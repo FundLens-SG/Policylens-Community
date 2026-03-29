@@ -235,8 +235,13 @@ async function loadUsers(){
   u.forEach(function(x){
     var ok=x.approved,col=ok?'var(--green2)':'var(--orange)',bg=ok?'rgba(16,185,129,.1)':'rgba(245,158,11,.1)';
     var d=x.created_at?new Date(x.created_at).toLocaleDateString('en-SG',{day:'numeric',month:'short',year:'numeric'}):'—';
-    var btn=ok?'<button onclick="adminAct(''+x.id+'',false)" style="background:rgba(239,68,68,.15);color:var(--red2);border:none;border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer">Revoke</button>'
-              :'<button onclick="adminAct(''+x.id+'',true)" style="background:rgba(16,185,129,.15);color:var(--green2);border:none;border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer">Approve</button>';
+    var uid=x.id;
+    var btn;
+    if(ok){
+      btn='<button onclick="adminAct(&quot;'+uid+'&quot;,false)" style="background:rgba(239,68,68,.15);color:var(--red2);border:none;border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer">Revoke</button>';
+    } else {
+      btn='<button onclick="adminAct(&quot;'+uid+'&quot;,true)" style="background:rgba(16,185,129,.15);color:var(--green2);border:none;border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer">Approve</button>';
+    }
     h+='<tr><td style="font-weight:500">'+(x.full_name||'—')+'</td><td style="font-size:12px">'+(x.email||'—')+'</td>'
       +'<td><span class="badge" style="background:'+bg+';color:'+col+'">'+(ok?'Approved':'Pending')+'</span></td>'
       +'<td style="font-size:11px">'+(x.role||'user')+'</td><td style="font-size:11px;color:var(--text3)">'+d+'</td><td>'+btn+'</td></tr>';
