@@ -153,7 +153,7 @@ var SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZ
 var ADMIN_EMAILS = ['chungakwanc@gmail.com'];
 
 var _sb=null,_user=null,_prof=null,_isAdmin=false;
-function sb(){if(!_sb&&window.supabase)_sb=window.supabase.createClient(SB_URL,SB_KEY);return _sb;}
+function sb(){if(!_sb&&window.supabase){_sb=window.supabase.createClient(SB_URL,SB_KEY);window._sbClient=_sb;}return _sb;}
 function authMsg(t,type){var e=document.getElementById('auth-message');e.className='auth-msg auth-msg-'+(type||'error');e.textContent=t;e.style.display='block';}
 function authClear(){document.getElementById('auth-message').style.display='none';}
 function authShow(v){authClear();['login','signup','reset','pending'].forEach(function(s){document.getElementById('auth-'+s).style.display=s===v?'':'none';});}
@@ -322,99 +322,11 @@ const RECOMMENDED_COVERAGE = {
 // ═══════════════════════════════════════════════════════════════
 
 const SEED_REPOSITORY = [
-  // ═══════════════════════════════════════════════════════════
-  // MANULIFE
-  // ═══════════════════════════════════════════════════════════
-  {id:'repo-siuls3',insurer:'Manulife',productName:'Signature Indexed Universal Life Solution III',productCode:'SIULS III',category:'protection',subType:'Indexed UL (IUL)',currency:'USD',ulSubType:'IUL',creditingMechanism:'indexed',faAllocation:'0-100%',iaAllocation:'0-100%',indexSubAccounts:[{name:'S&P 500 Plus',floor:0,capExample:11.30,participation:100,crediting:'point-to-point'},{name:'Euro Stoxx 50',floor:0,capExample:null,participation:100,crediting:'point-to-point'},{name:'Hang Seng Index',floor:0,capExample:null,participation:100,crediting:'point-to-point'},{name:'MSCI Emerging Markets',floor:0,capExample:null,participation:100,crediting:'point-to-point'},{name:'S&P Multi-Asset Risk Control 5%',floor:0,capExample:null,participation:100,crediting:'point-to-point'},{name:'Barclays Trident Index',floor:0,capExample:null,participation:100,crediting:'point-to-point'}],faMinGuaranteed:2.0,iaSegmentLength:1,loyaltyBonus:{rate:0.80,startYear:11,endDesc:'pre-age 100'},charges:{premium:{desc:'8% Yr1 declining to 4%'},faCharge:{desc:'Monthly, varies by FA allocation'},coi:{desc:'Monthly, stops at age 100'},performance:{desc:'S&P500Plus only'},surrender:{desc:'18-year schedule'}},features:['APS','ELP','Reallocation','Penalty-free withdrawal Yr11+','Policy Loan','Change of Life Insured','CVE','Age100 Advantage'],notes:'FA/IA split. IA has 1-year segments across 6 indices. FA minimum 2% guaranteed.'},
-  {id:'repo-sigwealth',insurer:'Manulife',productName:'Signature Wealth SGD',productCode:'VUL01',category:'protection',subType:'Variable UL (VUL)',currency:'SGD',ulSubType:'VUL',creditingMechanism:'client-directed',solvedPremium:{min:300000,currency:'SGD'},minLiquidity:2.0,investmentRisk:'client',charges:{premium:{desc:'4.8% chargeable top-up'},policyFee:{desc:'1.9% p.a. of solved premium for 8 years'},admin:{desc:'0.2% p.a. ongoing'},coi:{desc:'Monthly, stops at age 100'},surrender:{desc:'10-year schedule, 12% × declining'}},features:['Client appoints asset manager/custodian','Min 2% liquidity','Partial surrender free','Change of Life Insured','Age100 Advantage'],notes:'Single premium VUL. Full investment risk on client.'},
-  {id:'repo-heirloom7',insurer:'Manulife',productName:'Heirloom VII',productCode:'HRT09',category:'protection',subType:'Universal Life (UL)',currency:'USD',ulSubType:'UL',creditingMechanism:'fixed',creditingRates:{current:4.20,guaranteed:1.60},loyaltyBonus:{rate:0.35,startYear:11,endDesc:'pre-age 100'},charges:{premium:{desc:'7% / 8.5% with CVE'},faCharge:{desc:'Monthly, by issue age band'},coi:{desc:'Max 110% of launch rates, stops at age 100'},surrender:{desc:'18-year schedule'}},features:['ELP (5yr)','QSI (NS rates 3yr)','CVE','Penalty-free withdrawal Yr11+','Policy Loan (90% SV, variable rate)','Change of Life Insured (2×)','Age100 Advantage'],notes:'Non-par UL, flexible premium. 4.20% current / 1.60% guaranteed.'},
-  {id:'repo-ml-readybuilder',insurer:'Manulife',productName:'ReadyBuilder III',productCode:'',category:'savings',subType:'Endowment',currency:'SGD',charges:{},features:['Par endowment','Regular premium','Maturity 15/20/25 years'],notes:'Participating endowment with guaranteed and non-guaranteed maturity benefits. Regular premium.'},
-  {id:'repo-ml-readycompact',insurer:'Manulife',productName:'ReadyCompact V',productCode:'',category:'savings',subType:'Short-term Endowment',currency:'SGD',charges:{},features:['2-year or 3-year term','Single/limited premium','Capital guaranteed at maturity'],notes:'Short-term endowment. Capital guaranteed at maturity.'},
-  {id:'repo-ml-gioii',insurer:'Manulife',productName:'Global Income Optimiser II',productCode:'GIO II',category:'retirement',subType:'Retirement',currency:'SGD',charges:{},features:['Regular income from year 2','Income lock-in feature','Death benefit = premiums paid or account value'],notes:'Par retirement plan with regular income payouts.'},
-  {id:'repo-ml-smileincome',insurer:'Manulife',productName:'SmileIncome',productCode:'',category:'retirement',subType:'Annuity',currency:'SGD',charges:{},features:['Guaranteed lifetime income','SRS eligible','Non-par'],notes:'Non-par annuity providing guaranteed lifetime income.'},
-  {id:'repo-ml-shield',insurer:'Manulife',productName:'ManuShield',productCode:'',category:'health',subType:'Integrated Shield Plan',currency:'SGD',charges:{},features:['Class A / B1 / B2+','Panel & non-panel restructured hospitals','MediSave payable'],notes:'Integrated Shield Plan. Classes A, B1, B2+. Can attach rider.'},
-  // ═══════════════════════════════════════════════════════════
-  // AIA
-  // ═══════════════════════════════════════════════════════════
-  {id:'repo-aia-legacy',insurer:'AIA',productName:'Legacy Builder',productCode:'',category:'protection',subType:'Whole Life',currency:'SGD',charges:{},features:['Par whole life','Regular/limited pay','Death + CI coverage optional'],notes:'Participating whole life with optional CI rider.'},
-  {id:'repo-aia-smartflexi',insurer:'AIA',productName:'Smart Flexi Saver',productCode:'',category:'savings',subType:'Endowment',currency:'SGD',charges:{},features:['Regular premium endowment','10/15/20/25 year terms','Guaranteed + non-guaranteed maturity'],notes:'Par endowment. Regular premium with flexible terms.'},
-  {id:'repo-aia-achiever',insurer:'AIA',productName:'Achiever',productCode:'',category:'savings',subType:'Education Plan',currency:'SGD',charges:{},features:['Education endowment','Maturity aligned to uni age','Premium waiver on CI/death'],notes:'Education endowment aligned to child milestones.'},
-  {id:'repo-aia-pro',insurer:'AIA',productName:'Pro Lifetime Protector',productCode:'',category:'protection',subType:'Whole Life',currency:'SGD',charges:{},features:['Non-par whole life','Multipay CI up to 7×','Early CI + Juvenile CI'],notes:'Non-par WL with comprehensive multi-pay CI.'},
-  {id:'repo-aia-platinum',insurer:'AIA',productName:'Platinum Wealth Elite',productCode:'',category:'protection',subType:'Universal Life (UL)',currency:'USD',ulSubType:'UL',creditingMechanism:'fixed',charges:{},features:['High net worth UL','Single premium','Wealth transfer'],notes:'USD UL for wealth transfer. HNW segment.'},
-  {id:'repo-aia-vitalhealth',insurer:'AIA',productName:'HealthShield Gold Max',productCode:'',category:'health',subType:'Integrated Shield Plan',currency:'SGD',charges:{},features:['Class A private hospital','Full rider available','Pre/post hospitalisation'],notes:'ISP Class A. Full rider AIA Health Plus available.'},
-  {id:'repo-aia-retirement',insurer:'AIA',productName:'Retirement Saver',productCode:'',category:'retirement',subType:'Retirement',currency:'SGD',charges:{},features:['SRS eligible','Par retirement','Income from age 55/60/65'],notes:'Par retirement plan. SRS or cash funding.'},
-  {id:'repo-aia-ilp',insurer:'AIA',productName:'Pro Achiever 3.0',productCode:'',category:'investment',subType:'Investment-Linked Policy (ILP)',currency:'SGD',charges:{},features:['Regular premium ILP','101 sub-funds','Auto rebalancing','Premium holiday'],notes:'Regular premium ILP. Wide fund selection. Premium holiday after 3 years.'},
-  {id:'repo-aia-term',insurer:'AIA',productName:'AIA Term Plus',productCode:'',category:'protection',subType:'Term Life',currency:'SGD',charges:{},features:['Level term 10/20/30/to65','Renewable','Convertible to WL'],notes:'Level term with renewable and convertible options.'},
-  // ═══════════════════════════════════════════════════════════
-  // PRUDENTIAL
-  // ═══════════════════════════════════════════════════════════
-  {id:'repo-pru-protector',insurer:'Prudential',productName:'PRUActive Term',productCode:'',category:'protection',subType:'Term Life',currency:'SGD',charges:{},features:['Yearly renewable term','Death + TPD','Optional CI rider'],notes:'Yearly renewable term. Affordable pure protection.'},
-  {id:'repo-pru-wealthii',insurer:'Prudential',productName:'PRUWealth II',productCode:'',category:'savings',subType:'Endowment',currency:'SGD',charges:{},features:['Par endowment','Limited pay 5/10 year','Guaranteed maturity benefit'],notes:'Limited pay par endowment.'},
-  {id:'repo-pru-lifetime',insurer:'Prudential',productName:'PRULifetime Income Premier',productCode:'',category:'retirement',subType:'Retirement',currency:'SGD',charges:{},features:['Lifetime income from chosen age','Cash or SRS','Non-par'],notes:'Non-par retirement. Guaranteed lifetime income.'},
-  {id:'repo-pru-shield',insurer:'Prudential',productName:'PRUShield',productCode:'',category:'health',subType:'Integrated Shield Plan',currency:'SGD',charges:{},features:['Class A / B1','PRUExtra rider available','Panel hospitals'],notes:'ISP with PRUExtra Premier / Plus / CoPay rider options.'},
-  {id:'repo-pru-maxci',insurer:'Prudential',productName:'PRUActive Saver CI',productCode:'',category:'protection',subType:'Critical Illness',currency:'SGD',charges:{},features:['Standalone CI','Multi-pay up to 5×','Early CI 50%'],notes:'Multi-pay standalone CI plan.'},
-  {id:'repo-pru-ilp',insurer:'Prudential',productName:'PRULink FlexiSaver',productCode:'',category:'investment',subType:'Investment-Linked Policy (ILP)',currency:'SGD',charges:{},features:['Regular premium ILP','PRULink sub-funds','Low entry amount','Premium holiday'],notes:'Regular premium ILP.'},
-  {id:'repo-pru-wl',insurer:'Prudential',productName:'PRUVantage Whole Life',productCode:'',category:'protection',subType:'Whole Life',currency:'SGD',charges:{},features:['Par whole life','Death + CI','Limited pay 15/20/25'],notes:'Par whole life with CI coverage.'},
-  {id:'repo-pru-lady',insurer:'Prudential',productName:'PRULady',productCode:'',category:'protection',subType:'Critical Illness',currency:'SGD',charges:{},features:['Female CI plan','Breast/cervical/ovarian cancer','Pregnancy complications'],notes:'Female-specific CI covering gender-specific conditions.'},
-  // ═══════════════════════════════════════════════════════════
-  // GREAT EASTERN
-  // ═══════════════════════════════════════════════════════════
-  {id:'repo-ge-life',insurer:'Great Eastern',productName:'Great Life Advantage',productCode:'',category:'protection',subType:'Whole Life',currency:'SGD',charges:{},features:['Par whole life','Regular/limited premium','Multiplier CI option'],notes:'Par WL. Optional CI multiplier benefit.'},
-  {id:'repo-ge-smartsave',insurer:'Great Eastern',productName:'GREAT Smart Saver',productCode:'',category:'savings',subType:'Short-term Endowment',currency:'SGD',charges:{},features:['2-year term','Capital guaranteed at maturity','Bonus potential'],notes:'Short-term endowment. Capital guaranteed.'},
-  {id:'repo-ge-retire',insurer:'Great Eastern',productName:'GREAT Retirement Income Plan',productCode:'',category:'retirement',subType:'Retirement',currency:'SGD',charges:{},features:['Regular income','SRS eligible','Par plan'],notes:'Par retirement with regular income payouts.'},
-  {id:'repo-ge-shield',insurer:'Great Eastern',productName:'Supreme Health',productCode:'',category:'health',subType:'Integrated Shield Plan',currency:'SGD',charges:{},features:['Class A / B1 / B2+','TotalCare / Plus rider','Panel & non-panel'],notes:'ISP. Riders: GREAT TotalCare, GREAT Plus, GREAT CoPay.'},
-  {id:'repo-ge-readymummy',insurer:'Great Eastern',productName:'ReadyMummy',productCode:'RM01',category:'maternity',subType:'Maternity Coverage',currency:'SGD',maternityDetails:{dualInsured:true,dualInsuredDesc:'Mother + Child',benefitTypes:[{name:'Pregnancy Complications',payoutType:'lump sum',conditions:['Ectopic pregnancy','Hydatidiform mole','Miscarriage','Stillbirth']},{name:'Hospitalisation Benefit (Mother)',payoutType:'per day',amountPerDay:200,maxDays:30},{name:'Congenital Conditions (Child)',payoutType:'lump sum',conditions:['Cleft lip/palate','Down syndrome','Heart defects','Spina bifida']},{name:'NICU Benefit',payoutType:'per day',amountPerDay:200,maxDays:30}],guaranteedIssuance:true,guaranteedIssuanceDesc:'Guaranteed issuance within first trimester',conversionRights:true,conversionRightsDesc:'Convert to child whole life plan within 120 days of birth'},charges:{premium:{desc:'Single premium, varies by age and plan type'}},features:['Dual insured (mother+child)','Guaranteed issuance (1st trimester)','Conversion rights to child WL'],notes:'Maternity plan covering pregnancy complications and newborn conditions.'},
-  {id:'repo-ge-term',insurer:'Great Eastern',productName:'GREAT Term',productCode:'',category:'protection',subType:'Term Life',currency:'SGD',charges:{},features:['Level term','Death + TPD','Renewable & convertible'],notes:'Level term life. Renewable and convertible.'},
-  {id:'repo-ge-smartinv',insurer:'Great Eastern',productName:'GREAT Smart Invest',productCode:'',category:'investment',subType:'Investment-Linked Policy (ILP)',currency:'SGD',charges:{},features:['Regular/single premium','GE fund range','Bonus units'],notes:'ILP with GE sub-fund range. Bonus units in early years.'},
-  {id:'repo-ge-multipay',insurer:'Great Eastern',productName:'GREAT CI Multi-Pay',productCode:'',category:'protection',subType:'Critical Illness',currency:'SGD',charges:{},features:['Multi-pay CI up to 5×','Early CI','37 CI conditions'],notes:'Multi-pay CI. Covers 37 conditions.'},
-  {id:'repo-ge-ltc',insurer:'Great Eastern',productName:'ElderShield Supplement',productCode:'',category:'protection',subType:'Long-term Care',currency:'SGD',charges:{},features:['CareShield Life supplement','Monthly cash benefit','Lifetime coverage'],notes:'Supplements CareShield Life. Additional monthly cash benefit on disability.'},
-  // ═══════════════════════════════════════════════════════════
-  // NTUC INCOME
-  // ═══════════════════════════════════════════════════════════
-  {id:'repo-inc-vivolife',insurer:'NTUC Income',productName:'VivoLife',productCode:'',category:'protection',subType:'Whole Life',currency:'SGD',charges:{},features:['Par whole life','Death + CI','Limited pay'],notes:'Par WL. Affordable entry. CI rider available.'},
-  {id:'repo-inc-gro',insurer:'NTUC Income',productName:'Gro Saver Flex',productCode:'',category:'savings',subType:'Endowment',currency:'SGD',charges:{},features:['Par endowment','Regular premium','15/20/25 year terms'],notes:'Par endowment with flexible terms.'},
-  {id:'repo-inc-star',insurer:'NTUC Income',productName:'Star Secure',productCode:'',category:'savings',subType:'Short-term Endowment',currency:'SGD',charges:{},features:['2/3-year term','Capital protected','Single premium'],notes:'Short-term endowment. Single premium, capital protected.'},
-  {id:'repo-inc-annuity',insurer:'NTUC Income',productName:'Annuity Plan',productCode:'',category:'retirement',subType:'Annuity',currency:'SGD',charges:{},features:['Lifetime annuity','SRS eligible','Non-par guaranteed'],notes:'Non-par lifetime annuity. SRS or cash.'},
-  {id:'repo-inc-shield',insurer:'NTUC Income',productName:'Enhanced IncomeShield',productCode:'',category:'health',subType:'Integrated Shield Plan',currency:'SGD',charges:{},features:['Class A / B1','Assist rider / Plus rider','Affordable premiums'],notes:'ISP. Known for competitive premiums. Rider options available.'},
-  {id:'repo-inc-term',insurer:'NTUC Income',productName:'Term Life Solitaire',productCode:'',category:'protection',subType:'Term Life',currency:'SGD',charges:{},features:['Level term to 65/75','Death + TPD','CI rider optional'],notes:'Level term. Affordable pure protection.'},
-  {id:'repo-inc-ilp',insurer:'NTUC Income',productName:'Prime Funds',productCode:'',category:'investment',subType:'Investment-Linked Policy (ILP)',currency:'SGD',charges:{},features:['Single/regular premium','Income sub-fund range','Bonus units'],notes:'ILP with Income fund range.'},
-  // ═══════════════════════════════════════════════════════════
-  // FWD
-  // ═══════════════════════════════════════════════════════════
-  {id:'repo-fwd-term',insurer:'FWD',productName:'FWD Term Life',productCode:'',category:'protection',subType:'Term Life',currency:'SGD',charges:{},features:['Online purchase','Level term to 65/75','No medical for low SA'],notes:'Online term life. Simple underwriting for low sums assured.'},
-  {id:'repo-fwd-ci',insurer:'FWD',productName:'FWD CI Protect',productCode:'',category:'protection',subType:'Critical Illness',currency:'SGD',charges:{},features:['Online CI','37 conditions','Early CI 50%'],notes:'Online CI plan. Affordable entry.'},
-  {id:'repo-fwd-invest',insurer:'FWD',productName:'FWD Invest First Plus',productCode:'',category:'investment',subType:'Investment-Linked Policy (ILP)',currency:'SGD',charges:{},features:['Single premium ILP','Low charges','Wide fund range'],notes:'Single premium ILP. Competitive fees.'},
-  {id:'repo-fwd-save',insurer:'FWD',productName:'FWD Save First',productCode:'',category:'savings',subType:'Endowment',currency:'SGD',charges:{},features:['Par endowment','Regular premium','10/15 year terms'],notes:'Par endowment. Regular premium savings plan.'},
-  // ═══════════════════════════════════════════════════════════
-  // SINGLIFE
-  // ═══════════════════════════════════════════════════════════
-  {id:'repo-sl-shield',insurer:'Singlife',productName:'Singlife Shield',productCode:'',category:'health',subType:'Integrated Shield Plan',currency:'SGD',charges:{},features:['Class A / B1','Singlife Health Plus rider','Digital-first'],notes:'ISP. Digital-first experience. Health Plus rider available.'},
-  {id:'repo-sl-save',insurer:'Singlife',productName:'Singlife Savvy Endowment',productCode:'',category:'savings',subType:'Short-term Endowment',currency:'SGD',charges:{},features:['2-year/3-year term','Guaranteed returns','Online purchase'],notes:'Short-term endowment. Fully online application.'},
-  {id:'repo-sl-mylife',insurer:'Singlife',productName:'MyLife Income',productCode:'',category:'retirement',subType:'Retirement',currency:'SGD',charges:{},features:['Regular income','Cash or SRS','Par plan'],notes:'Par retirement plan with regular income payouts.'},
-  {id:'repo-sl-cancer',insurer:'Singlife',productName:'Cancer Plan Plus',productCode:'',category:'protection',subType:'Critical Illness',currency:'SGD',charges:{},features:['Cancer-specific','Covers all stages','Affordable premium'],notes:'Cancer-specific CI plan. All stages.'},
-  // ═══════════════════════════════════════════════════════════
-  // TOKIO MARINE
-  // ═══════════════════════════════════════════════════════════
-  {id:'repo-tm-wl',insurer:'Tokio Marine',productName:'TM LifeSecure',productCode:'',category:'protection',subType:'Whole Life',currency:'SGD',charges:{},features:['Par whole life','Limited pay','CI rider'],notes:'Par WL with limited pay and CI rider.'},
-  {id:'repo-tm-shield',insurer:'Tokio Marine',productName:'TM Shield',productCode:'',category:'health',subType:'Integrated Shield Plan',currency:'SGD',charges:{},features:['Class A / B1','TotalHealthCare rider','Restructured hospitals'],notes:'ISP. TotalHealthCare rider available.'},
-  {id:'repo-tm-save',insurer:'Tokio Marine',productName:'TM SmartWealth Premier',productCode:'',category:'savings',subType:'Endowment',currency:'SGD',charges:{},features:['Par endowment','Limited pay 3/5/10','Early cash value'],notes:'Par endowment with limited premium payment.'},
-  {id:'repo-tm-retire',insurer:'Tokio Marine',productName:'TM Retire Ready',productCode:'',category:'retirement',subType:'Annuity',currency:'SGD',charges:{},features:['Deferred annuity','SRS eligible','Guaranteed payouts'],notes:'Deferred annuity with guaranteed payouts.'},
-  // ═══════════════════════════════════════════════════════════
-  // HSBC LIFE
-  // ═══════════════════════════════════════════════════════════
-  {id:'repo-hsbc-wl',insurer:'HSBC Life',productName:'HSBC Life Protect First',productCode:'',category:'protection',subType:'Whole Life',currency:'SGD',charges:{},features:['Non-par WL','Death + CI','Limited pay'],notes:'Non-par whole life. Limited premium term.'},
-  {id:'repo-hsbc-save',insurer:'HSBC Life',productName:'HSBC Life Wealth Accelerate',productCode:'',category:'savings',subType:'Short-term Endowment',currency:'SGD',charges:{},features:['2-year / 3-year term','Guaranteed maturity','SGD/USD'],notes:'Short-term endowment. SGD or USD.'},
-  {id:'repo-hsbc-retire',insurer:'HSBC Life',productName:'HSBC Life Legacy Max',productCode:'',category:'protection',subType:'Universal Life (UL)',currency:'USD',ulSubType:'UL',creditingMechanism:'fixed',charges:{},features:['Single premium UL','Wealth transfer','HNW segment'],notes:'USD UL for wealth transfer.'},
-  // ═══════════════════════════════════════════════════════════
-  // CHINA TAIPING
-  // ═══════════════════════════════════════════════════════════
-  {id:'repo-ct-wl',insurer:'China Taiping',productName:'ePlatinum Life',productCode:'',category:'protection',subType:'Whole Life',currency:'SGD',charges:{},features:['Par whole life','Regular/limited pay','CI rider available'],notes:'Par WL. Regular or limited premium payment.'},
-  {id:'repo-ct-save',insurer:'China Taiping',productName:'eGolden Harvest',productCode:'',category:'savings',subType:'Endowment',currency:'SGD',charges:{},features:['Par endowment','Regular premium','15/20/25 year terms'],notes:'Par endowment.'},
-  // ═══════════════════════════════════════════════════════════
-  // ETIQA
-  // ═══════════════════════════════════════════════════════════
-  {id:'repo-et-save',insurer:'Etiqa',productName:'Tiq 3-Year Endowment',productCode:'',category:'savings',subType:'Short-term Endowment',currency:'SGD',charges:{},features:['3-year term','Online purchase','Guaranteed returns'],notes:'Online short-term endowment. 3-year.'},
-  {id:'repo-et-term',insurer:'Etiqa',productName:'Tiq Term Life',productCode:'',category:'protection',subType:'Term Life',currency:'SGD',charges:{},features:['Online term','Up to $400K coverage','No medical'],notes:'Online term life. Simple underwriting.'},
+  // Only verified products from actual policy documents — no approximations
+  {id:'repo-siuls3',insurer:'Manulife',productName:'Signature Indexed Universal Life Solution III',productCode:'SIULS III',category:'protection',subType:'Indexed UL (IUL)',currency:'USD',ulSubType:'IUL',creditingMechanism:'indexed',faAllocation:'0-100%',iaAllocation:'0-100%',indexSubAccounts:[{name:'S&P 500 Plus',floor:0,capExample:11.30,participation:100,crediting:'point-to-point'},{name:'Euro Stoxx 50',floor:0,capExample:null,participation:100,crediting:'point-to-point'},{name:'Hang Seng Index',floor:0,capExample:null,participation:100,crediting:'point-to-point'},{name:'MSCI Emerging Markets',floor:0,capExample:null,participation:100,crediting:'point-to-point'},{name:'S&P Multi-Asset Risk Control 5%',floor:0,capExample:null,participation:100,crediting:'point-to-point'},{name:'Barclays Trident Index',floor:0,capExample:null,participation:100,crediting:'point-to-point'}],faMinGuaranteed:2.0,iaSegmentLength:1,loyaltyBonus:{rate:0.80,startYear:11,endDesc:'pre-age 100'},charges:{premium:{desc:'8% Yr1 declining to 4%'},faCharge:{desc:'Monthly, varies by FA allocation'},coi:{desc:'Monthly, stops at age 100'},performance:{desc:'S&P500Plus only'},surrender:{desc:'18-year schedule'}},features:['APS','ELP','Reallocation','Penalty-free withdrawal Yr11+','Policy Loan','Change of Life Insured','CVE','Age100 Advantage'],notes:'FA/IA split. IA has 1-year segments across 6 indices. FA minimum 2% guaranteed.',editHistory:[]},
+  {id:'repo-sigwealth',insurer:'Manulife',productName:'Signature Wealth SGD',productCode:'VUL01',category:'protection',subType:'Variable UL (VUL)',currency:'SGD',ulSubType:'VUL',creditingMechanism:'client-directed',solvedPremium:{min:300000,currency:'SGD'},minLiquidity:2.0,investmentRisk:'client',charges:{premium:{desc:'4.8% chargeable top-up'},policyFee:{desc:'1.9% p.a. of solved premium for 8 years'},admin:{desc:'0.2% p.a. ongoing'},coi:{desc:'Monthly, stops at age 100'},surrender:{desc:'10-year schedule, 12% × declining'}},features:['Client appoints asset manager/custodian','Min 2% liquidity','Partial surrender free','Change of Life Insured','Age100 Advantage'],notes:'Single premium VUL. Full investment risk on client.',editHistory:[]},
+  {id:'repo-heirloom7',insurer:'Manulife',productName:'Heirloom VII',productCode:'HRT09',category:'protection',subType:'Universal Life (UL)',currency:'USD',ulSubType:'UL',creditingMechanism:'fixed',creditingRates:{current:4.20,guaranteed:1.60},loyaltyBonus:{rate:0.35,startYear:11,endDesc:'pre-age 100'},charges:{premium:{desc:'7% / 8.5% with CVE'},faCharge:{desc:'Monthly, by issue age band'},coi:{desc:'Max 110% of launch rates, stops at age 100'},surrender:{desc:'18-year schedule'}},features:['ELP (5yr)','QSI (NS rates 3yr)','CVE','Penalty-free withdrawal Yr11+','Policy Loan (90% SV, variable rate)','Change of Life Insured (2x)','Age100 Advantage'],notes:'Non-par UL, flexible premium. 4.20% current / 1.60% guaranteed.',editHistory:[]},
+  {id:'repo-readymummy',insurer:'Great Eastern',productName:'ReadyMummy',productCode:'RM01',category:'maternity',subType:'Maternity Coverage',currency:'SGD',maternityDetails:{dualInsured:true,dualInsuredDesc:'Mother + Child',benefitTypes:[{name:'Pregnancy Complications',payoutType:'lump sum',conditions:['Ectopic pregnancy','Hydatidiform mole','Miscarriage','Stillbirth']},{name:'Hospitalisation Benefit (Mother)',payoutType:'per day',amountPerDay:200,maxDays:30},{name:'Congenital Conditions (Child)',payoutType:'lump sum',conditions:['Cleft lip/palate','Down syndrome','Heart defects','Spina bifida']},{name:'NICU Benefit',payoutType:'per day',amountPerDay:200,maxDays:30}],guaranteedIssuance:true,guaranteedIssuanceDesc:'Guaranteed issuance within first trimester',conversionRights:true,conversionRightsDesc:'Convert to child whole life plan within 120 days of birth'},charges:{premium:{desc:'Single premium, varies by age and plan type'}},features:['Dual insured (mother+child)','Guaranteed issuance (1st trimester)','Conversion rights to child WL'],notes:'Maternity plan covering pregnancy complications and newborn conditions.',editHistory:[]},
 ];
 
 // ═══════════════════════════════════════════════════════════════
@@ -2719,6 +2631,48 @@ const catColor = cat => CATEGORIES[cat]?.color || 'var(--text3)';
 const AppCtx = createContext();
 
 // ═══════════════════════════════════════════════════════════════
+// SUPABASE REPO HELPERS
+// ═══════════════════════════════════════════════════════════════
+
+function getSB() {
+  // Reuse the single Supabase client from the auth script — never create a second one
+  if(window._sbClient) return window._sbClient;
+  // Fallback: if auth script hasn't initialized yet, create and share
+  if(window.supabase && typeof SB_URL !== 'undefined' && typeof SB_KEY !== 'undefined') {
+    window._sbClient = window.supabase.createClient(SB_URL, SB_KEY);
+    return window._sbClient;
+  }
+  return null;
+}
+
+async function sbRepoLoad() {
+  const s = getSB();
+  if(!s) return null;
+  try {
+    const {data,error} = await s.from('repository').select('*').order('created_at',{ascending:true});
+    if(error) { console.warn('[Repo] Supabase load error:', error.message); return null; }
+    return (data||[]).map(r => ({...r.data, _sbId:r.id, _createdBy:r.created_by}));
+  } catch(e) { console.warn('[Repo] Supabase unreachable:', e.message); return null; }
+}
+
+async function sbRepoSave(item) {
+  const s = getSB();
+  if(!s) return false;
+  const email = window._user?.email || '';
+  const {error} = await s.from('repository').upsert({id:item.id, data:item, created_by:email});
+  if(error) console.warn('[Repo] Save error:', error.message);
+  return !error;
+}
+
+async function sbRepoDelete(id) {
+  const s = getSB();
+  if(!s) return false;
+  const {error} = await s.from('repository').delete().eq('id', id);
+  if(error) console.warn('[Repo] Delete error:', error.message);
+  return !error;
+}
+
+// ═══════════════════════════════════════════════════════════════
 // MAIN APP
 // ═══════════════════════════════════════════════════════════════
 
@@ -2729,30 +2683,71 @@ function App() {
   const [apiKey, setApiKey] = useState('');
   const [clientName, setClientName] = useState('');
   const [loading, setLoading] = useState(true);
+  const [repoSource, setRepoSource] = useState('loading'); // 'supabase' | 'local' | 'loading'
 
   useEffect(() => {
     (async () => {
+      // Load policies + settings from local IndexedDB
       const ps = await dbGetAll('policies');
-      const rs = await dbGetAll('repository');
       const sk = await dbGet('settings','apiKey').catch(()=>null);
       const cn = await dbGet('settings','clientName').catch(()=>null);
       setPolicies(ps || []);
-      // Seed repo if empty
-      if(!rs || rs.length < SEED_REPOSITORY.length) {
-        // Merge seed data — upsert won't overwrite user edits since IDs differ
-        const existingIds = new Set((rs||[]).map(r=>r.id));
-        for(const s of SEED_REPOSITORY) {
-          if(!existingIds.has(s.id)) await dbPut('repository', s);
-        }
-        const merged = await dbGetAll('repository');
-        setRepo(merged);
-      } else {
-        setRepo(rs);
-      }
       if(sk) setApiKey(sk.value||'');
       if(cn) setClientName(cn.value||'');
+
+      // Load repository from Supabase (primary) with local fallback
+      // Only try Supabase if user is authenticated (session exists)
+      const s = getSB();
+      let hasSession = false;
+      if(s) { try { const sess = await s.auth.getSession(); hasSession = !!(sess?.data?.session); } catch(e){} }
+      
+      let repoData = hasSession ? await sbRepoLoad() : null;
+      if(repoData !== null) {
+        setRepoSource('supabase');
+        // Merge: ensure seed products exist in Supabase (add missing, never overwrite)
+        const sbIds = new Set(repoData.map(r=>r.id));
+        let seeded = 0;
+        for(const s of SEED_REPOSITORY) {
+          if(!sbIds.has(s.id)) { await sbRepoSave(s); repoData.push(s); seeded++; }
+        }
+        if(seeded) console.log('[Repo] Seeded', seeded, 'missing products to Supabase');
+        setRepo(repoData);
+        console.log('[Repo] Loaded', repoData.length, 'products from Supabase');
+      } else {
+        // Fallback to local IndexedDB
+        setRepoSource('local');
+        const rs = await dbGetAll('repository').catch(()=>[]);
+        if(!rs || rs.length === 0) {
+          for(const s of SEED_REPOSITORY) await dbPut('repository', s);
+          setRepo(SEED_REPOSITORY);
+        } else {
+          setRepo(rs);
+        }
+        console.log('[Repo] Fallback to local IndexedDB');
+      }
       setLoading(false);
     })();
+  }, []);
+
+  // Re-check Supabase repo after auth state changes (user logs in)
+  useEffect(() => {
+    const s = getSB();
+    if(!s) return;
+    const {data:{subscription}} = s.auth.onAuthStateChange(async (event) => {
+      if(event === 'SIGNED_IN') {
+        console.log('[Repo] Auth signed in — reloading from Supabase');
+        const data = await sbRepoLoad();
+        if(data !== null) {
+          setRepoSource('supabase');
+          const sbIds = new Set(data.map(r=>r.id));
+          for(const seed of SEED_REPOSITORY) {
+            if(!sbIds.has(seed.id)) { await sbRepoSave(seed); data.push(seed); }
+          }
+          setRepo(data);
+        }
+      }
+    });
+    return () => subscription?.unsubscribe();
   }, []);
 
   const savePolicy = async (p) => {
@@ -2763,10 +2758,31 @@ function App() {
     await dbDel('policies', id);
     setPolicies(prev => prev.filter(x=>x.id!==id));
   };
+
+  // Repo operations — Supabase primary, local fallback
   const saveRepo = async (item) => {
-    await dbPut('repository', item);
+    if(repoSource==='supabase') {
+      await sbRepoSave(item);
+    } else {
+      await dbPut('repository', item);
+    }
     setRepo(prev => {const idx=prev.findIndex(x=>x.id===item.id);if(idx>=0){const n=[...prev];n[idx]=item;return n}return[...prev,item]});
   };
+  const deleteRepo = async (id) => {
+    if(repoSource==='supabase') {
+      await sbRepoDelete(id);
+    } else {
+      await dbDel('repository', id);
+    }
+    setRepo(prev => prev.filter(x=>x.id!==id));
+  };
+  // Force refresh from Supabase
+  const refreshRepo = async () => {
+    const data = await sbRepoLoad();
+    if(data !== null) { setRepo(data); setRepoSource('supabase'); return true; }
+    return false;
+  };
+
   const saveApiKey = async (k) => {
     setApiKey(k);
     await dbPut('settings',{key:'apiKey',value:k});
@@ -2776,12 +2792,7 @@ function App() {
     await dbPut('settings',{key:'clientName',value:n});
   };
 
-  const deleteRepo = async (id) => {
-    await dbDel('repository', id);
-    setRepo(prev => prev.filter(x=>x.id!==id));
-  };
-
-  const ctx = {policies,repo,apiKey,clientName,savePolicy,deletePolicy,saveRepo,deleteRepo,saveApiKey,saveClientName,tab,setTab};
+  const ctx = {policies,repo,apiKey,clientName,savePolicy,deletePolicy,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,tab,setTab};
 
   if(loading) return <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh'}}>
     <div style={{textAlign:'center'}}><div style={{fontSize:28,marginBottom:8}}>🔍</div><div style={{color:'var(--text2)',fontSize:14}}>Loading PolicyLens…</div></div>
@@ -3041,10 +3052,30 @@ function Policies() {
   const isImage = file => getMime(file).startsWith('image/');
   const isText = file => ['text/plain','text/html','text/csv'].includes(getMime(file));
 
-  const EXTRACT_PROMPT = `You are an insurance document analyst for Singapore Financial Consultants. Extract ALL insurance policies from this document. For each policy return a JSON object with: insurer, productName, policyName, policyNumber, category (protection/savings/health/investment/retirement/maternity), subType, currency (default SGD), sumAssured (number), annualPremium (number), premiumStructure (Single Premium/Regular Premium/Limited Pay/Flexible Premium), lifeInsured, gender (Male/Female), dob (YYYY-MM-DD), ageAtEntry (number), smoker (Non-smoker/Smoker), inceptionDate (YYYY-MM-DD if available), maturityDate (YYYY-MM-DD if available), status (inforce/lapsed/paid-up/matured), notes (concise FC review meeting summary: key coverage, riders, benefit triggers, exclusions, surrender value milestones).
-If UL/IUL/VUL, also include: creditingMechanism, creditingRates{current,guaranteed}, loyaltyBonus{rate,startYear}.
-If ISP, include: ispClass (A/B1/B2+), riderList (rider names).
-If multiple policies found, return a JSON array. If single policy, return a JSON object.
+  const EXTRACT_PROMPT = `You are a senior insurance policy analyst for a Singapore Financial Advisory firm. Extract ALL insurance policies from this document with institutional-level detail.
+
+For EACH policy, return a JSON object with:
+
+CORE: insurer, productName, policyName, policyNumber, category (protection/savings/health/investment/retirement/maternity), subType (Term Life/Whole Life/Universal Life (UL)/Indexed UL (IUL)/Variable UL (VUL)/Critical Illness/Personal Accident/Disability Income/Long-term Care/Endowment/Lifetime Endowment/Education Plan/Short-term Endowment/Integrated Shield Plan/Hospital Income/Investment-Linked Policy (ILP)/Retirement/Annuity/Maternity Coverage), currency (default SGD), sumAssured (number), annualPremium (number), premiumStructure (Single Premium/Regular Premium/Limited Pay/Flexible Premium), paymentMethod (Cash/MediSave/SRS/MediSave+Cash/CPF OA)
+
+CLIENT: lifeInsured, gender (Male/Female), dob (YYYY-MM-DD), ageAtEntry (number), smoker (Non-smoker/Smoker), nationality (SC/PR/Foreigner), occupation
+
+DATES: inceptionDate (YYYY-MM-DD), maturityDate (YYYY-MM-DD), status (inforce/lapsed/paid-up/surrendered/matured)
+
+RIDERS: riders (JSON array). Each rider: {type (death/tpd/ci/eci/di/accidental/premium_waiver), sa (number — sum assured or monthly benefit for DI), premium (number — 0 if bundled), expiryAge (number), bundled (boolean — true if included in base premium), multiClaim (boolean — for CI/ECI)}
+Extract EVERY benefit/rider listed in the document. Death & TI coverage = type "death". TPD = type "tpd". CI with sum = type "ci". Early CI = type "eci". Disability income = type "di" with sa as monthly amount. Accidental death = type "accidental".
+
+SA MULTIPLIER: saMultiplier (number e.g. 2 for 2x), multiplierEndAge (number — age when multiplier reverts to 1x)
+
+ISP (if Integrated Shield Plan): ispClass (A/B1/B2+), hasRider (boolean), riderList (rider name), riderPremium (number), ispDeductible (number), ispCoinsurance (number — percentage)
+
+CASH VALUE: cashValue (number — current surrender/cash value if stated), cvGrowthRate (number — projected growth % p.a.), surrenderPeriod (number — years)
+
+UL/IUL/VUL: creditingMechanism (fixed/indexed/client-directed), creditingRates {current (number), guaranteed (number)}, loyaltyBonus {rate (number), startYear (number)}
+
+NOTES: notes (string — concise FC review meeting headline: 3-5 key numbers an adviser would present to a client. Include: key coverage amounts, premium breakdown, surrender value milestones, benefit triggers, exclusions, waiting periods, and any unique features)
+
+If multiple policies found, return a JSON array. If single, return a JSON object.
 Return ONLY valid JSON, no markdown fences, no explanation.`;
 
   // ── Stage camera photos ──
@@ -3254,7 +3285,15 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
     // Health
     ispClass:'', riderList:'',
     // General
-    monthlyBenefit:'', fundingSource:'', notes:'', fundAllocations:[],
+    monthlyBenefit:'', fundingSource:'', paymentMethod:'',
+    // Riders
+    riders:[], saMultiplier:'1', multiplierEndAge:'',
+    // ISP
+    hasRider:false, riderPremium:'', ispDeductible:'', ispCoinsurance:'',
+    // Cash value
+    cashValue:'', cvGrowthRate:'', surrenderPeriod:'',
+    // General
+    notes:'', fundAllocations:[],
   });
   const [fuzzyMatches, setFuzzyMatches] = useState([]);
   const [showFuzzy, setShowFuzzy] = useState(false);
@@ -3300,7 +3339,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         if(mime.startsWith('image/')) content.push({type:'image',source:{type:'base64',media_type:mime,data:b64}});
         else content.push({type:'document',source:{type:'base64',media_type:mime,data:b64}});
       }
-      content.push({type:'text',text:`Extract insurance policy details from this document. Return a JSON object with any fields you can find: insurer, productName, policyNumber, category, subType, currency, sumAssured (number), annualPremium (number), premiumStructure, lifeInsured, gender, dob, ageAtEntry, smoker, inceptionDate, maturityDate, status, ispClass, riderList, notes. Return ONLY valid JSON, no markdown.`});
+      content.push({type:'text',text:`Extract insurance policy details from this document. Return a JSON object with ALL fields you can find. Core: insurer, productName, policyNumber, category, subType, currency, sumAssured (number), annualPremium (number), premiumStructure, paymentMethod, lifeInsured, gender, dob, ageAtEntry, smoker, nationality, occupation, inceptionDate, maturityDate, status. Riders: riders (array of {type:death/tpd/ci/eci/di/accidental/premium_waiver, sa:number, premium:number, expiryAge:number, bundled:boolean, multiClaim:boolean}). SA: saMultiplier (number), multiplierEndAge (number). ISP: ispClass, hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance. Cash: cashValue, cvGrowthRate, surrenderPeriod. Notes: notes (FC review meeting headline — key numbers, riders, triggers). Return ONLY valid JSON, no markdown.`});
       const resp = await fetch('https://api.anthropic.com/v1/messages',{
         method:'POST',headers:{'Content-Type':'application/json','x-api-key':ak.value,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
         body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:4000,messages:[{role:'user',content}]})
@@ -3431,9 +3470,104 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         </div>
         <div className="grid-2">
           <div className="field"><label>Status</label><select value={form.status} onChange={e=>set('status',e.target.value)}><option value="inforce">In-force</option><option value="lapsed">Lapsed</option><option value="paid-up">Paid-up</option><option value="surrendered">Surrendered</option><option value="matured">Matured</option></select></div>
-          {(form.category==='retirement') && <div className="field"><label>Monthly Benefit</label><input type="number" value={form.monthlyBenefit} onChange={e=>set('monthlyBenefit',e.target.value)} /></div>}
-          {(form.category==='retirement') && <div className="field"><label>Funding Source</label><select value={form.fundingSource||''} onChange={e=>set('fundingSource',e.target.value)}><option value="">Select…</option><option value="Cash">Cash</option><option value="SRS">SRS</option><option value="CPF OA">CPF OA</option><option value="CPF SA">CPF SA</option><option value="CPF RA">CPF RA</option></select></div>}
+          <div className="field"><label>Payment Method</label><select value={form.paymentMethod||''} onChange={e=>set('paymentMethod',e.target.value)}><option value="">—</option><option value="Cash">Cash / GIRO</option><option value="MediSave">MediSave</option><option value="SRS">SRS</option><option value="MediSave+Cash">MediSave + Cash</option><option value="CPF OA">CPF OA</option></select></div>
         </div>
+        {(form.category==='retirement') && (
+          <div className="grid-2">
+            <div className="field"><label>Monthly Benefit</label><input type="number" value={form.monthlyBenefit} onChange={e=>set('monthlyBenefit',e.target.value)} /></div>
+            <div className="field"><label>Funding Source</label><select value={form.fundingSource||''} onChange={e=>set('fundingSource',e.target.value)}><option value="">Select…</option><option value="Cash">Cash</option><option value="SRS">SRS</option><option value="CPF OA">CPF OA</option><option value="CPF SA">CPF SA</option><option value="CPF RA">CPF RA</option></select></div>
+          </div>
+        )}
+
+        {/* ══════ COVERAGE & RIDERS — RetireWell-style ══════ */}
+        {(form.category==='protection'||form.category==='investment') && (
+          <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+              <div>
+                <h4 style={{fontSize:13,fontWeight:600,color:'var(--blue2)',margin:0}}>Coverage & Riders</h4>
+                <div style={{fontSize:10,color:'var(--text3)',marginTop:2}}>
+                  Total premium: {fmt(form.annualPremium,form.currency||'SGD')}/yr
+                  {(form.riders||[]).filter(r=>r.premium>0).length>0 && ` — Riders: ${fmt((form.riders||[]).reduce((s,r)=>s+(parseFloat(r.premium)||0),0),form.currency||'SGD')}`}
+                </div>
+              </div>
+              <button className="btn-secondary btn-sm" onClick={()=>{
+                const riders=[...(form.riders||[])];
+                riders.push({id:'r_'+Date.now(),type:'ci',sa:'',premium:'',expiryAge:'65',bundled:true,multiClaim:false});
+                set('riders',riders);
+              }}>+ Add Rider</button>
+            </div>
+            {/* SA Multiplier */}
+            <div className="grid-3" style={{marginBottom:8}}>
+              <div className="field"><label>SA Multiplier</label><select value={form.saMultiplier||'1'} onChange={e=>set('saMultiplier',e.target.value)}>
+                <option value="1">1× (none)</option><option value="1.5">1.5×</option><option value="2">2×</option><option value="3">3×</option><option value="5">5×</option>
+              </select></div>
+              <div className="field"><label>Multiplier Until Age</label><input type="number" value={form.multiplierEndAge||''} onChange={e=>set('multiplierEndAge',e.target.value)} placeholder="e.g. 70" /></div>
+              <div className="field"><label>Effective Base SA</label><input disabled value={form.sumAssured?fmt(form.sumAssured*(parseFloat(form.saMultiplier)||1),form.currency||'SGD'):'-'} style={{color:'var(--green2)',fontWeight:600}} /></div>
+            </div>
+            {/* Rider table */}
+            <table style={{fontSize:12}}>
+              <thead><tr><th>Benefit / Rider</th><th style={{width:100}}>Sum Assured</th><th style={{width:60}}>Bundled</th><th style={{width:90}}>Rider Premium</th><th style={{width:70}}>Expiry Age</th><th style={{width:50}}>Multi</th><th style={{width:30}}></th></tr></thead>
+              <tbody>
+                {(form.riders||[]).map((rd,ri) => (
+                  <tr key={rd.id||ri}>
+                    <td><select value={rd.type} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],type:e.target.value};set('riders',riders);}} style={{fontSize:11,padding:'4px 6px',width:'100%'}}>
+                      <option value="death">Death & TI</option><option value="tpd">TPD</option><option value="ci">Critical Illness</option>
+                      <option value="eci">Early CI</option><option value="di">Disability Income</option><option value="accidental">Accidental Death</option>
+                      <option value="premium_waiver">Premium Waiver</option>
+                    </select></td>
+                    <td><input type="number" value={rd.sa||''} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],sa:e.target.value};set('riders',riders);}} style={{width:'100%',fontSize:11}} placeholder="$" /></td>
+                    <td style={{textAlign:'center'}}><input type="checkbox" checked={rd.bundled!==false} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],bundled:e.target.checked};set('riders',riders);}} /></td>
+                    <td><input type="number" value={rd.premium||''} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],premium:e.target.value};set('riders',riders);}} style={{width:'100%',fontSize:11}} placeholder={rd.bundled!==false?'incl.':'$'} /></td>
+                    <td><input type="number" value={rd.expiryAge||''} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],expiryAge:e.target.value};set('riders',riders);}} style={{width:'100%',fontSize:11}} placeholder="65" /></td>
+                    <td style={{textAlign:'center'}}>{(rd.type==='ci'||rd.type==='eci') && <input type="checkbox" checked={rd.multiClaim||false} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],multiClaim:e.target.checked};set('riders',riders);}} title="Multi-claim" />}</td>
+                    <td><button className="btn-danger btn-sm" style={{padding:'2px 6px',fontSize:10}} onClick={()=>{const riders=[...(form.riders||[])];riders.splice(ri,1);set('riders',riders);}}>×</button></td>
+                  </tr>
+                ))}
+                {(!form.riders||form.riders.length===0) && <tr><td colSpan={7} style={{textAlign:'center',color:'var(--text3)',padding:12}}>No riders added. Click + Add Rider above.</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {/* ══════ ISP-SPECIFIC FIELDS ══════ */}
+        {form.subType==='Integrated Shield Plan' && (
+          <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid rgba(59,130,246,.3)'}}>
+            <h4 style={{fontSize:13,fontWeight:600,marginBottom:10,color:'var(--teal)'}}>Integrated Shield Plan Details</h4>
+            <div className="grid-3">
+              <div className="field"><label>Ward Class</label><select value={form.ispClass||''} onChange={e=>set('ispClass',e.target.value)}>
+                <option value="">Select…</option><option value="A">Class A (Private)</option><option value="B1">Class B1</option><option value="B2+">Class B2+</option>
+              </select></div>
+              <div className="field"><label>Has Rider?</label><select value={form.hasRider?'yes':'no'} onChange={e=>set('hasRider',e.target.value==='yes')}>
+                <option value="no">No Rider</option><option value="yes">Yes — Rider Attached</option>
+              </select></div>
+              <div className="field"><label>Rider Name</label><input value={form.riderList||''} onChange={e=>set('riderList',e.target.value)} placeholder="e.g. PRUExtra Premier" /></div>
+            </div>
+            {form.hasRider && (
+              <div className="grid-3">
+                <div className="field"><label>Rider Premium ($/yr)</label><input type="number" value={form.riderPremium||''} onChange={e=>set('riderPremium',e.target.value)} /></div>
+                <div className="field"><label>Deductible ($)</label><input type="number" value={form.ispDeductible||''} onChange={e=>set('ispDeductible',e.target.value)} placeholder="e.g. 3500" /></div>
+                <div className="field"><label>Co-insurance (%)</label><input type="number" value={form.ispCoinsurance||''} onChange={e=>set('ispCoinsurance',e.target.value)} placeholder="e.g. 5" /></div>
+              </div>
+            )}
+            <div style={{marginTop:8,padding:10,background:'var(--bg2)',borderRadius:8,fontSize:11,color:'var(--text3)'}}>
+              <div style={{fontWeight:600,marginBottom:4}}>MediShield Life Reference (CPF Board)</div>
+              <div>MSL is the base layer — premiums auto-deducted from MediSave. ISP is the private upgrade on top.</div>
+              <div style={{marginTop:4}}>MediSave Additional Withdrawal Limit (AWL): $300/yr (age ≤40) · $600/yr (41-70) · $900/yr (71+)</div>
+            </div>
+          </div>
+        )}
+
+        {/* ══════ CASH VALUE ══════ */}
+        {(form.category==='protection'||form.category==='savings'||form.category==='investment'||form.category==='retirement') && form.subType!=='Term Life' && (
+          <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)'}}>
+            <h4 style={{fontSize:13,fontWeight:600,marginBottom:10,color:'var(--text2)'}}>Cash / Surrender Value</h4>
+            <div className="grid-3">
+              <div className="field"><label>Current Cash Value</label><input type="number" value={form.cashValue||''} onChange={e=>set('cashValue',e.target.value)} placeholder="Enter if known" /></div>
+              <div className="field"><label>CV Growth Rate (% p.a.)</label><input type="number" step="0.1" value={form.cvGrowthRate||''} onChange={e=>set('cvGrowthRate',e.target.value)} placeholder="e.g. 3.0" /></div>
+              <div className="field"><label>Surrender Period (years)</label><input type="number" value={form.surrenderPeriod||''} onChange={e=>set('surrenderPeriod',e.target.value)} placeholder="e.g. 10" /></div>
+            </div>
+          </div>
+        )}
 
         {/* ══════ UL FAMILY FIELDS ══════ */}
         {isUL && (
@@ -3502,19 +3636,6 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
               <label style={{display:'flex',alignItems:'center',gap:6,margin:0}}><input type="checkbox" checked={form.dualInsured} onChange={e=>set('dualInsured',e.target.checked)} /><span style={{fontSize:12}}>Dual Insured (Mother+Child)</span></label>
               <label style={{display:'flex',alignItems:'center',gap:6,margin:0}}><input type="checkbox" checked={form.guaranteedIssuance} onChange={e=>set('guaranteedIssuance',e.target.checked)} /><span style={{fontSize:12}}>Guaranteed Issuance</span></label>
               <label style={{display:'flex',alignItems:'center',gap:6,margin:0}}><input type="checkbox" checked={form.conversionRights} onChange={e=>set('conversionRights',e.target.checked)} /><span style={{fontSize:12}}>Conversion Rights</span></label>
-            </div>
-          </div>
-        )}
-
-        {/* ══════ HEALTH FIELDS ══════ */}
-        {form.category==='health' && (
-          <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)'}}>
-            <h4 style={{fontSize:13,fontWeight:600,marginBottom:10,color:'var(--teal)'}}>Health Fields</h4>
-            <div className="grid-2">
-              <div className="field"><label>ISP Class</label><select value={form.ispClass||''} onChange={e=>set('ispClass',e.target.value)}>
-                <option value="">N/A</option><option value="A">Class A (Private)</option><option value="B1">Class B1</option><option value="B2+">Class B2+</option>
-              </select></div>
-              <div className="field"><label>Riders</label><input value={form.riderList||''} onChange={e=>set('riderList',e.target.value)} placeholder="e.g. PRUExtra Premier" /></div>
             </div>
           </div>
         )}
@@ -3657,28 +3778,63 @@ function FundAllocationEditor({allocations,onChange}) {
 // ═══════════════════════════════════════════════════════════════
 
 function Repository() {
-  const {repo,saveRepo,deleteRepo} = useContext(AppCtx);
+  const {repo,saveRepo,deleteRepo,refreshRepo,repoSource} = useContext(AppCtx);
   const [search, setSearch] = useState('');
   const [expanded, setExpanded] = useState(null);
+  const [editingRepo, setEditingRepo] = useState(null); // id of item being edited
+  const [editNotes, setEditNotes] = useState('');
+  const [comment, setComment] = useState('');
+  const [syncing, setSyncing] = useState(false);
+
+  // Get current user info from auth globals
+  const userName = (window._prof?.full_name || window._user?.email || 'Unknown');
+  const userEmail = (window._user?.email || '');
+  const isAdmin = window._isAdmin || false;
 
   const filtered = search ? repo.filter(r =>
     (r.productName+' '+r.insurer+' '+(r.productCode||'')).toLowerCase().includes(search.toLowerCase())
   ) : repo;
 
+  const addFootprint = (action) => ({name:userName,email:userEmail,date:new Date().toISOString(),action});
+
+  // Admin: save full edit with footprint
+  const handleAdminSave = (r) => {
+    const history = [...(r.editHistory||[]), addFootprint('Edited notes')];
+    saveRepo({...r, notes:editNotes, editHistory:history});
+    setEditingRepo(null);
+  };
+
+  // Advisor: add comment with footprint
+  const handleAddComment = (r) => {
+    if(!comment.trim()) return;
+    const existing = r.notes || '';
+    const newNotes = existing + '\n\n💬 ' + userName + ' (' + new Date().toLocaleDateString('en-SG',{day:'numeric',month:'short',year:'numeric'}) + '):\n' + comment.trim();
+    const history = [...(r.editHistory||[]), addFootprint('Added comment')];
+    saveRepo({...r, notes:newNotes, editHistory:history});
+    setComment('');
+  };
+
   return (
     <div className="fade-in">
-      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:16}}>
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:16,flexWrap:'wrap',gap:8}}>
         <div>
           <h2 style={{fontSize:18,fontWeight:600}}>Product Repository</h2>
-          <p style={{fontSize:12,color:'var(--text3)'}}>{repo.length} products across major SG insurers</p>
+          <p style={{fontSize:12,color:'var(--text3)'}}>
+            {repo.length} products • {repoSource==='supabase'?'☁️ Shared (Supabase)':'💾 Local only'} • {isAdmin?'Admin: full edit + delete':'Advisor: add comments'}
+          </p>
         </div>
-        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search products…" style={{width:240}} />
+        <div style={{display:'flex',gap:6}}>
+          {refreshRepo && <button className="btn-secondary btn-sm" disabled={syncing} onClick={async()=>{setSyncing(true);const ok=await refreshRepo();setSyncing(false);if(ok)alert('Synced '+repo.length+' products from cloud');else alert('Sync failed — check connection');}}>
+            {syncing?'Syncing…':'🔄 Sync'}
+          </button>}
+          <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search products…" style={{width:200}} />
+        </div>
       </div>
 
       <div style={{display:'grid',gap:12}}>
         {filtered.map(r => (
           <div key={r.id} className="card card-sm" style={{borderLeft:`3px solid ${catColor(r.category)}`}}>
-            <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',cursor:'pointer'}} onClick={()=>setExpanded(expanded===r.id?null:r.id)}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',cursor:'pointer'}} onClick={()=>{setExpanded(expanded===r.id?null:r.id);setEditingRepo(null);setComment('');}}>
               <div>
                 <div style={{fontWeight:600,fontSize:14}}>{r.insurer} — {r.productName}</div>
                 <div style={{fontSize:12,color:'var(--text3)',marginTop:2}}>
@@ -3730,7 +3886,7 @@ function Repository() {
                   </div>
                 )}
                 {/* Charges */}
-                {r.charges && (
+                {r.charges && Object.keys(r.charges).length>0 && (
                   <div style={{marginBottom:10}}>
                     <div style={{fontSize:11,fontWeight:600,color:'var(--text3)',textTransform:'uppercase',marginBottom:4}}>Charges</div>
                     <div style={{fontSize:12,color:'var(--text2)'}}>
@@ -3739,7 +3895,7 @@ function Repository() {
                   </div>
                 )}
                 {/* Features */}
-                {r.features && (
+                {r.features && r.features.length>0 && (
                   <div style={{marginBottom:10}}>
                     <div style={{fontSize:11,fontWeight:600,color:'var(--text3)',textTransform:'uppercase',marginBottom:4}}>Features</div>
                     <div style={{display:'flex',flexWrap:'wrap',gap:4}}>
@@ -3747,10 +3903,54 @@ function Repository() {
                     </div>
                   </div>
                 )}
-                {r.notes && <div style={{fontSize:12,color:'var(--text3)',fontStyle:'italic',marginTop:6}}>{r.notes}</div>}
-                <div style={{marginTop:10,paddingTop:8,borderTop:'1px solid var(--border)',display:'flex',gap:6}}>
-                  <button className="btn-danger btn-sm" onClick={e=>{e.stopPropagation();if(confirm('Delete "'+r.insurer+' — '+r.productName+'" from repository?'))deleteRepo(r.id)}}>Delete</button>
+
+                {/* Notes — with edit/comment based on role */}
+                <div style={{marginBottom:10}}>
+                  <div style={{fontSize:11,fontWeight:600,color:'var(--text3)',textTransform:'uppercase',marginBottom:4}}>Notes & Comments</div>
+                  {editingRepo===r.id && isAdmin ? (
+                    <div>
+                      <textarea rows={5} value={editNotes} onChange={e=>setEditNotes(e.target.value)} style={{width:'100%',fontSize:12}} />
+                      <div style={{display:'flex',gap:6,marginTop:6}}>
+                        <button className="btn-primary btn-sm" onClick={()=>handleAdminSave(r)}>Save Edit</button>
+                        <button className="btn-secondary btn-sm" onClick={()=>setEditingRepo(null)}>Cancel</button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div>
+                      {r.notes ? <div style={{fontSize:12,color:'var(--text2)',whiteSpace:'pre-line'}}>{r.notes}</div> : <div style={{fontSize:12,color:'var(--text3)',fontStyle:'italic'}}>No notes yet</div>}
+                      {isAdmin && <button className="btn-secondary btn-sm" style={{marginTop:6}} onClick={e=>{e.stopPropagation();setEditingRepo(r.id);setEditNotes(r.notes||'')}}>✏️ Edit Notes</button>}
+                    </div>
+                  )}
+                  {/* Advisor comment box — always visible */}
+                  <div style={{marginTop:8}}>
+                    <div style={{display:'flex',gap:6}}>
+                      <input value={expanded===r.id?comment:''} onChange={e=>setComment(e.target.value)} placeholder="Add a comment…" style={{flex:1,fontSize:12,padding:'6px 10px'}} onKeyDown={e=>{if(e.key==='Enter')handleAddComment(r)}} />
+                      <button className="btn-secondary btn-sm" onClick={()=>handleAddComment(r)} disabled={!comment.trim()}>💬 Comment</button>
+                    </div>
+                  </div>
                 </div>
+
+                {/* Edit history trail */}
+                {r.editHistory && r.editHistory.length>0 && (
+                  <div style={{marginBottom:10}}>
+                    <div style={{fontSize:11,fontWeight:600,color:'var(--text3)',textTransform:'uppercase',marginBottom:4}}>Edit History</div>
+                    <div style={{fontSize:11,color:'var(--text3)'}}>
+                      {r.editHistory.slice(-5).reverse().map((h,i)=>(
+                        <div key={i} style={{marginBottom:2}}>
+                          {h.name} — {h.action} — {new Date(h.date).toLocaleDateString('en-SG',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'})}
+                        </div>
+                      ))}
+                      {r.editHistory.length>5 && <div style={{fontStyle:'italic'}}>…and {r.editHistory.length-5} earlier edits</div>}
+                    </div>
+                  </div>
+                )}
+
+                {/* Admin-only actions */}
+                {isAdmin && (
+                  <div style={{marginTop:10,paddingTop:8,borderTop:'1px solid var(--border)',display:'flex',gap:6}}>
+                    <button className="btn-danger btn-sm" onClick={e=>{e.stopPropagation();if(confirm('Delete "'+r.insurer+' — '+r.productName+'" from repository?'))deleteRepo(r.id)}}>Delete</button>
+                  </div>
+                )}
               </div>
             )}
           </div>
@@ -4225,7 +4425,7 @@ function Settings() {
         <p style={{fontSize:12,color:'var(--text3)',marginBottom:12}}>
           Save your portfolio to a file for backup, or load a file from another advisor. Data auto-saves to your browser between sessions.
         </p>
-        <div style={{display:'flex',gap:8}}>
+        <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
           <button className="btn-primary btn-sm" onClick={handleSave} disabled={policies.length===0}>
             💾 Save Portfolio ({policies.length})
           </button>
@@ -4233,6 +4433,19 @@ function Settings() {
           <button className="btn-secondary btn-sm" onClick={()=>loadRef.current?.click()}>
             📂 Load Portfolio
           </button>
+          <button className="btn-danger btn-sm" onClick={async()=>{
+            if(!confirm('Reset repository to verified products only?\nThis removes ALL entries (including Supabase shared data) and re-seeds from scratch.')) return;
+            // Clear Supabase repo
+            const s = getSB();
+            if(s) {
+              const {data} = await s.from('repository').select('id');
+              if(data) for(const r of data) await s.from('repository').delete().eq('id', r.id);
+              for(const seed of SEED_REPOSITORY) await sbRepoSave(seed);
+            }
+            // Also clear local fallback
+            try { const tx = (await openDB()).transaction('repository','readwrite'); tx.objectStore('repository').clear(); } catch(e){}
+            window.location.reload();
+          }}>🗑️ Reset Repository</button>
         </div>
       </div>
 
