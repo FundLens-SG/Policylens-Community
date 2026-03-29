@@ -92,11 +92,6 @@ label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;lett
 </style>
 </head>
 <body>
-</div>
-
-<script>
-</script>
-
 
 <!-- ══════ AUTH GATE ══════ -->
 <div id="auth-gate">
@@ -162,9 +157,15 @@ async function authLogin(){
   authClear();
   var e=document.getElementById('auth-email').value.trim(),p=document.getElementById('auth-pass').value;
   if(!e||!p)return authMsg('Please enter email and password');
-  var r=await sb().auth.signInWithPassword({email:e,password:p});
-  if(r.error)return authMsg(r.error.message);
-  await authCheck();
+  try {
+    authMsg('Signing in…','info');
+    var r=await sb().auth.signInWithPassword({email:e,password:p});
+    if(r.error)return authMsg(r.error.message);
+    await authCheck();
+  } catch(err) {
+    console.error('[Auth] Login error:', err);
+    authMsg('Login error: '+err.message);
+  }
 }
 
 async function authSignup(){
@@ -198,34 +199,40 @@ async function authLogout(){
 }
 
 async function authCheck(){
+  try {
   var s=sb();
   if(!s){authGrant();return;}
   var sess=await s.auth.getSession();
   if(!sess.data||!sess.data.session){document.getElementById('auth-gate').style.display='flex';return;}
   _user=sess.data.session.user;
-  console.log('[PolicyLens Auth] User:', _user.email);
+  console.log('[PolicyLens Auth] User:', _user.email, 'UID:', _user.id);
   // Check if admin by email
   var emailIsAdmin = ADMIN_EMAILS.indexOf(_user.email)>=0;
+  console.log('[PolicyLens Auth] Email is admin?', emailIsAdmin);
   // Fetch profile — use maybeSingle to avoid error on 0 rows
   var p=await s.from('profiles').select('*').eq('id',_user.id).maybeSingle();
   console.log('[PolicyLens Auth] Profile fetch:', p.error?p.error.message:'ok', p.data?'found':'not found');
   if(p.error){
-    // RLS or DB error — if admin email, grant access anyway
     console.warn('[PolicyLens Auth] Profile fetch error:', p.error.message);
-    if(emailIsAdmin){_isAdmin=true;authGrant();return;}
-    authMsg('Database error — contact admin','error');return;
+    if(emailIsAdmin){_isAdmin=true;console.log('[PolicyLens Auth] Admin bypass — granting access');authGrant();return;}
+    authMsg('Database error: '+p.error.message);return;
   }
   if(!p.data){
-    // No profile row yet — INSERT (not upsert, won't overwrite)
+    console.log('[PolicyLens Auth] No profile — creating new');
     var m=_user.user_metadata||{};
     var isAdm=emailIsAdmin;
-    await s.from('profiles').insert({id:_user.id,email:_user.email,full_name:m.full_name||'',approved:isAdm,role:isAdm?'admin':'user'});
+    var ins=await s.from('profiles').insert({id:_user.id,email:_user.email,full_name:m.full_name||'',approved:isAdm,role:isAdm?'admin':'user'});
+    console.log('[PolicyLens Auth] Insert result:', ins.error?ins.error.message:'ok');
+    if(ins.error){
+      // Insert failed (maybe RLS) — admin bypass
+      if(isAdm){_isAdmin=true;authGrant();return;}
+      authMsg('Profile creation failed: '+ins.error.message);return;
+    }
     if(isAdm){_isAdmin=true;authGrant();return;}
     authShow('pending');return;
   }
   _prof=p.data;
   _isAdmin=emailIsAdmin||_prof.role==='admin';
-  // Auto-approve + promote admin emails
   if(_isAdmin&&(!_prof.approved||_prof.role!=='admin')){
     await s.from('profiles').update({approved:true,role:'admin'}).eq('id',_user.id);
     _prof.approved=true;_prof.role='admin';
@@ -233,6 +240,12 @@ async function authCheck(){
   console.log('[PolicyLens Auth] Approved:', _prof.approved, 'Admin:', _isAdmin);
   if(!_prof.approved){authShow('pending');return;}
   authGrant();
+  } catch(err) {
+    console.error('[PolicyLens Auth] authCheck error:', err);
+    // If admin email, grant access even on error
+    if(_user && ADMIN_EMAILS.indexOf(_user.email)>=0){_isAdmin=true;authGrant();return;}
+    authMsg('Auth error: '+err.message);
+  }
 }
 
 function authGrant(){
