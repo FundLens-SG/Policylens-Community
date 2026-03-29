@@ -2981,34 +2981,44 @@ function Header() {
 // OPENAI API HELPER — converts content blocks to OpenAI format
 // ═══════════════════════════════════════════════════════════════
 async function callOpenAI(apiKey, systemPrompt, contentBlocks, maxTokens) {
-  // Convert Anthropic-style content blocks to OpenAI messages format
   const userParts = [];
   let textPrompt = '';
+  let hasImages = false;
   for(const block of contentBlocks) {
     if(block.type==='text') {
       textPrompt += block.text + '\n';
     } else if(block.type==='image') {
+      hasImages = true;
       userParts.push({type:'image_url',image_url:{url:'data:'+block.source.media_type+';base64,'+block.source.data,detail:'high'}});
     } else if(block.type==='document') {
-      // OpenAI doesn't support raw document blocks — for PDFs, convert pages to images
-      // For now, send as text description
-      userParts.push({type:'text',text:'[Document uploaded — binary content, please extract what you can from images]'});
+      hasImages = true;
+      userParts.push({type:'image_url',image_url:{url:'data:'+(block.source.media_type||'application/pdf')+';base64,'+block.source.data,detail:'high'}});
     }
   }
   if(textPrompt) userParts.push({type:'text',text:textPrompt});
   
   const messages = [];
-  if(systemPrompt) messages.push({role:'system',content:systemPrompt});
-  messages.push({role:'user',content:userParts.length>0?userParts:textPrompt});
+  const sysMsg = (systemPrompt||'') + '\n\nCRITICAL: Respond with ONLY valid JSON. No apologies, no explanations, no markdown fences, no preamble. Start your response with { and end with }. If you cannot extract data, return {"error":"reason"}.';
+  messages.push({role:'system',content:sysMsg});
+  messages.push({role:'user',content:userParts.length>0?userParts:[{type:'text',text:textPrompt}]});
+  
+  const body = {model:'gpt-4o',max_tokens:maxTokens||4000,messages};
+  // Only use json_object mode for text-only calls (not vision)
+  if(!hasImages) body.response_format = {type:'json_object'};
+  
+  console.log('[OpenAI] Sending request:', hasImages?'vision':'text', userParts.length, 'parts, max_tokens:', maxTokens);
   
   const resp = await fetch('https://api.openai.com/v1/chat/completions',{
     method:'POST',
     headers:{'Content-Type':'application/json','Authorization':'Bearer '+apiKey},
-    body:JSON.stringify({model:'gpt-4o',max_tokens:maxTokens||4000,messages})
+    body:JSON.stringify(body)
   });
   const data = await resp.json();
   if(data.error) throw new Error(data.error.message||JSON.stringify(data.error));
-  return data.choices?.[0]?.message?.content||'';
+  const raw = data.choices?.[0]?.message?.content||'';
+  console.log('[OpenAI] Response length:', raw.length, 'preview:', raw.slice(0,200));
+  // Strip any markdown fences
+  return raw.replace(/```json\s*|```\s*/g,'').trim();
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -3123,8 +3133,9 @@ function ProfileTab() {
         if(mime.startsWith('image/')) content.push({type:'image',source:{type:'base64',media_type:mime,data:b64}});
         else content.push({type:'document',source:{type:'base64',media_type:mime,data:b64}});
       }
-      content.push({type:'text',text:`Extract client profile information from this document (NRIC, insurance forms, FNA, KYC). Return a JSON object with: name, nric, dob (YYYY-MM-DD), gender (Male/Female), smoker (Non-smoker/Smoker), nationality (SC/PR/Foreigner), occupation, phone, email. If dependants are found, include dependants (array of {name, relationship, dob, gender, smoker, nationality, occupation}). Return ONLY valid JSON.`});
-      const rawText = await callOpenAI(ak, null, content, 2000);
+      content.push({type:'text',text:'Extract client profile information from these documents/images.'});
+      const profilePrompt = 'Extract client profile from insurance documents. Return a JSON object with: name, nric, dob (YYYY-MM-DD), gender (Male/Female), smoker (Non-smoker/Smoker), nationality (SC/PR/Foreigner), occupation, phone, email. If dependants found, include dependants (array of {name, relationship, dob, gender, smoker, nationality, occupation}). Return ONLY valid JSON starting with { and ending with }.';
+      const rawText = await callOpenAI(ak, profilePrompt, content, 2000);
       const parsed = JSON.parse(rawText.replace(/```json|```/g,'').trim());
       // Merge scanned data
       const updated = {...p};
@@ -3560,12 +3571,16 @@ Return ONLY valid JSON, no markdown fences, no explanation.`;
         else if(isText(file)){ const t=await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result);r.onerror=rej;r.readAsText(file)}); content.push({type:'text',text:'[File: '+file.name+']\n'+t.slice(0,50000)}); }
         else content.push({type:'document',source:{type:'base64',media_type:mime,data:b64}});
       }
-      content.push({type:'text',text:EXTRACT_PROMPT});
-      const text = await callOpenAI(ak, null, content, 8000);
+      content.push({type:'text',text:'Extract all insurance policy information from these documents/images. Follow the system instructions for output format.'});
+      const text = await callOpenAI(ak, EXTRACT_PROMPT, content, 8000);
+      console.log('[Extract] Raw response:', text.slice(0,500));
       const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
+      console.log('[Extract] Parsed:', JSON.stringify(parsed).slice(0,500));
       const arr = Array.isArray(parsed)?parsed:[parsed];
+      console.log('[Extract] Policy count:', arr.length, 'Fields in first:', Object.keys(arr[0]||{}).join(','));
       if(arr.length===1){
         const p=arr[0]; const result = {...p,id:genId(),status:p.status||'inforce',sumAssured:parseFloat(p.sumAssured||p.faceAmount)||0,annualPremium:parseFloat(p.annualPremium)||0};
+        console.log('[Extract] Setting form with:', Object.entries(result).filter(([k,v])=>v&&v!==''&&v!==0).map(([k])=>k).join(','));
         mergeToProfile(p, clientProfile, saveProfile);
         setEditing(result); setShowForm(true); // Open edit form directly
       } else {
@@ -3837,8 +3852,9 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         if(mime.startsWith('image/')) content.push({type:'image',source:{type:'base64',media_type:mime,data:b64}});
         else content.push({type:'document',source:{type:'base64',media_type:mime,data:b64}});
       }
-      content.push({type:'text',text:`Extract insurance policy details from this document. Return a JSON object with ALL fields you can find. Core: insurer, productName, policyNumber, category, subType, currency, sumAssured (number), annualPremium (number), premiumStructure, paymentMethod, lifeInsured, gender, dob, ageAtEntry, smoker, nationality, occupation, inceptionDate, maturityDate, status, premStartAge, premTerm, premEndAge. Riders: riders (array of {type:death/tpd/ci/eci/di/accidental/premium_waiver, sa:number, premium:number, expiryAge:number, bundled:boolean, multiClaim:boolean, totalClaimPct:number}). SA: saMultiplier (number), multiplierEndAge (number). ISP: ispClass, hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance. ILP: ilpSubtype, ilpGrowth, ilpDivYield, ilpMgmtFee. Cash: cashValue, cvGrowthRate, surrenderPeriod. Notes: notes (FC review meeting headline). Return ONLY valid JSON, no markdown.`});
-      const rawText2 = await callOpenAI(ak, null, content, 4000);
+      const formExtractPrompt = 'Extract insurance policy details. Return a JSON object with ALL fields: insurer, productName, policyNumber, category (protection/savings/health/investment/retirement/maternity), subType, currency, sumAssured (number), annualPremium (number), premiumStructure, paymentMethod, lifeInsured, gender, dob, ageAtEntry, smoker, nationality, occupation, inceptionDate, maturityDate, status, premStartAge, premTerm, premEndAge. Riders: riders (array of {type:death/tpd/ci/eci/di/accidental/premium_waiver, sa:number, premium:number, expiryAge:number, bundled:boolean, multiClaim:boolean, totalClaimPct:number}). SA: saMultiplier, multiplierEndAge. ISP: ispClass, hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance. ILP: ilpSubtype, ilpGrowth, ilpDivYield, ilpMgmtFee. Cash: cashValue, cvGrowthRate, surrenderPeriod. Notes: notes (FC review headline). Return ONLY valid JSON starting with { ending with }.';
+      content.push({type:'text',text:'Extract all policy information from these documents/images.'});
+      const rawText2 = await callOpenAI(ak, formExtractPrompt, content, 4000);
       const parsed = JSON.parse(rawText2.replace(/```json|```/g,'').trim());
       const overwrites = [];
       const updates = {};
@@ -4166,8 +4182,15 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
               if(!ak){alert('Set OpenAI API key in Settings first');return;}
               setTidying(true);
               try{
-                const tidyResult = await callOpenAI(ak, 'You are an insurance product analyst for Singapore Financial Consultants. Clean up and structure rough policy notes into a concise FC reference card. Keep key numbers, conditions, exclusions, and premium details. Be factual and brief. Return ONLY the cleaned text.', [{type:'text',text:form.notes}], 1000);
-                set('notes',tidyResult||form.notes);
+                const tidyResp = await fetch('https://api.openai.com/v1/chat/completions',{
+                  method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+ak},
+                  body:JSON.stringify({model:'gpt-4o',max_tokens:1000,messages:[
+                    {role:'system',content:'You are an insurance product analyst for Singapore Financial Consultants. Clean up and structure rough policy notes into a concise FC reference card. Keep key numbers, conditions, exclusions, and premium details. Be factual and brief. Return ONLY the cleaned text, no JSON, no headers.'},
+                    {role:'user',content:form.notes}
+                  ]})});
+                const tidyData = await tidyResp.json();
+                if(tidyData.error) throw new Error(tidyData.error.message);
+                set('notes',tidyData.choices?.[0]?.message?.content||form.notes);
               }catch(e){alert('AI error: '+e.message)}
               setTidying(false);
             }}>{tidying?'Tidying…':'🤖 AI Tidy'}</button>
@@ -4966,8 +4989,13 @@ function Settings() {
           try {
             const testKey = ((await dbGet('settings','apiKey').catch(()=>null))?.value||'').trim();
             console.log('[Test] Key:', testKey.slice(0,15)+'...'+testKey.slice(-4), 'length:', testKey.length);
-            const testResult = await callOpenAI(testKey, null, [{type:'text',text:'Say hello'}], 50);
-            alert('✅ API key works! Response: '+testResult);
+            const testResp = await fetch('https://api.openai.com/v1/chat/completions',{
+              method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+testKey},
+              body:JSON.stringify({model:'gpt-4o',max_tokens:50,messages:[{role:'user',content:'Say hello in one sentence'}]})
+            });
+            const testData = await testResp.json();
+            if(testData.error) alert('API Error: '+testData.error.message+'\n\nKey: '+testKey.slice(0,15)+'...'+testKey.slice(-4));
+            else alert('✅ API key works! Response: '+(testData.choices?.[0]?.message?.content||'OK'));
           } catch(e){ alert('Network error: '+e.message); }
         }}>🔑 Test Key</button>}
       </div>
