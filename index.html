@@ -2982,40 +2982,101 @@ function Header() {
 // OPENAI API HELPER — converts content blocks to OpenAI format
 // ═══════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════
-// GEMINI 2.0 FLASH — native PDF support, 1M token context
+// DUAL AI PIPELINE — Gemini reads docs (free), Claude extracts (smart)
+// Fallback: Gemini-only if no Anthropic key
 // ═══════════════════════════════════════════════════════════════
-async function callGemini(apiKey, systemPrompt, contentBlocks, maxTokens) {
+
+// Step 1: Gemini reads PDFs/images → returns raw text
+async function geminiRead(geminiKey, contentBlocks) {
   const parts = [];
   for(const block of contentBlocks) {
-    if(block.type==='text') {
-      parts.push({text:block.text});
-    } else if(block.type==='image') {
-      parts.push({inlineData:{mimeType:block.source.media_type,data:block.source.data}});
-    } else if(block.type==='document') {
-      // Gemini accepts PDFs NATIVELY — no conversion needed!
-      parts.push({inlineData:{mimeType:block.source.media_type||'application/pdf',data:block.source.data}});
-    }
+    if(block.type==='text') parts.push({text:block.text});
+    else if(block.type==='image') parts.push({inlineData:{mimeType:block.source.media_type,data:block.source.data}});
+    else if(block.type==='document') parts.push({inlineData:{mimeType:block.source.media_type||'application/pdf',data:block.source.data}});
   }
-  
-  const body = {
-    contents:[{parts}],
-    generationConfig:{maxOutputTokens:maxTokens||4000,responseMimeType:'application/json'}
-  };
-  if(systemPrompt) body.systemInstruction = {parts:[{text:systemPrompt}]};
-  
-  const hasMedia = parts.some(p=>p.inlineData);
-  console.log('[Gemini] Sending:', parts.filter(p=>p.inlineData).length, 'files,', parts.filter(p=>p.text).length, 'text parts');
-  
-  const resp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key='+apiKey,{
-    method:'POST',
-    headers:{'Content-Type':'application/json'},
-    body:JSON.stringify(body)
+  console.log('[Gemini Read] Sending:', parts.filter(p=>p.inlineData).length, 'files');
+  const resp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='+geminiKey,{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      contents:[{parts}],
+      systemInstruction:{parts:[{text:'You are a document reader. Extract ALL text, numbers, tables, and data from these documents. Preserve table structures. Include every detail — policy numbers, dates, amounts, rider names, conditions, charges. Output as plain text, organized by section.'}]},
+      generationConfig:{maxOutputTokens:8000}
+    })
   });
   const data = await resp.json();
-  if(data.error) throw new Error(data.error.message||JSON.stringify(data.error));
-  const raw = data.candidates?.[0]?.content?.parts?.[0]?.text||'';
-  console.log('[Gemini] Response:', raw.length, 'chars, preview:', raw.slice(0,300));
+  if(data.error) throw new Error('Gemini: '+data.error.message);
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text||'';
+  console.log('[Gemini Read] Extracted:', text.length, 'chars');
+  return text;
+}
+
+// Step 2: Claude structures the extracted text → perfect JSON
+async function claudeExtract(anthropicKey, systemPrompt, rawText, maxTokens) {
+  console.log('[Claude Extract] Sending:', rawText.length, 'chars to Claude');
+  const resp = await fetch('https://api.anthropic.com/v1/messages',{
+    method:'POST',
+    headers:{'Content-Type':'application/json','x-api-key':anthropicKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+    body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:maxTokens||4000,
+      system:systemPrompt+'\n\nRespond with ONLY valid JSON. Start with { end with }.',
+      messages:[{role:'user',content:rawText}]
+    })
+  });
+  const data = await resp.json();
+  if(data.error) throw new Error('Claude: '+data.error.message);
+  const raw = data.content?.[0]?.text||'';
+  console.log('[Claude Extract] Response:', raw.length, 'chars');
   return raw.replace(/```json\s*|```\s*/g,'').trim();
+}
+
+// Gemini-only fallback (if no Anthropic key)
+async function geminiExtract(geminiKey, systemPrompt, contentBlocks, maxTokens) {
+  const parts = [];
+  for(const block of contentBlocks) {
+    if(block.type==='text') parts.push({text:block.text});
+    else if(block.type==='image') parts.push({inlineData:{mimeType:block.source.media_type,data:block.source.data}});
+    else if(block.type==='document') parts.push({inlineData:{mimeType:block.source.media_type||'application/pdf',data:block.source.data}});
+  }
+  const resp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='+geminiKey,{
+    method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({
+      contents:[{parts}],
+      systemInstruction:{parts:[{text:systemPrompt+'\n\nRespond with ONLY valid JSON. Start with { end with }.'}]},
+      generationConfig:{maxOutputTokens:maxTokens||4000,responseMimeType:'application/json'}
+    })
+  });
+  const data = await resp.json();
+  if(data.error) throw new Error('Gemini: '+data.error.message);
+  const raw = data.candidates?.[0]?.content?.parts?.[0]?.text||'';
+  console.log('[Gemini Extract] Response:', raw.length, 'chars');
+  return raw.replace(/```json\s*|```\s*/g,'').trim();
+}
+
+// Main entry point — uses dual pipeline if both keys exist, Gemini-only otherwise
+async function callAI(systemPrompt, contentBlocks, maxTokens) {
+  const gk = ((await dbGet('settings','geminiKey').catch(()=>null))?.value||'').trim();
+  const ck = ((await dbGet('settings','anthropicKey').catch(()=>null))?.value||'').trim();
+  
+  if(!gk) throw new Error('Set your Gemini API key in Settings first');
+  
+  const hasMedia = contentBlocks.some(b=>b.type==='image'||b.type==='document');
+  
+  if(ck && hasMedia) {
+    // DUAL PIPELINE: Gemini reads → Claude extracts
+    console.log('[AI] Dual pipeline: Gemini read → Claude extract');
+    const rawText = await geminiRead(gk, contentBlocks);
+    // Add any text prompts from content blocks
+    const textParts = contentBlocks.filter(b=>b.type==='text').map(b=>b.text).join('\n');
+    return await claudeExtract(ck, systemPrompt, rawText + '\n\n' + textParts, maxTokens);
+  } else if(ck && !hasMedia) {
+    // Text-only → Claude directly (cheapest)
+    console.log('[AI] Text-only → Claude direct');
+    const textParts = contentBlocks.filter(b=>b.type==='text').map(b=>b.text).join('\n');
+    return await claudeExtract(ck, systemPrompt, textParts, maxTokens);
+  } else {
+    // GEMINI ONLY (no Anthropic key)
+    console.log('[AI] Gemini-only mode');
+    return await geminiExtract(gk, systemPrompt, contentBlocks, maxTokens);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -3118,9 +3179,6 @@ function ProfileTab() {
   // AI scan for profile
   const scanProfile = async (files) => {
     if(!files||!files.length) return;
-    const ak = ((await dbGet('settings','apiKey').catch(()=>null))?.value || '').trim();
-    console.log('[Scan] API key length:', ak.length, 'starts:', ak.slice(0,15), 'ends:', ak.slice(-4));
-    if(!ak||!ak.startsWith('sk-')){alert('Invalid API key. Go to Settings and re-save your Gemini API key (starts with sk-ant-...)');return;}
     setScanning(true);
     try {
       const content = [];
@@ -3132,7 +3190,7 @@ function ProfileTab() {
       }
       content.push({type:'text',text:'Extract client profile information from these documents/images.'});
       const profilePrompt = 'Extract client profile from insurance documents. Return a JSON object with: name, nric, dob (YYYY-MM-DD), gender (Male/Female), smoker (Non-smoker/Smoker), nationality (SC/PR/Foreigner), occupation, phone, email. If dependants found, include dependants (array of {name, relationship, dob, gender, smoker, nationality, occupation}). Return ONLY valid JSON starting with { and ending with }.';
-      const rawText = await callGemini(ak, profilePrompt, content, 2000);
+      const rawText = await callAI(profilePrompt, content, 2000);
       const parsed = JSON.parse(rawText.replace(/```json|```/g,'').trim());
       // Merge scanned data
       const updated = {...p};
@@ -3239,8 +3297,8 @@ function Dashboard() {
 
   // Dashboard drop handler — route to profile or policies
   const handleDashDrop = async (files) => {
-    const ak = ((await dbGet('settings','apiKey').catch(()=>null))?.value || '').trim();
-    if(!ak){alert('Set Gemini API key in Settings first');return;}
+    const gk = ((await dbGet('settings','geminiKey').catch(()=>null))?.value || '').trim();
+    if(!gk){alert('Set your Gemini API key in Settings first');return;}
     const choice = confirm('What are these documents?\n\nOK = Client profile (NRIC, FNA, KYC)\nCancel = Policy documents');
     if(choice) setTab('profile');
     else setTab('policies');
@@ -3565,8 +3623,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
   // ── Extract from any files ──
   const handleExtract = async (files) => {
     if(!files||!files.length) return;
-    const ak = ((await dbGet('settings','apiKey').catch(()=>null))?.value || '').trim();
-    if(!ak){alert('Set your Gemini API key in Settings first');return;}
+    // Keys read internally by callAI()
     setScanning(true);
     try {
       const content = [];
@@ -3578,7 +3635,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         else content.push({type:'document',source:{type:'base64',media_type:mime,data:b64}});
       }
       content.push({type:'text',text:'Extract all insurance policy information from these documents/images. Follow the system instructions for output format.'});
-      const text = await callGemini(ak, EXTRACT_PROMPT, content, 8000);
+      const text = await callAI(EXTRACT_PROMPT, content, 8000);
       console.log('[Extract] Raw response:', text.slice(0,500));
       const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
       console.log('[Extract] Parsed:', JSON.stringify(parsed).slice(0,500));
@@ -3856,9 +3913,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
   // ── Scan into existing form ──
   const scanIntoForm = async (files) => {
     if(!files||!files.length) return;
-    const _akRaw = await dbGet('settings','apiKey').catch(()=>null);
-    const ak = (_akRaw?.value || '').trim();
-    if(!ak){alert('Set Gemini API key in Settings first');return;}
+    // Keys read internally by callAI()
     setFormScanning(true);
     try {
       const content = [];
@@ -3870,7 +3925,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
       }
       const formExtractPrompt = 'Extract insurance policy details. Return a JSON object with ALL fields: insurer, productName, policyNumber, category (protection/savings/health/investment/retirement/maternity), subType, currency, sumAssured (number), annualPremium (number), premiumStructure, paymentMethod, lifeInsured, gender, dob, ageAtEntry, smoker, nationality, occupation, inceptionDate, maturityDate, status, premStartAge, premTerm, premEndAge. Riders: riders (array of {type:death/tpd/ci/eci/di/accidental/premium_waiver, sa:number, premium:number, expiryAge:number, bundled:boolean, multiClaim:boolean, totalClaimPct:number}). SA: saMultiplier, multiplierEndAge. ISP: ispClass, hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance. ILP: ilpSubtype, ilpGrowth, ilpDivYield, ilpMgmtFee. Cash: cashValue, cvGrowthRate, surrenderPeriod. Notes: notes (FC review headline). Return ONLY valid JSON starting with { ending with }.';
       content.push({type:'text',text:'Extract all policy information from these documents/images.'});
-      const rawText2 = await callGemini(ak, formExtractPrompt, content, 4000);
+      const rawText2 = await callAI(formExtractPrompt, content, 4000);
       const parsed = JSON.parse(rawText2.replace(/```json|```/g,'').trim());
       const overwrites = [];
       const updates = {};
@@ -4208,12 +4263,11 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
           <textarea rows={3} value={form.notes} onChange={e=>set('notes',e.target.value)} style={{width:'100%',marginTop:4}} placeholder="Key policy details, rider info, anything — AI will clean it up" />
           <div style={{display:'flex',gap:6,marginTop:6}}>
             <button className="btn-secondary btn-sm" disabled={!form.notes||form.notes.length<10||tidying} onClick={async()=>{
-              const _akr = await dbGet('settings','apiKey').catch(()=>null);
-              const ak = (_akr?.value || '').trim();
+              const ak = ((await dbGet('settings','geminiKey').catch(()=>null))?.value||'').trim();
               if(!ak){alert('Set Gemini API key in Settings first');return;}
               setTidying(true);
               try{
-                const tidyResp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key='+ak,{
+                const tidyResp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='+ak,{
                   method:'POST',headers:{'Content-Type':'application/json'},
                   body:JSON.stringify({contents:[{parts:[{text:'Clean up these rough insurance policy notes into a concise FC reference card. Keep key numbers, conditions, exclusions, premium details. Be factual and brief. Return ONLY the cleaned text:\n\n'+form.notes}]}],
                     systemInstruction:{parts:[{text:'You are an insurance product analyst for Singapore Financial Consultants.'}]},
@@ -4894,21 +4948,20 @@ function ReportTab() {
 
 function Settings() {
   const {apiKey,saveApiKey,clientName,saveClientName,policies,savePolicy,deletePolicy} = useContext(AppCtx);
-  const [key, setKey] = useState('');
-  const [keyLoaded, setKeyLoaded] = useState(false);
+  const [geminiKey, setGeminiKey] = useState('');
+  const [anthropicKey, setAnthropicKey] = useState('');
   const [name, setName] = useState(clientName);
   const loadRef = useRef(null);
 
-  // Load key directly from IndexedDB on mount — don't rely on context which may be stale
+  // Load both keys from IndexedDB on mount
   useEffect(() => {
     (async () => {
-      const sk = await dbGet('settings','apiKey').catch(()=>null);
-      if(sk?.value) { setKey(sk.value); setKeyLoaded(true); }
-      else setKeyLoaded(true);
+      const gk = await dbGet('settings','geminiKey').catch(()=>null);
+      const ck = await dbGet('settings','anthropicKey').catch(()=>null);
+      if(gk?.value) setGeminiKey(gk.value);
+      if(ck?.value) setAnthropicKey(ck.value);
     })();
   }, []);
-  // Also sync if context updates later
-  useEffect(() => { if(apiKey && !key) setKey(apiKey); }, [apiKey]);
 
   // ── Save portfolio as JSON file ──
   const handleSave = () => {
@@ -4990,45 +5043,69 @@ function Settings() {
       <div className="card" style={{marginBottom:16}}>
         <div style={{fontSize:13,color:'var(--text2)'}}>Client details are now managed in the <strong>👤 My Client</strong> tab — name, NRIC, DOB, dependants, and more.</div>
       </div>
+      {/* ═══ AI KEYS ═══ */}
       <div className="card" style={{marginBottom:16}}>
-        <div className="field">
-          <label>Google Gemini API Key (for AI Capture)</label>
-          <div style={{display:'flex',gap:6,alignItems:'center'}}>
-            <input type="text" value={key} onChange={e=>setKey(e.target.value)} placeholder="AIza…" style={{flex:1,fontFamily:'monospace',fontSize:12}} autoComplete="off" spellCheck="false" />
-            {key && <span style={{fontSize:10,color:'var(--text3)',flexShrink:0}}>{key.length} chars</span>}
+        <h3 style={{fontSize:14,fontWeight:600,marginBottom:4}}>AI Document Extraction</h3>
+        <p style={{fontSize:11,color:'var(--text3)',marginBottom:12}}>Dual AI: Gemini reads documents (free) → Claude extracts structured data (smart). Gemini-only if no Anthropic key.</p>
+
+        {/* Gemini Key */}
+        <div style={{padding:10,background:'var(--bg3)',borderRadius:8,marginBottom:10,border:'1px solid var(--border)'}}>
+          <div className="field" style={{marginBottom:6}}>
+            <label style={{color:'#4285f4',fontWeight:600}}>🔵 Google Gemini Key <span style={{fontWeight:400,color:'var(--text3)'}}>(required — free)</span></label>
+            <div style={{display:'flex',gap:6,alignItems:'center'}}>
+              <input type="text" value={geminiKey} onChange={e=>setGeminiKey(e.target.value)} placeholder="AIza…" style={{flex:1,fontFamily:'monospace',fontSize:11}} autoComplete="off" spellCheck="false" />
+              {geminiKey && <span style={{fontSize:10,color:'var(--text3)',flexShrink:0}}>{geminiKey.length}ch</span>}
+            </div>
           </div>
+          <div style={{display:'flex',gap:6}}>
+            <button className="btn-primary btn-sm" onClick={async()=>{
+              const k=geminiKey.trim(); if(!k||!k.startsWith('AIza')){alert('Gemini keys start with AIza...');return;}
+              await dbPut('settings',{key:'geminiKey',value:k}); alert('✅ Gemini key saved!');
+            }}>Save</button>
+            <button className="btn-secondary btn-sm" onClick={async()=>{
+              const k=((await dbGet('settings','geminiKey').catch(()=>null))?.value||'').trim();
+              if(!k){alert('No Gemini key stored');return;}
+              try{const r=await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='+k,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{parts:[{text:'Say hello'}]}],generationConfig:{maxOutputTokens:30}})});
+              const d=await r.json();if(d.error)alert('❌ '+d.error.message);else alert('✅ Gemini works! '+(d.candidates?.[0]?.content?.parts?.[0]?.text||''));}catch(e){alert('Error: '+e.message);}
+            }}>Test</button>
+          </div>
+          <p style={{fontSize:10,color:'var(--text3)',marginTop:4}}>Get free: <a href="https://aistudio.google.com/apikey" target="_blank" style={{color:'#4285f4'}}>aistudio.google.com</a> → Create API key. 1,500 free req/day.</p>
         </div>
-        <div style={{display:'flex',gap:6,alignItems:'center',marginTop:6}}>
-          <button className="btn-primary btn-sm" onClick={()=>{
-            const k = key.trim().replace(/^["']+|["']+$/g,'');
-            if(!k){alert('Please enter an API key');return;}
-            if(!k.startsWith('AIza')){alert('Invalid key format — Gemini keys start with AIza...');return;}
-            saveApiKey(k);
-            setKey(k);
-            alert('API key saved! ('+k.length+' chars, starts: '+k.slice(0,15)+'…)');
-          }}>Save Key</button>
-          <button className="btn-secondary btn-sm" onClick={async()=>{
-            const stored = await dbGet('settings','apiKey').catch(()=>null);
-            const v = (stored?.value||'').trim();
-            alert('Stored in IndexedDB:\n\nLength: '+v.length+'\nStarts: '+v.slice(0,20)+'\nEnds: ...'+v.slice(-6)+'\nValid format: '+(v.startsWith('sk-')?'Yes':'NO'));
-          }}>🔍 Debug Key</button>
+
+        {/* Anthropic Key */}
+        <div style={{padding:10,background:'var(--bg3)',borderRadius:8,border:'1px solid var(--border)'}}>
+          <div className="field" style={{marginBottom:6}}>
+            <label style={{color:'#d97706',fontWeight:600}}>🟡 Anthropic Key <span style={{fontWeight:400,color:'var(--text3)'}}>(optional — better extraction)</span></label>
+            <div style={{display:'flex',gap:6,alignItems:'center'}}>
+              <input type="text" value={anthropicKey} onChange={e=>setAnthropicKey(e.target.value)} placeholder="sk-ant-api03-…" style={{flex:1,fontFamily:'monospace',fontSize:11}} autoComplete="off" spellCheck="false" />
+              {anthropicKey && <span style={{fontSize:10,color:'var(--text3)',flexShrink:0}}>{anthropicKey.length}ch</span>}
+            </div>
+          </div>
+          <div style={{display:'flex',gap:6}}>
+            <button className="btn-primary btn-sm" onClick={async()=>{
+              const k=anthropicKey.trim(); if(!k||!k.startsWith('sk-ant-')){alert('Anthropic keys start with sk-ant-...');return;}
+              if(k.length<50){alert('Key too short ('+k.length+' chars). Full keys are ~130 chars. Copy the FULL key from Anthropic Console.');return;}
+              await dbPut('settings',{key:'anthropicKey',value:k}); alert('✅ Anthropic key saved! ('+k.length+' chars)');
+            }}>Save</button>
+            <button className="btn-secondary btn-sm" onClick={async()=>{
+              const k=((await dbGet('settings','anthropicKey').catch(()=>null))?.value||'').trim();
+              if(!k){alert('No Anthropic key stored');return;}
+              try{const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json','x-api-key':k,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:30,messages:[{role:'user',content:'Say hello'}]})});
+              const d=await r.json();if(d.error)alert('❌ '+d.error.message);else alert('✅ Claude works! '+(d.content?.[0]?.text||''));}catch(e){alert('Error: '+e.message);}
+            }}>Test</button>
+          </div>
+          <p style={{fontSize:10,color:'var(--text3)',marginTop:4}}>Get key: <a href="https://console.anthropic.com/settings/keys" target="_blank" style={{color:'#d97706'}}>console.anthropic.com</a> → Create Key → copy FULL key (~130 chars). ~$0.003/scan.</p>
         </div>
-        <p style={{fontSize:11,color:'var(--text3)',marginTop:6}}>Google Gemini 2.0 Flash powers AI document extraction. Free tier: 1,500 requests/day. Accepts PDFs natively. Key stored locally in IndexedDB.</p>
-        {apiKey && <p style={{fontSize:11,color:'var(--green2)',marginTop:4}}>✓ Key active ({apiKey.slice(0,15)}… {apiKey.length} chars)</p>}
-        {apiKey && <button className="btn-secondary btn-sm" style={{marginTop:6}} onClick={async()=>{
-          try {
-            const testKey = ((await dbGet('settings','apiKey').catch(()=>null))?.value||'').trim();
-            console.log('[Test] Key:', testKey.slice(0,15)+'...'+testKey.slice(-4), 'length:', testKey.length);
-            const testResp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key='+testKey,{
-              method:'POST',headers:{'Content-Type':'application/json'},
-              body:JSON.stringify({contents:[{parts:[{text:'Say hello in one sentence'}]}],generationConfig:{maxOutputTokens:50}})
-            });
-            const testData = await testResp.json();
-            if(testData.error) alert('API Error: '+testData.error.message+'\n\nKey: '+testKey.slice(0,10)+'...');
-            else alert('✅ Gemini API key works! Response: '+(testData.candidates?.[0]?.content?.parts?.[0]?.text||'OK'));
-          } catch(e){ alert('Network error: '+e.message); }
-        }}>🔑 Test Key</button>}
+
+        {/* Pipeline status */}
+        <div style={{marginTop:10,padding:8,background:'var(--bg2)',borderRadius:6,fontSize:11}}>
+          <strong>Pipeline: </strong>
+          {geminiKey && anthropicKey && anthropicKey.length>50 ? <span style={{color:'var(--green2)'}}>✅ Dual AI — Gemini reads → Claude extracts (best quality)</span>
+           : geminiKey ? <span style={{color:'#4285f4'}}>🔵 Gemini-only mode (good, free)</span>
+           : <span style={{color:'var(--red)'}}>⚠️ No keys — AI scanning disabled</span>}
+        </div>
       </div>
+
       <div className="card">
         <h3 style={{fontSize:14,fontWeight:600,marginBottom:8}}>About PolicyLens v4</h3>
         <div style={{fontSize:12,color:'var(--text2)',lineHeight:1.6}}>
