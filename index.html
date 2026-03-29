@@ -343,6 +343,84 @@ const SUB_TYPES = {
 
 const UL_FAMILY = ['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'];
 
+// ═══════════════════════════════════════════════════════════════
+// INSURER REGISTRY — brand colors + logos for SG market
+// ═══════════════════════════════════════════════════════════════
+const INSURERS = {
+  // Life insurers
+  'Manulife':       {color:'#00a758',bg:'#e6f7ef',logo:'https://logo.clearbit.com/manulife.com.sg'},
+  'AIA':            {color:'#e4002b',bg:'#fde8ec',logo:'https://logo.clearbit.com/aia.com.sg'},
+  'Prudential':     {color:'#e31837',bg:'#fde8ec',logo:'https://logo.clearbit.com/prudential.com.sg'},
+  'Great Eastern':  {color:'#003da5',bg:'#e6edf8',logo:'https://logo.clearbit.com/greateasternlife.com'},
+  'NTUC Income':    {color:'#f47920',bg:'#fef3e8',logo:'https://logo.clearbit.com/income.com.sg'},
+  'FWD':            {color:'#e87722',bg:'#fef3e8',logo:'https://logo.clearbit.com/fwd.com.sg'},
+  'Singlife':       {color:'#ff4f5b',bg:'#ffe8ea',logo:'https://logo.clearbit.com/singlife.com'},
+  'Tokio Marine':   {color:'#0033a0',bg:'#e6edf8',logo:'https://logo.clearbit.com/tokiomarine.com'},
+  'HSBC Life':      {color:'#db0011',bg:'#fde8ec',logo:'https://logo.clearbit.com/hsbc.com.sg'},
+  'China Life':     {color:'#c10230',bg:'#fde8ec',logo:'https://logo.clearbit.com/chinalife.com.sg'},
+  'China Taiping':  {color:'#c41230',bg:'#fde8ec',logo:'https://logo.clearbit.com/sg.cntaiping.com'},
+  'Etiqa':          {color:'#00205b',bg:'#e6edf8',logo:'https://logo.clearbit.com/etiqa.com.sg'},
+  'Zurich':         {color:'#003399',bg:'#e6edf8',logo:'https://logo.clearbit.com/zurich.com.sg'},
+  'Sun Life':       {color:'#fdb813',bg:'#fef9e6',logo:'https://logo.clearbit.com/sunlife.com.sg'},
+  'Aviva/Singlife': {color:'#ffcc00',bg:'#fef9e6',logo:'https://logo.clearbit.com/singlife.com'},
+  'AXA':            {color:'#00008f',bg:'#e6e6f8',logo:'https://logo.clearbit.com/axa.com.sg'},
+  'Raffles Health':  {color:'#1a4480',bg:'#e6edf8',logo:'https://logo.clearbit.com/raffleshealth.com'},
+  'Swiss Life':     {color:'#e30613',bg:'#fde8ec',logo:'https://logo.clearbit.com/swisslife.com'},
+  // General insurers
+  'MSIG':           {color:'#004ea2',bg:'#e6edf8',logo:'https://logo.clearbit.com/msig.com.sg'},
+  'Sompo':          {color:'#003c71',bg:'#e6edf8',logo:'https://logo.clearbit.com/sompo.com.sg'},
+  'Chubb':          {color:'#a3080c',bg:'#fde8ec',logo:'https://logo.clearbit.com/chubb.com'},
+  'QBE':            {color:'#003087',bg:'#e6edf8',logo:'https://logo.clearbit.com/qbe.com'},
+  'Liberty':        {color:'#1e3a5f',bg:'#e6edf8',logo:'https://logo.clearbit.com/libertyinsurance.com.sg'},
+  // Brokerages / platforms
+  'iFAST':          {color:'#003366',bg:'#e6edf8',logo:'https://logo.clearbit.com/ifastfinancial.com'},
+  'Tiger Brokers':  {color:'#ff6600',bg:'#fff3e6',logo:'https://logo.clearbit.com/tigerbrokers.com.sg'},
+  'Phillip Securities': {color:'#003087',bg:'#e6edf8',logo:'https://logo.clearbit.com/poems.com.sg'},
+  'UOB Kay Hian':   {color:'#0033a1',bg:'#e6edf8',logo:'https://logo.clearbit.com/utrade.com.sg'},
+  'DBS':            {color:'#e21a22',bg:'#fde8ec',logo:'https://logo.clearbit.com/dbs.com.sg'},
+  'OCBC':           {color:'#ef3e23',bg:'#fde8ec',logo:'https://logo.clearbit.com/ocbc.com'},
+  'UOB':            {color:'#0033a1',bg:'#e6edf8',logo:'https://logo.clearbit.com/uob.com.sg'},
+  'Citibank':       {color:'#003b70',bg:'#e6edf8',logo:'https://logo.clearbit.com/citibank.com.sg'},
+  'StashAway':      {color:'#00c2a8',bg:'#e6f9f5',logo:'https://logo.clearbit.com/stashaway.sg'},
+  'Endowus':        {color:'#2d46b9',bg:'#e8ecf8',logo:'https://logo.clearbit.com/endowus.com'},
+  'Syfe':           {color:'#1a1a2e',bg:'#e8e8ec',logo:'https://logo.clearbit.com/syfe.com'},
+  'MoneyOwl':       {color:'#5b2c6f',bg:'#f0e8f5',logo:'https://logo.clearbit.com/moneyowl.com.sg'},
+  'FSMOne':         {color:'#003366',bg:'#e6edf8',logo:'https://logo.clearbit.com/fsmone.com'},
+  'Saxo':           {color:'#0b4f6c',bg:'#e6f0f5',logo:'https://logo.clearbit.com/home.saxo'},
+  'Interactive Brokers': {color:'#d81b26',bg:'#fde8ec',logo:'https://logo.clearbit.com/interactivebrokers.com'},
+  'moomoo':         {color:'#ff6600',bg:'#fff3e6',logo:'https://logo.clearbit.com/moomoo.com'},
+  'Webull':         {color:'#f6475d',bg:'#fde8ec',logo:'https://logo.clearbit.com/webull.com'},
+  // CPF / Gov
+  'CPF Board':      {color:'#00629b',bg:'#e6f0f5',logo:'https://logo.clearbit.com/cpf.gov.sg'},
+};
+const INSURER_LIST = Object.keys(INSURERS).sort();
+const getInsurer = (name) => INSURERS[name] || {color:'#64748b',bg:'#f1f5f9',logo:null};
+
+// Insurer badge component
+const InsurerBadge = ({name, size='sm'}) => {
+  const ins = getInsurer(name);
+  const sz = size==='lg'?{h:24,f:13,p:'3px 10px',img:18}:{h:18,f:11,p:'2px 8px',img:14};
+  return React.createElement('span',{style:{display:'inline-flex',alignItems:'center',gap:4,background:ins.bg,color:ins.color,fontSize:sz.f,fontWeight:600,padding:sz.p,borderRadius:6,border:`1px solid ${ins.color}22`,whiteSpace:'nowrap'}},
+    ins.logo && React.createElement('img',{src:ins.logo,style:{width:sz.img,height:sz.img,borderRadius:3,objectFit:'contain'},onError:e=>{e.target.style.display='none'}}),
+    name||'Unknown'
+  );
+};
+
+// Insurer dropdown component
+const InsurerSelect = ({value,onChange,style}) => {
+  const [other,setOther] = React.useState(value && !INSURERS[value] && value!=='' ? value : '');
+  const isOther = value && !INSURERS[value] && value!=='';
+  return React.createElement('div',null,
+    React.createElement('select',{value:isOther?'__other':value||'',onChange:e=>{if(e.target.value==='__other'){onChange(other||'Other');setOther(other||'');}else{onChange(e.target.value);setOther('');}},style:{...style,color:getInsurer(value).color,fontWeight:600}},
+      React.createElement('option',{value:''},'Select insurer…'),
+      INSURER_LIST.map(n=>React.createElement('option',{key:n,value:n},n)),
+      React.createElement('option',{value:'__other'},'Other…')
+    ),
+    isOther && React.createElement('input',{value:other,onChange:e=>{setOther(e.target.value);onChange(e.target.value);},placeholder:'Type insurer name',style:{marginTop:4,width:'100%',fontSize:12}})
+  );
+};
+
+
 const CURRENCIES = ['SGD','USD','GBP','EUR','HKD','AUD','JPY','CNY','MYR'];
 
 const PREMIUM_STRUCTURES = ['Single Premium','Regular Premium','Limited Pay','Flexible Premium'];
@@ -2898,6 +2976,41 @@ function Header() {
 // DASHBOARD — Portfolio Overview + Gap Analysis
 // ═══════════════════════════════════════════════════════════════
 
+
+// ═══════════════════════════════════════════════════════════════
+// OPENAI API HELPER — converts content blocks to OpenAI format
+// ═══════════════════════════════════════════════════════════════
+async function callOpenAI(apiKey, systemPrompt, contentBlocks, maxTokens) {
+  // Convert Anthropic-style content blocks to OpenAI messages format
+  const userParts = [];
+  let textPrompt = '';
+  for(const block of contentBlocks) {
+    if(block.type==='text') {
+      textPrompt += block.text + '\n';
+    } else if(block.type==='image') {
+      userParts.push({type:'image_url',image_url:{url:'data:'+block.source.media_type+';base64,'+block.source.data,detail:'high'}});
+    } else if(block.type==='document') {
+      // OpenAI doesn't support raw document blocks — for PDFs, convert pages to images
+      // For now, send as text description
+      userParts.push({type:'text',text:'[Document uploaded — binary content, please extract what you can from images]'});
+    }
+  }
+  if(textPrompt) userParts.push({type:'text',text:textPrompt});
+  
+  const messages = [];
+  if(systemPrompt) messages.push({role:'system',content:systemPrompt});
+  messages.push({role:'user',content:userParts.length>0?userParts:textPrompt});
+  
+  const resp = await fetch('https://api.openai.com/v1/chat/completions',{
+    method:'POST',
+    headers:{'Content-Type':'application/json','Authorization':'Bearer '+apiKey},
+    body:JSON.stringify({model:'gpt-4o',max_tokens:maxTokens||4000,messages})
+  });
+  const data = await resp.json();
+  if(data.error) throw new Error(data.error.message||JSON.stringify(data.error));
+  return data.choices?.[0]?.message?.content||'';
+}
+
 // ═══════════════════════════════════════════════════════════════
 // DROP ZONE — paste + drag-and-drop for any screen
 // ═══════════════════════════════════════════════════════════════
@@ -3000,7 +3113,7 @@ function ProfileTab() {
     if(!files||!files.length) return;
     const ak = ((await dbGet('settings','apiKey').catch(()=>null))?.value || '').trim();
     console.log('[Scan] API key length:', ak.length, 'starts:', ak.slice(0,15), 'ends:', ak.slice(-4));
-    if(!ak||!ak.startsWith('sk-')){alert('Invalid API key. Go to Settings and re-save your Anthropic API key (starts with sk-ant-...)');return;}
+    if(!ak||!ak.startsWith('sk-')){alert('Invalid API key. Go to Settings and re-save your OpenAI API key (starts with sk-ant-...)');return;}
     setScanning(true);
     try {
       const content = [];
@@ -3011,13 +3124,8 @@ function ProfileTab() {
         else content.push({type:'document',source:{type:'base64',media_type:mime,data:b64}});
       }
       content.push({type:'text',text:`Extract client profile information from this document (NRIC, insurance forms, FNA, KYC). Return a JSON object with: name, nric, dob (YYYY-MM-DD), gender (Male/Female), smoker (Non-smoker/Smoker), nationality (SC/PR/Foreigner), occupation, phone, email. If dependants are found, include dependants (array of {name, relationship, dob, gender, smoker, nationality, occupation}). Return ONLY valid JSON.`});
-      const resp = await fetch('https://api.anthropic.com/v1/messages',{
-        method:'POST',headers:{'Content-Type':'application/json','x-api-key':ak,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-        body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:2000,messages:[{role:'user',content}]})
-      });
-      const data = await resp.json();
-      if(data.error) throw new Error(data.error.message);
-      const parsed = JSON.parse((data.content?.[0]?.text||'').replace(/```json|```/g,'').trim());
+      const rawText = await callOpenAI(ak, null, content, 2000);
+      const parsed = JSON.parse(rawText.replace(/```json|```/g,'').trim());
       // Merge scanned data
       const updated = {...p};
       Object.entries(parsed).forEach(([k,v])=>{
@@ -3124,7 +3232,7 @@ function Dashboard() {
   // Dashboard drop handler — route to profile or policies
   const handleDashDrop = async (files) => {
     const ak = ((await dbGet('settings','apiKey').catch(()=>null))?.value || '').trim();
-    if(!ak){alert('Set Anthropic API key in Settings first');return;}
+    if(!ak){alert('Set OpenAI API key in Settings first');return;}
     const choice = confirm('What are these documents?\n\nOK = Client profile (NRIC, FNA, KYC)\nCancel = Policy documents');
     if(choice) setTab('profile');
     else setTab('policies');
@@ -3276,8 +3384,67 @@ function GapBar({label,current,rec,pct,fmt:fmtFn,color}) {
 // POLICIES — List, Add, Edit with Sub-type System
 // ═══════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════
+// SMART PROFILE MERGE — extracts client details from policy scans
+// ═══════════════════════════════════════════════════════════════
+const PROFILE_FIELDS = {
+  lifeInsured:{profileKey:'name',label:'Name'},
+  gender:{profileKey:'gender',label:'Gender'},
+  dob:{profileKey:'dob',label:'Date of Birth'},
+  smoker:{profileKey:'smoker',label:'Smoker Status'},
+  nationality:{profileKey:'nationality',label:'Nationality'},
+  occupation:{profileKey:'occupation',label:'Occupation'},
+};
+
+function normalName(n){ return (n||'').toLowerCase().replace(/[^a-z]/g,' ').split(/\s+/).sort().join(' ').trim(); }
+function isNameMatch(a,b){ if(!a||!b)return false; return normalName(a)===normalName(b); }
+
+function mergeToProfile(extracted, currentProfile, saveProfile) {
+  if(!extracted || !currentProfile || !saveProfile) return;
+  const adds = {};  // fields to silently add (profile is empty)
+  const conflicts = []; // fields that differ (need confirmation)
+
+  Object.entries(PROFILE_FIELDS).forEach(([extKey, {profileKey, label}]) => {
+    const extVal = extracted[extKey];
+    if(!extVal || extVal==='' || extVal==='—') return;
+    const curVal = currentProfile[profileKey];
+
+    if(!curVal || curVal==='') {
+      // Profile field is empty — silently add
+      adds[profileKey] = extVal;
+    } else {
+      // Both have values — check if evidently different
+      if(profileKey==='name') {
+        if(!isNameMatch(curVal, extVal)) conflicts.push({label, current:curVal, scanned:extVal, key:profileKey});
+      } else if(String(curVal).toLowerCase().trim() !== String(extVal).toLowerCase().trim()) {
+        conflicts.push({label, current:curVal, scanned:extVal, key:profileKey});
+      }
+    }
+  });
+
+  // Apply silent adds
+  if(Object.keys(adds).length > 0) {
+    const updated = {...currentProfile, ...adds};
+    saveProfile(updated);
+    console.log('[Profile Merge] Silently added:', Object.keys(adds).join(', '));
+  }
+
+  // Prompt for conflicts
+  if(conflicts.length > 0) {
+    const lines = conflicts.map(c => `• ${c.label}: "${c.current}" → "${c.scanned}"`);
+    const msg = 'Policy scan found different client details:\n\n' + lines.join('\n') + '\n\nUpdate profile with scanned values?';
+    if(confirm(msg)) {
+      const overrides = {};
+      conflicts.forEach(c => { overrides[c.key] = c.scanned; });
+      const updated = {...currentProfile, ...adds, ...overrides};
+      saveProfile(updated);
+      console.log('[Profile Merge] Overrides applied:', conflicts.map(c=>c.key).join(', '));
+    }
+  }
+}
+
 function Policies() {
-  const {policies,savePolicy,deletePolicy,repo,apiKey,saveRepo} = useContext(AppCtx);
+  const {policies,savePolicy,deletePolicy,repo,apiKey,saveRepo,clientProfile,saveProfile} = useContext(AppCtx);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState(null);
   const [filter, setFilter] = useState('all');
@@ -3382,7 +3549,7 @@ Return ONLY valid JSON, no markdown fences, no explanation.`;
   const handleExtract = async (files) => {
     if(!files||!files.length) return;
     const ak = ((await dbGet('settings','apiKey').catch(()=>null))?.value || '').trim();
-    if(!ak){alert('Set your Anthropic API key in Settings first');return;}
+    if(!ak){alert('Set your OpenAI API key in Settings first');return;}
     setScanning(true);
     try {
       const content = [];
@@ -3394,24 +3561,21 @@ Return ONLY valid JSON, no markdown fences, no explanation.`;
         else content.push({type:'document',source:{type:'base64',media_type:mime,data:b64}});
       }
       content.push({type:'text',text:EXTRACT_PROMPT});
-      const resp = await fetch('https://api.anthropic.com/v1/messages',{
-        method:'POST',
-        headers:{'Content-Type':'application/json','x-api-key':ak,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-        body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:8000,messages:[{role:'user',content}]})
-      });
-      const data = await resp.json();
-      if(data.error) throw new Error(data.error.message||JSON.stringify(data.error));
-      const text = data.content?.[0]?.text||'';
+      const text = await callOpenAI(ak, null, content, 8000);
       const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
       const arr = Array.isArray(parsed)?parsed:[parsed];
       if(arr.length===1){
         const p=arr[0]; const result = {...p,id:genId(),status:p.status||'inforce',sumAssured:parseFloat(p.sumAssured||p.faceAmount)||0,annualPremium:parseFloat(p.annualPremium)||0};
+        mergeToProfile(p, clientProfile, saveProfile);
         setEditing(result); setShowForm(true); // Open edit form directly
       } else {
         if(confirm('Found '+arr.length+' policies. Import all?')){
           let c=0; for(const p of arr){await savePolicy({...p,id:genId(),status:p.status||'inforce',sumAssured:parseFloat(p.sumAssured||p.faceAmount)||0,annualPremium:parseFloat(p.annualPremium)||0,monthlyBenefit:parseFloat(p.monthlyBenefit)||0});c++;}
           alert('Imported '+c+' policies');
-        } else { const p=arr[0]; const result={...p,id:genId(),status:p.status||'inforce',sumAssured:parseFloat(p.sumAssured||p.faceAmount)||0,annualPremium:parseFloat(p.annualPremium)||0}; setEditing(result);setShowForm(true); }
+          if(arr[0]) mergeToProfile(arr[0], clientProfile, saveProfile);
+        } else { const p=arr[0]; const result={...p,id:genId(),status:p.status||'inforce',sumAssured:parseFloat(p.sumAssured||p.faceAmount)||0,annualPremium:parseFloat(p.annualPremium)||0};
+          mergeToProfile(p, clientProfile, saveProfile);
+          setEditing(result);setShowForm(true); }
       }
       clearStaged(); setScanning(false);
     } catch(e){console.error(e);alert('Extraction error: '+e.message);setScanning(false);}
@@ -3492,7 +3656,7 @@ Return ONLY valid JSON, no markdown fences, no explanation.`;
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:8}}>
             <div>
               <div style={{fontSize:13,fontWeight:600,color:'var(--green2)'}}>✅ Extracted Policy</div>
-              <div style={{fontSize:15,fontWeight:600,marginTop:4}}>{scanResult.insurer} — {scanResult.productName}</div>
+              <div style={{fontSize:15,fontWeight:600,marginTop:4,display:'flex',alignItems:'center',gap:6}}>{scanResult.insurer && <InsurerBadge name={scanResult.insurer} />} <span>{scanResult.productName}</span></div>
               <div style={{fontSize:12,color:'var(--text3)'}}>
                 {scanResult.subType} • {scanResult.currency} {(scanResult.sumAssured||0).toLocaleString()} • Premium: {scanResult.currency} {(scanResult.annualPremium||0).toLocaleString()}
               </div>
@@ -3527,7 +3691,7 @@ Return ONLY valid JSON, no markdown fences, no explanation.`;
                   </td>
                   <td><span className="badge" style={{background:`${catColor(p.category)}22`,color:catColor(p.category)}}>{CATEGORIES[p.category]?.label||p.category}</span></td>
                   <td style={{fontSize:12,color:'var(--text2)'}}>{p.subType||'-'}</td>
-                  <td>{p.insurer||'-'}</td>
+                  <td>{p.insurer?<InsurerBadge name={p.insurer} />:'-'}</td>
                   <td className="mono">{p.currency||'SGD'}</td>
                   <td className="mono">{fmt(p.sumAssured,p.currency||'SGD')}</td>
                   <td className="mono">{fmt(p.annualPremium,p.currency||'SGD')}</td>
@@ -3563,7 +3727,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
   const formUploadRef = useRef(null);
 
   // Build life insured dropdown from profile
-  const {clientProfile:_cp} = useContext(AppCtx);
+  const {clientProfile:_cp, saveProfile:_sp} = useContext(AppCtx);
   const profileNames = useMemo(() => {
     const names = [];
     if(_cp?.name) names.push(_cp.name);
@@ -3663,7 +3827,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
     if(!files||!files.length) return;
     const _akRaw = await dbGet('settings','apiKey').catch(()=>null);
     const ak = (_akRaw?.value || '').trim();
-    if(!ak){alert('Set Anthropic API key in Settings first');return;}
+    if(!ak){alert('Set OpenAI API key in Settings first');return;}
     setFormScanning(true);
     try {
       const content = [];
@@ -3674,13 +3838,8 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         else content.push({type:'document',source:{type:'base64',media_type:mime,data:b64}});
       }
       content.push({type:'text',text:`Extract insurance policy details from this document. Return a JSON object with ALL fields you can find. Core: insurer, productName, policyNumber, category, subType, currency, sumAssured (number), annualPremium (number), premiumStructure, paymentMethod, lifeInsured, gender, dob, ageAtEntry, smoker, nationality, occupation, inceptionDate, maturityDate, status, premStartAge, premTerm, premEndAge. Riders: riders (array of {type:death/tpd/ci/eci/di/accidental/premium_waiver, sa:number, premium:number, expiryAge:number, bundled:boolean, multiClaim:boolean, totalClaimPct:number}). SA: saMultiplier (number), multiplierEndAge (number). ISP: ispClass, hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance. ILP: ilpSubtype, ilpGrowth, ilpDivYield, ilpMgmtFee. Cash: cashValue, cvGrowthRate, surrenderPeriod. Notes: notes (FC review meeting headline). Return ONLY valid JSON, no markdown.`});
-      const resp = await fetch('https://api.anthropic.com/v1/messages',{
-        method:'POST',headers:{'Content-Type':'application/json','x-api-key':ak,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-        body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:4000,messages:[{role:'user',content}]})
-      });
-      const data = await resp.json();
-      if(data.error) throw new Error(data.error.message);
-      const parsed = JSON.parse((data.content?.[0]?.text||'').replace(/```json|```/g,'').trim());
+      const rawText2 = await callOpenAI(ak, null, content, 4000);
+      const parsed = JSON.parse(rawText2.replace(/```json|```/g,'').trim());
       const overwrites = [];
       const updates = {};
       Object.entries(parsed).forEach(([k,v])=>{
@@ -3693,6 +3852,8 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
       if(overwrites.length>0 && !confirm('Scanned data will update: '+overwrites.join(', ')+'. Proceed?')){setFormScanning(false);return;}
       setForm(f=>({...f,...updates}));
       if(onDraftChange)onDraftChange({...form,...updates});
+      // Merge client details to profile
+      mergeToProfile(parsed, _cp, _sp);
     } catch(e){alert('Scan error: '+e.message);}
     setFormScanning(false);
   };
@@ -3744,7 +3905,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
           </select></div>
         </div>
         <div className="grid-2">
-          <div className="field"><label>Insurer</label><input value={form.insurer} onChange={e=>set('insurer',e.target.value)} placeholder="e.g. Manulife" /></div>
+          <div className="field"><label>Insurer</label><InsurerSelect value={form.insurer} onChange={v=>set('insurer',v)} /></div>
           <div className="field"><label>Product Name</label><input value={form.productName} onChange={e=>set('productName',e.target.value)} placeholder="e.g. Heirloom VII" /></div>
         </div>
 
@@ -4002,14 +4163,11 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
             <button className="btn-secondary btn-sm" disabled={!form.notes||form.notes.length<10||tidying} onClick={async()=>{
               const _akr = await dbGet('settings','apiKey').catch(()=>null);
               const ak = (_akr?.value || '').trim();
-              if(!ak){alert('Set Anthropic API key in Settings first');return;}
+              if(!ak){alert('Set OpenAI API key in Settings first');return;}
               setTidying(true);
               try{
-                const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json','x-api-key':ak,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-                  body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1000,
-                    messages:[{role:'user',content:`You are an insurance product analyst for Singapore Financial Consultants. Clean up and structure these rough policy notes into a concise FC reference card. Keep key numbers, conditions, exclusions, and premium details. Be factual and brief. Return ONLY the cleaned text, no headers or labels.\n\nRaw notes:\n${form.notes}`}]})});
-                const d=await r.json();
-                set('notes',d.content?.[0]?.text||form.notes);
+                const tidyResult = await callOpenAI(ak, 'You are an insurance product analyst for Singapore Financial Consultants. Clean up and structure rough policy notes into a concise FC reference card. Keep key numbers, conditions, exclusions, and premium details. Be factual and brief. Return ONLY the cleaned text.', [{type:'text',text:form.notes}], 1000);
+                set('notes',tidyResult||form.notes);
               }catch(e){alert('AI error: '+e.message)}
               setTidying(false);
             }}>{tidying?'Tidying…':'🤖 AI Tidy'}</button>
@@ -4148,7 +4306,7 @@ function Repository() {
           <div key={r.id} className="card card-sm" style={{borderLeft:`3px solid ${catColor(r.category)}`}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',cursor:'pointer'}} onClick={()=>{setExpanded(expanded===r.id?null:r.id);setEditingRepo(null);setComment('');}}>
               <div>
-                <div style={{fontWeight:600,fontSize:14}}>{r.insurer} — {r.productName}</div>
+                <div style={{fontWeight:600,fontSize:14,display:'flex',alignItems:'center',gap:6}}><InsurerBadge name={r.insurer} size="lg" /> <span>— {r.productName}</span></div>
                 <div style={{fontSize:12,color:'var(--text3)',marginTop:2}}>
                   {r.productCode} • {r.currency} • <span className="badge" style={{background:`${catColor(r.category)}22`,color:catColor(r.category)}}>{r.subType}</span>
                 </div>
@@ -4781,9 +4939,9 @@ function Settings() {
       </div>
       <div className="card" style={{marginBottom:16}}>
         <div className="field">
-          <label>Anthropic API Key (for AI Capture)</label>
+          <label>OpenAI API Key (for AI Capture)</label>
           <div style={{display:'flex',gap:6,alignItems:'center'}}>
-            <input type="text" value={key} onChange={e=>setKey(e.target.value)} placeholder="sk-ant-api03-…" style={{flex:1,fontFamily:'monospace',fontSize:12}} autoComplete="off" spellCheck="false" />
+            <input type="text" value={key} onChange={e=>setKey(e.target.value)} placeholder="sk-proj-… or sk-…" style={{flex:1,fontFamily:'monospace',fontSize:12}} autoComplete="off" spellCheck="false" />
             {key && <span style={{fontSize:10,color:'var(--text3)',flexShrink:0}}>{key.length} chars</span>}
           </div>
         </div>
@@ -4791,7 +4949,7 @@ function Settings() {
           <button className="btn-primary btn-sm" onClick={()=>{
             const k = key.trim().replace(/^["']+|["']+$/g,'');
             if(!k){alert('Please enter an API key');return;}
-            if(!k.startsWith('sk-')){alert('Invalid key format — must start with sk-ant-...');return;}
+            if(!k.startsWith('sk-')){alert('Invalid key format — must start with sk-...');return;}
             saveApiKey(k);
             setKey(k);
             alert('API key saved! ('+k.length+' chars, starts: '+k.slice(0,15)+'…)');
@@ -4802,20 +4960,14 @@ function Settings() {
             alert('Stored in IndexedDB:\n\nLength: '+v.length+'\nStarts: '+v.slice(0,20)+'\nEnds: ...'+v.slice(-6)+'\nValid format: '+(v.startsWith('sk-')?'Yes':'NO'));
           }}>🔍 Debug Key</button>
         </div>
-        <p style={{fontSize:11,color:'var(--text3)',marginTop:6}}>Used for AI-powered document extraction. Stored locally in IndexedDB. Key is permanent — survives page reloads and HTML updates.</p>
+        <p style={{fontSize:11,color:'var(--text3)',marginTop:6}}>OpenAI GPT-4o powers AI document extraction. Key stored locally in IndexedDB — permanent across reloads and HTML updates.</p>
         {apiKey && <p style={{fontSize:11,color:'var(--green2)',marginTop:4}}>✓ Key active ({apiKey.slice(0,15)}… {apiKey.length} chars)</p>}
         {apiKey && <button className="btn-secondary btn-sm" style={{marginTop:6}} onClick={async()=>{
           try {
             const testKey = ((await dbGet('settings','apiKey').catch(()=>null))?.value||'').trim();
             console.log('[Test] Key:', testKey.slice(0,15)+'...'+testKey.slice(-4), 'length:', testKey.length);
-            const r = await fetch('https://api.anthropic.com/v1/messages',{
-              method:'POST',
-              headers:{'Content-Type':'application/json','x-api-key':testKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-              body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:50,messages:[{role:'user',content:'Say hello'}]})
-            });
-            const d = await r.json();
-            if(d.error) alert('API Error: '+d.error.message+'\n\nKey sent: '+testKey.slice(0,15)+'...'+testKey.slice(-4));
-            else alert('✅ API key works! Response: '+(d.content?.[0]?.text||'OK'));
+            const testResult = await callOpenAI(testKey, null, [{type:'text',text:'Say hello'}], 50);
+            alert('✅ API key works! Response: '+testResult);
           } catch(e){ alert('Network error: '+e.message); }
         }}>🔑 Test Key</button>}
       </div>
