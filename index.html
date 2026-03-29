@@ -3954,13 +3954,72 @@ function ReportTab() {
 // ═══════════════════════════════════════════════════════════════
 
 function Settings() {
-  const {apiKey,saveApiKey,clientName,saveClientName} = useContext(AppCtx);
+  const {apiKey,saveApiKey,clientName,saveClientName,policies,savePolicy,deletePolicy} = useContext(AppCtx);
   const [key, setKey] = useState(apiKey);
   const [name, setName] = useState(clientName);
+  const loadRef = useRef(null);
+
+  // ── Save portfolio as JSON file ──
+  const handleSave = () => {
+    const data = {
+      version:'PolicyLens_v4',
+      exportedAt: new Date().toISOString(),
+      clientName: clientName,
+      policies: policies,
+    };
+    const blob = new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `PolicyLens_${(clientName||'Portfolio').replace(/\s+/g,'_')}_${new Date().toISOString().slice(0,10)}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  // ── Load portfolio from JSON file ──
+  const handleLoad = async (file) => {
+    if(!file) return;
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      const arr = data.policies || (Array.isArray(data)?data:[]);
+      if(!arr.length){alert('No policies found in file');return;}
+      const mode = confirm(`Found ${arr.length} policies${data.clientName?' for '+data.clientName:''}.\n\nOK = Replace current portfolio\nCancel = Add to existing portfolio`);
+      if(mode){
+        // Replace — delete all existing first
+        for(const p of policies) await deletePolicy(p.id);
+      }
+      let count = 0;
+      for(const p of arr){
+        await savePolicy({...p, id: mode ? p.id : genId()});
+        count++;
+      }
+      if(data.clientName && mode) await saveClientName(data.clientName);
+      alert(`Loaded ${count} policies` + (mode?' (replaced)':' (added)'));
+    } catch(e){alert('Error loading file: '+e.message);}
+  };
 
   return (
     <div className="fade-in" style={{maxWidth:500}}>
       <h2 style={{fontSize:18,fontWeight:600,marginBottom:16}}>Settings</h2>
+
+      {/* Save / Load Portfolio */}
+      <div className="card" style={{marginBottom:16}}>
+        <h3 style={{fontSize:14,fontWeight:600,marginBottom:8}}>Portfolio File</h3>
+        <p style={{fontSize:12,color:'var(--text3)',marginBottom:12}}>
+          Save your portfolio to a file for backup, or load a file from another advisor. Data auto-saves to your browser between sessions.
+        </p>
+        <div style={{display:'flex',gap:8}}>
+          <button className="btn-primary btn-sm" onClick={handleSave} disabled={policies.length===0}>
+            💾 Save Portfolio ({policies.length})
+          </button>
+          <input ref={loadRef} type="file" accept=".json" style={{display:'none'}} onChange={e=>{if(e.target.files[0])handleLoad(e.target.files[0]);e.target.value=''}} />
+          <button className="btn-secondary btn-sm" onClick={()=>loadRef.current?.click()}>
+            📂 Load Portfolio
+          </button>
+        </div>
+      </div>
+
       <div className="card" style={{marginBottom:16}}>
         <div className="field">
           <label>Client Name</label>
@@ -3981,7 +4040,7 @@ function Settings() {
         <div style={{fontSize:12,color:'var(--text2)',lineHeight:1.6}}>
           <p>Full sub-type system with UL/IUL/VUL and Maternity schemas. Repository seeded with Manulife SIULS III, Signature Wealth SGD, Heirloom VII, and Great Eastern ReadyMummy.</p>
           <p style={{marginTop:6}}>Fuzzy matching informs on variations without auto-merging. Gap analysis against recommended coverage levels. Fund risk lookup covers {FUND_DB.length.toLocaleString()} instruments from the iFAST/FundLens universe — unit trusts, ETFs, REITs, stocks, bonds, and money market funds with risk ratings 1–10.</p>
-          <p style={{marginTop:6}}>Single-file HTML • React 18 • Chart.js • IndexedDB • jsPDF</p>
+          <p style={{marginTop:6}}>Single-file HTML • React 18 • Chart.js • IndexedDB • jsPDF • Supabase Auth</p>
         </div>
       </div>
     </div>
