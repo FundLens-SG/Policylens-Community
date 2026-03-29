@@ -10,6 +10,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
+<!-- Gemini handles PDFs natively — no pdf.js needed -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
@@ -2980,44 +2981,40 @@ function Header() {
 // ═══════════════════════════════════════════════════════════════
 // OPENAI API HELPER — converts content blocks to OpenAI format
 // ═══════════════════════════════════════════════════════════════
-async function callOpenAI(apiKey, systemPrompt, contentBlocks, maxTokens) {
-  const userParts = [];
-  let textPrompt = '';
-  let hasImages = false;
+// ═══════════════════════════════════════════════════════════════
+// GEMINI 2.0 FLASH — native PDF support, 1M token context
+// ═══════════════════════════════════════════════════════════════
+async function callGemini(apiKey, systemPrompt, contentBlocks, maxTokens) {
+  const parts = [];
   for(const block of contentBlocks) {
     if(block.type==='text') {
-      textPrompt += block.text + '\n';
+      parts.push({text:block.text});
     } else if(block.type==='image') {
-      hasImages = true;
-      userParts.push({type:'image_url',image_url:{url:'data:'+block.source.media_type+';base64,'+block.source.data,detail:'high'}});
+      parts.push({inlineData:{mimeType:block.source.media_type,data:block.source.data}});
     } else if(block.type==='document') {
-      hasImages = true;
-      userParts.push({type:'image_url',image_url:{url:'data:'+(block.source.media_type||'application/pdf')+';base64,'+block.source.data,detail:'high'}});
+      // Gemini accepts PDFs NATIVELY — no conversion needed!
+      parts.push({inlineData:{mimeType:block.source.media_type||'application/pdf',data:block.source.data}});
     }
   }
-  if(textPrompt) userParts.push({type:'text',text:textPrompt});
   
-  const messages = [];
-  const sysMsg = (systemPrompt||'') + '\n\nCRITICAL: Respond with ONLY valid JSON. No apologies, no explanations, no markdown fences, no preamble. Start your response with { and end with }. If you cannot extract data, return {"error":"reason"}.';
-  messages.push({role:'system',content:sysMsg});
-  messages.push({role:'user',content:userParts.length>0?userParts:[{type:'text',text:textPrompt}]});
+  const body = {
+    contents:[{parts}],
+    generationConfig:{maxOutputTokens:maxTokens||4000,responseMimeType:'application/json'}
+  };
+  if(systemPrompt) body.systemInstruction = {parts:[{text:systemPrompt}]};
   
-  const body = {model:'gpt-4o',max_tokens:maxTokens||4000,messages};
-  // Only use json_object mode for text-only calls (not vision)
-  if(!hasImages) body.response_format = {type:'json_object'};
+  const hasMedia = parts.some(p=>p.inlineData);
+  console.log('[Gemini] Sending:', parts.filter(p=>p.inlineData).length, 'files,', parts.filter(p=>p.text).length, 'text parts');
   
-  console.log('[OpenAI] Sending request:', hasImages?'vision':'text', userParts.length, 'parts, max_tokens:', maxTokens);
-  
-  const resp = await fetch('https://api.openai.com/v1/chat/completions',{
+  const resp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key='+apiKey,{
     method:'POST',
-    headers:{'Content-Type':'application/json','Authorization':'Bearer '+apiKey},
+    headers:{'Content-Type':'application/json'},
     body:JSON.stringify(body)
   });
   const data = await resp.json();
   if(data.error) throw new Error(data.error.message||JSON.stringify(data.error));
-  const raw = data.choices?.[0]?.message?.content||'';
-  console.log('[OpenAI] Response length:', raw.length, 'preview:', raw.slice(0,200));
-  // Strip any markdown fences
+  const raw = data.candidates?.[0]?.content?.parts?.[0]?.text||'';
+  console.log('[Gemini] Response:', raw.length, 'chars, preview:', raw.slice(0,300));
   return raw.replace(/```json\s*|```\s*/g,'').trim();
 }
 
@@ -3123,7 +3120,7 @@ function ProfileTab() {
     if(!files||!files.length) return;
     const ak = ((await dbGet('settings','apiKey').catch(()=>null))?.value || '').trim();
     console.log('[Scan] API key length:', ak.length, 'starts:', ak.slice(0,15), 'ends:', ak.slice(-4));
-    if(!ak||!ak.startsWith('sk-')){alert('Invalid API key. Go to Settings and re-save your OpenAI API key (starts with sk-ant-...)');return;}
+    if(!ak||!ak.startsWith('sk-')){alert('Invalid API key. Go to Settings and re-save your Gemini API key (starts with sk-ant-...)');return;}
     setScanning(true);
     try {
       const content = [];
@@ -3135,7 +3132,7 @@ function ProfileTab() {
       }
       content.push({type:'text',text:'Extract client profile information from these documents/images.'});
       const profilePrompt = 'Extract client profile from insurance documents. Return a JSON object with: name, nric, dob (YYYY-MM-DD), gender (Male/Female), smoker (Non-smoker/Smoker), nationality (SC/PR/Foreigner), occupation, phone, email. If dependants found, include dependants (array of {name, relationship, dob, gender, smoker, nationality, occupation}). Return ONLY valid JSON starting with { and ending with }.';
-      const rawText = await callOpenAI(ak, profilePrompt, content, 2000);
+      const rawText = await callGemini(ak, profilePrompt, content, 2000);
       const parsed = JSON.parse(rawText.replace(/```json|```/g,'').trim());
       // Merge scanned data
       const updated = {...p};
@@ -3243,7 +3240,7 @@ function Dashboard() {
   // Dashboard drop handler — route to profile or policies
   const handleDashDrop = async (files) => {
     const ak = ((await dbGet('settings','apiKey').catch(()=>null))?.value || '').trim();
-    if(!ak){alert('Set OpenAI API key in Settings first');return;}
+    if(!ak){alert('Set Gemini API key in Settings first');return;}
     const choice = confirm('What are these documents?\n\nOK = Client profile (NRIC, FNA, KYC)\nCancel = Policy documents');
     if(choice) setTab('profile');
     else setTab('policies');
@@ -3524,23 +3521,32 @@ CORE: insurer, productName, policyName, policyNumber, category (protection/savin
 
 CLIENT: lifeInsured, gender (Male/Female), dob (YYYY-MM-DD), ageAtEntry (number), smoker (Non-smoker/Smoker), nationality (SC/PR/Foreigner), occupation
 
+PREMIUM TERM: premStartAge (number), premTerm (number — premium payment years), premEndAge (number — premStartAge + premTerm)
+
 DATES: inceptionDate (YYYY-MM-DD), maturityDate (YYYY-MM-DD), status (inforce/lapsed/paid-up/surrendered/matured)
 
-RIDERS: riders (JSON array). Each rider: {type (death/tpd/ci/eci/di/accidental/premium_waiver), sa (number — sum assured or monthly benefit for DI), premium (number — 0 if bundled), expiryAge (number), bundled (boolean — true if included in base premium), multiClaim (boolean — for CI/ECI)}
-Extract EVERY benefit/rider listed in the document. Death & TI coverage = type "death". TPD = type "tpd". CI with sum = type "ci". Early CI = type "eci". Disability income = type "di" with sa as monthly amount. Accidental death = type "accidental".
+RIDERS: riders (JSON array). Each rider: {type (death/tpd/ci/eci/di/accidental/premium_waiver), sa (number), premium (number — 0 if bundled), expiryAge (number), bundled (boolean), multiClaim (boolean), totalClaimPct (number)}
 
-SA MULTIPLIER: saMultiplier (number e.g. 2 for 2x), multiplierEndAge (number — age when multiplier reverts to 1x)
+SA MULTIPLIER: saMultiplier (number), multiplierEndAge (number)
+ISP: ispClass (A/B1/B2+), hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance
+CASH VALUE: cashValue (number), cvGrowthRate (% p.a.), surrenderPeriod (years)
+UL/IUL/VUL: creditingMechanism, creditingRates {current, guaranteed}, loyaltyBonus {rate, startYear}
+ILP: ilpSubtype (protection/investment), ilpGrowth, ilpDivYield, ilpMgmtFee
 
-ISP (if Integrated Shield Plan): ispClass (A/B1/B2+), hasRider (boolean), riderList (rider name), riderPremium (number), ispDeductible (number), ispCoinsurance (number — percentage)
+KEY HIGHLIGHTS — highlights (JSON array of strings, 5-8 items). MUST include:
+- Total death/TI payout and conditions
+- CI payout (single or multi-claim total)
+- Surrender value at Year 5, 10, 20, maturity if available
+- Projected maturity/endowment value
+- Monthly income payout if retirement/annuity
+- Bonus rates or illustrated yields
+- Distribution cost % if stated
+- Breakeven year (SV > total premiums)
+- Any unique features (conversion, waiver triggers, multiplier)
 
-CASH VALUE: cashValue (number — current surrender/cash value if stated), cvGrowthRate (number — projected growth % p.a.), surrenderPeriod (number — years)
+NOTES: notes (string — concise 3-5 sentence FC review summary)
 
-UL/IUL/VUL: creditingMechanism (fixed/indexed/client-directed), creditingRates {current (number), guaranteed (number)}, loyaltyBonus {rate (number), startYear (number)}
-
-NOTES: notes (string — concise FC review meeting headline: 3-5 key numbers an adviser would present to a client. Include: key coverage amounts, premium breakdown, surrender value milestones, benefit triggers, exclusions, waiting periods, and any unique features)
-
-If multiple policies found, return a JSON array. If single, return a JSON object.
-Return ONLY valid JSON, no markdown fences, no explanation.`;
+Return ONLY valid JSON. Start with { end with }. No markdown.`;
 
   // ── Stage camera photos ──
   const stagePhotos = (files) => {
@@ -3560,7 +3566,7 @@ Return ONLY valid JSON, no markdown fences, no explanation.`;
   const handleExtract = async (files) => {
     if(!files||!files.length) return;
     const ak = ((await dbGet('settings','apiKey').catch(()=>null))?.value || '').trim();
-    if(!ak){alert('Set your OpenAI API key in Settings first');return;}
+    if(!ak){alert('Set your Gemini API key in Settings first');return;}
     setScanning(true);
     try {
       const content = [];
@@ -3572,7 +3578,7 @@ Return ONLY valid JSON, no markdown fences, no explanation.`;
         else content.push({type:'document',source:{type:'base64',media_type:mime,data:b64}});
       }
       content.push({type:'text',text:'Extract all insurance policy information from these documents/images. Follow the system instructions for output format.'});
-      const text = await callOpenAI(ak, EXTRACT_PROMPT, content, 8000);
+      const text = await callGemini(ak, EXTRACT_PROMPT, content, 8000);
       console.log('[Extract] Raw response:', text.slice(0,500));
       const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
       console.log('[Extract] Parsed:', JSON.stringify(parsed).slice(0,500));
@@ -3580,6 +3586,15 @@ Return ONLY valid JSON, no markdown fences, no explanation.`;
       console.log('[Extract] Policy count:', arr.length, 'Fields in first:', Object.keys(arr[0]||{}).join(','));
       if(arr.length===1){
         const p=arr[0]; const result = {...p,id:genId(),status:p.status||'inforce',sumAssured:parseFloat(p.sumAssured||p.faceAmount)||0,annualPremium:parseFloat(p.annualPremium)||0};
+        // Auto-calc premEndAge if missing
+        if(result.premStartAge && result.premTerm && !result.premEndAge) result.premEndAge = String(parseInt(result.premStartAge)+parseInt(result.premTerm));
+        if(result.ageAtEntry && result.premTerm && !result.premEndAge) result.premEndAge = String(parseInt(result.ageAtEntry)+parseInt(result.premTerm));
+        // Sync ageAtEntry ↔ premStartAge
+        if(result.ageAtEntry && !result.premStartAge) result.premStartAge = result.ageAtEntry;
+        if(result.premStartAge && !result.ageAtEntry) result.ageAtEntry = result.premStartAge;
+        // Ensure highlights is array
+        if(result.highlights && typeof result.highlights === 'string') try { result.highlights = JSON.parse(result.highlights); } catch(e){}
+        if(!Array.isArray(result.highlights)) result.highlights = [];
         console.log('[Extract] Setting form with:', Object.entries(result).filter(([k,v])=>v&&v!==''&&v!==0).map(([k])=>k).join(','));
         mergeToProfile(p, clientProfile, saveProfile);
         setEditing(result); setShowForm(true); // Open edit form directly
@@ -3703,6 +3718,7 @@ Return ONLY valid JSON, no markdown fences, no explanation.`;
                   <td>
                     <div style={{fontWeight:500}}>{p.policyName || p.productName || 'Unnamed'}</div>
                     <div style={{fontSize:11,color:'var(--text3)'}}>{p.policyNumber || ''}</div>
+                    {p.highlights && p.highlights.length>0 && <div style={{fontSize:10,color:'var(--orange)',marginTop:2}}>{p.highlights[0]}</div>}
                   </td>
                   <td><span className="badge" style={{background:`${catColor(p.category)}22`,color:catColor(p.category)}}>{CATEGORIES[p.category]?.label||p.category}</span></td>
                   <td style={{fontSize:12,color:'var(--text2)'}}>{p.subType||'-'}</td>
@@ -3788,7 +3804,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
     // Retirement
     monthlyBenefit:'', fundingSource:'',
     // General
-    notes:'', fundAllocations:[],
+    notes:'', highlights:[], fundAllocations:[],
   });
 
   const set = (k,v) => setForm(f=>{
@@ -3842,7 +3858,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
     if(!files||!files.length) return;
     const _akRaw = await dbGet('settings','apiKey').catch(()=>null);
     const ak = (_akRaw?.value || '').trim();
-    if(!ak){alert('Set OpenAI API key in Settings first');return;}
+    if(!ak){alert('Set Gemini API key in Settings first');return;}
     setFormScanning(true);
     try {
       const content = [];
@@ -3854,7 +3870,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
       }
       const formExtractPrompt = 'Extract insurance policy details. Return a JSON object with ALL fields: insurer, productName, policyNumber, category (protection/savings/health/investment/retirement/maternity), subType, currency, sumAssured (number), annualPremium (number), premiumStructure, paymentMethod, lifeInsured, gender, dob, ageAtEntry, smoker, nationality, occupation, inceptionDate, maturityDate, status, premStartAge, premTerm, premEndAge. Riders: riders (array of {type:death/tpd/ci/eci/di/accidental/premium_waiver, sa:number, premium:number, expiryAge:number, bundled:boolean, multiClaim:boolean, totalClaimPct:number}). SA: saMultiplier, multiplierEndAge. ISP: ispClass, hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance. ILP: ilpSubtype, ilpGrowth, ilpDivYield, ilpMgmtFee. Cash: cashValue, cvGrowthRate, surrenderPeriod. Notes: notes (FC review headline). Return ONLY valid JSON starting with { ending with }.';
       content.push({type:'text',text:'Extract all policy information from these documents/images.'});
-      const rawText2 = await callOpenAI(ak, formExtractPrompt, content, 4000);
+      const rawText2 = await callGemini(ak, formExtractPrompt, content, 4000);
       const parsed = JSON.parse(rawText2.replace(/```json|```/g,'').trim());
       const overwrites = [];
       const updates = {};
@@ -4171,6 +4187,21 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
           </div>
         )}
 
+        {/* ═══ KEY HIGHLIGHTS (from AI scan) ═══ */}
+        {form.highlights && form.highlights.length > 0 && (
+          <div style={{marginTop:8,padding:14,background:'rgba(245,158,11,.06)',borderRadius:10,border:'1px solid rgba(245,158,11,.2)'}}>
+            <h4 style={{fontSize:13,fontWeight:600,marginBottom:8,color:'var(--orange)'}}>📋 Key Policy Highlights</h4>
+            <div style={{display:'grid',gap:4}}>
+              {form.highlights.map((h,i) => (
+                <div key={i} style={{fontSize:12,color:'var(--text2)',padding:'4px 8px',background:'var(--bg2)',borderRadius:6,display:'flex',alignItems:'flex-start',gap:6}}>
+                  <span style={{color:'var(--orange)',fontWeight:700,flexShrink:0}}>•</span>
+                  <span>{h}</span>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* ═══ NOTES ═══ */}
         <div style={{marginTop:12}}>
           <label style={{fontSize:11,textTransform:'uppercase',fontWeight:600,color:'var(--text3)',letterSpacing:'.5px'}}>Notes — freeform OK, use AI Tidy to clean up</label>
@@ -4179,18 +4210,17 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
             <button className="btn-secondary btn-sm" disabled={!form.notes||form.notes.length<10||tidying} onClick={async()=>{
               const _akr = await dbGet('settings','apiKey').catch(()=>null);
               const ak = (_akr?.value || '').trim();
-              if(!ak){alert('Set OpenAI API key in Settings first');return;}
+              if(!ak){alert('Set Gemini API key in Settings first');return;}
               setTidying(true);
               try{
-                const tidyResp = await fetch('https://api.openai.com/v1/chat/completions',{
-                  method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+ak},
-                  body:JSON.stringify({model:'gpt-4o',max_tokens:1000,messages:[
-                    {role:'system',content:'You are an insurance product analyst for Singapore Financial Consultants. Clean up and structure rough policy notes into a concise FC reference card. Keep key numbers, conditions, exclusions, and premium details. Be factual and brief. Return ONLY the cleaned text, no JSON, no headers.'},
-                    {role:'user',content:form.notes}
-                  ]})});
+                const tidyResp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key='+ak,{
+                  method:'POST',headers:{'Content-Type':'application/json'},
+                  body:JSON.stringify({contents:[{parts:[{text:'Clean up these rough insurance policy notes into a concise FC reference card. Keep key numbers, conditions, exclusions, premium details. Be factual and brief. Return ONLY the cleaned text:\n\n'+form.notes}]}],
+                    systemInstruction:{parts:[{text:'You are an insurance product analyst for Singapore Financial Consultants.'}]},
+                    generationConfig:{maxOutputTokens:1000}})});
                 const tidyData = await tidyResp.json();
                 if(tidyData.error) throw new Error(tidyData.error.message);
-                set('notes',tidyData.choices?.[0]?.message?.content||form.notes);
+                set('notes',tidyData.candidates?.[0]?.content?.parts?.[0]?.text||form.notes);
               }catch(e){alert('AI error: '+e.message)}
               setTidying(false);
             }}>{tidying?'Tidying…':'🤖 AI Tidy'}</button>
@@ -4962,9 +4992,9 @@ function Settings() {
       </div>
       <div className="card" style={{marginBottom:16}}>
         <div className="field">
-          <label>OpenAI API Key (for AI Capture)</label>
+          <label>Google Gemini API Key (for AI Capture)</label>
           <div style={{display:'flex',gap:6,alignItems:'center'}}>
-            <input type="text" value={key} onChange={e=>setKey(e.target.value)} placeholder="sk-proj-… or sk-…" style={{flex:1,fontFamily:'monospace',fontSize:12}} autoComplete="off" spellCheck="false" />
+            <input type="text" value={key} onChange={e=>setKey(e.target.value)} placeholder="AIza…" style={{flex:1,fontFamily:'monospace',fontSize:12}} autoComplete="off" spellCheck="false" />
             {key && <span style={{fontSize:10,color:'var(--text3)',flexShrink:0}}>{key.length} chars</span>}
           </div>
         </div>
@@ -4972,7 +5002,7 @@ function Settings() {
           <button className="btn-primary btn-sm" onClick={()=>{
             const k = key.trim().replace(/^["']+|["']+$/g,'');
             if(!k){alert('Please enter an API key');return;}
-            if(!k.startsWith('sk-')){alert('Invalid key format — must start with sk-...');return;}
+            if(!k.startsWith('AIza')){alert('Invalid key format — Gemini keys start with AIza...');return;}
             saveApiKey(k);
             setKey(k);
             alert('API key saved! ('+k.length+' chars, starts: '+k.slice(0,15)+'…)');
@@ -4983,19 +5013,19 @@ function Settings() {
             alert('Stored in IndexedDB:\n\nLength: '+v.length+'\nStarts: '+v.slice(0,20)+'\nEnds: ...'+v.slice(-6)+'\nValid format: '+(v.startsWith('sk-')?'Yes':'NO'));
           }}>🔍 Debug Key</button>
         </div>
-        <p style={{fontSize:11,color:'var(--text3)',marginTop:6}}>OpenAI GPT-4o powers AI document extraction. Key stored locally in IndexedDB — permanent across reloads and HTML updates.</p>
+        <p style={{fontSize:11,color:'var(--text3)',marginTop:6}}>Google Gemini 2.0 Flash powers AI document extraction. Free tier: 1,500 requests/day. Accepts PDFs natively. Key stored locally in IndexedDB.</p>
         {apiKey && <p style={{fontSize:11,color:'var(--green2)',marginTop:4}}>✓ Key active ({apiKey.slice(0,15)}… {apiKey.length} chars)</p>}
         {apiKey && <button className="btn-secondary btn-sm" style={{marginTop:6}} onClick={async()=>{
           try {
             const testKey = ((await dbGet('settings','apiKey').catch(()=>null))?.value||'').trim();
             console.log('[Test] Key:', testKey.slice(0,15)+'...'+testKey.slice(-4), 'length:', testKey.length);
-            const testResp = await fetch('https://api.openai.com/v1/chat/completions',{
-              method:'POST',headers:{'Content-Type':'application/json','Authorization':'Bearer '+testKey},
-              body:JSON.stringify({model:'gpt-4o',max_tokens:50,messages:[{role:'user',content:'Say hello in one sentence'}]})
+            const testResp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key='+testKey,{
+              method:'POST',headers:{'Content-Type':'application/json'},
+              body:JSON.stringify({contents:[{parts:[{text:'Say hello in one sentence'}]}],generationConfig:{maxOutputTokens:50}})
             });
             const testData = await testResp.json();
-            if(testData.error) alert('API Error: '+testData.error.message+'\n\nKey: '+testKey.slice(0,15)+'...'+testKey.slice(-4));
-            else alert('✅ API key works! Response: '+(testData.choices?.[0]?.message?.content||'OK'));
+            if(testData.error) alert('API Error: '+testData.error.message+'\n\nKey: '+testKey.slice(0,10)+'...');
+            else alert('✅ Gemini API key works! Response: '+(testData.candidates?.[0]?.content?.parts?.[0]?.text||'OK'));
           } catch(e){ alert('Network error: '+e.message); }
         }}>🔑 Test Key</button>}
       </div>
