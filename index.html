@@ -2799,8 +2799,9 @@ function App() {
   };
 
   const saveApiKey = async (k) => {
-    setApiKey(k);
-    await dbPut('settings',{key:'apiKey',value:k});
+    const trimmed=k.trim().replace(/^["']+|["']+$/g,'');
+    setApiKey(trimmed);
+    await dbPut('settings',{key:'apiKey',value:trimmed});
   };
   const saveClientName = async (n) => {
     setClientName(n);
@@ -2975,7 +2976,7 @@ function ProfileTab() {
   // AI scan for profile
   const scanProfile = async (files) => {
     if(!files||!files.length) return;
-    const ak = apiKey || (await dbGet('settings','apiKey').catch(()=>null))?.value;
+    const ak = ((await dbGet('settings','apiKey').catch(()=>null))?.value || '').trim();
     if(!ak){alert('Set Anthropic API key in Settings first');return;}
     setScanning(true);
     try {
@@ -3099,7 +3100,7 @@ function Dashboard() {
 
   // Dashboard drop handler — route to profile or policies
   const handleDashDrop = async (files) => {
-    const ak = apiKey || (await dbGet('settings','apiKey').catch(()=>null))?.value;
+    const ak = ((await dbGet('settings','apiKey').catch(()=>null))?.value || '').trim();
     if(!ak){alert('Set Anthropic API key in Settings first');return;}
     const choice = confirm('What are these documents?\n\nOK = Client profile (NRIC, FNA, KYC)\nCancel = Policy documents');
     if(choice) setTab('profile');
@@ -3155,7 +3156,7 @@ function Dashboard() {
       <div style={{fontSize:48,marginBottom:12}}>🔍</div>
       <h2 style={{fontSize:22,fontWeight:600,marginBottom:8}}>Welcome to PolicyLens v4</h2>
       <p style={{color:'var(--text2)',maxWidth:480,margin:'0 auto 24px'}}>
-        Full sub-type system • Repository with seed data • Fuzzy matching • Gap analysis • PDF reports • Fund risk lookup
+        Full sub-type system • Shared cloud repository • AI document capture • Rider-level extraction • Gap analysis • PDF reports • Fund risk lookup
       </p>
       <button className="btn-primary" style={{fontSize:15,padding:'12px 28px'}} onClick={()=>setTab('policies')}>
         Add Your First Policy →
@@ -3357,7 +3358,8 @@ Return ONLY valid JSON, no markdown fences, no explanation.`;
   // ── Extract from any files ──
   const handleExtract = async (files) => {
     if(!files||!files.length) return;
-    if(!apiKey){alert('Set your Anthropic API key in Settings first');return;}
+    const ak = ((await dbGet('settings','apiKey').catch(()=>null))?.value || '').trim();
+    if(!ak){alert('Set your Anthropic API key in Settings first');return;}
     setScanning(true);
     try {
       const content = [];
@@ -3371,7 +3373,7 @@ Return ONLY valid JSON, no markdown fences, no explanation.`;
       content.push({type:'text',text:EXTRACT_PROMPT});
       const resp = await fetch('https://api.anthropic.com/v1/messages',{
         method:'POST',
-        headers:{'Content-Type':'application/json','x-api-key':apiKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+        headers:{'Content-Type':'application/json','x-api-key':ak,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
         body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:8000,messages:[{role:'user',content}]})
       });
       const data = await resp.json();
@@ -3636,8 +3638,9 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
   // ── Scan into existing form ──
   const scanIntoForm = async (files) => {
     if(!files||!files.length) return;
-    const ak = await dbGet('settings','apiKey').catch(()=>null);
-    if(!ak?.value){alert('Set Anthropic API key in Settings first');return;}
+    const _akRaw = await dbGet('settings','apiKey').catch(()=>null);
+    const ak = (_akRaw?.value || '').trim();
+    if(!ak){alert('Set Anthropic API key in Settings first');return;}
     setFormScanning(true);
     try {
       const content = [];
@@ -3649,7 +3652,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
       }
       content.push({type:'text',text:`Extract insurance policy details from this document. Return a JSON object with ALL fields you can find. Core: insurer, productName, policyNumber, category, subType, currency, sumAssured (number), annualPremium (number), premiumStructure, paymentMethod, lifeInsured, gender, dob, ageAtEntry, smoker, nationality, occupation, inceptionDate, maturityDate, status, premStartAge, premTerm, premEndAge. Riders: riders (array of {type:death/tpd/ci/eci/di/accidental/premium_waiver, sa:number, premium:number, expiryAge:number, bundled:boolean, multiClaim:boolean, totalClaimPct:number}). SA: saMultiplier (number), multiplierEndAge (number). ISP: ispClass, hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance. ILP: ilpSubtype, ilpGrowth, ilpDivYield, ilpMgmtFee. Cash: cashValue, cvGrowthRate, surrenderPeriod. Notes: notes (FC review meeting headline). Return ONLY valid JSON, no markdown.`});
       const resp = await fetch('https://api.anthropic.com/v1/messages',{
-        method:'POST',headers:{'Content-Type':'application/json','x-api-key':ak.value,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+        method:'POST',headers:{'Content-Type':'application/json','x-api-key':ak,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
         body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:4000,messages:[{role:'user',content}]})
       });
       const data = await resp.json();
@@ -3974,11 +3977,12 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
           <textarea rows={3} value={form.notes} onChange={e=>set('notes',e.target.value)} style={{width:'100%',marginTop:4}} placeholder="Key policy details, rider info, anything — AI will clean it up" />
           <div style={{display:'flex',gap:6,marginTop:6}}>
             <button className="btn-secondary btn-sm" disabled={!form.notes||form.notes.length<10||tidying} onClick={async()=>{
-              const ak = await dbGet('settings','apiKey').catch(()=>null);
-              if(!ak?.value){alert('Set Anthropic API key in Settings first');return;}
+              const _akr = await dbGet('settings','apiKey').catch(()=>null);
+              const ak = (_akr?.value || '').trim();
+              if(!ak){alert('Set Anthropic API key in Settings first');return;}
               setTidying(true);
               try{
-                const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json','x-api-key':ak.value,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+                const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json','x-api-key':ak,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
                   body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1000,
                     messages:[{role:'user',content:`You are an insurance product analyst for Singapore Financial Consultants. Clean up and structure these rough policy notes into a concise FC reference card. Keep key numbers, conditions, exclusions, and premium details. Be factual and brief. Return ONLY the cleaned text, no headers or labels.\n\nRaw notes:\n${form.notes}`}]})});
                 const d=await r.json();
@@ -4749,7 +4753,9 @@ function Settings() {
       <div className="card">
         <h3 style={{fontSize:14,fontWeight:600,marginBottom:8}}>About PolicyLens v4</h3>
         <div style={{fontSize:12,color:'var(--text2)',lineHeight:1.6}}>
-          <p>Full sub-type system with UL/IUL/VUL and Maternity schemas. Repository seeded with Manulife SIULS III, Signature Wealth SGD, Heirloom VII, and Great Eastern ReadyMummy.</p>
+          <p>Institutional-grade policy review toolkit for Singapore Financial Consultants. AI-powered document capture with rider-level extraction, shared cloud repository with role-based editing, and comprehensive portfolio analysis.</p>
+          <p style={{marginTop:8}}>Coverage & Riders system with SA multipliers, multi-claim CI, ISP premium breakdown, ILP fund projections, and UL crediting structures. Gap analysis against LIA recommended coverage levels.</p>
+          <p style={{marginTop:8}}>Fund risk lookup covers 2,200+ instruments from the iFAST/FundLens universe.</p>
           <p style={{marginTop:6}}>Fuzzy matching informs on variations without auto-merging. Gap analysis against recommended coverage levels. Fund risk lookup covers {FUND_DB.length.toLocaleString()} instruments from the iFAST/FundLens universe — unit trusts, ETFs, REITs, stocks, bonds, and money market funds with risk ratings 1–10.</p>
           <p style={{marginTop:6}}>Single-file HTML • React 18 • Chart.js • IndexedDB • jsPDF • Supabase Auth</p>
         </div>
