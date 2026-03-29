@@ -157,39 +157,59 @@ async function authLogin(){
   authClear();
   var e=document.getElementById('auth-email').value.trim(),p=document.getElementById('auth-pass').value;
   if(!e||!p)return authMsg('Please enter email and password');
-  try {
-    authMsg('Step 1: Connecting…','info');
-    var client = sb();
-    if(!client) return authMsg('Supabase client failed to initialize');
-    
-    authMsg('Step 2: Authenticating…','info');
-    var r = await client.auth.signInWithPassword({email:e,password:p});
+  authMsg('Signing in…','info');
+  
+  var client = sb();
+  if(!client) return authMsg('Supabase client failed');
+  
+  // Race: signInWithPassword vs 4-second timeout
+  var resolved = false;
+  var loginPromise = client.auth.signInWithPassword({email:e,password:p}).then(function(r){
+    if(resolved) return;
+    resolved = true;
     if(r.error) return authMsg('Login failed: '+r.error.message);
-    
-    authMsg('Step 3: Checking access…','info');
-    
-    // Admin fast-grant with timeout safety
-    if(ADMIN_EMAILS.indexOf(e)>=0){
-      _user=r.data.user||r.data.session?.user;
-      _isAdmin=true;
-      _prof={email:e,full_name:'Admin',approved:true,role:'admin'};
-      authMsg('Admin verified — loading app…','info');
-      // Fire-and-forget profile upsert
-      try{client.from('profiles').upsert({id:_user.id,email:e,full_name:_user?.user_metadata?.full_name||'',approved:true,role:'admin'});}catch(x){}
-      setTimeout(function(){authGrant();},100);
-      return;
-    }
-    
-    await authCheck();
-  } catch(err) {
-    console.error('[Auth] Login error:', err);
-    // Admin emergency bypass
-    if(ADMIN_EMAILS.indexOf(e)>=0){
-      _isAdmin=true;_prof={email:e,approved:true,role:'admin'};
-      authGrant();return;
-    }
+    finishLogin(e);
+  }).catch(function(err){
+    if(resolved) return;
+    resolved = true;
     authMsg('Login error: '+err.message);
+  });
+  
+  // Timeout: if signInWithPassword hangs, check session directly
+  setTimeout(async function(){
+    if(resolved) return;
+    console.log('[Auth] signInWithPassword timed out — checking session');
+    resolved = true;
+    try {
+      var sess = await client.auth.getSession();
+      if(sess?.data?.session?.user){
+        console.log('[Auth] Session found after timeout — proceeding');
+        finishLogin(e);
+      } else {
+        authMsg('Login timed out — please try again');
+      }
+    } catch(err) {
+      authMsg('Login timed out: '+err.message);
+    }
+  }, 4000);
+}
+
+function finishLogin(email){
+  var client = sb();
+  if(ADMIN_EMAILS.indexOf(email)>=0){
+    _isAdmin=true;
+    _prof={email:email,full_name:'Admin',approved:true,role:'admin'};
+    // Get user from session
+    client.auth.getSession().then(function(s){
+      _user=s?.data?.session?.user||{email:email};
+      // Fire-and-forget profile upsert
+      if(_user.id) client.from('profiles').upsert({id:_user.id,email:email,full_name:_user?.user_metadata?.full_name||'',approved:true,role:'admin'}).catch(function(){});
+    }).catch(function(){});
+    authGrant();
+    return;
   }
+  // Non-admin: run full check
+  authCheck();
 }
 
 async function authSignup(){
