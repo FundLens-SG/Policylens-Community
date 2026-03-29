@@ -2982,6 +2982,50 @@ function Header() {
 // OPENAI API HELPER — converts content blocks to OpenAI format
 // ═══════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════
+// JSON REPAIR — fixes truncated JSON from token limits
+// ═══════════════════════════════════════════════════════════════
+function repairJSON(raw) {
+  let s = raw.replace(/```json\s*|```\s*/g,'').trim();
+  // If it doesn't start with { or [, try to find the first one
+  const firstBrace = s.indexOf('{');
+  const firstBracket = s.indexOf('[');
+  if(firstBrace>0 && (firstBracket<0 || firstBrace<firstBracket)) s = s.slice(firstBrace);
+  else if(firstBracket>=0 && firstBracket<firstBrace) s = s.slice(firstBracket);
+  
+  // Try parsing as-is first
+  try { return JSON.parse(s); } catch(e) {}
+  
+  // Count open/close braces and brackets
+  let braces=0, brackets=0;
+  for(const c of s) {
+    if(c==='{') braces++;
+    if(c==='}') braces--;
+    if(c==='[') brackets++;
+    if(c===']') brackets--;
+  }
+  
+  // Truncated string — close any open quotes
+  if((s.match(/"/g)||[]).length % 2 !== 0) s += '"';
+  
+  // Close open structures
+  while(brackets>0) { s+=']'; brackets--; }
+  while(braces>0) { s+='}'; braces--; }
+  
+  // Remove trailing comma before closing
+  s = s.replace(/,\s*}/g,'}').replace(/,\s*]/g,']');
+  
+  try { return JSON.parse(s); } catch(e2) {
+    // Last resort — try to extract first complete object
+    let depth=0, start=-1;
+    for(let i=0;i<s.length;i++){
+      if(s[i]==='{'){if(start<0)start=i;depth++;}
+      if(s[i]==='}'){depth--;if(depth===0&&start>=0){try{return JSON.parse(s.slice(start,i+1));}catch(e3){start=-1;}}}
+    }
+    throw new Error('Could not parse AI response as JSON');
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // DUAL AI PIPELINE — Gemini reads docs (free), Claude extracts (smart)
 // Fallback: Gemini-only if no Anthropic key
 // ═══════════════════════════════════════════════════════════════
@@ -3000,7 +3044,7 @@ async function geminiRead(geminiKey, contentBlocks) {
     body:JSON.stringify({
       contents:[{parts}],
       systemInstruction:{parts:[{text:'You are a document reader. Extract ALL text, numbers, tables, and data from these documents. Preserve table structures. Include every detail — policy numbers, dates, amounts, rider names, conditions, charges. Output as plain text, organized by section.'}]},
-      generationConfig:{maxOutputTokens:8000}
+      generationConfig:{maxOutputTokens:16000}
     })
   });
   const data = await resp.json();
@@ -3041,7 +3085,7 @@ async function geminiExtract(geminiKey, systemPrompt, contentBlocks, maxTokens) 
     body:JSON.stringify({
       contents:[{parts}],
       systemInstruction:{parts:[{text:systemPrompt+'\n\nRespond with ONLY valid JSON. Start with { end with }.'}]},
-      generationConfig:{maxOutputTokens:maxTokens||4000,responseMimeType:'application/json'}
+      generationConfig:{maxOutputTokens:maxTokens||8000,responseMimeType:'application/json'}
     })
   });
   const data = await resp.json();
@@ -3191,7 +3235,7 @@ function ProfileTab() {
       content.push({type:'text',text:'Extract client profile information from these documents/images.'});
       const profilePrompt = 'Extract client profile from insurance documents. Return a JSON object with: name, nric, dob (YYYY-MM-DD), gender (Male/Female), smoker (Non-smoker/Smoker), nationality (SC/PR/Foreigner), occupation, phone, email. If dependants found, include dependants (array of {name, relationship, dob, gender, smoker, nationality, occupation}). Return ONLY valid JSON starting with { and ending with }.';
       const rawText = await callAI(profilePrompt, content, 2000);
-      const parsed = JSON.parse(rawText.replace(/```json|```/g,'').trim());
+      const parsed = repairJSON(rawText);
       // Merge scanned data
       const updated = {...p};
       Object.entries(parsed).forEach(([k,v])=>{
@@ -3637,7 +3681,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       content.push({type:'text',text:'Extract all insurance policy information from these documents/images. Follow the system instructions for output format.'});
       const text = await callAI(EXTRACT_PROMPT, content, 8000);
       console.log('[Extract] Raw response:', text.slice(0,500));
-      const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
+      const parsed = repairJSON(text);
       console.log('[Extract] Parsed:', JSON.stringify(parsed).slice(0,500));
       const arr = Array.isArray(parsed)?parsed:[parsed];
       console.log('[Extract] Policy count:', arr.length, 'Fields in first:', Object.keys(arr[0]||{}).join(','));
@@ -3926,7 +3970,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
       const formExtractPrompt = 'Extract insurance policy details. Return a JSON object with ALL fields: insurer, productName, policyNumber, category (protection/savings/health/investment/retirement/maternity), subType, currency, sumAssured (number), annualPremium (number), premiumStructure, paymentMethod, lifeInsured, gender, dob, ageAtEntry, smoker, nationality, occupation, inceptionDate, maturityDate, status, premStartAge, premTerm, premEndAge. Riders: riders (array of {type:death/tpd/ci/eci/di/accidental/premium_waiver, sa:number, premium:number, expiryAge:number, bundled:boolean, multiClaim:boolean, totalClaimPct:number}). SA: saMultiplier, multiplierEndAge. ISP: ispClass, hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance. ILP: ilpSubtype, ilpGrowth, ilpDivYield, ilpMgmtFee. Cash: cashValue, cvGrowthRate, surrenderPeriod. Notes: notes (FC review headline). Return ONLY valid JSON starting with { ending with }.';
       content.push({type:'text',text:'Extract all policy information from these documents/images.'});
       const rawText2 = await callAI(formExtractPrompt, content, 4000);
-      const parsed = JSON.parse(rawText2.replace(/```json|```/g,'').trim());
+      const parsed = repairJSON(rawText2);
       const overwrites = [];
       const updates = {};
       Object.entries(parsed).forEach(([k,v])=>{
