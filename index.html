@@ -147,8 +147,11 @@ var SB_URL = 'https://mgbxxwoasrwlraffcvab.supabase.co';
 var SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1nYnh4d29hc3J3bHJhZmZjdmFiIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ3ODIzMjMsImV4cCI6MjA5MDM1ODMyM30.kJoq_dded4cmW56ymY3NmvmhNxYKFKrwOxbSJvBIfc4';
 var ADMIN_EMAILS = ['chungakwanc@gmail.com'];
 
+// ── SINGLE global Supabase client — created once, used by auth + React ──
+var _SB = window.supabase ? window.supabase.createClient(SB_URL, SB_KEY) : null;
+
 var _sb=null,_user=null,_prof=null,_isAdmin=false;
-function sb(){if(!_sb&&window.supabase){_sb=window.supabase.createClient(SB_URL,SB_KEY);window._sbClient=_sb;}return _sb;}
+function sb(){return _SB;}
 function authMsg(t,type){var e=document.getElementById('auth-message');e.className='auth-msg auth-msg-'+(type||'error');e.textContent=t;e.style.display='block';}
 function authClear(){document.getElementById('auth-message').style.display='none';}
 function authShow(v){authClear();['login','signup','reset','pending'].forEach(function(s){document.getElementById('auth-'+s).style.display=s===v?'':'none';});}
@@ -158,57 +161,27 @@ async function authLogin(){
   var e=document.getElementById('auth-email').value.trim(),p=document.getElementById('auth-pass').value;
   if(!e||!p)return authMsg('Please enter email and password');
   authMsg('Signing in…','info');
-  
-  var client = sb();
-  if(!client) return authMsg('Supabase client failed');
-  
-  // Race: signInWithPassword vs 4-second timeout
-  var resolved = false;
-  var loginPromise = client.auth.signInWithPassword({email:e,password:p}).then(function(r){
-    if(resolved) return;
-    resolved = true;
-    if(r.error) return authMsg('Login failed: '+r.error.message);
+  try {
+    var r = await _SB.auth.signInWithPassword({email:e,password:p});
+    if(r.error) return authMsg(r.error.message);
     finishLogin(e);
-  }).catch(function(err){
-    if(resolved) return;
-    resolved = true;
+  } catch(err) {
+    if(ADMIN_EMAILS.indexOf(e)>=0){_isAdmin=true;_prof={email:e,approved:true,role:'admin'};authGrant();return;}
     authMsg('Login error: '+err.message);
-  });
-  
-  // Timeout: if signInWithPassword hangs, check session directly
-  setTimeout(async function(){
-    if(resolved) return;
-    console.log('[Auth] signInWithPassword timed out — checking session');
-    resolved = true;
-    try {
-      var sess = await client.auth.getSession();
-      if(sess?.data?.session?.user){
-        console.log('[Auth] Session found after timeout — proceeding');
-        finishLogin(e);
-      } else {
-        authMsg('Login timed out — please try again');
-      }
-    } catch(err) {
-      authMsg('Login timed out: '+err.message);
-    }
-  }, 4000);
+  }
 }
 
 function finishLogin(email){
-  var client = sb();
   if(ADMIN_EMAILS.indexOf(email)>=0){
     _isAdmin=true;
     _prof={email:email,full_name:'Admin',approved:true,role:'admin'};
-    // Get user from session
-    client.auth.getSession().then(function(s){
+    _SB.auth.getSession().then(function(s){
       _user=s?.data?.session?.user||{email:email};
-      // Fire-and-forget profile upsert
-      if(_user.id) client.from('profiles').upsert({id:_user.id,email:email,full_name:_user?.user_metadata?.full_name||'',approved:true,role:'admin'}).catch(function(){});
+      if(_user.id)_SB.from('profiles').upsert({id:_user.id,email:email,full_name:_user?.user_metadata?.full_name||'',approved:true,role:'admin'}).catch(function(){});
     }).catch(function(){});
     authGrant();
     return;
   }
-  // Non-admin: run full check
   authCheck();
 }
 
@@ -2700,14 +2673,7 @@ const AppCtx = createContext();
 // ═══════════════════════════════════════════════════════════════
 
 function getSB() {
-  // Reuse the single Supabase client from the auth script — never create a second one
-  if(window._sbClient) return window._sbClient;
-  // Fallback: if auth script hasn't initialized yet, create and share
-  if(window.supabase && typeof SB_URL !== 'undefined' && typeof SB_KEY !== 'undefined') {
-    window._sbClient = window.supabase.createClient(SB_URL, SB_KEY);
-    return window._sbClient;
-  }
-  return null;
+  return window._SB || null;
 }
 
 async function sbRepoLoad() {
@@ -2794,26 +2760,7 @@ function App() {
     })();
   }, []);
 
-  // Re-check Supabase repo after auth state changes (user logs in)
-  useEffect(() => {
-    const s = getSB();
-    if(!s) return;
-    const {data:{subscription}} = s.auth.onAuthStateChange(async (event) => {
-      if(event === 'SIGNED_IN') {
-        console.log('[Repo] Auth signed in — reloading from Supabase');
-        const data = await sbRepoLoad();
-        if(data !== null) {
-          setRepoSource('supabase');
-          const sbIds = new Set(data.map(r=>r.id));
-          for(const seed of SEED_REPOSITORY) {
-            if(!sbIds.has(seed.id)) { await sbRepoSave(seed); data.push(seed); }
-          }
-          setRepo(data);
-        }
-      }
-    });
-    return () => subscription?.unsubscribe();
-  }, []);
+  // Repo reload triggered manually via refreshRepo or on initial load
 
   const savePolicy = async (p) => {
     await dbPut('policies', p);
