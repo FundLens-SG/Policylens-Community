@@ -364,6 +364,27 @@ const SEED_REPOSITORY = [
   {id:'repo-siuls3',insurer:'Manulife',productName:'Signature Indexed Universal Life Solution III',productCode:'SIULS III',category:'protection',subType:'Indexed UL (IUL)',currency:'USD',ulSubType:'IUL',creditingMechanism:'indexed',faAllocation:'0-100%',iaAllocation:'0-100%',indexSubAccounts:[{name:'S&P 500 Plus',floor:0,capExample:11.30,participation:100,crediting:'point-to-point'},{name:'Euro Stoxx 50',floor:0,capExample:null,participation:100,crediting:'point-to-point'},{name:'Hang Seng Index',floor:0,capExample:null,participation:100,crediting:'point-to-point'},{name:'MSCI Emerging Markets',floor:0,capExample:null,participation:100,crediting:'point-to-point'},{name:'S&P Multi-Asset Risk Control 5%',floor:0,capExample:null,participation:100,crediting:'point-to-point'},{name:'Barclays Trident Index',floor:0,capExample:null,participation:100,crediting:'point-to-point'}],faMinGuaranteed:2.0,iaSegmentLength:1,loyaltyBonus:{rate:0.80,startYear:11,endDesc:'pre-age 100'},charges:{premium:{desc:'8% Yr1 declining to 4%'},faCharge:{desc:'Monthly, varies by FA allocation'},coi:{desc:'Monthly, stops at age 100'},performance:{desc:'S&P500Plus only'},surrender:{desc:'18-year schedule'}},features:['APS','ELP','Reallocation','Penalty-free withdrawal Yr11+','Policy Loan','Change of Life Insured','CVE','Age100 Advantage'],notes:'FA/IA split. IA has 1-year segments across 6 indices. FA minimum 2% guaranteed.',editHistory:[]},
   {id:'repo-sigwealth',insurer:'Manulife',productName:'Signature Wealth SGD',productCode:'VUL01',category:'protection',subType:'Variable UL (VUL)',currency:'SGD',ulSubType:'VUL',creditingMechanism:'client-directed',solvedPremium:{min:300000,currency:'SGD'},minLiquidity:2.0,investmentRisk:'client',charges:{premium:{desc:'4.8% chargeable top-up'},policyFee:{desc:'1.9% p.a. of solved premium for 8 years'},admin:{desc:'0.2% p.a. ongoing'},coi:{desc:'Monthly, stops at age 100'},surrender:{desc:'10-year schedule, 12% × declining'}},features:['Client appoints asset manager/custodian','Min 2% liquidity','Partial surrender free','Change of Life Insured','Age100 Advantage'],notes:'Single premium VUL. Full investment risk on client.',editHistory:[]},
   {id:'repo-heirloom7',insurer:'Manulife',productName:'Heirloom VII',productCode:'HRT09',category:'protection',subType:'Universal Life (UL)',currency:'USD',ulSubType:'UL',creditingMechanism:'fixed',creditingRates:{current:4.20,guaranteed:1.60},loyaltyBonus:{rate:0.35,startYear:11,endDesc:'pre-age 100'},charges:{premium:{desc:'7% / 8.5% with CVE'},faCharge:{desc:'Monthly, by issue age band'},coi:{desc:'Max 110% of launch rates, stops at age 100'},surrender:{desc:'18-year schedule'}},features:['ELP (5yr)','QSI (NS rates 3yr)','CVE','Penalty-free withdrawal Yr11+','Policy Loan (90% SV, variable rate)','Change of Life Insured (2x)','Age100 Advantage'],notes:'Non-par UL, flexible premium. 4.20% current / 1.60% guaranteed.',editHistory:[]},
+  // ── Manulife Term / Decreasing ──
+  {id:'repo-ml-manuprotect-term',insurer:'Manulife',productName:'ManuProtect Term (II)',productCode:'RLC19',category:'protection',subType:'Term Life',currency:'SGD',features:['Level & Convertible','Death + TI (accelerated)','TI cap $1M/life','Conversion to WL/endowment/ILP before age 65','QSI available (SI≥$500k)','SDIC Protected','Free look 14 days'],charges:{},notes:'Non-par level term. Available terms 11-40yr or to age 65/75/85. Suicide exclusion 1yr. Available riders: Critical Care Enhancer (II) — 36 CIs, accelerates death benefit; TPD Plus (II) — accelerates death, guaranteed premiums; Accidental Death Benefit — to age 65; Early Critical Care Waiver — waives all premiums on CI diagnosis.',editHistory:[]},
+  {id:'repo-ml-manuprotect-dec',insurer:'Manulife',productName:'ManuProtect Decreasing (II)',productCode:'MPDS1',category:'protection',subType:'Term Life',currency:'SGD',features:['Decreasing term','Interest rate options: 1-5%','Premium term = policy term minus 2yr','Death + TI (accelerated)','Joint-lives available','SDIC Protected'],charges:{},notes:'Non-par decreasing term. SA decreases annually at chosen interest rate. Zero cash value. Available riders: Critical Care Enhancer (II), TPD Plus (II).',editHistory:[]},
+
+  // ── Manulife Whole Life ──
+  {id:'repo-ml-lifeready-plus',insurer:'Manulife',productName:'LifeReady Plus (II)',productCode:'WLH20',category:'protection',subType:'Whole Life',currency:'SGD',features:['Par whole life','Limited pay 10/15/20/25yr','Life Benefit Multiplier (III) — up to 5× SA to age 70','Health Advantage premium discount','Retrenchment benefit (6mo waiver)','Financial Flexibility Option (age 70+ annual payout)','Guaranteed Insurability Option'],charges:{},notes:'Par WL. Death benefit = LBM multiple × SA until age 70, then reverts to SA + bonuses. Available riders: Early Critical Care Rider (III) — 35 advanced + early/intermediate CI; Critical Care Waiver Rider III — waives all premiums on CI. Bonus: reversionary + surrender/claim escalation schedule.',editHistory:[]},
+
+  // ── Manulife ILP ──
+  {id:'repo-ml-manuinvest-duo',insurer:'Manulife',productName:'ManuInvest Duo',productCode:'RMH15',category:'investment',subType:'Investment-Linked Policy (ILP)',currency:'SGD',ilpSubtype:'protection',features:['Regular premium ILP','MIP options: 10/15/20yr','Death = higher of SI or AV','TI to age 99','TPD to age 70','Premium Flexibility from Yr6','Auto fund rebalancing from Yr2','Change of life insured allowed','Fund switching unlimited free'],charges:{premium:{desc:'Currently 0% top-up'},admin:{desc:'5% p.a. AV (Yr1-5), 1% p.a. (Yr6+)'},surrender:{desc:'100% Yr1-2, scaling to 8% at end of MIP'},coi:{desc:'Guaranteed rates on NAAR, monthly'}},notes:'Protection ILP. Welcome bonus 45-52% of Yr1 premiums (varies by SI multiple and premium band). Loyalty bonus 0.20-0.80% of AV. Key riders: Early Critical Care Rider (II) — unit-deducting, early/intermediate/advanced CI + special benefit + child illness. Admin charge is on AV not premiums.',editHistory:[]},
+  {id:'repo-ml-investready-growth',insurer:'Manulife',productName:'InvestReady Growth',productCode:'',category:'investment',subType:'Investment-Linked Policy (ILP)',currency:'SGD',ilpSubtype:'investment',features:['Regular premium ILP','MIP 15yr','Flexi Start from Yr11','Death = higher of 101% premiums paid or AV','Welcome bonus 45%','Annual premium bonus 3%','Booster bonus 35% at end of MIP','Loyalty bonus 0.3% of AV after MIP'],charges:{admin:{desc:'2.18% p.a. during MIP → 0.95% after, on notional value'},surrender:{desc:'100% Yr1-2 scaling to 8% Yr14-15'},topUp:{desc:'5%'},coi:{desc:'Guaranteed rates'}},notes:'Investment ILP. Premium allocation 100% regular, 95% top-up. Flexi start from Yr11 onwards. SV breakeven ~Yr17 at 4%, ~Yr10 at 8%.',editHistory:[]},
+
+  // ── Manulife CI ──
+  {id:'repo-ml-ecc-classic',insurer:'Manulife',productName:'Early CompleteCare (Classic)',productCode:'CCC2A',category:'protection',subType:'Critical Illness',currency:'SGD',features:['Non-par term CI','126 conditions (early/intermediate/advanced/extended)','Single comprehensive payout 100% SI','Special CI benefit 20% SI (max $25k, ×6)','Recovery Care Plus (ICU 4 days, 20% SI, ×1)','Serious Illness of Child $10k (×2)','Death benefit = higher of total premiums or 8× annual premium'],charges:{},notes:'Single-payout term CI to age 65/75/85. 90-day waiting for cancer/heart/coronary. 7-day survival period. Premiums NOT guaranteed. Zero cash value.',editHistory:[]},
+  {id:'repo-ml-ecc-deluxe',insurer:'Manulife',productName:'Early CompleteCare (Deluxe)',productCode:'CCC2B',category:'protection',subType:'Critical Illness',currency:'SGD',features:['Non-par term CI','126 conditions','Multi-payout: Comprehensive (×1) + Cover Me Again (×4) + Recurring/Relapse (×2)','Continuous Cancer Income Option (4% SI/mth, up to 60mth)','Special CI + Recovery Care Plus + Child illness','Death = higher of premiums less claims or 8× annual premium'],charges:{},notes:'Multi-payout term CI. Up to $700k lump-sum + $240k cancer income on $100k SI. +33% premium uplift vs Classic for multi-claim. Available rider: Critical Care Waiver Rider III (waives premiums on advanced CI).',editHistory:[]},
+
+  // ── Manulife Personal Accident ──
+  {id:'repo-ml-readyprotect',insurer:'Manulife',productName:'ReadyProtect Advantage',productCode:'',category:'protection',subType:'Personal Accident',currency:'SGD',features:['Non-par yearly renewable PA','ADD $200k (max 150% = $300k)','Double payout on public transport/school','AMR up to $3k/accident ($6k overseas)','TCM/Chiropractic up to $750/accident','Family discount available','Medical expenses end age 75, ADD end age 99'],charges:{},notes:'Accident-only — no illness/CI/natural death. Premium not guaranteed, can be revised with 30 days notice. Renewal guaranteed first 5 years only. Premium steps up at age 56. No MediSave payable.',editHistory:[]},
+
+  // ── Manulife ReadyMummy (separate from GE ReadyMummy) ──
+  {id:'repo-ml-readymummy',insurer:'Manulife',productName:'ReadyMummy',productCode:'MHPS1',category:'maternity',subType:'Maternity Coverage',currency:'SGD',features:['Non-par 3yr term','Single premium','Dual insured: mother + child (up to 2 children)','Mother: death + 14 pregnancy complications + hospital $50/day + psychotherapy','Child: death + 24 congenital conditions + hospital $50/day + phototherapy','Guaranteed Issuance: LifeReady Plus for child within 90 days, no underwriting'],charges:{},notes:'Max payout ~$24k per child scenario. Covers pregnancy complications, congenital illness, hospital care. Guaranteed issuance for child WL plan within 90 days of birth (max $200k death/TPD, $100k CI).',editHistory:[]},
+
   {id:'repo-readymummy',insurer:'Great Eastern',productName:'ReadyMummy',productCode:'RM01',category:'maternity',subType:'Maternity Coverage',currency:'SGD',maternityDetails:{dualInsured:true,dualInsuredDesc:'Mother + Child',benefitTypes:[{name:'Pregnancy Complications',payoutType:'lump sum',conditions:['Ectopic pregnancy','Hydatidiform mole','Miscarriage','Stillbirth']},{name:'Hospitalisation Benefit (Mother)',payoutType:'per day',amountPerDay:200,maxDays:30},{name:'Congenital Conditions (Child)',payoutType:'lump sum',conditions:['Cleft lip/palate','Down syndrome','Heart defects','Spina bifida']},{name:'NICU Benefit',payoutType:'per day',amountPerDay:200,maxDays:30}],guaranteedIssuance:true,guaranteedIssuanceDesc:'Guaranteed issuance within first trimester',conversionRights:true,conversionRightsDesc:'Convert to child whole life plan within 120 days of birth'},charges:{premium:{desc:'Single premium, varies by age and plan type'}},features:['Dual insured (mother+child)','Guaranteed issuance (1st trimester)','Conversion rights to child WL'],notes:'Maternity plan covering pregnancy complications and newborn conditions.',editHistory:[]},
 ];
 
@@ -2977,7 +2998,8 @@ function ProfileTab() {
   const scanProfile = async (files) => {
     if(!files||!files.length) return;
     const ak = ((await dbGet('settings','apiKey').catch(()=>null))?.value || '').trim();
-    if(!ak){alert('Set Anthropic API key in Settings first');return;}
+    console.log('[Scan] API key length:', ak.length, 'starts:', ak.slice(0,15), 'ends:', ak.slice(-4));
+    if(!ak||!ak.startsWith('sk-')){alert('Invalid API key. Go to Settings and re-save your Anthropic API key (starts with sk-ant-...)');return;}
     setScanning(true);
     try {
       const content = [];
@@ -4723,7 +4745,10 @@ function Settings() {
             📂 Load Portfolio
           </button>
           <button className="btn-danger btn-sm" onClick={async()=>{
-            if(!confirm('Reset repository to verified products only?\nThis removes ALL entries (including Supabase shared data) and re-seeds from scratch.')) return;
+            if(!window._isAdmin){alert('Only admin can reset the repository.');return;}
+            const pw = prompt('Enter admin password to reset repository:');
+            if(pw !== 'bprawn0011'){alert('Incorrect password.');return;}
+            if(!confirm('This removes ALL repository entries and re-seeds with verified products. Proceed?')) return;
             // Clear Supabase repo
             const s = getSB();
             if(s) {
@@ -4749,6 +4774,20 @@ function Settings() {
         <button className="btn-primary btn-sm" onClick={()=>{saveApiKey(key);alert('API key saved!');}}>Save</button>
         <p style={{fontSize:11,color:'var(--text3)',marginTop:6}}>Used for AI-powered document extraction. Stored locally in IndexedDB.</p>
         {apiKey && <p style={{fontSize:11,color:'var(--green2)',marginTop:4}}>✓ Key configured ({apiKey.slice(0,12)}…)</p>}
+        {apiKey && <button className="btn-secondary btn-sm" style={{marginTop:6}} onClick={async()=>{
+          try {
+            const testKey = ((await dbGet('settings','apiKey').catch(()=>null))?.value||'').trim();
+            console.log('[Test] Key:', testKey.slice(0,15)+'...'+testKey.slice(-4), 'length:', testKey.length);
+            const r = await fetch('https://api.anthropic.com/v1/messages',{
+              method:'POST',
+              headers:{'Content-Type':'application/json','x-api-key':testKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+              body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:50,messages:[{role:'user',content:'Say hello'}]})
+            });
+            const d = await r.json();
+            if(d.error) alert('API Error: '+d.error.message+'\n\nKey sent: '+testKey.slice(0,15)+'...'+testKey.slice(-4));
+            else alert('✅ API key works! Response: '+(d.content?.[0]?.text||'OK'));
+          } catch(e){ alert('Network error: '+e.message); }
+        }}>🔑 Test Key</button>}
       </div>
       <div className="card">
         <h3 style={{fontSize:14,fontWeight:600,marginBottom:8}}>About PolicyLens v4</h3>
