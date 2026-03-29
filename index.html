@@ -2713,6 +2713,7 @@ function App() {
   const [repo, setRepo] = useState([]);
   const [apiKey, setApiKey] = useState('');
   const [clientName, setClientName] = useState('');
+  const [clientProfile, setClientProfile] = useState({name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[]});
   const [loading, setLoading] = useState(true);
   const [repoSource, setRepoSource] = useState('loading'); // 'supabase' | 'local' | 'loading'
 
@@ -2725,6 +2726,8 @@ function App() {
       setPolicies(ps || []);
       if(sk) setApiKey(sk.value||'');
       if(cn) setClientName(cn.value||'');
+      const cp = await dbGet('settings','clientProfile').catch(()=>null);
+      if(cp?.value) setClientProfile(cp.value);
 
       // Load repository from Supabase (primary) with local fallback
       // Only try Supabase if user is authenticated (session exists)
@@ -2803,8 +2806,14 @@ function App() {
     setClientName(n);
     await dbPut('settings',{key:'clientName',value:n});
   };
+  const saveProfile = async (p) => {
+    setClientProfile(p);
+    setClientName(p.name||'');
+    await dbPut('settings',{key:'clientProfile',value:p});
+    await dbPut('settings',{key:'clientName',value:p.name||''});
+  };
 
-  const ctx = {policies,repo,apiKey,clientName,savePolicy,deletePolicy,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,tab,setTab};
+  const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,deletePolicy,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,tab,setTab};
 
   if(loading) return <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh'}}>
     <div style={{textAlign:'center'}}><div style={{fontSize:28,marginBottom:8}}>🔍</div><div style={{color:'var(--text2)',fontSize:14}}>Loading PolicyLens…</div></div>
@@ -2814,6 +2823,7 @@ function App() {
     <AppCtx.Provider value={ctx}>
       <Header />
       <div style={{flex:1,overflow:'auto',padding:'16px 20px 40px'}}>
+        {tab==='profile' && <ProfileTab />}
         {tab==='dashboard' && <Dashboard />}
         {tab==='policies' && <Policies />}
         {tab==='repository' && <Repository />}
@@ -2832,6 +2842,7 @@ function App() {
 function Header() {
   const {tab,setTab,policies,clientName} = useContext(AppCtx);
   const tabs = [
+    {id:'profile',label:'My Client',icon:'👤'},
     {id:'dashboard',label:'Dashboard',icon:'📊'},
     {id:'policies',label:'Policies',icon:'📋'},
     {id:'repository',label:'Repository',icon:'🗄️'},
@@ -2862,6 +2873,144 @@ function Header() {
 
 // ═══════════════════════════════════════════════════════════════
 // DASHBOARD — Portfolio Overview + Gap Analysis
+// ═══════════════════════════════════════════════════════════════
+
+// ═══════════════════════════════════════════════════════════════
+// MY CLIENT — Profile + Dependants
+// ═══════════════════════════════════════════════════════════════
+
+function ProfileTab() {
+  const {clientProfile,saveProfile,apiKey} = useContext(AppCtx);
+  const [p, setP] = useState(clientProfile);
+  const [scanning, setScanning] = useState(false);
+  const camRef = useRef(null);
+  const uploadRef = useRef(null);
+
+  // Auto-save on change
+  useEffect(() => { saveProfile(p); }, [p]);
+
+  const set = (k,v) => setP(prev=>({...prev,[k]:v}));
+  const addDep = () => setP(prev=>({...prev,dependants:[...(prev.dependants||[]),{id:'dep_'+Date.now(),name:'',relationship:'',dob:'',gender:'',smoker:'',nationality:'',occupation:''}]}));
+  const updateDep = (i,k,v) => setP(prev=>{const d=[...(prev.dependants||[])];d[i]={...d[i],[k]:v};return{...prev,dependants:d}});
+  const removeDep = (i) => setP(prev=>({...prev,dependants:(prev.dependants||[]).filter((_,idx)=>idx!==i)}));
+
+  // AI scan for profile
+  const scanProfile = async (files) => {
+    if(!files||!files.length) return;
+    const ak = apiKey || (await dbGet('settings','apiKey').catch(()=>null))?.value;
+    if(!ak){alert('Set Anthropic API key in Settings first');return;}
+    setScanning(true);
+    try {
+      const content = [];
+      for(const file of Array.from(files).slice(0,6)){
+        const b64 = await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file)});
+        const mime = file.type||'image/jpeg';
+        if(mime.startsWith('image/')) content.push({type:'image',source:{type:'base64',media_type:mime,data:b64}});
+        else content.push({type:'document',source:{type:'base64',media_type:mime,data:b64}});
+      }
+      content.push({type:'text',text:`Extract client profile information from this document (NRIC, insurance forms, FNA, KYC). Return a JSON object with: name, nric, dob (YYYY-MM-DD), gender (Male/Female), smoker (Non-smoker/Smoker), nationality (SC/PR/Foreigner), occupation, phone, email. If dependants are found, include dependants (array of {name, relationship, dob, gender, smoker, nationality, occupation}). Return ONLY valid JSON.`});
+      const resp = await fetch('https://api.anthropic.com/v1/messages',{
+        method:'POST',headers:{'Content-Type':'application/json','x-api-key':ak,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+        body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:2000,messages:[{role:'user',content}]})
+      });
+      const data = await resp.json();
+      if(data.error) throw new Error(data.error.message);
+      const parsed = JSON.parse((data.content?.[0]?.text||'').replace(/```json|```/g,'').trim());
+      // Merge scanned data
+      const updated = {...p};
+      Object.entries(parsed).forEach(([k,v])=>{
+        if(v===null||v===undefined||v==='') return;
+        if(k==='dependants' && Array.isArray(v)){
+          updated.dependants = [...(updated.dependants||[]),...v.map(d=>({...d,id:'dep_'+Date.now()+Math.random().toString(36).slice(2,4)}))];
+        } else {
+          updated[k] = v;
+        }
+      });
+      setP(updated);
+      alert('Profile updated from scan!');
+    } catch(e){alert('Scan error: '+e.message);}
+    setScanning(false);
+  };
+
+  const age = p.dob ? Math.floor((Date.now()-new Date(p.dob).getTime())/(365.25*24*60*60*1000)) : '';
+
+  return (
+    <div className="fade-in">
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
+        <div>
+          <h2 style={{fontSize:18,fontWeight:600}}>My Client</h2>
+          <p style={{fontSize:12,color:'var(--text3)'}}>Client details used across all policies — fill once, use everywhere</p>
+        </div>
+        <div style={{display:'flex',gap:6}}>
+          <input ref={camRef} type="file" accept="image/*" capture="environment" multiple style={{display:'none'}} onChange={e=>{scanProfile(e.target.files);e.target.value='';}} />
+          <input ref={uploadRef} type="file" accept="image/*,.pdf,.xlsx,.xls,.doc,.docx" multiple style={{display:'none'}} onChange={e=>{scanProfile(e.target.files);e.target.value='';}} />
+          <button className="btn-secondary btn-sm" onClick={()=>camRef.current?.click()} disabled={scanning}>{scanning?'Scanning…':'📷 Scan'}</button>
+          <button className="btn-secondary btn-sm" onClick={()=>uploadRef.current?.click()} disabled={scanning}>{scanning?'…':'📄 Upload'}</button>
+        </div>
+      </div>
+
+      {/* Client Details */}
+      <div className="card" style={{marginBottom:16}}>
+        <h3 style={{fontSize:14,fontWeight:600,marginBottom:12}}>Client Details</h3>
+        <div className="grid-3">
+          <div className="field"><label>Full Name</label><input value={p.name||''} onChange={e=>set('name',e.target.value)} placeholder="Client full name" /></div>
+          <div className="field"><label>NRIC / Passport</label><input value={p.nric||''} onChange={e=>set('nric',e.target.value)} placeholder="S1234567X" /></div>
+          <div className="field"><label>Date of Birth</label><input type="date" value={p.dob||''} onChange={e=>set('dob',e.target.value)} /></div>
+        </div>
+        <div className="grid-3">
+          <div className="field"><label>Gender</label><select value={p.gender||''} onChange={e=>set('gender',e.target.value)}><option value="">—</option><option>Male</option><option>Female</option></select></div>
+          <div className="field"><label>Smoker</label><select value={p.smoker||''} onChange={e=>set('smoker',e.target.value)}><option value="">—</option><option>Non-smoker</option><option>Smoker</option></select></div>
+          <div className="field"><label>Nationality</label><select value={p.nationality||''} onChange={e=>set('nationality',e.target.value)}><option value="">—</option><option value="SC">Singapore Citizen</option><option value="PR">PR</option><option value="Foreigner">Foreigner</option></select></div>
+        </div>
+        <div className="grid-3">
+          <div className="field"><label>Occupation</label><input value={p.occupation||''} onChange={e=>set('occupation',e.target.value)} placeholder="e.g. Engineer" /></div>
+          <div className="field"><label>Phone</label><input value={p.phone||''} onChange={e=>set('phone',e.target.value)} placeholder="+65 9xxx xxxx" /></div>
+          <div className="field"><label>Email</label><input value={p.email||''} onChange={e=>set('email',e.target.value)} placeholder="client@email.com" /></div>
+        </div>
+        {age && <div style={{fontSize:12,color:'var(--text3)',marginTop:8}}>Current Age: <strong>{age}</strong></div>}
+      </div>
+
+      {/* Dependants */}
+      <div className="card">
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+          <div>
+            <h3 style={{fontSize:14,fontWeight:600}}>Dependants</h3>
+            <p style={{fontSize:12,color:'var(--text3)'}}>Spouse, children, parents — any life insured under your client's policies</p>
+          </div>
+          <button className="btn-primary btn-sm" onClick={addDep}>+ Add Dependant</button>
+        </div>
+        {(!p.dependants||p.dependants.length===0) ? (
+          <div style={{textAlign:'center',padding:24,color:'var(--text3)'}}>
+            <div style={{fontSize:24,marginBottom:6}}>👨‍👩‍👧‍👦</div>
+            <div style={{fontSize:12}}>No dependants added yet. Click + Add Dependant or use 📷 Scan to extract from documents.</div>
+          </div>
+        ) : (p.dependants||[]).map((d,i) => (
+          <div key={d.id||i} style={{padding:12,background:'var(--bg3)',borderRadius:10,marginBottom:8,border:'1px solid var(--border)'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
+              <span style={{fontSize:13,fontWeight:600}}>{d.name||'Dependant '+(i+1)}</span>
+              <button className="btn-danger btn-sm" onClick={()=>removeDep(i)}>×</button>
+            </div>
+            <div className="grid-3">
+              <div className="field"><label>Name</label><input value={d.name||''} onChange={e=>updateDep(i,'name',e.target.value)} /></div>
+              <div className="field"><label>Relationship</label><select value={d.relationship||''} onChange={e=>updateDep(i,'relationship',e.target.value)}>
+                <option value="">—</option><option>Spouse</option><option>Child</option><option>Parent</option><option>Sibling</option><option>Other</option>
+              </select></div>
+              <div className="field"><label>Date of Birth</label><input type="date" value={d.dob||''} onChange={e=>updateDep(i,'dob',e.target.value)} /></div>
+            </div>
+            <div className="grid-3">
+              <div className="field"><label>Gender</label><select value={d.gender||''} onChange={e=>updateDep(i,'gender',e.target.value)}><option value="">—</option><option>Male</option><option>Female</option></select></div>
+              <div className="field"><label>Smoker</label><select value={d.smoker||''} onChange={e=>updateDep(i,'smoker',e.target.value)}><option value="">—</option><option>Non-smoker</option><option>Smoker</option></select></div>
+              <div className="field"><label>Nationality</label><select value={d.nationality||''} onChange={e=>updateDep(i,'nationality',e.target.value)}><option value="">—</option><option value="SC">SC</option><option value="PR">PR</option><option value="Foreigner">Foreigner</option></select></div>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// DASHBOARD
 // ═══════════════════════════════════════════════════════════════
 
 function Dashboard() {
@@ -3278,49 +3427,96 @@ Return ONLY valid JSON, no markdown fences, no explanation.`;
 function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,onDraftClear}) {
   const isEdit = !!policy;
   const [tidying, setTidying] = useState(false);
-  const [repoMatches, setRepoMatches] = useState(null); // fuzzy matches for repo save
+  const [repoMatches, setRepoMatches] = useState(null);
   const [pendingRepoItem, setPendingRepoItem] = useState(null);
+  const [formScanning, setFormScanning] = useState(false);
+  const formCamRef = useRef(null);
+  const formUploadRef = useRef(null);
+
+  // Build life insured dropdown from profile
+  const {clientProfile:_cp} = useContext(AppCtx);
+  const profileNames = useMemo(() => {
+    const names = [];
+    if(_cp?.name) names.push(_cp.name);
+    (_cp?.dependants||[]).forEach(d=>{if(d.name)names.push(d.name + (d.relationship?' ('+d.relationship+')':''))});
+    return names;
+  }, [_cp]);
+
+  const DEFAULT_RIDERS = {
+    'Term Life':       [{type:'death',sa:'',premium:'',expiryAge:'65',bundled:true}],
+    'Whole Life':      [{type:'death',sa:'',premium:'',expiryAge:'99',bundled:true},{type:'tpd',sa:'',premium:'',expiryAge:'70',bundled:true},{type:'ci',sa:'',premium:'',expiryAge:'85',bundled:true}],
+    'Universal Life (UL)': [{type:'death',sa:'',premium:'',expiryAge:'100',bundled:true}],
+    'Indexed UL (IUL)':    [{type:'death',sa:'',premium:'',expiryAge:'100',bundled:true}],
+    'Variable UL (VUL)':   [{type:'death',sa:'',premium:'',expiryAge:'100',bundled:true}],
+    'Critical Illness':    [{type:'death',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'tpd',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'ci',sa:'',premium:'',expiryAge:'65',bundled:true,multiClaim:false,totalClaimPct:300}],
+    'Personal Accident':   [{type:'accidental',sa:'',premium:'',expiryAge:'70',bundled:true}],
+    'Disability Income':   [{type:'di',sa:'',premium:'',expiryAge:'65',bundled:true}],
+    'Long-term Care':      [],
+    'Investment-Linked Policy (ILP)': [{type:'death',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'tpd',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'ci',sa:'',premium:'',expiryAge:'65',bundled:true}],
+  };
+
   const [form, setForm] = useState(policy || {
     id:genId(), category:'protection', subType:'', insurer:'', productName:'', policyName:'', policyNumber:'',
     currency:'SGD', sumAssured:'', annualPremium:'', premiumStructure:'Regular Premium',
     lifeInsured:'', gender:'', dob:'', ageAtEntry:'', smoker:'', nationality:'', occupation:'',
-    inceptionDate:'', maturityDate:'', status:'inforce',
+    inceptionDate:'', maturityDate:'', status:'inforce', paymentMethod:'',
+    // Premium structure (RetireWell)
+    premStartAge:'', premTerm:'', premEndAge:'65', premSingle:false, premWholeLife:false,
+    // Riders
+    riders:[], saMultiplier:'1', multiplierEndAge:'70',
+    // ISP
+    ispClass:'', hasRider:false, riderList:'', riderPremium:'', ispDeductible:'3500', ispCoinsurance:'5', ispCoInsCap:'',
+    // Cash value
+    cashValue:'', cvGrowthRate:'3.0', surrenderPeriod:'',
+    // ILP (RetireWell)
+    ilpSubtype:'protection', ilpGrowth:'6', ilpDivYield:'2', ilpMgmtFee:'1.5', ilpPaymentYrs:'10', ilpProtPct:'101',
     // UL fields
     ulSubType:'', creditingMechanism:'', creditingRates:{current:'',guaranteed:''},
     loyaltyBonus:{rate:'',startYear:'',endDesc:''}, loanRate:'', elpPremium:'', qsiFlag:false,
-    // IUL fields
     faAllocation:'', iaAllocation:'', indexSubAccounts:[],
-    // VUL fields
     solvedPremium:'', assumedReturn:'', minLiquidity:'', investmentRisk:'client',
-    // Maternity fields
+    // Maternity
     dualInsured:false, guaranteedIssuance:false, conversionRights:false,
-    // Health
-    ispClass:'', riderList:'',
-    // General
-    monthlyBenefit:'', fundingSource:'', paymentMethod:'',
-    // Riders
-    riders:[], saMultiplier:'1', multiplierEndAge:'',
-    // ISP
-    hasRider:false, riderPremium:'', ispDeductible:'', ispCoinsurance:'',
-    // Cash value
-    cashValue:'', cvGrowthRate:'', surrenderPeriod:'',
+    // Retirement
+    monthlyBenefit:'', fundingSource:'',
     // General
     notes:'', fundAllocations:[],
   });
-  const [fuzzyMatches, setFuzzyMatches] = useState([]);
-  const [showFuzzy, setShowFuzzy] = useState(false);
 
-  const set = (k,v) => setForm(f=>{const nf={...f,[k]:v};if(onDraftChange)onDraftChange(nf);return nf});
+  const set = (k,v) => setForm(f=>{
+    const nf={...f,[k]:v};
+    // Auto-populate riders when subType changes
+    if(k==='subType' && DEFAULT_RIDERS[v] && (!f.riders || f.riders.length===0)){
+      nf.riders = DEFAULT_RIDERS[v].map(r=>({...r,id:'r_'+Date.now()+Math.random().toString(36).slice(2,5)}));
+    }
+    // Auto-calc premium end age
+    if((k==='premStartAge'||k==='premTerm') && nf.premStartAge && nf.premTerm && !nf.premWholeLife){
+      nf.premEndAge = String(parseInt(nf.premStartAge)+parseInt(nf.premTerm));
+    }
+    if(onDraftChange)onDraftChange(nf);
+    return nf;
+  });
   const setNested = (parent,k,v) => setForm(f=>{const nf={...f,[parent]:{...f[parent],[k]:v}};if(onDraftChange)onDraftChange(nf);return nf});
 
-  const isUL = UL_FAMILY.includes(form.subType);
-  const isIUL = form.subType === 'Indexed UL (IUL)';
-  const isVUL = form.subType === 'Variable UL (VUL)';
-  const isULPlain = form.subType === 'Universal Life (UL)';
-  const isMaternity = form.category === 'maternity' || form.subType === 'Maternity';
-  const isILP = form.subType === 'Investment-Linked Policy (Investment)';
+  const PREMIUM_STRUCTURES = ['Regular Premium','Single Premium','Limited Pay','Flexible Premium'];
+  const isUL = ['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(form.subType);
+  const isULPlain = form.subType==='Universal Life (UL)';
+  const isIUL = form.subType==='Indexed UL (IUL)';
+  const isVUL = form.subType==='Variable UL (VUL)';
+  const isMaternity = form.category === 'maternity';
+  const isILP = form.subType==='Investment-Linked Policy (ILP)';
+  const isISP = form.subType==='Integrated Shield Plan';
+  const isProtection = form.category==='protection';
+  const isInvestment = form.category==='investment';
+  const hasCoverageSection = isProtection || isInvestment;
+  const hasCV = (isProtection||form.category==='savings'||isInvestment||form.category==='retirement') && form.subType!=='Term Life' && !isISP;
 
-  // Fuzzy match on product name change
+  // ILP effective rate
+  const ilpEffRate = Math.max(0, parseFloat(form.ilpGrowth||6) + parseFloat(form.ilpDivYield||2) - parseFloat(form.ilpMgmtFee||1.5));
+
+  // Fuzzy matching
+  const [showFuzzy, setShowFuzzy] = useState(false);
+  const [fuzzyMatches, setFuzzyMatches] = useState([]);
   useEffect(() => {
     if(!form.productName || form.productName.length < 3 || isEdit) return;
     const matches = fuzzyMatch(form.productName + ' ' + form.insurer, repo);
@@ -3333,11 +3529,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
     onSave({...form, sumAssured:parseFloat(form.sumAssured)||0, annualPremium:parseFloat(form.annualPremium)||0, monthlyBenefit:parseFloat(form.monthlyBenefit)||0});
   };
 
-  const [formScanning, setFormScanning] = useState(false);
-  const formCamRef = useRef(null);
-  const formUploadRef = useRef(null);
-
-  // ── Scan into existing form — merges AI-extracted fields ──
+  // ── Scan into existing form ──
   const scanIntoForm = async (files) => {
     if(!files||!files.length) return;
     const ak = await dbGet('settings','apiKey').catch(()=>null);
@@ -3351,34 +3543,26 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         if(mime.startsWith('image/')) content.push({type:'image',source:{type:'base64',media_type:mime,data:b64}});
         else content.push({type:'document',source:{type:'base64',media_type:mime,data:b64}});
       }
-      content.push({type:'text',text:`Extract insurance policy details from this document. Return a JSON object with ALL fields you can find. Core: insurer, productName, policyNumber, category, subType, currency, sumAssured (number), annualPremium (number), premiumStructure, paymentMethod, lifeInsured, gender, dob, ageAtEntry, smoker, nationality, occupation, inceptionDate, maturityDate, status. Riders: riders (array of {type:death/tpd/ci/eci/di/accidental/premium_waiver, sa:number, premium:number, expiryAge:number, bundled:boolean, multiClaim:boolean}). SA: saMultiplier (number), multiplierEndAge (number). ISP: ispClass, hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance. Cash: cashValue, cvGrowthRate, surrenderPeriod. Notes: notes (FC review meeting headline — key numbers, riders, triggers). Return ONLY valid JSON, no markdown.`});
+      content.push({type:'text',text:`Extract insurance policy details from this document. Return a JSON object with ALL fields you can find. Core: insurer, productName, policyNumber, category, subType, currency, sumAssured (number), annualPremium (number), premiumStructure, paymentMethod, lifeInsured, gender, dob, ageAtEntry, smoker, nationality, occupation, inceptionDate, maturityDate, status, premStartAge, premTerm, premEndAge. Riders: riders (array of {type:death/tpd/ci/eci/di/accidental/premium_waiver, sa:number, premium:number, expiryAge:number, bundled:boolean, multiClaim:boolean, totalClaimPct:number}). SA: saMultiplier (number), multiplierEndAge (number). ISP: ispClass, hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance. ILP: ilpSubtype, ilpGrowth, ilpDivYield, ilpMgmtFee. Cash: cashValue, cvGrowthRate, surrenderPeriod. Notes: notes (FC review meeting headline). Return ONLY valid JSON, no markdown.`});
       const resp = await fetch('https://api.anthropic.com/v1/messages',{
         method:'POST',headers:{'Content-Type':'application/json','x-api-key':ak.value,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
         body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:4000,messages:[{role:'user',content}]})
       });
       const data = await resp.json();
       if(data.error) throw new Error(data.error.message);
-      const text = data.content?.[0]?.text||'';
-      const parsed = JSON.parse(text.replace(/```json|```/g,'').trim());
-      // Merge: only overwrite non-empty fields, confirm if overwriting existing values
+      const parsed = JSON.parse((data.content?.[0]?.text||'').replace(/```json|```/g,'').trim());
       const overwrites = [];
       const updates = {};
       Object.entries(parsed).forEach(([k,v])=>{
         if(v===null||v===undefined||v==='') return;
-        if(k==='faceAmount') k='sumAssured'; // backwards compat
+        if(k==='faceAmount') k='sumAssured';
         const current = form[k];
-        if(current && current!=='' && current!==0 && current!=='0' && JSON.stringify(current)!==JSON.stringify(v)){
-          overwrites.push(k);
-        }
+        if(current && current!=='' && current!==0 && current!=='0' && JSON.stringify(current)!==JSON.stringify(v)) overwrites.push(k);
         updates[k] = typeof v==='number'?v:(typeof v==='string'?v:JSON.stringify(v));
       });
-      if(overwrites.length > 0){
-        const proceed = confirm('Scanned data will update these fields that already have values:\n\n• '+overwrites.join('\n• ')+'\n\nProceed?');
-        if(!proceed){setFormScanning(false);return;}
-      }
+      if(overwrites.length>0 && !confirm('Scanned data will update: '+overwrites.join(', ')+'. Proceed?')){setFormScanning(false);return;}
       setForm(f=>({...f,...updates}));
-      if(onDraftChange) onDraftChange({...form,...updates});
-      alert('Form updated with scanned data!');
+      if(onDraftChange)onDraftChange({...form,...updates});
     } catch(e){alert('Scan error: '+e.message);}
     setFormScanning(false);
   };
@@ -3390,13 +3574,9 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
           <h3 style={{fontSize:16,fontWeight:600}}>{isEdit?'Edit Policy':'Add Policy'}</h3>
           <div style={{display:'flex',gap:6,alignItems:'center'}}>
             <input ref={formCamRef} type="file" accept="image/*" capture="environment" multiple style={{display:'none'}} onChange={e=>{scanIntoForm(e.target.files);e.target.value='';}} />
-            <input ref={formUploadRef} type="file" accept="image/*,.pdf,.xlsx,.xls,.csv,.doc,.docx,.html,.htm,.txt" multiple style={{display:'none'}} onChange={e=>{scanIntoForm(e.target.files);e.target.value='';}} />
-            <button className="btn-secondary btn-sm" onClick={()=>formCamRef.current?.click()} disabled={formScanning}>
-              {formScanning?'Scanning…':'📷'}
-            </button>
-            <button className="btn-secondary btn-sm" onClick={()=>formUploadRef.current?.click()} disabled={formScanning}>
-              {formScanning?'…':'📄'}
-            </button>
+            <input ref={formUploadRef} type="file" accept="image/*,.pdf,.xlsx,.xls,.csv,.doc,.docx" multiple style={{display:'none'}} onChange={e=>{scanIntoForm(e.target.files);e.target.value='';}} />
+            <button className="btn-secondary btn-sm" onClick={()=>formCamRef.current?.click()} disabled={formScanning}>{formScanning?'Scanning…':'📷'}</button>
+            <button className="btn-secondary btn-sm" onClick={()=>formUploadRef.current?.click()} disabled={formScanning}>{formScanning?'…':'📄'}</button>
             <button onClick={onClose} style={{background:'none',color:'var(--text3)',fontSize:20,marginLeft:4}}>×</button>
           </div>
         </div>
@@ -3405,144 +3585,172 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         {showFuzzy && !isEdit && (
           <div className="fuzzy-alert">
             <h4>🔍 Possible Repository Matches</h4>
-            <p style={{fontSize:12,color:'var(--text2)',marginBottom:8}}>These products look similar. Variations are shown — review before proceeding.</p>
+            <p style={{fontSize:12,color:'var(--text2)',marginBottom:8}}>These products look similar.</p>
             {fuzzyMatches.map(m => (
               <div key={m.id} style={{background:'var(--bg3)',borderRadius:8,padding:10,marginBottom:6,fontSize:12}}>
                 <div style={{display:'flex',justifyContent:'space-between'}}>
                   <span style={{fontWeight:600}}>{m.insurer} — {m.productName}</span>
-                  <span className="mono" style={{color:'var(--orange)'}}>{Math.round(m.score*100)}% match</span>
+                  <span className="mono" style={{color:'var(--orange)',fontSize:11}}>{Math.round(m.score*100)}%</span>
                 </div>
-                <div style={{color:'var(--text3)',marginTop:2}}>
-                  {m.productCode} • {m.currency} • {CATEGORIES[m.category]?.label} • {m.subType}
-                </div>
-                {/* Show variations */}
-                {form.insurer && form.insurer.toLowerCase()!==m.insurer.toLowerCase() && (
-                  <div style={{color:'var(--orange)',marginTop:4,fontSize:11}}>⚠ Insurer differs: you entered "{form.insurer}", repo has "{m.insurer}"</div>
-                )}
-                {form.currency && form.currency!==m.currency && (
-                  <div style={{color:'var(--orange)',marginTop:2,fontSize:11}}>⚠ Currency differs: you entered "{form.currency}", repo has "{m.currency}"</div>
-                )}
-                <button className="btn-secondary btn-sm" style={{marginTop:6}} onClick={()=>{
-                  // Pre-fill from repo but don't auto-merge
-                  set('insurer',m.insurer);set('productName',m.productName);set('category',m.category);
-                  set('subType',m.subType);set('currency',m.currency);
-                  if(m.ulSubType) set('ulSubType',m.ulSubType);
-                  setShowFuzzy(false);
+                <button className="btn-secondary btn-sm" style={{marginTop:4}} onClick={()=>{
+                  setForm(f=>({...f,...m,id:f.id,status:f.status}));setShowFuzzy(false);
                 }}>Use as template</button>
               </div>
             ))}
-            <button onClick={()=>setShowFuzzy(false)} style={{background:'none',color:'var(--text3)',fontSize:11,marginTop:4}}>Dismiss</button>
           </div>
         )}
 
-        {/* Core fields */}
+        {/* ═══ SECTION 1: BASIC INFO ═══ */}
         <div className="grid-2">
-          <div className="field">
-            <label>Category</label>
-            <select value={form.category} onChange={e=>{set('category',e.target.value);set('subType','')}}>
-              {Object.entries(CATEGORIES).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}
-            </select>
-          </div>
-          <div className="field">
-            <label>Sub-type</label>
-            <select value={form.subType} onChange={e=>set('subType',e.target.value)}>
-              <option value="">Select…</option>
-              {(SUB_TYPES[form.category]||[]).map(s=><option key={s} value={s}>{s}</option>)}
-            </select>
-          </div>
+          <div className="field"><label>Category</label><select value={form.category} onChange={e=>{set('category',e.target.value);set('subType','');}}>
+            {Object.entries(CATEGORIES).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}
+          </select></div>
+          <div className="field"><label>Sub-type</label><select value={form.subType} onChange={e=>set('subType',e.target.value)}>
+            <option value="">Select…</option>
+            {(SUB_TYPES[form.category]||[]).map(s=><option key={s}>{s}</option>)}
+          </select></div>
         </div>
         <div className="grid-2">
           <div className="field"><label>Insurer</label><input value={form.insurer} onChange={e=>set('insurer',e.target.value)} placeholder="e.g. Manulife" /></div>
           <div className="field"><label>Product Name</label><input value={form.productName} onChange={e=>set('productName',e.target.value)} placeholder="e.g. Heirloom VII" /></div>
         </div>
+
+        {/* ═══ SECTION 2: POLICY IDENTITY ═══ */}
         <div className="grid-3">
-          <div className="field"><label>Policy Name / Label</label><input value={form.policyName} onChange={e=>set('policyName',e.target.value)} placeholder="Friendly name" /></div>
-          <div className="field"><label>Policy Number</label><input value={form.policyNumber} onChange={e=>set('policyNumber',e.target.value)} /></div>
-          <div className="field"><label>Life Insured</label><input value={form.lifeInsured} onChange={e=>set('lifeInsured',e.target.value)} /></div>
+          <div className="field"><label>Policy Number</label><input value={form.policyNumber} onChange={e=>set('policyNumber',e.target.value)} placeholder="e.g. 12345678" /></div>
+          <div className="field"><label>Life Insured</label>
+            <select value={form.lifeInsured||''} onChange={e=>set('lifeInsured',e.target.value)}>
+              <option value="">— Select from profile —</option>
+              {profileNames.map(n=><option key={n} value={n}>{n}</option>)}
+              <option value="__other">Other (type below)</option>
+            </select>
+            {form.lifeInsured==='__other' && <input value={form.lifeInsuredOther||''} onChange={e=>set('lifeInsuredOther',e.target.value)} placeholder="Name" style={{marginTop:4}} />}
+          </div>
+          <div className="field"><label>Currency</label><select value={form.currency} onChange={e=>set('currency',e.target.value)}><option>SGD</option><option>USD</option><option>HKD</option><option>GBP</option><option>EUR</option><option>AUD</option><option>MYR</option></select></div>
         </div>
-        <div className="grid-3">
-          <div className="field"><label>Gender</label><select value={form.gender||''} onChange={e=>set('gender',e.target.value)}><option value="">—</option><option value="Male">Male</option><option value="Female">Female</option></select></div>
-          <div className="field"><label>Date of Birth</label><input type="date" value={form.dob||''} onChange={e=>set('dob',e.target.value)} /></div>
-          <div className="field"><label>Age at Entry</label><input type="number" value={form.ageAtEntry||''} onChange={e=>set('ageAtEntry',e.target.value)} placeholder="Auto or manual" /></div>
+
+        {/* ═══ SECTION 3: PREMIUM STRUCTURE (RetireWell-style) ═══ */}
+        <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)'}}>
+          <h4 style={{fontSize:13,fontWeight:600,marginBottom:10,color:'var(--text2)'}}>Premium Structure</h4>
+          <div className="grid-3">
+            <div className="field"><label>Sum Assured / Face Amount</label><input type="number" value={form.sumAssured} onChange={e=>set('sumAssured',e.target.value)} /></div>
+            <div className="field"><label>Annual Premium</label><input type="number" value={form.annualPremium} onChange={e=>set('annualPremium',e.target.value)} /></div>
+            <div className="field"><label>Payment Method</label><select value={form.paymentMethod||''} onChange={e=>set('paymentMethod',e.target.value)}>
+              <option value="">—</option><option value="Cash">Cash / GIRO</option><option value="MediSave">MediSave</option><option value="SRS">SRS</option><option value="MediSave+Cash">MediSave + Cash</option><option value="CPF OA">CPF OA</option>
+            </select></div>
+          </div>
+          <div className="grid-3" style={{marginTop:4}}>
+            <div className="field"><label>Age at Entry</label><input type="number" value={form.premStartAge||form.ageAtEntry||''} onChange={e=>{set('premStartAge',e.target.value);set('ageAtEntry',e.target.value)}} placeholder="e.g. 30" /></div>
+            <div className="field">
+              <label>Premium Term (years)</label>
+              <input type="number" value={form.premTerm||''} onChange={e=>set('premTerm',e.target.value)} placeholder="e.g. 25" disabled={form.premSingle||form.premWholeLife} />
+              <div style={{display:'flex',gap:12,marginTop:4}}>
+                <label style={{fontSize:11,display:'flex',alignItems:'center',gap:3,cursor:'pointer'}}><input type="checkbox" checked={form.premSingle||false} onChange={e=>{set('premSingle',e.target.checked);if(e.target.checked)set('premWholeLife',false);}} /> Single</label>
+                <label style={{fontSize:11,display:'flex',alignItems:'center',gap:3,cursor:'pointer'}}><input type="checkbox" checked={form.premWholeLife||false} onChange={e=>{set('premWholeLife',e.target.checked);if(e.target.checked){set('premSingle',false);set('premEndAge','Whole Life');}}} /> Whole Life</label>
+              </div>
+            </div>
+            <div className="field"><label>Premium End Age</label><input value={form.premWholeLife?'Whole Life':form.premEndAge||''} disabled={form.premWholeLife} onChange={e=>set('premEndAge',e.target.value)} placeholder="auto: start + term" /></div>
+          </div>
+          <div className="grid-3" style={{marginTop:4}}>
+            <div className="field"><label>Inception Date</label><input type="date" value={form.inceptionDate} onChange={e=>set('inceptionDate',e.target.value)} /></div>
+            <div className="field"><label>Maturity Date</label><input type="date" value={form.maturityDate} onChange={e=>set('maturityDate',e.target.value)} /></div>
+            <div className="field"><label>Status</label><select value={form.status} onChange={e=>set('status',e.target.value)}><option value="inforce">In-force</option><option value="lapsed">Lapsed</option><option value="paid-up">Paid-up</option><option value="surrendered">Surrendered</option><option value="matured">Matured</option></select></div>
+          </div>
         </div>
-        <div className="grid-3">
-          <div className="field"><label>Smoker</label><select value={form.smoker||''} onChange={e=>set('smoker',e.target.value)}><option value="">—</option><option value="Non-smoker">Non-smoker</option><option value="Smoker">Smoker</option></select></div>
-          <div className="field"><label>Nationality</label><select value={form.nationality||''} onChange={e=>set('nationality',e.target.value)}><option value="">—</option><option value="SC">Singapore Citizen</option><option value="PR">PR</option><option value="Foreigner">Foreigner</option></select></div>
-          <div className="field"><label>Occupation</label><input value={form.occupation||''} onChange={e=>set('occupation',e.target.value)} placeholder="e.g. Engineer" /></div>
-        </div>
-        <div className="grid-3">
-          <div className="field"><label>Currency</label><select value={form.currency} onChange={e=>set('currency',e.target.value)}>{CURRENCIES.map(c=><option key={c}>{c}</option>)}</select></div>
-          <div className="field"><label>Sum Assured</label><input type="number" value={form.sumAssured} onChange={e=>set('sumAssured',e.target.value)} /></div>
-          <div className="field"><label>Annual Premium</label><input type="number" value={form.annualPremium} onChange={e=>set('annualPremium',e.target.value)} /></div>
-        </div>
-        <div className="grid-3">
-          <div className="field"><label>Premium Structure</label><select value={form.premiumStructure} onChange={e=>set('premiumStructure',e.target.value)}>{PREMIUM_STRUCTURES.map(s=><option key={s}>{s}</option>)}</select></div>
-          <div className="field"><label>Inception Date</label><input type="date" value={form.inceptionDate} onChange={e=>set('inceptionDate',e.target.value)} /></div>
-          <div className="field"><label>Maturity Date</label><input type="date" value={form.maturityDate} onChange={e=>set('maturityDate',e.target.value)} /></div>
-        </div>
-        <div className="grid-2">
-          <div className="field"><label>Status</label><select value={form.status} onChange={e=>set('status',e.target.value)}><option value="inforce">In-force</option><option value="lapsed">Lapsed</option><option value="paid-up">Paid-up</option><option value="surrendered">Surrendered</option><option value="matured">Matured</option></select></div>
-          <div className="field"><label>Payment Method</label><select value={form.paymentMethod||''} onChange={e=>set('paymentMethod',e.target.value)}><option value="">—</option><option value="Cash">Cash / GIRO</option><option value="MediSave">MediSave</option><option value="SRS">SRS</option><option value="MediSave+Cash">MediSave + Cash</option><option value="CPF OA">CPF OA</option></select></div>
-        </div>
-        {(form.category==='retirement') && (
-          <div className="grid-2">
-            <div className="field"><label>Monthly Benefit</label><input type="number" value={form.monthlyBenefit} onChange={e=>set('monthlyBenefit',e.target.value)} /></div>
-            <div className="field"><label>Funding Source</label><select value={form.fundingSource||''} onChange={e=>set('fundingSource',e.target.value)}><option value="">Select…</option><option value="Cash">Cash</option><option value="SRS">SRS</option><option value="CPF OA">CPF OA</option><option value="CPF SA">CPF SA</option><option value="CPF RA">CPF RA</option></select></div>
+
+        {/* ═══ RETIREMENT FIELDS ═══ */}
+        {form.category==='retirement' && (
+          <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)'}}>
+            <h4 style={{fontSize:13,fontWeight:600,marginBottom:10,color:'var(--green2)'}}>Retirement Plan Details</h4>
+            <div className="grid-3">
+              <div className="field"><label>Monthly Benefit</label><input type="number" value={form.monthlyBenefit} onChange={e=>set('monthlyBenefit',e.target.value)} /></div>
+              <div className="field"><label>Funding Source</label><select value={form.fundingSource||''} onChange={e=>set('fundingSource',e.target.value)}><option value="">Select…</option><option>Cash</option><option>SRS</option><option>CPF OA</option><option>CPF SA</option><option>CPF RA</option></select></div>
+              <div></div>
+            </div>
           </div>
         )}
 
-        {/* ══════ COVERAGE & RIDERS — RetireWell-style ══════ */}
-        {(form.category==='protection'||form.category==='investment') && (
+        {/* ═══ COVERAGE & RIDERS (RetireWell-style) ═══ */}
+        {hasCoverageSection && (
           <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)'}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
               <div>
                 <h4 style={{fontSize:13,fontWeight:600,color:'var(--blue2)',margin:0}}>Coverage & Riders</h4>
                 <div style={{fontSize:10,color:'var(--text3)',marginTop:2}}>
                   Total premium: {fmt(form.annualPremium,form.currency||'SGD')}/yr
-                  {(form.riders||[]).filter(r=>r.premium>0).length>0 && ` — Riders: ${fmt((form.riders||[]).reduce((s,r)=>s+(parseFloat(r.premium)||0),0),form.currency||'SGD')}`}
+                  {(form.riders||[]).filter(r=>parseFloat(r.premium)>0).length>0 && ` — Riders: ${fmt((form.riders||[]).reduce((s,r)=>s+(parseFloat(r.premium)||0),0),form.currency||'SGD')}`}
                 </div>
               </div>
               <button className="btn-secondary btn-sm" onClick={()=>{
                 const riders=[...(form.riders||[])];
-                riders.push({id:'r_'+Date.now(),type:'ci',sa:'',premium:'',expiryAge:'65',bundled:true,multiClaim:false});
+                riders.push({id:'r_'+Date.now(),type:'ci',sa:'',premium:'',expiryAge:form.premEndAge||'65',bundled:true,multiClaim:false,totalClaimPct:300});
                 set('riders',riders);
               }}>+ Add Rider</button>
             </div>
-            {/* SA Multiplier */}
-            <div className="grid-3" style={{marginBottom:8}}>
-              <div className="field"><label>SA Multiplier</label><select value={form.saMultiplier||'1'} onChange={e=>set('saMultiplier',e.target.value)}>
-                <option value="1">1× (none)</option><option value="1.5">1.5×</option><option value="2">2×</option><option value="3">3×</option><option value="5">5×</option>
-              </select></div>
-              <div className="field"><label>Multiplier Until Age</label><input type="number" value={form.multiplierEndAge||''} onChange={e=>set('multiplierEndAge',e.target.value)} placeholder="e.g. 70" /></div>
-              <div className="field"><label>Effective Base SA</label><input disabled value={form.sumAssured?fmt(form.sumAssured*(parseFloat(form.saMultiplier)||1),form.currency||'SGD'):'-'} style={{color:'var(--green2)',fontWeight:600}} /></div>
-            </div>
+
+            {/* SA Multiplier — only for life/WL plans */}
+            {(form.subType==='Whole Life'||form.subType==='Term Life'||isUL) && (
+              <div className="grid-3" style={{marginBottom:8}}>
+                <div className="field"><label>SA Multiplier</label><select value={form.saMultiplier||'1'} onChange={e=>set('saMultiplier',e.target.value)}>
+                  {[1,1.5,2,3,5].map(m=><option key={m} value={m}>{m}× {m===1?'(none)':''}</option>)}
+                </select></div>
+                <div className="field"><label>Multiplier Until Age</label><input type="number" value={form.multiplierEndAge||''} onChange={e=>set('multiplierEndAge',e.target.value)} placeholder="70" /></div>
+                <div className="field"><label>Effective Base SA</label><input disabled value={form.sumAssured?fmt(parseFloat(form.sumAssured)*(parseFloat(form.saMultiplier)||1),form.currency||'SGD'):'-'} style={{color:'var(--green2)',fontWeight:600}} /></div>
+              </div>
+            )}
+
             {/* Rider table */}
-            <table style={{fontSize:12}}>
-              <thead><tr><th>Benefit / Rider</th><th style={{width:100}}>Sum Assured</th><th style={{width:60}}>Bundled</th><th style={{width:90}}>Rider Premium</th><th style={{width:70}}>Expiry Age</th><th style={{width:50}}>Multi</th><th style={{width:30}}></th></tr></thead>
+            <div style={{overflowX:'auto'}}>
+            <table style={{fontSize:12,minWidth:600}}>
+              <thead><tr>
+                <th style={{textAlign:'left'}}>Benefit / Rider</th>
+                <th style={{width:100}}>Sum Assured</th>
+                <th style={{width:55,textAlign:'center'}}>Bundled</th>
+                <th style={{width:90}}>Rider Prem</th>
+                <th style={{width:65}}>Expiry</th>
+                <th style={{width:80,textAlign:'center'}}>Options</th>
+                <th style={{width:30}}></th>
+              </tr></thead>
               <tbody>
                 {(form.riders||[]).map((rd,ri) => (
                   <tr key={rd.id||ri}>
-                    <td><select value={rd.type} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],type:e.target.value};set('riders',riders);}} style={{fontSize:11,padding:'4px 6px',width:'100%'}}>
-                      <option value="death">Death & TI</option><option value="tpd">TPD</option><option value="ci">Critical Illness</option>
-                      <option value="eci">Early CI</option><option value="di">Disability Income</option><option value="accidental">Accidental Death</option>
-                      <option value="premium_waiver">Premium Waiver</option>
-                    </select></td>
-                    <td><input type="number" value={rd.sa||''} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],sa:e.target.value};set('riders',riders);}} style={{width:'100%',fontSize:11}} placeholder="$" /></td>
-                    <td style={{textAlign:'center'}}><input type="checkbox" checked={rd.bundled!==false} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],bundled:e.target.checked};set('riders',riders);}} /></td>
-                    <td><input type="number" value={rd.premium||''} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],premium:e.target.value};set('riders',riders);}} style={{width:'100%',fontSize:11}} placeholder={rd.bundled!==false?'incl.':'$'} /></td>
-                    <td><input type="number" value={rd.expiryAge||''} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],expiryAge:e.target.value};set('riders',riders);}} style={{width:'100%',fontSize:11}} placeholder="65" /></td>
-                    <td style={{textAlign:'center'}}>{(rd.type==='ci'||rd.type==='eci') && <input type="checkbox" checked={rd.multiClaim||false} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],multiClaim:e.target.checked};set('riders',riders);}} title="Multi-claim" />}</td>
+                    <td>
+                      <select value={rd.type} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],type:e.target.value};set('riders',riders);}} style={{fontSize:11,padding:'4px 6px',width:'100%'}}>
+                        <option value="death">Death & TI</option><option value="tpd">TPD</option><option value="ci">Critical Illness</option>
+                        <option value="eci">Early CI</option><option value="di">Disability Income</option><option value="accidental">Accidental Death</option>
+                        <option value="premium_waiver">Premium Waiver</option>
+                      </select>
+                      <div style={{fontSize:9,color:'var(--text3)'}}>{
+                        {death:'Death & Terminal Illness',tpd:'Total Permanent Disability',ci:'Lump sum on CI diagnosis',eci:'Early-stage CI',di:'Monthly income ($/mth)',accidental:'Additional on accident',premium_waiver:'Waives premiums'}[rd.type]||''
+                      }</div>
+                    </td>
+                    <td>{rd.type!=='premium_waiver'?<input type="number" value={rd.sa||''} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],sa:e.target.value};set('riders',riders);}} style={{width:'100%',fontSize:11}} placeholder="$" />:<span style={{color:'var(--text3)',fontSize:10}}>N/A</span>}</td>
+                    <td style={{textAlign:'center'}}><input type="checkbox" checked={rd.bundled!==false} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],bundled:e.target.checked,premium:e.target.checked?'':riders[ri].premium};set('riders',riders);}} /></td>
+                    <td>{rd.bundled!==false?<span style={{color:'var(--text3)',fontSize:10}}>incl.</span>:<input type="number" value={rd.premium||''} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],premium:e.target.value};set('riders',riders);}} style={{width:'100%',fontSize:11}} placeholder="$/yr" />}</td>
+                    <td><input type="number" value={rd.expiryAge||''} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],expiryAge:e.target.value};set('riders',riders);}} style={{width:'100%',fontSize:11}} /></td>
+                    <td style={{textAlign:'center'}}>
+                      {(rd.type==='ci'||rd.type==='eci') && (
+                        <div>
+                          <label style={{fontSize:10,display:'flex',alignItems:'center',gap:2,justifyContent:'center'}}><input type="checkbox" checked={rd.multiClaim||false} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],multiClaim:e.target.checked};set('riders',riders);}} /> Multi</label>
+                          {rd.multiClaim && <input type="number" value={rd.totalClaimPct||300} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],totalClaimPct:e.target.value};set('riders',riders);}} style={{width:45,fontSize:10,textAlign:'center',marginTop:2}} />}
+                          {rd.multiClaim && <div style={{fontSize:9,color:'var(--text3)'}}>%</div>}
+                        </div>
+                      )}
+                      {rd.type==='premium_waiver' && <input value={rd.waiverEvent||''} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],waiverEvent:e.target.value};set('riders',riders);}} placeholder="CI, TPD…" style={{width:'100%',fontSize:10}} />}
+                      {!['ci','eci','premium_waiver'].includes(rd.type) && <span style={{color:'var(--text3)'}}>—</span>}
+                    </td>
                     <td><button className="btn-danger btn-sm" style={{padding:'2px 6px',fontSize:10}} onClick={()=>{const riders=[...(form.riders||[])];riders.splice(ri,1);set('riders',riders);}}>×</button></td>
                   </tr>
                 ))}
-                {(!form.riders||form.riders.length===0) && <tr><td colSpan={7} style={{textAlign:'center',color:'var(--text3)',padding:12}}>No riders added. Click + Add Rider above.</td></tr>}
+                {(!form.riders||form.riders.length===0) && <tr><td colSpan={7} style={{textAlign:'center',color:'var(--text3)',padding:12}}>No riders. Click + Add Rider or select a sub-type to auto-populate.</td></tr>}
               </tbody>
             </table>
+            </div>
           </div>
         )}
 
-        {/* ══════ ISP-SPECIFIC FIELDS ══════ */}
-        {form.subType==='Integrated Shield Plan' && (
+        {/* ═══ ISP DETAILS ═══ */}
+        {isISP && (
           <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid rgba(59,130,246,.3)'}}>
             <h4 style={{fontSize:13,fontWeight:600,marginBottom:10,color:'var(--teal)'}}>Integrated Shield Plan Details</h4>
             <div className="grid-3">
@@ -3556,103 +3764,84 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
             </div>
             {form.hasRider && (
               <div className="grid-3">
-                <div className="field"><label>Rider Premium ($/yr)</label><input type="number" value={form.riderPremium||''} onChange={e=>set('riderPremium',e.target.value)} /></div>
-                <div className="field"><label>Deductible ($)</label><input type="number" value={form.ispDeductible||''} onChange={e=>set('ispDeductible',e.target.value)} placeholder="e.g. 3500" /></div>
-                <div className="field"><label>Co-insurance (%)</label><input type="number" value={form.ispCoinsurance||''} onChange={e=>set('ispCoinsurance',e.target.value)} placeholder="e.g. 5" /></div>
+                <div className="field"><label>Rider Premium ($/yr, Cash)</label><input type="number" value={form.riderPremium||''} onChange={e=>set('riderPremium',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Always cash — not MediSave payable</div></div>
+                <div className="field"><label>Deductible After Rider ($)</label><input type="number" value={form.ispDeductible||'3500'} onChange={e=>set('ispDeductible',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Client pays this first</div></div>
+                <div className="field"><label>Co-insurance (%)</label><input type="number" value={form.ispCoinsurance||'5'} onChange={e=>set('ispCoinsurance',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Min 5% — MOH rule since Mar 2018</div></div>
               </div>
             )}
+            {form.hasRider && <div style={{fontSize:11,color:'var(--teal)',marginTop:6,fontWeight:600}}>With rider: Deductible ${form.ispDeductible||3500} · Co-pay {form.ispCoinsurance||5}% only · Rider premium ${form.riderPremium||0}/yr cash</div>}
             <div style={{marginTop:8,padding:10,background:'var(--bg2)',borderRadius:8,fontSize:11,color:'var(--text3)'}}>
-              <div style={{fontWeight:600,marginBottom:4}}>MediShield Life Reference (CPF Board)</div>
-              <div>MSL is the base layer — premiums auto-deducted from MediSave. ISP is the private upgrade on top.</div>
-              <div style={{marginTop:4}}>MediSave Additional Withdrawal Limit (AWL): $300/yr (age ≤40) · $600/yr (41-70) · $900/yr (71+)</div>
+              <strong>MediShield Life Reference:</strong> MSL is the base layer — premiums auto-deducted from MediSave. ISP is the private upgrade. AWL: $300/yr (age ≤40) · $600/yr (41-70) · $900/yr (71+)
             </div>
           </div>
         )}
 
-        {/* ══════ CASH VALUE ══════ */}
-        {(form.category==='protection'||form.category==='savings'||form.category==='investment'||form.category==='retirement') && form.subType!=='Term Life' && (
+        {/* ═══ ILP DETAILS (RetireWell-style) ═══ */}
+        {isILP && (
           <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)'}}>
-            <h4 style={{fontSize:13,fontWeight:600,marginBottom:10,color:'var(--text2)'}}>Cash / Surrender Value</h4>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+              <h4 style={{fontSize:13,fontWeight:600,color:'var(--orange)',margin:0}}>{form.ilpSubtype==='investment'?'📊 Investment ILP':'🛡 Protection ILP'}</h4>
+              <select value={form.ilpSubtype||'protection'} onChange={e=>set('ilpSubtype',e.target.value)} style={{fontSize:11,padding:'4px 8px'}}>
+                <option value="protection">Protection ILP (riders + growth)</option>
+                <option value="investment">Investment ILP (capital growth)</option>
+              </select>
+            </div>
             <div className="grid-3">
-              <div className="field"><label>Current Cash Value</label><input type="number" value={form.cashValue||''} onChange={e=>set('cashValue',e.target.value)} placeholder="Enter if known" /></div>
-              <div className="field"><label>CV Growth Rate (% p.a.)</label><input type="number" step="0.1" value={form.cvGrowthRate||''} onChange={e=>set('cvGrowthRate',e.target.value)} placeholder="e.g. 3.0" /></div>
-              <div className="field"><label>Surrender Period (years)</label><input type="number" value={form.surrenderPeriod||''} onChange={e=>set('surrenderPeriod',e.target.value)} placeholder="e.g. 10" /></div>
+              <div className="field"><label>Growth % p.a.</label><input type="number" step="0.5" value={form.ilpGrowth||'6'} onChange={e=>set('ilpGrowth',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Fund return before fees</div></div>
+              <div className="field"><label>Dividend % p.a.</label><input type="number" step="0.5" value={form.ilpDivYield||'2'} onChange={e=>set('ilpDivYield',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Distributed or reinvested</div></div>
+              <div className="field"><label>Mgmt Fee % p.a.</label><input type="number" step="0.1" value={form.ilpMgmtFee||'1.5'} onChange={e=>set('ilpMgmtFee',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)',color:'var(--red)'}}>Deducted from fund</div></div>
+            </div>
+            <div style={{marginTop:8,padding:10,background:'var(--bg2)',borderRadius:8,display:'flex',gap:20}}>
+              <div><div style={{fontSize:10,color:'var(--text3)',textTransform:'uppercase'}}>Effective Rate</div><div style={{fontSize:16,fontWeight:700}}>{ilpEffRate.toFixed(1)}% p.a.</div><div style={{fontSize:10,color:'var(--text3)'}}>{form.ilpGrowth||6}% + {form.ilpDivYield||2}% − {form.ilpMgmtFee||1.5}%</div></div>
+              {form.ilpSubtype==='protection' && <div><div style={{fontSize:10,color:'var(--text3)',textTransform:'uppercase'}}>Protection % of Fund</div><input type="number" value={form.ilpProtPct||'101'} onChange={e=>set('ilpProtPct',e.target.value)} style={{width:70,fontSize:14,fontWeight:600}} /><div style={{fontSize:10,color:'var(--text3)'}}>Typically 101% — amend as per policy</div></div>}
+              <div><div style={{fontSize:10,color:'var(--text3)',textTransform:'uppercase'}}>Payment Years</div><input type="number" value={form.ilpPaymentYrs||'10'} onChange={e=>set('ilpPaymentYrs',e.target.value)} style={{width:60,fontSize:14,fontWeight:600}} /></div>
             </div>
           </div>
         )}
 
-        {/* ══════ UL FAMILY FIELDS ══════ */}
+        {/* ═══ UL FAMILY FIELDS ═══ */}
         {isUL && (
           <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)'}}>
             <h4 style={{fontSize:13,fontWeight:600,marginBottom:10,color:'var(--blue2)'}}>
-              {isIUL?'IUL':'isVUL'?'VUL':'UL'} Specific Fields
+              {isIUL?'IUL':isVUL?'VUL':'UL'} Specific Fields
             </h4>
-            <div className="grid-2">
-              <div className="field"><label>Crediting Mechanism</label>
-                <select value={form.creditingMechanism} onChange={e=>set('creditingMechanism',e.target.value)}>
-                  <option value="">Select…</option><option value="fixed">Fixed</option><option value="indexed">Indexed</option><option value="client-directed">Client-Directed</option>
-                </select>
-              </div>
-              <div className="field"><label>Loan Rate</label><input value={form.loanRate} onChange={e=>set('loanRate',e.target.value)} placeholder="e.g. variable, up to 90% SV" /></div>
-            </div>
-            {/* UL plain: crediting rates */}
-            {(isULPlain || form.creditingMechanism==='fixed') && (
-              <div className="grid-2">
-                <div className="field"><label>Current Crediting Rate (%)</label><input value={form.creditingRates?.current||''} onChange={e=>setNested('creditingRates','current',e.target.value)} /></div>
-                <div className="field"><label>Guaranteed Crediting Rate (%)</label><input value={form.creditingRates?.guaranteed||''} onChange={e=>setNested('creditingRates','guaranteed',e.target.value)} /></div>
-              </div>
-            )}
-            {/* Loyalty bonus */}
             <div className="grid-3">
-              <div className="field"><label>Loyalty Bonus (%)</label><input value={form.loyaltyBonus?.rate||''} onChange={e=>setNested('loyaltyBonus','rate',e.target.value)} /></div>
-              <div className="field"><label>Starts Year</label><input value={form.loyaltyBonus?.startYear||''} onChange={e=>setNested('loyaltyBonus','startYear',e.target.value)} /></div>
-              <div className="field"><label>Ends</label><input value={form.loyaltyBonus?.endDesc||''} onChange={e=>setNested('loyaltyBonus','endDesc',e.target.value)} placeholder="e.g. pre-age 100" /></div>
+              <div className="field"><label>Crediting Mechanism</label><select value={form.creditingMechanism||''} onChange={e=>set('creditingMechanism',e.target.value)}>
+                <option value="">Select…</option><option value="fixed">Fixed</option><option value="indexed">Indexed</option><option value="client-directed">Client-directed</option>
+              </select></div>
+              {(isULPlain||form.creditingMechanism==='fixed') && (
+                <><div className="field"><label>Current Rate (%)</label><input type="number" step="0.1" value={form.creditingRates?.current||''} onChange={e=>setNested('creditingRates','current',e.target.value)} /></div>
+                <div className="field"><label>Guaranteed Rate (%)</label><input type="number" step="0.1" value={form.creditingRates?.guaranteed||''} onChange={e=>setNested('creditingRates','guaranteed',e.target.value)} /></div></>
+              )}
             </div>
-            <div className="grid-2">
-              <div className="field"><label>ELP Premium (years)</label><input value={form.elpPremium} onChange={e=>set('elpPremium',e.target.value)} /></div>
-              <div className="field" style={{display:'flex',alignItems:'center',gap:8,paddingTop:20}}>
-                <input type="checkbox" checked={form.qsiFlag} onChange={e=>set('qsiFlag',e.target.checked)} />
-                <span style={{fontSize:12}}>QSI Available</span>
-              </div>
+            <div className="grid-3">
+              <div className="field"><label>Loyalty Bonus (%)</label><input type="number" step="0.01" value={form.loyaltyBonus?.rate||''} onChange={e=>setNested('loyaltyBonus','rate',e.target.value)} /></div>
+              <div className="field"><label>Bonus Start Year</label><input type="number" value={form.loyaltyBonus?.startYear||''} onChange={e=>setNested('loyaltyBonus','startYear',e.target.value)} /></div>
+              <div className="field"><label>Loan Rate</label><input value={form.loanRate||''} onChange={e=>set('loanRate',e.target.value)} placeholder="e.g. Variable" /></div>
             </div>
-
-            {/* IUL: index sub-accounts */}
-            {isIUL && (
-              <div style={{marginTop:8}}>
-                <label>FA/IA Allocation</label>
-                <div className="grid-2" style={{marginBottom:8}}>
-                  <input value={form.faAllocation} onChange={e=>set('faAllocation',e.target.value)} placeholder="FA allocation e.g. 0-100%" />
-                  <input value={form.iaAllocation} onChange={e=>set('iaAllocation',e.target.value)} placeholder="IA allocation e.g. 0-100%" />
-                </div>
-                <label>FA Min Guaranteed Rate (%)</label>
-                <input value={form.faMinGuaranteed||''} onChange={e=>set('faMinGuaranteed',e.target.value)} style={{marginBottom:8}} />
-              </div>
-            )}
-
-            {/* VUL: solved premium, assumed return */}
             {isVUL && (
               <div className="grid-3">
-                <div className="field"><label>Solved Premium</label><input type="number" value={form.solvedPremium} onChange={e=>set('solvedPremium',e.target.value)} /></div>
-                <div className="field"><label>Assumed Return (%)</label><input value={form.assumedReturn} onChange={e=>set('assumedReturn',e.target.value)} /></div>
-                <div className="field"><label>Min Liquidity (%)</label><input value={form.minLiquidity} onChange={e=>set('minLiquidity',e.target.value)} /></div>
+                <div className="field"><label>Solved Premium</label><input type="number" value={form.solvedPremium||''} onChange={e=>set('solvedPremium',e.target.value)} /></div>
+                <div className="field"><label>Assumed Return (%)</label><input type="number" step="0.5" value={form.assumedReturn||''} onChange={e=>set('assumedReturn',e.target.value)} /></div>
+                <div className="field"><label>Investment Risk</label><input disabled value="Client" /></div>
               </div>
             )}
           </div>
         )}
 
-        {/* ══════ MATERNITY FIELDS ══════ */}
+        {/* ═══ MATERNITY FIELDS ═══ */}
         {isMaternity && (
           <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)'}}>
-            <h4 style={{fontSize:13,fontWeight:600,marginBottom:10,color:'var(--pink)'}}>Maternity Fields</h4>
-            <div style={{display:'flex',gap:20,marginBottom:8}}>
-              <label style={{display:'flex',alignItems:'center',gap:6,margin:0}}><input type="checkbox" checked={form.dualInsured} onChange={e=>set('dualInsured',e.target.checked)} /><span style={{fontSize:12}}>Dual Insured (Mother+Child)</span></label>
-              <label style={{display:'flex',alignItems:'center',gap:6,margin:0}}><input type="checkbox" checked={form.guaranteedIssuance} onChange={e=>set('guaranteedIssuance',e.target.checked)} /><span style={{fontSize:12}}>Guaranteed Issuance</span></label>
-              <label style={{display:'flex',alignItems:'center',gap:6,margin:0}}><input type="checkbox" checked={form.conversionRights} onChange={e=>set('conversionRights',e.target.checked)} /><span style={{fontSize:12}}>Conversion Rights</span></label>
+            <h4 style={{fontSize:13,fontWeight:600,marginBottom:10,color:'var(--red)'}}>Maternity Fields</h4>
+            <div style={{display:'flex',gap:16,flexWrap:'wrap'}}>
+              <label style={{fontSize:12}}><input type="checkbox" checked={form.dualInsured} onChange={e=>set('dualInsured',e.target.checked)} /> Dual Insured (Mother+Child)</label>
+              <label style={{fontSize:12}}><input type="checkbox" checked={form.guaranteedIssuance} onChange={e=>set('guaranteedIssuance',e.target.checked)} /> Guaranteed Issuance</label>
+              <label style={{fontSize:12}}><input type="checkbox" checked={form.conversionRights} onChange={e=>set('conversionRights',e.target.checked)} /> Conversion Rights</label>
             </div>
           </div>
         )}
 
-        {/* ══════ ILP FUND ALLOCATIONS ══════ */}
+        {/* ═══ ILP FUND ALLOCATIONS ═══ */}
         {isILP && (
           <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)'}}>
             <h4 style={{fontSize:13,fontWeight:600,marginBottom:10,color:'var(--purple)'}}>Fund Allocations</h4>
@@ -3660,13 +3849,25 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
           </div>
         )}
 
-        {/* Notes + AI Tidy */}
-        <div className="field" style={{marginTop:12}}>
-          <label>Notes <span style={{fontWeight:400,textTransform:'none',letterSpacing:0,color:'var(--text3)'}}>— freeform OK, use AI Tidy to clean up</span></label>
-          <textarea rows={3} value={form.notes} onChange={e=>set('notes',e.target.value)} style={{width:'100%'}} placeholder="Key policy details, rider info, anything — AI will clean it up" />
+        {/* ═══ CASH / SURRENDER VALUE ═══ */}
+        {hasCV && (
+          <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px dashed var(--border)'}}>
+            <h4 style={{fontSize:13,fontWeight:600,marginBottom:10,color:'var(--text2)'}}>Cash Value {isILP?'/ Fund Value':''}</h4>
+            <div className="grid-3">
+              <div className="field"><label>Current Cash Value</label><input type="number" value={form.cashValue||''} onChange={e=>set('cashValue',e.target.value)} placeholder="From policy statement" /></div>
+              <div className="field"><label>CV Growth Rate (% p.a.)</label><input type="number" step="0.1" value={form.cvGrowthRate||'3.0'} onChange={e=>set('cvGrowthRate',e.target.value)} /></div>
+              <div className="field"><label>Surrender Period (years)</label><input type="number" value={form.surrenderPeriod||''} onChange={e=>set('surrenderPeriod',e.target.value)} placeholder="e.g. 10" /></div>
+            </div>
+          </div>
+        )}
+
+        {/* ═══ NOTES ═══ */}
+        <div style={{marginTop:12}}>
+          <label style={{fontSize:11,textTransform:'uppercase',fontWeight:600,color:'var(--text3)',letterSpacing:'.5px'}}>Notes — freeform OK, use AI Tidy to clean up</label>
+          <textarea rows={3} value={form.notes} onChange={e=>set('notes',e.target.value)} style={{width:'100%',marginTop:4}} placeholder="Key policy details, rider info, anything — AI will clean it up" />
           <div style={{display:'flex',gap:6,marginTop:6}}>
             <button className="btn-secondary btn-sm" disabled={!form.notes||form.notes.length<10||tidying} onClick={async()=>{
-              const ak = await dbGet('settings','apiKey').catch(()=>null); console.log('[AI Tidy] Key:', ak?.value?.slice(0,12));
+              const ak = await dbGet('settings','apiKey').catch(()=>null);
               if(!ak?.value){alert('Set Anthropic API key in Settings first');return;}
               setTidying(true);
               try{
@@ -3674,74 +3875,39 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                   body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:1000,
                     messages:[{role:'user',content:`You are an insurance product analyst for Singapore Financial Consultants. Clean up and structure these rough policy notes into a concise FC reference card. Keep key numbers, conditions, exclusions, and premium details. Be factual and brief. Return ONLY the cleaned text, no headers or labels.\n\nRaw notes:\n${form.notes}`}]})});
                 const d=await r.json();
-                const t=d.content?.[0]?.text||form.notes;
-                set('notes',t);
+                set('notes',d.content?.[0]?.text||form.notes);
               }catch(e){alert('AI error: '+e.message)}
               setTidying(false);
             }}>{tidying?'Tidying…':'🤖 AI Tidy'}</button>
             {!isEdit && form.productName && <button className="btn-secondary btn-sm" onClick={()=>{
-              // Build repo item
               const repoItem = {
                 id:'repo-'+Date.now().toString(36),insurer:form.insurer,productName:form.productName,
                 productCode:'',category:form.category,subType:form.subType,currency:form.currency,
                 notes:form.notes,features:[],charges:{},
-                ...(form.creditingMechanism?{ulSubType:form.subType==='Variable UL (VUL)'?'VUL':form.subType==='Indexed UL (IUL)'?'IUL':'UL',creditingMechanism:form.creditingMechanism}:{}),
+                ...(form.creditingMechanism?{ulSubType:isVUL?'VUL':isIUL?'IUL':'UL',creditingMechanism:form.creditingMechanism}:{}),
                 ...(form.creditingRates?.current?{creditingRates:form.creditingRates}:{}),
                 ...(form.loyaltyBonus?.rate?{loyaltyBonus:form.loyaltyBonus}:{}),
               };
-              // Fuzzy check against existing repo
               const matches = fuzzyMatch(form.insurer+' '+form.productName, repo, 0.35);
-              if(matches.length > 0){
-                setRepoMatches(matches.slice(0,3));
-                setPendingRepoItem(repoItem);
-              } else {
-                onSaveRepo(repoItem);
-                alert('Saved to repository!');
-              }
+              if(matches.length > 0){ setRepoMatches(matches.slice(0,3)); setPendingRepoItem(repoItem); }
+              else { onSaveRepo(repoItem); alert('Saved to repository!'); }
             }}>📤 Save to Repository</button>}
           </div>
 
-          {/* Fuzzy duplicate detection modal */}
           {repoMatches && pendingRepoItem && (
             <div style={{marginTop:10,padding:14,background:'rgba(245,158,11,.08)',border:'1px solid rgba(245,158,11,.25)',borderRadius:10}}>
-              <div style={{fontSize:13,fontWeight:600,color:'var(--orange)',marginBottom:8}}>⚠ Similar products found in repository</div>
+              <div style={{fontSize:13,fontWeight:600,color:'var(--orange)',marginBottom:8}}>⚠ Similar products in repository</div>
               {repoMatches.map(m => (
                 <div key={m.id} style={{background:'var(--bg3)',borderRadius:8,padding:10,marginBottom:6}}>
-                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-                    <div>
-                      <span style={{fontWeight:600,fontSize:13}}>{m.insurer} — {m.productName}</span>
-                      <span className="mono" style={{marginLeft:8,color:'var(--orange)',fontSize:11}}>{Math.round(m.score*100)}%</span>
-                    </div>
-                  </div>
-                  {m.notes && <div style={{fontSize:11,color:'var(--text3)',marginTop:4}}>{m.notes.slice(0,120)}{m.notes.length>120?'…':''}</div>}
-                  <div style={{display:'flex',gap:6,marginTop:8}}>
-                    <button className="btn-secondary btn-sm" onClick={()=>{
-                      // Combine: merge notes, keep existing + add new info
-                      const combined = {...m, notes: (m.notes||'')+'\n\n--- Updated ---\n'+(pendingRepoItem.notes||''),
-                        ...(pendingRepoItem.creditingRates?.current?{creditingRates:pendingRepoItem.creditingRates}:{}),
-                        ...(pendingRepoItem.loyaltyBonus?.rate?{loyaltyBonus:pendingRepoItem.loyaltyBonus}:{}),
-                      };
-                      delete combined.score;
-                      onSaveRepo(combined);
-                      setRepoMatches(null);setPendingRepoItem(null);
-                      alert('Combined with existing entry!');
-                    }}>🔀 Combine</button>
-                    <button className="btn-secondary btn-sm" onClick={()=>{
-                      // Overwrite: replace existing with new
-                      const overwritten = {...pendingRepoItem, id:m.id};
-                      onSaveRepo(overwritten);
-                      setRepoMatches(null);setPendingRepoItem(null);
-                      alert('Overwritten!');
-                    }}>↻ Overwrite</button>
+                  <div><span style={{fontWeight:600,fontSize:13}}>{m.insurer} — {m.productName}</span> <span className="mono" style={{color:'var(--orange)',fontSize:11}}>{Math.round(m.score*100)}%</span></div>
+                  <div style={{display:'flex',gap:6,marginTop:6}}>
+                    <button className="btn-secondary btn-sm" onClick={()=>{const c={...m,notes:(m.notes||'')+'\n\n--- Updated ---\n'+(pendingRepoItem.notes||'')};delete c.score;onSaveRepo(c);setRepoMatches(null);setPendingRepoItem(null);alert('Combined!');}}>🔀 Combine</button>
+                    <button className="btn-secondary btn-sm" onClick={()=>{onSaveRepo({...pendingRepoItem,id:m.id});setRepoMatches(null);setPendingRepoItem(null);alert('Overwritten!');}}>↻ Overwrite</button>
                   </div>
                 </div>
               ))}
               <div style={{display:'flex',gap:6,marginTop:8}}>
-                <button className="btn-primary btn-sm" onClick={()=>{
-                  onSaveRepo(pendingRepoItem);
-                  setRepoMatches(null);setPendingRepoItem(null);
-                  alert('Saved as new entry!');
-                }}>➕ Save as New Anyway</button>
+                <button className="btn-primary btn-sm" onClick={()=>{onSaveRepo(pendingRepoItem);setRepoMatches(null);setPendingRepoItem(null);alert('Saved as new!');}}>➕ Save as New</button>
                 <button className="btn-secondary btn-sm" onClick={()=>{setRepoMatches(null);setPendingRepoItem(null);}}>Cancel</button>
               </div>
             </div>
@@ -4462,11 +4628,7 @@ function Settings() {
       </div>
 
       <div className="card" style={{marginBottom:16}}>
-        <div className="field">
-          <label>Client Name</label>
-          <input value={name} onChange={e=>setName(e.target.value)} placeholder="Client name for reports" />
-        </div>
-        <button className="btn-primary btn-sm" onClick={()=>saveClientName(name)}>Save</button>
+        <div style={{fontSize:13,color:'var(--text2)'}}>Client details are now managed in the <strong>👤 My Client</strong> tab — name, NRIC, DOB, dependants, and more.</div>
       </div>
       <div className="card" style={{marginBottom:16}}>
         <div className="field">
