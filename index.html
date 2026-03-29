@@ -2876,6 +2876,75 @@ function Header() {
 // ═══════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════
+// DROP ZONE — paste + drag-and-drop for any screen
+// ═══════════════════════════════════════════════════════════════
+
+function DropZone({onFiles, label, active}) {
+  const [dragOver, setDragOver] = useState(false);
+  const [staged, setStaged] = useState([]);
+  const ref = useRef(null);
+
+  // Paste handler — attach to window when active
+  useEffect(() => {
+    if(!active) return;
+    const handler = (e) => {
+      const items = e.clipboardData?.items;
+      if(!items) return;
+      const files = [];
+      for(const item of items) {
+        if(item.kind==='file') files.push(item.getAsFile());
+      }
+      if(files.length) { e.preventDefault(); setStaged(prev=>[...prev,...files.map(f=>({file:f,preview:f.type.startsWith('image/')?URL.createObjectURL(f):null}))].slice(0,12)); }
+    };
+    window.addEventListener('paste', handler);
+    return () => window.removeEventListener('paste', handler);
+  }, [active]);
+
+  const onDrop = (e) => {
+    e.preventDefault(); setDragOver(false);
+    const files = Array.from(e.dataTransfer.files);
+    if(files.length) setStaged(prev=>[...prev,...files.map(f=>({file:f,preview:f.type.startsWith('image/')?URL.createObjectURL(f):null}))].slice(0,12));
+  };
+  const removeStaged = (i) => { setStaged(prev=>{const n=[...prev];if(n[i].preview)URL.revokeObjectURL(n[i].preview);n.splice(i,1);return n;}); };
+  const clearStaged = () => { staged.forEach(s=>{if(s.preview)URL.revokeObjectURL(s.preview)}); setStaged([]); };
+  const submit = () => { if(staged.length && onFiles){onFiles(staged.map(s=>s.file));clearStaged();} };
+
+  if(staged.length > 0) return (
+    <div style={{padding:14,background:'rgba(59,130,246,.06)',border:'2px solid rgba(59,130,246,.3)',borderRadius:12,marginBottom:12}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
+        <div style={{fontSize:13,fontWeight:600,color:'var(--blue2)'}}>📎 {staged.length} file{staged.length>1?'s':''} ready</div>
+        <div style={{display:'flex',gap:6}}>
+          <button className="btn-primary btn-sm" onClick={submit}>✨ Extract with AI</button>
+          <button className="btn-danger btn-sm" onClick={clearStaged}>Clear</button>
+        </div>
+      </div>
+      <div style={{display:'flex',gap:8,overflowX:'auto',paddingBottom:4}}>
+        {staged.map((s,i) => (
+          <div key={i} style={{position:'relative',flexShrink:0}}>
+            {s.preview ? <img src={s.preview} style={{width:72,height:72,objectFit:'cover',borderRadius:8,border:'1px solid var(--border)'}} />
+              : <div style={{width:72,height:72,borderRadius:8,border:'1px solid var(--border)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,color:'var(--text3)',background:'var(--bg3)',padding:4,textAlign:'center',wordBreak:'break-all'}}>{s.file.name.slice(0,20)}</div>}
+            <button onClick={()=>removeStaged(i)} style={{position:'absolute',top:-4,right:-4,width:18,height:18,borderRadius:'50%',background:'var(--red)',color:'#fff',border:'none',fontSize:10,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}>×</button>
+          </div>
+        ))}
+      </div>
+      <div style={{fontSize:10,color:'var(--text3)',marginTop:6}}>Paste more images (Ctrl+V) or drag more files, then hit Extract</div>
+    </div>
+  );
+
+  return (
+    <div ref={ref}
+      onDragOver={e=>{e.preventDefault();setDragOver(true);}}
+      onDragLeave={()=>setDragOver(false)}
+      onDrop={onDrop}
+      style={{padding:dragOver?20:14,background:dragOver?'rgba(59,130,246,.1)':'rgba(59,130,246,.03)',border:`2px dashed ${dragOver?'var(--blue)':'var(--border)'}`,borderRadius:12,marginBottom:12,textAlign:'center',cursor:'default',transition:'all .2s'}}>
+      <div style={{fontSize:13,color:dragOver?'var(--blue2)':'var(--text3)',fontWeight:dragOver?600:400}}>
+        {dragOver ? '📎 Drop files here…' : (label || '📎 Drag & drop files here, or paste images (Ctrl+V)')}
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
 // MY CLIENT — Profile + Dependants
 // ═══════════════════════════════════════════════════════════════
 
@@ -2888,6 +2957,15 @@ function ProfileTab() {
 
   // Auto-save on change
   useEffect(() => { saveProfile(p); }, [p]);
+
+  // Pick up files dropped from Dashboard
+  useEffect(() => {
+    if(window._pendingDropFiles) {
+      const files = window._pendingDropFiles;
+      window._pendingDropFiles = null;
+      scanProfile(files);
+    }
+  }, []);
 
   const set = (k,v) => setP(prev=>({...prev,[k]:v}));
   const addDep = () => setP(prev=>({...prev,dependants:[...(prev.dependants||[]),{id:'dep_'+Date.now(),name:'',relationship:'',dob:'',gender:'',smoker:'',nationality:'',occupation:''}]}));
@@ -2948,6 +3026,9 @@ function ProfileTab() {
           <button className="btn-secondary btn-sm" onClick={()=>uploadRef.current?.click()} disabled={scanning}>{scanning?'…':'📄 Upload'}</button>
         </div>
       </div>
+
+      {/* Drop / Paste zone */}
+      <DropZone active={true} onFiles={scanProfile} label="📎 Drop or paste client documents here (NRIC, FNA, KYC) — AI will extract profile details" />
 
       {/* Client Details */}
       <div className="card" style={{marginBottom:16}}>
@@ -3014,7 +3095,18 @@ function ProfileTab() {
 // ═══════════════════════════════════════════════════════════════
 
 function Dashboard() {
-  const {policies,setTab} = useContext(AppCtx);
+  const {policies,setTab,apiKey,clientProfile,saveProfile} = useContext(AppCtx);
+
+  // Dashboard drop handler — route to profile or policies
+  const handleDashDrop = async (files) => {
+    const ak = apiKey || (await dbGet('settings','apiKey').catch(()=>null))?.value;
+    if(!ak){alert('Set Anthropic API key in Settings first');return;}
+    const choice = confirm('What are these documents?\n\nOK = Client profile (NRIC, FNA, KYC)\nCancel = Policy documents');
+    if(choice) setTab('profile');
+    else setTab('policies');
+    // Store files for the target tab to pick up
+    window._pendingDropFiles = files;
+  };
 
   const byCategory = useMemo(() => {
     const m = {};
@@ -3073,6 +3165,9 @@ function Dashboard() {
 
   return (
     <div className="fade-in">
+      {/* Drop / Paste zone — routes to Profile or Policies */}
+      <DropZone active={true} onFiles={handleDashDrop} label="📎 Drop or paste any document — client profile, policy contracts, benefit illustrations" />
+
       {/* Summary cards */}
       <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))',gap:12,marginBottom:20}}>
         <div className="card card-sm">
@@ -3187,6 +3282,12 @@ function Policies() {
   useEffect(() => {
     const draft = loadDraft();
     if(draft && draft.productName) setDraftBanner(true);
+    // Pick up files dropped from Dashboard
+    if(window._pendingDropFiles) {
+      const files = window._pendingDropFiles;
+      window._pendingDropFiles = null;
+      setTimeout(()=>handleExtract(files), 100);
+    }
   }, []);
 
   const restoreDraft = () => {
@@ -3316,6 +3417,9 @@ Return ONLY valid JSON, no markdown fences, no explanation.`;
           <button className="btn-primary btn-sm" onClick={()=>{setEditing(null);setScanResult(null);setShowForm(true)}}>+ Add</button>
         </div>
       </div>
+
+      {/* Drop / Paste zone for policy extraction */}
+      {!showForm && <DropZone active={!showForm} onFiles={(files)=>handleExtract(files)} label="📎 Drop or paste policy documents here — AI will extract and populate" />}
 
       {/* Draft restore banner */}
       {draftBanner && !showForm && (
@@ -3580,6 +3684,9 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
             <button onClick={onClose} style={{background:'none',color:'var(--text3)',fontSize:20,marginLeft:4}}>×</button>
           </div>
         </div>
+
+        {/* Drop / Paste zone inside form */}
+        <DropZone active={true} onFiles={(files)=>scanIntoForm(files)} label="📎 Drop or paste policy docs here to auto-fill this form" />
 
         {/* Fuzzy match alert */}
         {showFuzzy && !isEdit && (
