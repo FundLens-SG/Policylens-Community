@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="g1" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3b82f6"/>
+      <stop offset="100%" stop-color="#1d4ed8"/>
+    </linearGradient>
+    <linearGradient id="g2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#60a5fa"/>
+      <stop offset="100%" stop-color="#3b82f6"/>
+    </linearGradient>
+    <linearGradient id="g3" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#93c5fd"/>
+      <stop offset="100%" stop-color="#3b82f6"/>
+    </linearGradient>
+  </defs>
+  <!-- Lens handle -->
+  <rect x="340" y="340" width="42" height="160" rx="21" transform="rotate(45 361 420)" fill="url(#g1)" opacity="0.9"/>
+  <rect x="347" y="347" width="28" height="140" rx="14" transform="rotate(45 361 417)" fill="#1e40af" opacity="0.4"/>
+  <!-- Lens ring -->
+  <circle cx="210" cy="210" r="175" fill="none" stroke="url(#g1)" stroke-width="36"/>
+  <circle cx="210" cy="210" r="175" fill="none" stroke="#60a5fa" stroke-width="4" opacity="0.5"/>
+  <!-- Inner lens glass -->
+  <circle cx="210" cy="210" r="148" fill="#0f172a" opacity="0.85"/>
+  <circle cx="210" cy="210" r="148" fill="url(#g2)" opacity="0.08"/>
+  <!-- Shield inside lens -->
+  <path d="M210 95 C210 95 280 120 290 130 C300 140 300 210 290 250 C280 290 210 330 210 330 C210 330 140 290 130 250 C120 210 120 140 130 130 C140 120 210 95 210 95Z" fill="url(#g3)" opacity="0.25" stroke="#60a5fa" stroke-width="2.5" opacity="0.6"/>
+  <!-- Document lines inside shield -->
+  <rect x="172" y="155" width="76" height="5" rx="2.5" fill="#93c5fd" opacity="0.8"/>
+  <rect x="172" y="175" width="60" height="5" rx="2.5" fill="#93c5fd" opacity="0.6"/>
+  <rect x="172" y="195" width="76" height="5" rx="2.5" fill="#93c5fd" opacity="0.8"/>
+  <rect x="172" y="215" width="50" height="5" rx="2.5" fill="#93c5fd" opacity="0.5"/>
+  <rect x="172" y="235" width="68" height="5" rx="2.5" fill="#93c5fd" opacity="0.7"/>
+  <!-- Checkmark on shield -->
+  <path d="M194 258 L208 274 L238 240" fill="none" stroke="#34d399" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Lens glare -->
+  <ellipse cx="155" cy="140" rx="35" ry="12" transform="rotate(-40 155 140)" fill="white" opacity="0.15"/>
+</svg>

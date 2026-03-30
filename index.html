@@ -12,6 +12,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 <!-- Gemini handles PDFs natively — no pdf.js needed -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+CiAgPGNpcmNsZSBjeD0iMTMiIGN5PSIxMyIgcj0iMTAiIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzNiODJmNiIgc3Ryb2tlLXdpZHRoPSIzIi8+CiAgPGNpcmNsZSBjeD0iMTMiIGN5PSIxMyIgcj0iNyIgZmlsbD0iIzBmMTcyYSIvPgogIDxwYXRoIGQ9Ik0xMyA3IEMxMyA3IDE3IDguNSAxNy41IDkgQzE4IDkuNSAxOCAxMyAxNy41IDE1IEMxNyAxNyAxMyAxOSAxMyAxOSBDMTMgMTkgOSAxNyA4LjUgMTUgQzggMTMgOCA5LjUgOC41IDkgQzkgOC41IDEzIDcgMTMgN1oiIGZpbGw9IiMzYjgyZjYiIG9wYWNpdHk9IjAuMyIgc3Ryb2tlPSIjNjBhNWZhIiBzdHJva2Utd2lkdGg9IjAuNSIvPgogIDxwYXRoIGQ9Ik0xMSAxNSBMMTIuNSAxNi44IEwxNiAxMi41IiBmaWxsPSJub25lIiBzdHJva2U9IiMzNGQzOTkiIHN0cm9rZS13aWR0aD0iMS4yIiBzdHJva2UtbGluZWNhcD0icm91bmQiLz4KICA8bGluZSB4MT0iMjEiIHkxPSIyMSIgeDI9IjI5IiB5Mj0iMjkiIHN0cm9rZT0iIzNiODJmNiIgc3Ryb2tlLXdpZHRoPSIzLjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgo8L3N2Zz4=">
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
@@ -98,7 +99,7 @@ label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;lett
 <div id="auth-gate">
   <div class="auth-card">
     <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
-      <span style="font-size:28px">🔍</span>
+      <img src="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA1MTIgNTEyIj4KICA8ZGVmcz4KICAgIDxsaW5lYXJHcmFkaWVudCBpZD0iZzEiIHgxPSIwJSIgeTE9IjAlIiB4Mj0iMTAwJSIgeTI9IjEwMCUiPgogICAgICA8c3RvcCBvZmZzZXQ9IjAlIiBzdG9wLWNvbG9yPSIjM2I4MmY2Ii8+CiAgICAgIDxzdG9wIG9mZnNldD0iMTAwJSIgc3RvcC1jb2xvcj0iIzFkNGVkOCIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICAgIDxsaW5lYXJHcmFkaWVudCBpZD0iZzIiIHgxPSIwJSIgeTE9IjAlIiB4Mj0iMTAwJSIgeTI9IjEwMCUiPgogICAgICA8c3RvcCBvZmZzZXQ9IjAlIiBzdG9wLWNvbG9yPSIjNjBhNWZhIi8+CiAgICAgIDxzdG9wIG9mZnNldD0iMTAwJSIgc3RvcC1jb2xvcj0iIzNiODJmNiIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICAgIDxsaW5lYXJHcmFkaWVudCBpZD0iZzMiIHgxPSIwJSIgeTE9IjAlIiB4Mj0iMCUiIHkyPSIxMDAlIj4KICAgICAgPHN0b3Agb2Zmc2V0PSIwJSIgc3RvcC1jb2xvcj0iIzkzYzVmZCIvPgogICAgICA8c3RvcCBvZmZzZXQ9IjEwMCUiIHN0b3AtY29sb3I9IiMzYjgyZjYiLz4KICAgIDwvbGluZWFyR3JhZGllbnQ+CiAgPC9kZWZzPgogIDwhLS0gTGVucyBoYW5kbGUgLS0+CiAgPHJlY3QgeD0iMzQwIiB5PSIzNDAiIHdpZHRoPSI0MiIgaGVpZ2h0PSIxNjAiIHJ4PSIyMSIgdHJhbnNmb3JtPSJyb3RhdGUoNDUgMzYxIDQyMCkiIGZpbGw9InVybCgjZzEpIiBvcGFjaXR5PSIwLjkiLz4KICA8cmVjdCB4PSIzNDciIHk9IjM0NyIgd2lkdGg9IjI4IiBoZWlnaHQ9IjE0MCIgcng9IjE0IiB0cmFuc2Zvcm09InJvdGF0ZSg0NSAzNjEgNDE3KSIgZmlsbD0iIzFlNDBhZiIgb3BhY2l0eT0iMC40Ii8+CiAgPCEtLSBMZW5zIHJpbmcgLS0+CiAgPGNpcmNsZSBjeD0iMjEwIiBjeT0iMjEwIiByPSIxNzUiIGZpbGw9Im5vbmUiIHN0cm9rZT0idXJsKCNnMSkiIHN0cm9rZS13aWR0aD0iMzYiLz4KICA8Y2lyY2xlIGN4PSIyMTAiIGN5PSIyMTAiIHI9IjE3NSIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjNjBhNWZhIiBzdHJva2Utd2lkdGg9IjQiIG9wYWNpdHk9IjAuNSIvPgogIDwhLS0gSW5uZXIgbGVucyBnbGFzcyAtLT4KICA8Y2lyY2xlIGN4PSIyMTAiIGN5PSIyMTAiIHI9IjE0OCIgZmlsbD0iIzBmMTcyYSIgb3BhY2l0eT0iMC44NSIvPgogIDxjaXJjbGUgY3g9IjIxMCIgY3k9IjIxMCIgcj0iMTQ4IiBmaWxsPSJ1cmwoI2cyKSIgb3BhY2l0eT0iMC4wOCIvPgogIDwhLS0gU2hpZWxkIGluc2lkZSBsZW5zIC0tPgogIDxwYXRoIGQ9Ik0yMTAgOTUgQzIxMCA5NSAyODAgMTIwIDI5MCAxMzAgQzMwMCAxNDAgMzAwIDIxMCAyOTAgMjUwIEMyODAgMjkwIDIxMCAzMzAgMjEwIDMzMCBDMjEwIDMzMCAxNDAgMjkwIDEzMCAyNTAgQzEyMCAyMTAgMTIwIDE0MCAxMzAgMTMwIEMxNDAgMTIwIDIxMCA5NSAyMTAgOTVaIiBmaWxsPSJ1cmwoI2czKSIgb3BhY2l0eT0iMC4yNSIgc3Ryb2tlPSIjNjBhNWZhIiBzdHJva2Utd2lkdGg9IjIuNSIgb3BhY2l0eT0iMC42Ii8+CiAgPCEtLSBEb2N1bWVudCBsaW5lcyBpbnNpZGUgc2hpZWxkIC0tPgogIDxyZWN0IHg9IjE3MiIgeT0iMTU1IiB3aWR0aD0iNzYiIGhlaWdodD0iNSIgcng9IjIuNSIgZmlsbD0iIzkzYzVmZCIgb3BhY2l0eT0iMC44Ii8+CiAgPHJlY3QgeD0iMTcyIiB5PSIxNzUiIHdpZHRoPSI2MCIgaGVpZ2h0PSI1IiByeD0iMi41IiBmaWxsPSIjOTNjNWZkIiBvcGFjaXR5PSIwLjYiLz4KICA8cmVjdCB4PSIxNzIiIHk9IjE5NSIgd2lkdGg9Ijc2IiBoZWlnaHQ9IjUiIHJ4PSIyLjUiIGZpbGw9IiM5M2M1ZmQiIG9wYWNpdHk9IjAuOCIvPgogIDxyZWN0IHg9IjE3MiIgeT0iMjE1IiB3aWR0aD0iNTAiIGhlaWdodD0iNSIgcng9IjIuNSIgZmlsbD0iIzkzYzVmZCIgb3BhY2l0eT0iMC41Ii8+CiAgPHJlY3QgeD0iMTcyIiB5PSIyMzUiIHdpZHRoPSI2OCIgaGVpZ2h0PSI1IiByeD0iMi41IiBmaWxsPSIjOTNjNWZkIiBvcGFjaXR5PSIwLjciLz4KICA8IS0tIENoZWNrbWFyayBvbiBzaGllbGQgLS0+CiAgPHBhdGggZD0iTTE5NCAyNTggTDIwOCAyNzQgTDIzOCAyNDAiIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzM0ZDM5OSIgc3Ryb2tlLXdpZHRoPSI3IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz4KICA8IS0tIExlbnMgZ2xhcmUgLS0+CiAgPGVsbGlwc2UgY3g9IjE1NSIgY3k9IjE0MCIgcng9IjM1IiByeT0iMTIiIHRyYW5zZm9ybT0icm90YXRlKC00MCAxNTUgMTQwKSIgZmlsbD0id2hpdGUiIG9wYWNpdHk9IjAuMTUiLz4KPC9zdmc+" alt="PolicyLens" style="width:56px;height:56px;">
       <div><h2>PolicyLens</h2><div class="auth-sub">Sign in to access your portfolio</div></div>
     </div>
     <div id="auth-message" style="display:none"></div>
@@ -320,6 +321,11 @@ document.addEventListener('DOMContentLoaded',function(){
 <script type="text/babel">
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext} = React;
 
+// PolicyLens Logo (inline SVG base64)
+const PL_LOGO = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA1MTIgNTEyIj4KICA8ZGVmcz4KICAgIDxsaW5lYXJHcmFkaWVudCBpZD0iZzEiIHgxPSIwJSIgeTE9IjAlIiB4Mj0iMTAwJSIgeTI9IjEwMCUiPgogICAgICA8c3RvcCBvZmZzZXQ9IjAlIiBzdG9wLWNvbG9yPSIjM2I4MmY2Ii8+CiAgICAgIDxzdG9wIG9mZnNldD0iMTAwJSIgc3RvcC1jb2xvcj0iIzFkNGVkOCIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICAgIDxsaW5lYXJHcmFkaWVudCBpZD0iZzIiIHgxPSIwJSIgeTE9IjAlIiB4Mj0iMTAwJSIgeTI9IjEwMCUiPgogICAgICA8c3RvcCBvZmZzZXQ9IjAlIiBzdG9wLWNvbG9yPSIjNjBhNWZhIi8+CiAgICAgIDxzdG9wIG9mZnNldD0iMTAwJSIgc3RvcC1jb2xvcj0iIzNiODJmNiIvPgogICAgPC9saW5lYXJHcmFkaWVudD4KICAgIDxsaW5lYXJHcmFkaWVudCBpZD0iZzMiIHgxPSIwJSIgeTE9IjAlIiB4Mj0iMCUiIHkyPSIxMDAlIj4KICAgICAgPHN0b3Agb2Zmc2V0PSIwJSIgc3RvcC1jb2xvcj0iIzkzYzVmZCIvPgogICAgICA8c3RvcCBvZmZzZXQ9IjEwMCUiIHN0b3AtY29sb3I9IiMzYjgyZjYiLz4KICAgIDwvbGluZWFyR3JhZGllbnQ+CiAgPC9kZWZzPgogIDwhLS0gTGVucyBoYW5kbGUgLS0+CiAgPHJlY3QgeD0iMzQwIiB5PSIzNDAiIHdpZHRoPSI0MiIgaGVpZ2h0PSIxNjAiIHJ4PSIyMSIgdHJhbnNmb3JtPSJyb3RhdGUoNDUgMzYxIDQyMCkiIGZpbGw9InVybCgjZzEpIiBvcGFjaXR5PSIwLjkiLz4KICA8cmVjdCB4PSIzNDciIHk9IjM0NyIgd2lkdGg9IjI4IiBoZWlnaHQ9IjE0MCIgcng9IjE0IiB0cmFuc2Zvcm09InJvdGF0ZSg0NSAzNjEgNDE3KSIgZmlsbD0iIzFlNDBhZiIgb3BhY2l0eT0iMC40Ii8+CiAgPCEtLSBMZW5zIHJpbmcgLS0+CiAgPGNpcmNsZSBjeD0iMjEwIiBjeT0iMjEwIiByPSIxNzUiIGZpbGw9Im5vbmUiIHN0cm9rZT0idXJsKCNnMSkiIHN0cm9rZS13aWR0aD0iMzYiLz4KICA8Y2lyY2xlIGN4PSIyMTAiIGN5PSIyMTAiIHI9IjE3NSIgZmlsbD0ibm9uZSIgc3Ryb2tlPSIjNjBhNWZhIiBzdHJva2Utd2lkdGg9IjQiIG9wYWNpdHk9IjAuNSIvPgogIDwhLS0gSW5uZXIgbGVucyBnbGFzcyAtLT4KICA8Y2lyY2xlIGN4PSIyMTAiIGN5PSIyMTAiIHI9IjE0OCIgZmlsbD0iIzBmMTcyYSIgb3BhY2l0eT0iMC44NSIvPgogIDxjaXJjbGUgY3g9IjIxMCIgY3k9IjIxMCIgcj0iMTQ4IiBmaWxsPSJ1cmwoI2cyKSIgb3BhY2l0eT0iMC4wOCIvPgogIDwhLS0gU2hpZWxkIGluc2lkZSBsZW5zIC0tPgogIDxwYXRoIGQ9Ik0yMTAgOTUgQzIxMCA5NSAyODAgMTIwIDI5MCAxMzAgQzMwMCAxNDAgMzAwIDIxMCAyOTAgMjUwIEMyODAgMjkwIDIxMCAzMzAgMjEwIDMzMCBDMjEwIDMzMCAxNDAgMjkwIDEzMCAyNTAgQzEyMCAyMTAgMTIwIDE0MCAxMzAgMTMwIEMxNDAgMTIwIDIxMCA5NSAyMTAgOTVaIiBmaWxsPSJ1cmwoI2czKSIgb3BhY2l0eT0iMC4yNSIgc3Ryb2tlPSIjNjBhNWZhIiBzdHJva2Utd2lkdGg9IjIuNSIgb3BhY2l0eT0iMC42Ii8+CiAgPCEtLSBEb2N1bWVudCBsaW5lcyBpbnNpZGUgc2hpZWxkIC0tPgogIDxyZWN0IHg9IjE3MiIgeT0iMTU1IiB3aWR0aD0iNzYiIGhlaWdodD0iNSIgcng9IjIuNSIgZmlsbD0iIzkzYzVmZCIgb3BhY2l0eT0iMC44Ii8+CiAgPHJlY3QgeD0iMTcyIiB5PSIxNzUiIHdpZHRoPSI2MCIgaGVpZ2h0PSI1IiByeD0iMi41IiBmaWxsPSIjOTNjNWZkIiBvcGFjaXR5PSIwLjYiLz4KICA8cmVjdCB4PSIxNzIiIHk9IjE5NSIgd2lkdGg9Ijc2IiBoZWlnaHQ9IjUiIHJ4PSIyLjUiIGZpbGw9IiM5M2M1ZmQiIG9wYWNpdHk9IjAuOCIvPgogIDxyZWN0IHg9IjE3MiIgeT0iMjE1IiB3aWR0aD0iNTAiIGhlaWdodD0iNSIgcng9IjIuNSIgZmlsbD0iIzkzYzVmZCIgb3BhY2l0eT0iMC41Ii8+CiAgPHJlY3QgeD0iMTcyIiB5PSIyMzUiIHdpZHRoPSI2OCIgaGVpZ2h0PSI1IiByeD0iMi41IiBmaWxsPSIjOTNjNWZkIiBvcGFjaXR5PSIwLjciLz4KICA8IS0tIENoZWNrbWFyayBvbiBzaGllbGQgLS0+CiAgPHBhdGggZD0iTTE5NCAyNTggTDIwOCAyNzQgTDIzOCAyNDAiIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzM0ZDM5OSIgc3Ryb2tlLXdpZHRoPSI3IiBzdHJva2UtbGluZWNhcD0icm91bmQiIHN0cm9rZS1saW5lam9pbj0icm91bmQiLz4KICA8IS0tIExlbnMgZ2xhcmUgLS0+CiAgPGVsbGlwc2UgY3g9IjE1NSIgY3k9IjE0MCIgcng9IjM1IiByeT0iMTIiIHRyYW5zZm9ybT0icm90YXRlKC00MCAxNTUgMTQwKSIgZmlsbD0id2hpdGUiIG9wYWNpdHk9IjAuMTUiLz4KPC9zdmc+';
+const PL_ICON = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAzMiAzMiI+CiAgPGNpcmNsZSBjeD0iMTMiIGN5PSIxMyIgcj0iMTAiIGZpbGw9Im5vbmUiIHN0cm9rZT0iIzNiODJmNiIgc3Ryb2tlLXdpZHRoPSIzIi8+CiAgPGNpcmNsZSBjeD0iMTMiIGN5PSIxMyIgcj0iNyIgZmlsbD0iIzBmMTcyYSIvPgogIDxwYXRoIGQ9Ik0xMyA3IEMxMyA3IDE3IDguNSAxNy41IDkgQzE4IDkuNSAxOCAxMyAxNy41IDE1IEMxNyAxNyAxMyAxOSAxMyAxOSBDMTMgMTkgOSAxNyA4LjUgMTUgQzggMTMgOCA5LjUgOC41IDkgQzkgOC41IDEzIDcgMTMgN1oiIGZpbGw9IiMzYjgyZjYiIG9wYWNpdHk9IjAuMyIgc3Ryb2tlPSIjNjBhNWZhIiBzdHJva2Utd2lkdGg9IjAuNSIvPgogIDxwYXRoIGQ9Ik0xMSAxNSBMMTIuNSAxNi44IEwxNiAxMi41IiBmaWxsPSJub25lIiBzdHJva2U9IiMzNGQzOTkiIHN0cm9rZS13aWR0aD0iMS4yIiBzdHJva2UtbGluZWNhcD0icm91bmQiLz4KICA8bGluZSB4MT0iMjEiIHkxPSIyMSIgeDI9IjI5IiB5Mj0iMjkiIHN0cm9rZT0iIzNiODJmNiIgc3Ryb2tlLXdpZHRoPSIzLjUiIHN0cm9rZS1saW5lY2FwPSJyb3VuZCIvPgo8L3N2Zz4=';
+const LogoMark = ({size=24}) => <img src={PL_LOGO} alt="PolicyLens" style={{width:size,height:size}} />;
+
 // ═══════════════════════════════════════════════════════════════
 // CONSTANTS & DATA MODEL
 // ═══════════════════════════════════════════════════════════════
@@ -343,6 +349,30 @@ const SUB_TYPES = {
 };
 
 const UL_FAMILY = ['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'];
+
+// ═══ SG INSURANCE CONSTANTS (MOH/CPF Board 2024) ═══
+function getMSLPremium(age) {
+  if(age<21) return 150; if(age<31) return 320; if(age<36) return 450;
+  if(age<41) return 630; if(age<46) return 800; if(age<51) return 1000;
+  if(age<56) return 1420; if(age<61) return 1780; if(age<66) return 2480;
+  if(age<71) return 3090; if(age<76) return 3900; if(age<81) return 4660;
+  if(age<86) return 5500; return 6360;
+}
+function getISPAWL(age) {
+  const anb = age + 1;
+  if (anb <= 40) return 300;
+  if (anb <= 70) return 600;
+  return 900;
+}
+function calcISPBreakdown(totalPrem, age) {
+  const msl = getMSLPremium(age);
+  const awl = getISPAWL(age);
+  const ispAdditional = Math.max(0, totalPrem - msl);
+  const ispMediSave = Math.min(ispAdditional, awl);
+  const ispCash = Math.max(0, ispAdditional - awl);
+  return { msl, awl, ispAdditional, ispMediSave, ispCash, totalMediSave: msl + ispMediSave, totalCash: ispCash };
+}
+const CARESHIELD_MEDISAVE_CAP = 600;
 
 // ═══════════════════════════════════════════════════════════════
 // INSURER REGISTRY — brand colors + logos for SG market
@@ -418,6 +448,46 @@ const InsurerSelect = ({value,onChange,style}) => {
       React.createElement('option',{value:'__other'},'Other…')
     ),
     isOther && React.createElement('input',{value:other,onChange:e=>{setOther(e.target.value);onChange(e.target.value);},placeholder:'Type insurer name',style:{marginTop:4,width:'100%',fontSize:12}})
+  );
+};
+
+// Fuzzy autocomplete input — shows matching suggestions from a list as user types
+const FuzzyInput = ({value,onChange,suggestions,placeholder,style,onSelect}) => {
+  const [open,setOpen] = React.useState(false);
+  const [filtered,setFiltered] = React.useState([]);
+  const ref = React.useRef(null);
+  React.useEffect(() => {
+    if(!value || value.length < 2 || !suggestions || suggestions.length === 0) { setFiltered([]); return; }
+    const q = value.toLowerCase();
+    const matches = suggestions.filter(s => {
+      const t = (s.label||s).toLowerCase();
+      if(t.includes(q)) return true;
+      // Simple fuzzy: check if all chars of query appear in order
+      let qi=0;
+      for(let i=0;i<t.length&&qi<q.length;i++) if(t[i]===q[qi]) qi++;
+      return qi >= q.length * 0.7;
+    }).slice(0,8);
+    setFiltered(matches);
+    setOpen(matches.length > 0);
+  }, [value, suggestions]);
+  React.useEffect(() => {
+    const handler = (e) => { if(ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+  return React.createElement('div', {ref, style:{position:'relative'}},
+    React.createElement('input', {value:value||'', onChange:e=>{onChange(e.target.value);setOpen(true);}, onFocus:()=>{if(filtered.length>0)setOpen(true);}, placeholder, style:{...style,width:'100%'}}),
+    open && filtered.length > 0 && React.createElement('div', {style:{position:'absolute',top:'100%',left:0,right:0,background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:8,maxHeight:200,overflowY:'auto',zIndex:100,boxShadow:'var(--shadow)'}},
+      filtered.map((item,i) => {
+        const label = item.label || item;
+        const sub = item.sub || '';
+        return React.createElement('div', {key:i, style:{padding:'8px 12px',cursor:'pointer',borderBottom:'1px solid var(--border)',fontSize:12}, 
+          onMouseDown:e=>{e.preventDefault();onChange(label);if(onSelect)onSelect(item);setOpen(false);}},
+          React.createElement('div', {style:{fontWeight:600}}, label),
+          sub && React.createElement('div', {style:{fontSize:10,color:'var(--text3)',marginTop:2}}, sub)
+        );
+      })
+    )
   );
 };
 
@@ -2918,7 +2988,7 @@ function App() {
   const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,deletePolicy,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,tab,setTab};
 
   if(loading) return <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh'}}>
-    <div style={{textAlign:'center'}}><div style={{fontSize:28,marginBottom:8}}>🔍</div><div style={{color:'var(--text2)',fontSize:14}}>Loading PolicyLens…</div></div>
+    <div style={{textAlign:'center'}}><LogoMark size={36} /><div style={{color:'var(--text2)',fontSize:14,marginTop:8}}>Loading PolicyLens…</div></div>
   </div>;
 
   return (
@@ -2929,6 +2999,7 @@ function App() {
         {tab==='dashboard' && <Dashboard />}
         {tab==='policies' && <Policies />}
         {tab==='repository' && <Repository />}
+        {tab==='analysis' && <PortfolioAnalysis />}
         {tab==='funds' && <FundLookup />}
         {tab==='report' && <ReportTab />}
         {tab==='settings' && <Settings />}
@@ -2948,6 +3019,7 @@ function Header() {
     {id:'dashboard',label:'Dashboard',icon:'📊'},
     {id:'policies',label:'Policies',icon:'📋'},
     {id:'repository',label:'Repository',icon:'🗄️'},
+    {id:'analysis',label:'Analysis',icon:'📈'},
     {id:'funds',label:'Fund Risk',icon:'📉'},
     {id:'report',label:'PDF Report',icon:'📄'},
     {id:'settings',label:'Settings',icon:'⚙️'},
@@ -2955,7 +3027,7 @@ function Header() {
   return (
     <div style={{background:'var(--bg2)',borderBottom:'1px solid var(--border)',padding:'0 20px',display:'flex',alignItems:'center',gap:8,flexShrink:0,overflow:'auto'}}>
       <div style={{display:'flex',alignItems:'center',gap:8,padding:'12px 0',marginRight:16,flexShrink:0}}>
-        <span style={{fontSize:22}}>🔍</span>
+        <LogoMark size={26} />
         <span style={{fontWeight:700,fontSize:17,letterSpacing:'-0.3px'}}>PolicyLens</span>
         <span style={{fontSize:10,color:'var(--text3)',fontWeight:600,background:'var(--bg4)',padding:'2px 6px',borderRadius:4}}>v4</span>
         {clientName && <span style={{fontSize:12,color:'var(--text3)',marginLeft:8}}>— {clientName}</span>}
@@ -3293,6 +3365,22 @@ function ProfileTab() {
         {age && <div style={{fontSize:12,color:'var(--text3)',marginTop:8}}>Current Age: <strong>{age}</strong></div>}
       </div>
 
+      {/* Financial Profile */}
+      <div className="card" style={{marginBottom:16}}>
+        <h3 style={{fontSize:14,fontWeight:600,marginBottom:12}}>Financial Profile</h3>
+        <div style={{fontSize:11,color:'var(--text3)',marginBottom:10}}>Used for protection gap analysis, retirement projections, and cashflow timeline</div>
+        <div className="grid-3">
+          <div className="field"><label>Gross Annual Income ($)</label><input type="number" value={p.annualIncome||''} onChange={e=>set('annualIncome',e.target.value)} placeholder="e.g. 120000" /><div style={{fontSize:10,color:'var(--text3)'}}>{p.annualIncome ? '$'+(Math.round(p.annualIncome/12)).toLocaleString()+'/mth' : ''}</div></div>
+          <div className="field"><label>Monthly Expenses ($)</label><input type="number" value={p.monthlyExpenses||''} onChange={e=>set('monthlyExpenses',e.target.value)} placeholder="e.g. 4000" /></div>
+          <div className="field"><label>Target Retirement Age</label><input type="number" value={p.retirementAge||65} onChange={e=>set('retirementAge',e.target.value)} /></div>
+        </div>
+        <div className="grid-3">
+          <div className="field"><label>Mortgage Payment ($/mth)</label><input type="number" value={p.mortgagePayment||''} onChange={e=>set('mortgagePayment',e.target.value)} placeholder="0 if none" /></div>
+          <div className="field"><label>Dependant Support ($/mth)</label><input type="number" value={p.dependantSupport||''} onChange={e=>set('dependantSupport',e.target.value)} placeholder="Total for all dependants" /></div>
+          <div className="field"><label>Medical Budget ($/mth)</label><input type="number" value={p.medicalBudget||300} onChange={e=>set('medicalBudget',e.target.value)} /></div>
+        </div>
+      </div>
+
       {/* Dependants */}
       <div className="card">
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
@@ -3360,21 +3448,39 @@ function Dashboard() {
   const totalPremium = useMemo(() => policies.reduce((s,p) => s + (parseFloat(p.annualPremium)||0), 0), [policies]);
   const totalCoverage = useMemo(() => policies.reduce((s,p) => s + (parseFloat(p.sumAssured)||0), 0), [policies]);
 
-  // Gap analysis
+  // Gap analysis — synced with client profile income
   const gaps = useMemo(() => {
+    const income = parseFloat(clientProfile?.annualIncome)||0;
+    const monthly = (parseFloat(clientProfile?.monthlyExpenses)||0)+(parseFloat(clientProfile?.mortgagePayment)||0)+(parseFloat(clientProfile?.medicalBudget)||300);
     const protPolicies = byCategory.protection || [];
-    const deathCover = protPolicies.reduce((s,p) => s + (parseFloat(p.sumAssured)||0), 0);
-    const ciCover = protPolicies.filter(p => p.subType==='Critical Illness').reduce((s,p) => s + (parseFloat(p.sumAssured)||0), 0);
+    // Sum from riders too
+    let deathCover=0, tpdCover=0, ciCover=0;
+    policies.forEach(p => {
+      if(p.category==='protection' && !['Personal Accident','Critical Illness'].includes(p.subType)) {
+        const sa = parseFloat(p.sumAssured)||0;
+        const mult = parseFloat(p.saMultiplier)||1;
+        deathCover += sa*mult; tpdCover += sa*mult;
+      }
+      if(p.subType==='Critical Illness') ciCover += parseFloat(p.sumAssured)||0;
+      (p.riders||[]).forEach(r => {
+        if(r.type==='death') deathCover += parseFloat(r.sa)||0;
+        if(r.type==='tpd') tpdCover += parseFloat(r.sa)||0;
+        if(r.type==='ci') ciCover += parseFloat(r.sa)||0;
+      });
+    });
     const hasISP = (byCategory.health||[]).some(p => p.subType==='Integrated Shield Plan');
     const retPolicies = byCategory.retirement || [];
-    const retIncome = retPolicies.reduce((s,p) => s + (parseFloat(p.monthlyBenefit)||0), 0);
+    const retIncome = retPolicies.reduce((s,p) => s + (parseFloat(p.annuityMonthly)||parseFloat(p.monthlyBenefit)||0), 0);
+    const recDeath = income>0 ? income*10 : RECOMMENDED_COVERAGE.protection.death;
+    const recCI = income>0 ? monthly*12*5 : RECOMMENDED_COVERAGE.protection.ci;
+    const recRet = income>0 ? Math.round(income/12*0.7) : RECOMMENDED_COVERAGE.retirement.monthlyIncome;
     return {
-      death: {current:deathCover,recommended:RECOMMENDED_COVERAGE.protection.death,pct:Math.min(deathCover/RECOMMENDED_COVERAGE.protection.death,1)},
-      ci: {current:ciCover,recommended:RECOMMENDED_COVERAGE.protection.ci,pct:Math.min(ciCover/RECOMMENDED_COVERAGE.protection.ci,1)},
+      death: {current:deathCover,recommended:recDeath,pct:recDeath>0?Math.min(deathCover/recDeath,1):0},
+      ci: {current:ciCover,recommended:recCI,pct:recCI>0?Math.min(ciCover/recCI,1):0},
       isp: {current:hasISP?1:0,recommended:1,pct:hasISP?1:0},
-      retirement: {current:retIncome,recommended:RECOMMENDED_COVERAGE.retirement.monthlyIncome,pct:Math.min(retIncome/RECOMMENDED_COVERAGE.retirement.monthlyIncome,1)},
+      retirement: {current:retIncome,recommended:recRet,pct:recRet>0?Math.min(retIncome/recRet,1):0},
     };
-  }, [byCategory]);
+  }, [byCategory,policies,clientProfile]);
 
   const chartRef = useRef(null);
   const chartInst = useRef(null);
@@ -3394,7 +3500,7 @@ function Dashboard() {
 
   if(policies.length === 0) return (
     <div className="fade-in" style={{textAlign:'center',padding:'60px 20px'}}>
-      <div style={{fontSize:48,marginBottom:12}}>🔍</div>
+      <LogoMark size={56} />
       <h2 style={{fontSize:22,fontWeight:600,marginBottom:8}}>Welcome to PolicyLens v4</h2>
       <p style={{color:'var(--text2)',maxWidth:480,margin:'0 auto 24px'}}>
         Full sub-type system • Shared cloud repository • AI document capture • Rider-level extraction • Gap analysis • PDF reports • Fund risk lookup
@@ -3440,6 +3546,7 @@ function Dashboard() {
         {/* Gap Analysis */}
         <div className="card">
           <h3 style={{fontSize:14,fontWeight:600,marginBottom:12}}>Gap Analysis</h3>
+          {!clientProfile?.annualIncome && <div style={{fontSize:10,color:'var(--orange)',marginBottom:8}}>⚠ Set annual income in My Client for accurate gap analysis</div>}
           <GapBar label="Death Coverage" current={gaps.death.current} rec={gaps.death.recommended} pct={gaps.death.pct} fmt={v=>fmt(v)} color="var(--blue)" />
           <GapBar label="Critical Illness" current={gaps.ci.current} rec={gaps.ci.recommended} pct={gaps.ci.pct} fmt={v=>fmt(v)} color="var(--purple)" />
           <GapBar label="Shield Plan" current={gaps.isp.current?'Yes':'No'} rec="Yes" pct={gaps.isp.pct} fmt={v=>v} color="var(--teal)" />
@@ -3895,6 +4002,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
     cashValue:'', cvGrowthRate:'3.0', surrenderPeriod:'',
     // ILP (RetireWell)
     ilpSubtype:'protection', ilpGrowth:'6', ilpDivYield:'2', ilpMgmtFee:'1.5', ilpPaymentYrs:'10', ilpProtPct:'101',
+    divReinvest:false, ilpDivDrawdownAge:'',
     // UL fields
     ulSubType:'', creditingMechanism:'', creditingRates:{current:'',guaranteed:''},
     loyaltyBonus:{rate:'',startYear:'',endDesc:''}, loanRate:'', elpPremium:'', qsiFlag:false,
@@ -3904,6 +4012,12 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
     dualInsured:false, guaranteedIssuance:false, conversionRights:false,
     // Retirement
     monthlyBenefit:'', fundingSource:'',
+    annuityMonthly:'', annuityPayout:'', annuityStartAge:'65', annuityEndAge:'85',
+    retAccumYield:'3.5', retPayoutMode:'payout', retDeathBenefit:'cv', financed:false, finLoan:'', finRate:'', finTenure:'',
+    endSubtype:'limited', endPayYrs:'', endWaitYrs:'', endPolicyTerm:'', endYield:'4', endGuaranteedCV:'', endNonGuarBonus:'',
+    diMonthlyBenefit:'', defermentMths:'3', diBenefitAge:'65',
+    cslMonthlyBenefit:'600', cslEscalation:'0', cslPayoutAge:'67', cslLifetime:'yes',
+    addSA:'', accMedical:'', tcmReimb:'',
     // General
     notes:'', highlights:[], fundAllocations:[],
   });
@@ -3933,8 +4047,17 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
   const isISP = form.subType==='Integrated Shield Plan';
   const isProtection = form.category==='protection';
   const isInvestment = form.category==='investment';
-  const hasCoverageSection = isProtection || isInvestment;
-  const hasCV = (isProtection||form.category==='savings'||isInvestment||form.category==='retirement') && form.subType!=='Term Life' && !isISP;
+  const isSavings = form.category==='savings';
+  const isRetirement = form.category==='retirement';
+  const isHealth = form.category==='health';
+  const isDI = form.subType==='Disability Income';
+  const isCSL = form.subType==='CareShield Life / Supplement';
+  const isPA = form.subType==='Personal Accident';
+  const isEndowment = isSavings;
+  const isAnnuity = isRetirement;
+  const noRiderCategories = isISP || isCSL;
+  const hasCoverageSection = !noRiderCategories;
+  const hasCV = (isProtection||isSavings||isInvestment||isRetirement) && form.subType!=='Term Life' && !isISP && !isCSL && !isDI && !isPA;
 
   // ILP effective rate
   const ilpEffRate = Math.max(0, parseFloat(form.ilpGrowth||6) + parseFloat(form.ilpDivYield||2) - parseFloat(form.ilpMgmtFee||1.5));
@@ -4037,7 +4160,10 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         </div>
         <div className="grid-2">
           <div className="field"><label>Insurer</label><InsurerSelect value={form.insurer} onChange={v=>set('insurer',v)} /></div>
-          <div className="field"><label>Product Name</label><input value={form.productName} onChange={e=>set('productName',e.target.value)} placeholder="e.g. Heirloom VII" /></div>
+          <div className="field"><label>Product Name</label><FuzzyInput value={form.productName} onChange={v=>set('productName',v)} 
+            suggestions={repo.filter(r=>!form.insurer||r.insurer===form.insurer||form.insurer==='').map(r=>({label:r.productName,sub:r.insurer+' · '+r.subType+(r.notes?' · '+r.notes.substring(0,60)+'…':''),item:r}))}
+            onSelect={item=>{if(item.item){set('insurer',item.item.insurer);set('subType',item.item.subType);set('category',item.item.category);if(item.item.currency)set('currency',item.item.currency);}}}
+            placeholder="e.g. Heirloom VII — type to search repository" /></div>
         </div>
 
         {/* ═══ SECTION 2: POLICY IDENTITY ═══ */}
@@ -4058,11 +4184,18 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)'}}>
           <h4 style={{fontSize:13,fontWeight:600,marginBottom:10,color:'var(--text2)'}}>Premium Structure</h4>
           <div className="grid-3">
-            <div className="field"><label>Sum Assured / Face Amount</label><input type="number" value={form.sumAssured} onChange={e=>set('sumAssured',e.target.value)} /></div>
-            <div className="field"><label>Annual Premium</label><input type="number" value={form.annualPremium} onChange={e=>set('annualPremium',e.target.value)} /></div>
+            <div className="field"><label>Annual Premium ($)</label><input type="number" value={form.annualPremium} onChange={e=>set('annualPremium',e.target.value)} />{form.annualPremium && <div style={{fontSize:10,color:'var(--text3)'}}>${(parseFloat(form.annualPremium)/12).toFixed(0)}/mth</div>}</div>
             <div className="field"><label>Payment Method</label><select value={form.paymentMethod||''} onChange={e=>set('paymentMethod',e.target.value)}>
-              <option value="">—</option><option value="Cash">Cash / GIRO</option><option value="MediSave">MediSave</option><option value="SRS">SRS</option><option value="MediSave+Cash">MediSave + Cash</option><option value="CPF OA">CPF OA</option>
-            </select></div>
+              <option value="">—</option>
+              <option value="Cash">Cash / GIRO</option>
+              {(isISP||isCSL) && <option value="MediSave">MediSave</option>}
+              {(isRetirement||isSavings) && <option value="SRS">SRS</option>}
+              {isRetirement && <option value="CPF OA">CPF OA</option>}
+            </select>
+            {isISP && <div style={{fontSize:10,color:'var(--teal)'}}>ISP: MediSave (AWL) + Cash overflow</div>}
+            {isCSL && <div style={{fontSize:10,color:'var(--green2)'}}>MediSave cap $600/yr · overflow → Cash</div>}
+            </div>
+            {!isISP && !isCSL && <div className="field"><label>Sum Assured / Face Amount</label><input type="number" value={form.sumAssured} onChange={e=>set('sumAssured',e.target.value)} placeholder="Notional for par/annuity" /></div>}
           </div>
           <div className="grid-3" style={{marginTop:4}}>
             <div className="field"><label>Age at Entry</label><input type="number" value={form.premStartAge||form.ageAtEntry||''} onChange={e=>{set('premStartAge',e.target.value);set('ageAtEntry',e.target.value)}} placeholder="e.g. 30" /></div>
@@ -4083,20 +4216,185 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
           </div>
         </div>
 
-        {/* ═══ RETIREMENT FIELDS ═══ */}
-        {form.category==='retirement' && (
-          <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)'}}>
-            <h4 style={{fontSize:13,fontWeight:600,marginBottom:10,color:'var(--green2)'}}>Retirement Plan Details</h4>
+        {/* ═══ RETIREMENT / ANNUITY PLAN ═══ */}
+        {isRetirement && (
+          <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid rgba(45,106,79,.25)'}}>
+            <div style={{fontSize:10,fontWeight:700,color:'var(--green2)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:12}}>Retirement / Annuity Plan</div>
+            {(() => {
+              const payYrs = form.premSingle ? 1 : (parseInt(form.premTerm)||10);
+              const startAge = parseInt(form.premStartAge)||30;
+              const payoutStart = parseInt(form.annuityStartAge)||65;
+              const payoutEnd = parseInt(form.annuityEndAge)||85;
+              const accumYrs = Math.max(0, payoutStart - startAge - payYrs);
+              return (<>
+                <div style={{fontSize:11,background:'var(--bg2)',borderRadius:6,padding:'8px 12px',marginBottom:12,border:'1px solid var(--border)'}}>
+                  <span style={{fontWeight:600,color:'var(--green2)'}}>Pay {payYrs} yr{payYrs!==1?'s':''}</span>
+                  <span style={{color:'var(--text3)',margin:'0 6px'}}>→</span>
+                  {accumYrs > 0 && <><span style={{fontWeight:600,color:'var(--orange)'}}>Wait {accumYrs} yr{accumYrs!==1?'s':''}</span><span style={{color:'var(--text3)',margin:'0 6px'}}>→</span></>}
+                  <span style={{fontWeight:600,color:'var(--blue2)'}}>Payout from age {payoutStart} → age {payoutEnd}</span>
+                  <span style={{color:'var(--text3)',fontSize:10,marginLeft:6}}>({payYrs} + {payoutStart-startAge} yrs total policy)</span>
+                </div>
+              </>);
+            })()}
+            <div className="grid-4" style={{gridTemplateColumns:'1fr 1fr 1fr 1fr',display:'grid',gap:7,marginBottom:8}}>
+              <div className="field"><label>Monthly Payout ($)</label><input type="number" value={form.annuityMonthly||''} onChange={e=>{set('annuityMonthly',e.target.value);set('annuityPayout',String((parseFloat(e.target.value)||0)*12));}} style={{fontWeight:600}} /></div>
+              <div className="field"><label>Annual Payout ($)</label><input disabled value={form.annuityPayout ? '$'+parseInt(form.annuityPayout).toLocaleString()+'/yr' : '$0/yr'} style={{background:'var(--bg2)'}} /></div>
+              <div className="field"><label>Payout Starts Age</label><input type="number" value={form.annuityStartAge||65} onChange={e=>set('annuityStartAge',e.target.value)} /></div>
+              <div className="field"><label>Payout Ends Age</label><input type="number" value={form.annuityEndAge||85} onChange={e=>set('annuityEndAge',e.target.value)} /></div>
+            </div>
+            <div className="grid-3" style={{marginBottom:8}}>
+              <div className="field"><label>Yield % p.a.</label><input type="number" step="0.1" value={form.retAccumYield||'3.5'} onChange={e=>set('retAccumYield',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Policy yield — drives growth & projections</div></div>
+              <div className="field"><label>Reinvest Payouts?</label>
+                <div style={{display:'flex',alignItems:'center',gap:6,marginTop:5,cursor:'pointer'}} onClick={()=>set('retPayoutMode',form.retPayoutMode==='reinvest'?'payout':'reinvest')}>
+                  <input type="checkbox" checked={form.retPayoutMode==='reinvest'} readOnly style={{width:15,height:15,accentColor:'var(--green2)',pointerEvents:'none'}} />
+                  <span style={{fontSize:11,fontWeight:600,color:form.retPayoutMode==='reinvest'?'var(--green2)':'var(--text3)'}}>{form.retPayoutMode==='reinvest'?'Yes':'No — paid out'}</span>
+                </div>
+              </div>
+              <div className="field"><label>Death Benefit</label>
+                <select value={form.retDeathBenefit||'cv'} onChange={e=>set('retDeathBenefit',e.target.value)}>
+                  <option value="cv">= Cash Value (default)</option>
+                  <option value="higher_cv_prem">Higher of CV or % of Premiums</option>
+                  <option value="custom">Custom amount</option>
+                </select>
+                <div style={{fontSize:9,color:'var(--text3)',marginTop:3,fontStyle:'italic'}}>Note: retirement plans may have $0 cash value at end of term</div>
+              </div>
+            </div>
+            <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8,cursor:'pointer',userSelect:'none'}} onClick={()=>set('financed',!form.financed)}>
+              <div style={{width:36,height:20,borderRadius:10,background:form.financed?'var(--orange)':'var(--border)',position:'relative',flexShrink:0}}>
+                <div style={{position:'absolute',top:2,left:form.financed?18:2,width:16,height:16,borderRadius:'50%',background:'#fff',transition:'left .2s'}}></div>
+              </div>
+              <span style={{fontSize:12,fontWeight:600,color:form.financed?'var(--orange)':'var(--text3)'}}>Premium Financing (Interest-Only Loan)</span>
+            </div>
+            {form.financed && (
+              <div style={{background:'rgba(245,158,11,.06)',borderRadius:7,padding:10,border:'1px solid rgba(245,158,11,.25)',marginBottom:8}}>
+                <div style={{fontSize:10,color:'var(--text3)',marginBottom:8}}>Single premium funded by loan · Month 0 = premium paid · Month 1+ = interest only · Loan repaid at policy maturity/surrender</div>
+                <div className="grid-3">
+                  <div className="field"><label>Loan Amount ($)</label><input type="number" value={form.finLoan||''} onChange={e=>set('finLoan',e.target.value)} /></div>
+                  <div className="field"><label>Interest Rate % p.a.</label><input type="number" step="0.1" value={form.finRate||''} onChange={e=>set('finRate',e.target.value)} /><div style={{fontSize:10,color:'var(--red)'}}>Int-only: ${Math.round((parseFloat(form.finLoan)||0)*(parseFloat(form.finRate)||0)/100).toLocaleString()}/yr</div></div>
+                  <div className="field"><label>Loan Tenure (yrs)</label><input type="number" value={form.finTenure||''} onChange={e=>set('finTenure',e.target.value)} /></div>
+                </div>
+                <div style={{textAlign:'right',marginTop:6,fontSize:13,fontWeight:700,color:((parseFloat(form.annuityPayout)||0)-Math.round((parseFloat(form.finLoan)||0)*(parseFloat(form.finRate)||0)/100))>=0?'var(--green2)':'var(--red)'}}>
+                  Net Cashflow: ${((parseFloat(form.annuityPayout)||0)-Math.round((parseFloat(form.finLoan)||0)*(parseFloat(form.finRate)||0)/100)).toLocaleString()}/yr (Payout − Interest)
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ═══ ENDOWMENT / SAVINGS PLAN ═══ */}
+        {isSavings && (
+          <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid rgba(59,130,246,.25)'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+              <div style={{fontSize:10,fontWeight:700,color:'var(--blue2)',textTransform:'uppercase',letterSpacing:'.5px'}}>Endowment Plan — {form.endSubtype==='fullpay'?'Full Pay':form.endSubtype==='lifetime'?'Lifetime':form.subType==='Short-term Endowment'?'Short-term':'Limited Pay'}</div>
+              <select value={form.endSubtype||'limited'} onChange={e=>set('endSubtype',e.target.value)} style={{fontSize:11,padding:'3px 8px'}}>
+                <option value="limited">Limited Pay</option>
+                <option value="fullpay">Full Pay</option>
+                <option value="lifetime">Lifetime Endowment</option>
+              </select>
+            </div>
+            {form.endSubtype!=='lifetime' && (
+              <div className="grid-3" style={{marginBottom:8}}>
+                <div className="field"><label>Premium Payment Years</label><input type="number" value={form.endPayYrs||form.premTerm||''} onChange={e=>set('endPayYrs',e.target.value)} /></div>
+                {form.endSubtype==='limited' && <div className="field"><label>Wait Period (yrs)</label><input type="number" value={form.endWaitYrs||''} onChange={e=>set('endWaitYrs',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Yrs between last premium & maturity</div></div>}
+                <div className="field"><label>Policy Term (yrs)</label><input type="number" value={form.endPolicyTerm||''} onChange={e=>set('endPolicyTerm',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Maturity age: {(parseInt(form.premStartAge)||30)+(parseInt(form.endPolicyTerm)||0)}</div></div>
+                <div className="field"><label>Guaranteed Yield % p.a.</label><input type="number" step="0.1" value={form.endYield||'4'} onChange={e=>set('endYield',e.target.value)} /></div>
+              </div>
+            )}
+            {form.endSubtype==='lifetime' && (
+              <div className="grid-3" style={{marginBottom:8}}>
+                <div className="field"><label>Premium Payment Years</label><input type="number" value={form.endPayYrs||form.premTerm||''} onChange={e=>set('endPayYrs',e.target.value)} /></div>
+                <div className="field"><label>Guaranteed Yield % p.a.</label><input type="number" step="0.1" value={form.endYield||'4'} onChange={e=>set('endYield',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Growth after premiums paid</div></div>
+                <div className="field"><label>Kept Till</label><input disabled value="Age 99 (Lifetime)" style={{background:'var(--bg2)'}} /></div>
+              </div>
+            )}
             <div className="grid-3">
-              <div className="field"><label>Monthly Benefit</label><input type="number" value={form.monthlyBenefit} onChange={e=>set('monthlyBenefit',e.target.value)} /></div>
-              <div className="field"><label>Funding Source</label><select value={form.fundingSource||''} onChange={e=>set('fundingSource',e.target.value)}><option value="">Select…</option><option>Cash</option><option>SRS</option><option>CPF OA</option><option>CPF SA</option><option>CPF RA</option></select></div>
-              <div></div>
+              <div className="field"><label>Guaranteed Maturity Value ($)</label><input type="number" value={form.endGuaranteedCV||''} onChange={e=>set('endGuaranteedCV',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>0 = use yield calculation</div></div>
+              <div className="field"><label>Non-Guaranteed Bonus ($)</label><input type="number" value={form.endNonGuarBonus||''} onChange={e=>set('endNonGuarBonus',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Reversionary + terminal bonus</div></div>
+              {(() => {
+                const payYrs = parseInt(form.endPayYrs||form.premTerm)||10;
+                const r = (parseFloat(form.endYield)||4)/100;
+                const prem = parseFloat(form.annualPremium)||0;
+                const calcCV = form.endGuaranteedCV > 0 ? parseFloat(form.endGuaranteedCV) : Math.round(prem * (Math.pow(1+r, payYrs)-1)/r);
+                const bonus = parseFloat(form.endNonGuarBonus)||0;
+                const total = calcCV + bonus;
+                const totalPrem = prem * payYrs;
+                const effYield = totalPrem > 0 && payYrs > 0 ? ((Math.pow(total/totalPrem, 1/((parseInt(form.endPolicyTerm)||payYrs)))-1)*100).toFixed(1) : '—';
+                return (
+                  <div style={{background:'var(--bg2)',borderRadius:8,padding:10,border:'1px solid var(--border)',textAlign:'center'}}>
+                    <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',marginBottom:3}}>Total at Maturity</div>
+                    <div style={{fontSize:16,fontWeight:700,color:'var(--blue2)'}}>${total.toLocaleString()}</div>
+                    <div style={{fontSize:10,color:'var(--text3)'}}>Effective yield ~{effYield}% p.a.</div>
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+        )}
+
+        {/* ═══ DISABILITY INCOME ═══ */}
+        {isDI && (
+          <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid rgba(45,106,79,.25)'}}>
+            <div style={{fontSize:10,fontWeight:700,color:'var(--green2)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8}}>Disability Income · Cash Only</div>
+            <div style={{fontSize:10,color:'var(--text3)',marginBottom:8}}>DI plans are not MediSave-payable</div>
+            <div className="grid-3">
+              <div className="field"><label>Monthly Benefit ($)</label><input type="number" value={form.diMonthlyBenefit||''} onChange={e=>set('diMonthlyBenefit',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Contributes to DI coverage</div></div>
+              <div className="field"><label>Deferment (months)</label><input type="number" value={form.defermentMths||3} onChange={e=>set('defermentMths',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Waiting period before payout</div></div>
+              <div className="field"><label>Benefit Until Age</label><input type="number" value={form.diBenefitAge||65} onChange={e=>set('diBenefitAge',e.target.value)} /></div>
+            </div>
+          </div>
+        )}
+
+        {/* ═══ CARESHIELD LIFE / SUPPLEMENT ═══ */}
+        {isCSL && (
+          <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid rgba(26,122,94,.25)'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+              <div style={{fontSize:10,fontWeight:700,color:'var(--teal)',textTransform:'uppercase',letterSpacing:'.5px'}}>CareShield Life / Supplement Details</div>
+              <div style={{fontSize:11,background:'rgba(26,122,94,0.1)',color:'var(--teal)',padding:'3px 8px',borderRadius:4,fontWeight:600}}>MediSave cap: ${CARESHIELD_MEDISAVE_CAP}/yr · Overflow → Cash</div>
+            </div>
+            <div className="grid-3" style={{marginBottom:8}}>
+              <div className="field"><label>Monthly Benefit ($)</label><input type="number" value={form.cslMonthlyBenefit||600} onChange={e=>set('cslMonthlyBenefit',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Base CareShield $600/mth</div></div>
+              <div className="field"><label>Benefit Escalation (% /yr)</label><input type="number" step="0.5" value={form.cslEscalation||0} onChange={e=>set('cslEscalation',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>0% = flat; some supplements inflate</div></div>
+              <div className="field"><label>Payout Start Age</label><input type="number" value={form.cslPayoutAge||67} onChange={e=>set('cslPayoutAge',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>CareShield from age 67</div></div>
+            </div>
+            <div className="grid-3">
+              <div className="field"><label>Lifetime Payout?</label><select value={form.cslLifetime||'yes'} onChange={e=>set('cslLifetime',e.target.value)}>
+                <option value="yes">Yes — lifetime (as long as disabled)</option>
+                <option value="no">No — fixed term</option>
+              </select></div>
+              {(() => {
+                const prem = parseFloat(form.annualPremium)||0;
+                const msCap = CARESHIELD_MEDISAVE_CAP;
+                const msPart = Math.min(prem, msCap);
+                const cashPart = Math.max(0, prem - msCap);
+                return (<>
+                  <div style={{background:'var(--bg2)',borderRadius:8,padding:10,border:'1px solid var(--border)',textAlign:'center'}}>
+                    <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>MediSave</div>
+                    <div style={{fontSize:14,fontWeight:700,color:'var(--teal)'}}>${msPart.toLocaleString()}/yr</div>
+                  </div>
+                  <div style={{background:cashPart>0?'rgba(244,63,94,.06)':'var(--bg2)',borderRadius:8,padding:10,border:'1px solid '+(cashPart>0?'rgba(244,63,94,.2)':'var(--border)'),textAlign:'center'}}>
+                    <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Cash (above cap)</div>
+                    <div style={{fontSize:14,fontWeight:700,color:cashPart>0?'var(--red)':'var(--green2)'}}>${cashPart.toLocaleString()}/yr</div>
+                  </div>
+                </>);
+              })()}
+            </div>
+          </div>
+        )}
+
+        {/* ═══ PERSONAL ACCIDENT COVERAGE ═══ */}
+        {isPA && (
+          <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid rgba(245,158,11,.25)'}}>
+            <div style={{fontSize:10,fontWeight:700,color:'var(--orange)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:12}}>Accident Coverage</div>
+            <div className="grid-3">
+              <div className="field"><label>ADD Sum Assured ($)</label><input type="number" value={form.addSA||''} onChange={e=>set('addSA',e.target.value)} /></div>
+              <div className="field"><label>Accidental Medical ($)</label><input type="number" value={form.accMedical||''} onChange={e=>set('accMedical',e.target.value)} /></div>
+              <div className="field"><label>TCM Reimbursement ($)</label><input type="number" value={form.tcmReimb||''} onChange={e=>set('tcmReimb',e.target.value)} /></div>
             </div>
           </div>
         )}
 
         {/* ═══ COVERAGE & RIDERS (RetireWell-style) ═══ */}
-        {hasCoverageSection && (
+        {hasCoverageSection && !isISP && !isCSL && (
           <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)'}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
               <div>
@@ -4130,7 +4428,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
               <thead><tr>
                 <th style={{textAlign:'left'}}>Benefit / Rider</th>
                 <th style={{width:100}}>Sum Assured</th>
-                <th style={{width:55,textAlign:'center'}}>Bundled</th>
+                <th style={{width:75,textAlign:'center'}}>Part of Plan</th>
                 <th style={{width:90}}>Rider Prem</th>
                 <th style={{width:65}}>Expiry</th>
                 <th style={{width:80,textAlign:'center'}}>Options</th>
@@ -4174,29 +4472,78 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
           </div>
         )}
 
-        {/* ═══ ISP DETAILS ═══ */}
+        {/* ═══ ISP — INTEGRATED SHIELD PLAN ═══ */}
         {isISP && (
           <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid rgba(59,130,246,.3)'}}>
-            <h4 style={{fontSize:13,fontWeight:600,marginBottom:10,color:'var(--teal)'}}>Integrated Shield Plan Details</h4>
-            <div className="grid-3">
-              <div className="field"><label>Ward Class</label><select value={form.ispClass||''} onChange={e=>set('ispClass',e.target.value)}>
-                <option value="">Select…</option><option value="A">Class A (Private)</option><option value="B1">Class B1</option><option value="B2+">Class B2+</option>
+            <div style={{fontSize:10,fontWeight:700,color:'var(--teal)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:12}}>ISP Premium Structure — Age {form.premStartAge||30} (AWL: ${getISPAWL(parseInt(form.premStartAge)||30)}/yr)</div>
+            {(() => {
+              const age = parseInt(form.premStartAge)||30;
+              const totalPrem = parseFloat(form.annualPremium)||0;
+              const bd = calcISPBreakdown(totalPrem, age);
+              const riderPrem = parseFloat(form.riderPremium)||0;
+              return (<>
+                <div style={{borderRadius:8,border:'1px solid var(--border)',overflow:'hidden',marginBottom:10}}>
+                  <table style={{width:'100%',fontSize:12,borderCollapse:'collapse'}}>
+                    <thead><tr style={{background:'var(--bg2)'}}>
+                      <th style={{textAlign:'left',padding:'8px 10px'}}>Component</th>
+                      <th style={{textAlign:'right',padding:'8px 10px'}}>Annual ($)</th>
+                      <th style={{textAlign:'right',padding:'8px 10px'}}>MediSave</th>
+                      <th style={{textAlign:'right',padding:'8px 10px'}}>Cash</th>
+                    </tr></thead>
+                    <tbody>
+                      <tr style={{borderTop:'1px solid var(--border)'}}>
+                        <td style={{padding:'6px 10px'}}><strong>① MediShield Life</strong><div style={{fontSize:10,color:'var(--text3)'}}>Mandatory, auto by age · covers B2/C ward</div></td>
+                        <td style={{textAlign:'right',padding:'6px 10px'}}>${bd.msl.toLocaleString()}</td>
+                        <td style={{textAlign:'right',padding:'6px 10px',color:'var(--teal)',fontWeight:600}}>${bd.msl.toLocaleString()}</td>
+                        <td style={{textAlign:'right',padding:'6px 10px',color:'var(--text3)'}}>—</td>
+                      </tr>
+                      <tr style={{borderTop:'1px solid var(--border)'}}>
+                        <td style={{padding:'6px 10px'}}><strong>② ISP Additional Component</strong><div style={{fontSize:10,color:'var(--text3)'}}>Private coverage top-up · MediSave up to AWL ${bd.awl}/yr (age {age})</div></td>
+                        <td style={{textAlign:'right',padding:'6px 10px'}}>${bd.ispAdditional.toLocaleString()}</td>
+                        <td style={{textAlign:'right',padding:'6px 10px',color:'var(--teal)',fontWeight:600}}>${bd.ispMediSave.toLocaleString()}</td>
+                        <td style={{textAlign:'right',padding:'6px 10px',color:bd.ispCash>0?'var(--red)':'var(--text3)',fontWeight:bd.ispCash>0?600:400}}>{bd.ispCash>0?'$'+bd.ispCash.toLocaleString():'—'}</td>
+                      </tr>
+                      {form.hasRider && riderPrem>0 && <tr style={{borderTop:'1px solid var(--border)'}}>
+                        <td style={{padding:'6px 10px'}}><strong>③ Rider</strong><div style={{fontSize:10,color:'var(--text3)'}}>Always cash — not MediSave payable</div></td>
+                        <td style={{textAlign:'right',padding:'6px 10px'}}>${riderPrem.toLocaleString()}</td>
+                        <td style={{textAlign:'right',padding:'6px 10px',color:'var(--text3)'}}>—</td>
+                        <td style={{textAlign:'right',padding:'6px 10px',color:'var(--red)',fontWeight:600}}>${riderPrem.toLocaleString()}</td>
+                      </tr>}
+                      <tr style={{borderTop:'2px solid var(--border)',fontWeight:700}}>
+                        <td style={{padding:'8px 10px'}}>TOTAL</td>
+                        <td style={{textAlign:'right',padding:'8px 10px'}}>${(totalPrem+riderPrem).toLocaleString()}</td>
+                        <td style={{textAlign:'right',padding:'8px 10px',color:'var(--teal)'}}>${bd.totalMediSave.toLocaleString()}</td>
+                        <td style={{textAlign:'right',padding:'8px 10px',color:'var(--red)'}}>${(bd.totalCash+riderPrem).toLocaleString()}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div style={{fontSize:10,color:'var(--teal)',padding:'6px 10px',background:'rgba(6,182,212,.06)',borderRadius:6,marginBottom:10}}>
+                  📋 <strong>AWL Rule:</strong> Age {age} → MediSave AWL for ISP top-up: <strong>${bd.awl}/yr</strong> (≤40: $300 · 41–70: $600 · 71+: $900) · MSL premiums are fully covered by MediSave on top of AWL
+                </div>
+              </>);
+            })()}
+            <div className="grid-3" style={{marginBottom:8}}>
+              <div className="field"><label>Total ISP Premium ($/yr)</label><input type="number" value={form.annualPremium||''} onChange={e=>set('annualPremium',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>MSL is auto-embedded inside this figure</div></div>
+              <div className="field"><label>Hospital Ward</label><select value={form.ispClass||''} onChange={e=>set('ispClass',e.target.value)}>
+                <option value="">Select…</option><option value="A">A</option><option value="B1">B1</option><option value="B2+">B2+</option>
               </select></div>
+              <div className="field"><label>Annual Policy Limit ($)</label><input type="number" value={form.ispAnnualLimit||''} onChange={e=>set('ispAnnualLimit',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>0 = unlimited</div></div>
+            </div>
+            <div style={{fontSize:10,fontWeight:700,color:'var(--text2)',textTransform:'uppercase',marginBottom:6}}>Patient Liability {form.hasRider ? '(With Rider)' : '(No Rider)'}</div>
+            <div className="grid-3" style={{marginBottom:8}}>
+              <div className="field"><label>Annual Deductible ($)</label><input type="number" value={form.ispDeductible||3500} onChange={e=>set('ispDeductible',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Client pays this first before insurance covers</div></div>
+              <div className="field"><label>Co-Insurance (%)</label><input type="number" value={form.ispCoinsurance||(form.hasRider?5:10)} onChange={e=>set('ispCoinsurance',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>{form.hasRider?'Min 5% — MOH rule since Mar 2018':'% of bill after deductible'}</div></div>
+              <div className="field"><label>Co-Insurance Cap ($)</label><input type="number" value={form.ispCoInsCap||''} onChange={e=>set('ispCoInsCap',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Panel providers only</div></div>
+            </div>
+            <div className="grid-3">
               <div className="field"><label>Has Rider?</label><select value={form.hasRider?'yes':'no'} onChange={e=>set('hasRider',e.target.value==='yes')}>
                 <option value="no">No Rider</option><option value="yes">Yes — Rider Attached</option>
               </select></div>
-              <div className="field"><label>Rider Name</label><input value={form.riderList||''} onChange={e=>set('riderList',e.target.value)} placeholder="e.g. PRUExtra Premier" /></div>
-            </div>
-            {form.hasRider && (
-              <div className="grid-3">
-                <div className="field"><label>Rider Premium ($/yr, Cash)</label><input type="number" value={form.riderPremium||''} onChange={e=>set('riderPremium',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Always cash — not MediSave payable</div></div>
-                <div className="field"><label>Deductible After Rider ($)</label><input type="number" value={form.ispDeductible||'3500'} onChange={e=>set('ispDeductible',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Client pays this first</div></div>
-                <div className="field"><label>Co-insurance (%)</label><input type="number" value={form.ispCoinsurance||'5'} onChange={e=>set('ispCoinsurance',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Min 5% — MOH rule since Mar 2018</div></div>
-              </div>
-            )}
-            {form.hasRider && <div style={{fontSize:11,color:'var(--teal)',marginTop:6,fontWeight:600}}>With rider: Deductible ${form.ispDeductible||3500} · Co-pay {form.ispCoinsurance||5}% only · Rider premium ${form.riderPremium||0}/yr cash</div>}
-            <div style={{marginTop:8,padding:10,background:'var(--bg2)',borderRadius:8,fontSize:11,color:'var(--text3)'}}>
-              <strong>MediShield Life Reference:</strong> MSL is the base layer — premiums auto-deducted from MediSave. ISP is the private upgrade. AWL: $300/yr (age ≤40) · $600/yr (41-70) · $900/yr (71+)
+              {form.hasRider && <div className="field"><label>Rider Name</label><FuzzyInput value={form.riderList||''} onChange={v=>set('riderList',v)} 
+                suggestions={repo.filter(r=>r.subType==='Rider'||r.category==='health').map(r=>({label:r.productName,sub:r.insurer+(r.notes?' · '+r.notes.substring(0,50)+'…':'')}))}
+                placeholder="e.g. PRUExtra Premier CoPay" /></div>}
+              {form.hasRider && <div className="field"><label>Rider Premium ($/yr, Cash)</label><input type="number" value={form.riderPremium||''} onChange={e=>set('riderPremium',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Always cash — not MediSave payable</div></div>}
             </div>
           </div>
         )}
@@ -4214,6 +4561,8 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
             <div className="grid-3">
               <div className="field"><label>Growth % p.a.</label><input type="number" step="0.5" value={form.ilpGrowth||'6'} onChange={e=>set('ilpGrowth',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Fund return before fees</div></div>
               <div className="field"><label>Dividend % p.a.</label><input type="number" step="0.5" value={form.ilpDivYield||'2'} onChange={e=>set('ilpDivYield',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Distributed or reinvested</div></div>
+              <div className="field"><label>Reinvest Dividends?</label><select value={form.divReinvest?'yes':'no'} onChange={e=>set('divReinvest',e.target.value==='yes')}><option value="no">No — draw down</option><option value="yes">Yes — compound</option></select></div>
+              <div className="field"><label>Div. Drawdown Age</label><input type="number" value={form.ilpDivDrawdownAge||''} onChange={e=>set('ilpDivDrawdownAge',e.target.value)} placeholder="Default: retirement age" /><div style={{fontSize:10,color:'var(--text3)'}}>When to start drawing dividends as income</div></div>
               <div className="field"><label>Mgmt Fee % p.a.</label><input type="number" step="0.1" value={form.ilpMgmtFee||'1.5'} onChange={e=>set('ilpMgmtFee',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)',color:'var(--red)'}}>Deducted from fund</div></div>
             </div>
             <div style={{marginTop:8,padding:10,background:'var(--bg2)',borderRadius:8,display:'flex',gap:20}}>
@@ -4281,7 +4630,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
             <div className="grid-3">
               <div className="field"><label>Current Cash Value</label><input type="number" value={form.cashValue||''} onChange={e=>set('cashValue',e.target.value)} placeholder="From policy statement" /></div>
               <div className="field"><label>CV Growth Rate (% p.a.)</label><input type="number" step="0.1" value={form.cvGrowthRate||'3.0'} onChange={e=>set('cvGrowthRate',e.target.value)} /></div>
-              <div className="field"><label>Surrender Period (years)</label><input type="number" value={form.surrenderPeriod||''} onChange={e=>set('surrenderPeriod',e.target.value)} placeholder="e.g. 10" /></div>
+              <div className="field"><label>Breakeven Year</label><input type="number" value={form.breakEvenYear||form.surrenderPeriod||''} onChange={e=>{set('breakEvenYear',e.target.value);set('surrenderPeriod',e.target.value)}} placeholder="Year SV ≥ premiums" /><div style={{fontSize:10,color:'var(--text3)'}}>Year where (income + SV) ≥ total premiums</div></div>
             </div>
           </div>
         )}
@@ -4582,6 +4931,352 @@ function Repository() {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// PORTFOLIO ANALYSIS — Protection Gaps + Cash Value Timeline
+// ═══════════════════════════════════════════════════════════════
+
+function PortfolioAnalysis() {
+  const {policies,clientProfile,setTab} = useContext(AppCtx);
+  const p = clientProfile || {};
+  const age = p.dob ? Math.floor((Date.now()-new Date(p.dob).getTime())/31557600000) : 35;
+  const retAge = parseInt(p.retirementAge)||65;
+  const annualIncome = parseFloat(p.annualIncome)||0;
+  const monthlyIncome = annualIncome/12;
+  const monthlyExpenses = parseFloat(p.monthlyExpenses)||0;
+  const mortgage = parseFloat(p.mortgagePayment)||0;
+  const medical = parseFloat(p.medicalBudget)||300;
+  const monthly = monthlyExpenses + mortgage + medical;
+
+  // ── LIA COVERAGE PARAMETERS ──
+  const [deathYrs,setDeathYrs] = useState(10);
+  const [tpdYrs,setTpdYrs] = useState(10);
+  const [ciYrs,setCiYrs] = useState(5);
+  const [eciYrs,setEciYrs] = useState(2);
+  const [diPct,setDiPct] = useState(75);
+
+  // ── COVERAGE FROM POLICIES ──
+  const coverage = useMemo(() => {
+    let death=0,tpd=0,ci=0,eci=0,di=0,add=0,amr=0,tcm=0;
+    let hasISP=false, ispRider=false, ispDeductible=0, ispCoIns=0;
+    policies.forEach(pol => {
+      // Riders contribute to coverage
+      (pol.riders||[]).forEach(rd => {
+        const sa = parseFloat(rd.sa)||0;
+        const expAge = parseInt(rd.expiryAge)||99;
+        if(expAge <= age) return;
+        if(rd.type==='death') death += sa;
+        if(rd.type==='tpd') tpd += sa;
+        if(rd.type==='ci') ci += sa;
+        if(rd.type==='eci') eci += sa;
+        if(rd.type==='di') di += sa;
+        if(rd.type==='accidental') add += sa;
+      });
+      // Base SA also contributes to death+TPD for protection policies
+      if(pol.category==='protection' && pol.subType!=='Personal Accident' && pol.subType!=='Critical Illness') {
+        const sa = parseFloat(pol.sumAssured)||0;
+        const mult = parseFloat(pol.saMultiplier)||1;
+        const multEnd = parseInt(pol.multiplierEndAge)||70;
+        const effSA = age < multEnd ? sa * mult : sa;
+        death += effSA;
+        tpd += effSA;
+      }
+      if(pol.subType==='Critical Illness') ci += parseFloat(pol.sumAssured)||0;
+      if(pol.subType==='Personal Accident') {
+        add += parseFloat(pol.addSA)||0;
+        amr += parseFloat(pol.accMedical)||0;
+        tcm += parseFloat(pol.tcmReimb)||0;
+      }
+      if(pol.subType==='Disability Income') di += parseFloat(pol.diMonthlyBenefit)||0;
+      if(pol.subType==='Integrated Shield Plan') { hasISP=true; ispRider=pol.hasRider||false; ispDeductible=parseFloat(pol.ispDeductible)||3500; ispCoIns=parseFloat(pol.ispCoinsurance)||10; }
+    });
+    return {death,tpd,ci,eci,di,add,amr,tcm,hasISP,ispRider,ispDeductible,ispCoIns};
+  },[policies,age]);
+
+  // ── REQUIRED COVERAGE (LIA) ──
+  const reqDeath = annualIncome * deathYrs;
+  const reqTPD = annualIncome * tpdYrs;
+  const reqCI = monthly * 12 * ciYrs;
+  const reqECI = monthly * 12 * eciYrs;
+  const reqDI = monthlyIncome * diPct/100;
+
+  const gaps = [
+    {label:'Death & TI', cur:coverage.death, need:reqDeath, note:'LIA: '+deathYrs+'× annual income', weight:20},
+    {label:'TPD', cur:coverage.tpd, need:reqTPD, note:'LIA: '+tpdYrs+'× annual income', weight:20},
+    {label:'Critical Illness', cur:coverage.ci, need:reqCI, note:'LIA: '+ciYrs+'× annual expenses', weight:25},
+    {label:'Early CI', cur:coverage.eci, need:reqECI, note:'LIA: '+eciYrs+'× annual expenses', weight:10},
+    {label:'Disability/mth', cur:coverage.di, need:reqDI, note:'LIA: '+diPct+'% gross monthly income', weight:10},
+    {label:'Hospitalisation Cover', cur:coverage.hasISP?1:0, need:1, note:coverage.hasISP?(coverage.ispRider?'ISP + Rider':'ISP only — deductible and co-insurance apply'):'No ISP held', weight:15, isFlag:true},
+  ];
+
+  const overallScore = Math.round(gaps.reduce((s,g) => {
+    const pct = g.isFlag ? (g.cur>=g.need?100:(g.cur>0?50:0)) : (g.need===0?100:Math.min(100, g.cur/g.need*100));
+    return s + pct * g.weight/100;
+  },0));
+  const scoreColor = overallScore >= 80 ? 'var(--green2)' : overallScore >= 50 ? 'var(--orange)' : 'var(--red)';
+  const scoreLabel = overallScore >= 80 ? 'Well Protected' : overallScore >= 50 ? 'Partially Protected' : 'Significantly Underprotected';
+
+  // ── CASH VALUE TIMELINE ──
+  const cvTimeline = useMemo(() => {
+    const rows = [];
+    for(let yr=age; yr<=Math.max(retAge+20,90); yr++) {
+      const row = {age:yr, policies:[], totalCV:0, income:0, maturities:0, dividends:0};
+      policies.forEach(pol => {
+        const startAge = parseInt(pol.premStartAge)||parseInt(pol.ageAtEntry)||age;
+        const yearsInForce = yr - startAge;
+        if(yearsInForce < 0) return;
+        const prem = parseFloat(pol.annualPremium)||0;
+        const isSingle = pol.premSingle;
+        const premTerm = isSingle ? 1 : (parseInt(pol.premTerm)||10);
+        const totalPremPaid = isSingle ? prem : prem * Math.min(premTerm, yearsInForce+1);
+
+        // ── Endowment / Savings ──
+        if(pol.category==='savings') {
+          const sub = pol.endSubtype||'limited';
+          const payYrs = parseInt(pol.endPayYrs)||premTerm;
+          const policyTerm = sub==='lifetime' ? 99-startAge : (parseInt(pol.endPolicyTerm)||payYrs+(parseInt(pol.endWaitYrs)||0));
+          const matAge = startAge + policyTerm;
+          const r = (parseFloat(pol.endYield)||parseFloat(pol.cvGrowthRate)||4)/100;
+          let cv;
+          if(parseFloat(pol.cashValue) > 0 && yearsInForce <= 1) cv = parseFloat(pol.cashValue);
+          else if(parseFloat(pol.endGuaranteedCV) > 0 && yearsInForce >= policyTerm) cv = parseFloat(pol.endGuaranteedCV) + (parseFloat(pol.endNonGuarBonus)||0);
+          else {
+            const paid = Math.min(payYrs, yearsInForce+1);
+            cv = isSingle ? prem * Math.pow(1+r, yearsInForce) : (r>0 ? prem*(Math.pow(1+r,paid)-1)/r*Math.pow(1+r, Math.max(0,yearsInForce-paid)) : prem*paid);
+          }
+          if(yr === matAge && sub!=='lifetime') { row.maturities += Math.round(cv); }
+          else if(yr <= matAge || sub==='lifetime') { row.totalCV += Math.round(cv); row.policies.push({name:pol.productName||pol.insurer,cv:Math.round(cv),type:'endowment'}); }
+        }
+
+        // ── Retirement / Annuity ──
+        if(pol.category==='retirement') {
+          const payoutStart = parseInt(pol.annuityStartAge)||65;
+          const payoutEnd = parseInt(pol.annuityEndAge)||85;
+          const annPayout = parseFloat(pol.annuityPayout)||(parseFloat(pol.annuityMonthly)||0)*12;
+          const r = (parseFloat(pol.retAccumYield)||3.5)/100;
+          // CV estimation
+          const paidYrs = Math.min(premTerm, yearsInForce+1);
+          let cv = parseFloat(pol.cashValue) > 0 && yearsInForce <= 1 ? parseFloat(pol.cashValue) :
+            (isSingle ? prem * Math.pow(1+r, yearsInForce) : (r>0 ? prem*(Math.pow(1+r,paidYrs)-1)/r*Math.pow(1+r,Math.max(0,yearsInForce-paidYrs)) : prem*paidYrs));
+          if(yr >= payoutStart && yr <= payoutEnd && pol.retPayoutMode!=='reinvest') cv = Math.max(0, cv - annPayout*(yr-payoutStart+1));
+          if(yr >= payoutStart && yr <= payoutEnd) row.income += annPayout;
+          if(yr <= payoutEnd) { row.totalCV += Math.max(0,Math.round(cv)); row.policies.push({name:pol.productName||pol.insurer,cv:Math.max(0,Math.round(cv)),type:'annuity'}); }
+        }
+
+        // ── Protection with CV (WL, UL) ──
+        if(pol.category==='protection' && !['Term Life','Personal Accident','Critical Illness'].includes(pol.subType)) {
+          const r = (parseFloat(pol.cvGrowthRate)||3)/100;
+          let cv = parseFloat(pol.cashValue) > 0 && yearsInForce <= 1 ? parseFloat(pol.cashValue) :
+            (r>0 && !isSingle ? prem*(Math.pow(1+r,Math.min(premTerm,yearsInForce+1))-1)/r*Math.pow(1+r,Math.max(0,yearsInForce-premTerm)) : totalPremPaid*Math.pow(1+r,yearsInForce));
+          row.totalCV += Math.round(cv);
+          row.policies.push({name:pol.productName||pol.insurer,cv:Math.round(cv),type:'protection'});
+        }
+
+        // ── ILP / Investment ──
+        if(pol.category==='investment') {
+          const growth = (parseFloat(pol.ilpGrowth)||6)/100;
+          const div = (parseFloat(pol.ilpDivYield)||0)/100;
+          const fee = (parseFloat(pol.ilpMgmtFee)||1.5)/100;
+          const netRate = growth + div - fee;
+          const drawdownAge = parseInt(pol.ilpDivDrawdownAge)||retAge;
+          let fv = parseFloat(pol.cashValue) > 0 && yearsInForce <= 1 ? parseFloat(pol.cashValue) :
+            (netRate>0 && !isSingle ? prem*(Math.pow(1+netRate,Math.min(premTerm,yearsInForce+1))-1)/netRate*Math.pow(1+netRate,Math.max(0,yearsInForce-premTerm)) : totalPremPaid*Math.pow(1+netRate,yearsInForce));
+          // Dividend drawdown
+          if(yr >= drawdownAge && div > 0 && !pol.divReinvest) {
+            const divAmt = Math.round(fv * div);
+            row.dividends += divAmt;
+            row.income += divAmt;
+          }
+          row.totalCV += Math.round(fv);
+          row.policies.push({name:pol.productName||pol.insurer,cv:Math.round(fv),type:'ilp'});
+        }
+      });
+      rows.push(row);
+    }
+    return rows;
+  },[policies,age,retAge]);
+
+  // Chart
+  const chartRef = useRef(null);
+  const chartInst = useRef(null);
+  useEffect(() => {
+    if(!chartRef.current || cvTimeline.length === 0) return;
+    if(chartInst.current) chartInst.current.destroy();
+    chartInst.current = new Chart(chartRef.current, {
+      type:'line',
+      data:{
+        labels: cvTimeline.map(r=>r.age),
+        datasets:[
+          {label:'Total Cash Value',data:cvTimeline.map(r=>r.totalCV),borderColor:'#3b82f6',backgroundColor:'rgba(59,130,246,.1)',fill:true,tension:.3,pointRadius:0},
+          {label:'Income (Annual)',data:cvTimeline.map(r=>r.income),borderColor:'#10b981',backgroundColor:'rgba(16,185,129,.1)',fill:true,tension:.3,pointRadius:0},
+          {label:'Maturities',data:cvTimeline.map(r=>r.maturities),type:'bar',backgroundColor:'rgba(245,158,11,.6)',borderRadius:4},
+        ]
+      },
+      options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+        scales:{x:{title:{display:true,text:'Age',color:'#94a3b8'},grid:{color:'rgba(255,255,255,.05)'},ticks:{color:'#94a3b8'}},
+          y:{title:{display:true,text:'$',color:'#94a3b8'},grid:{color:'rgba(255,255,255,.05)'},ticks:{color:'#94a3b8',callback:v=>v>=1000000?'$'+(v/1000000).toFixed(1)+'M':v>=1000?'$'+(v/1000).toFixed(0)+'K':'$'+v}}},
+        plugins:{legend:{labels:{color:'#94a3b8',font:{size:11}}},
+          annotation:retAge?{annotations:{retLine:{type:'line',xMin:retAge-age,xMax:retAge-age,borderColor:'rgba(245,158,11,.5)',borderWidth:2,borderDash:[6,3],label:{content:'Retirement',display:true,color:'#f59e0b',font:{size:10}}}}}:{}
+        }
+      }
+    });
+    return ()=>{if(chartInst.current)chartInst.current.destroy()};
+  },[cvTimeline,retAge,age]);
+
+  if(!annualIncome) return (
+    <div className="fade-in" style={{textAlign:'center',padding:'60px 20px'}}>
+      <LogoMark size={56} />
+      <h2 style={{fontSize:22,fontWeight:600,marginBottom:8}}>Portfolio Analysis</h2>
+      <p style={{color:'var(--text2)',maxWidth:480,margin:'0 auto 24px'}}>
+        Set your client's annual income in <strong>My Client</strong> to enable protection gap analysis and cash value projections.
+      </p>
+      <button className="btn-primary" onClick={()=>setTab('profile')}>Go to My Client →</button>
+    </div>
+  );
+
+  return (
+    <div className="fade-in">
+      <h2 style={{fontSize:18,fontWeight:600,marginBottom:4}}>Portfolio Analysis</h2>
+      <p style={{fontSize:12,color:'var(--text3)',marginBottom:16}}>Protection gaps, cash value timeline, income projections — all synced from your policies</p>
+
+      {/* ═══ PROTECTION GAPS ═══ */}
+      <div className="card" style={{marginBottom:20}}>
+        <h3 style={{fontSize:15,fontWeight:700,marginBottom:4}}>Understanding Your Protection Gaps</h3>
+        <p style={{fontSize:11,color:'var(--text3)',marginBottom:12}}>Based on your income and lifestyle — what you would need if something went wrong today</p>
+
+        {/* LIA Framework Inputs */}
+        <div style={{background:'var(--bg3)',borderRadius:10,padding:12,marginBottom:16,border:'1px solid var(--border)'}}>
+          <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8}}>Coverage Guidelines (LIA Framework)</div>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:8}}>
+            <div className="field"><label>Death (yrs)</label><input type="number" value={deathYrs} onChange={e=>setDeathYrs(+e.target.value||10)} /><div style={{fontSize:9,color:'var(--text3)'}}>LIA: 9–10× annual income</div></div>
+            <div className="field"><label>TPD (yrs)</label><input type="number" value={tpdYrs} onChange={e=>setTpdYrs(+e.target.value||10)} /><div style={{fontSize:9,color:'var(--text3)'}}>LIA: 9–10× annual income</div></div>
+            <div className="field"><label>CI (yrs)</label><input type="number" value={ciYrs} onChange={e=>setCiYrs(+e.target.value||5)} /><div style={{fontSize:9,color:'var(--text3)'}}>LIA: 3.5–5× annual income</div></div>
+            <div className="field"><label>ECI (yrs)</label><input type="number" value={eciYrs} onChange={e=>setEciYrs(+e.target.value||2)} /><div style={{fontSize:9,color:'var(--text3)'}}>LIA: ~2× annual income</div></div>
+            <div className="field"><label>DI — Income Replaced (%)</label><input type="number" value={diPct} onChange={e=>setDiPct(+e.target.value||75)} /><div style={{fontSize:9,color:'var(--text3)'}}>LIA: 75% of gross monthly income</div></div>
+          </div>
+          <div style={{fontSize:10,color:'var(--text3)',marginTop:6}}>LIA Singapore: Death & TPD 9–10× gross annual income · CI 3.5–5× annual income · ECI ~2× annual income · Disability Income: 75% of monthly gross income</div>
+        </div>
+
+        {/* Score + Gap rows */}
+        <div style={{display:'flex',gap:20,alignItems:'flex-start'}}>
+          {/* Score circle */}
+          <div style={{textAlign:'center',flexShrink:0}}>
+            <div style={{width:80,height:80,borderRadius:'50%',border:'4px solid '+scoreColor,display:'flex',flexDirection:'column',justifyContent:'center',alignItems:'center'}}>
+              <div style={{fontSize:22,fontWeight:700,color:scoreColor}}>{overallScore}%</div>
+              <div style={{fontSize:8,color:'var(--text3)',textTransform:'uppercase'}}>Covered</div>
+            </div>
+            <div style={{fontSize:11,fontWeight:600,marginTop:4}}>Overall Coverage Score</div>
+            <div style={{fontSize:10,color:scoreColor,fontWeight:600}}>{scoreLabel}</div>
+          </div>
+
+          {/* Gap details */}
+          <div style={{flex:1}}>
+            <div style={{background:'var(--bg3)',borderRadius:8,padding:10,marginBottom:8}}>
+              <div style={{fontSize:9,fontWeight:700,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:6}}>How the Score is Calculated</div>
+              {gaps.map((g,i) => {
+                const pct = g.isFlag ? (g.cur>=g.need?100:(g.cur>0?50:0)) : (g.need===0?100:Math.min(100,g.cur/g.need*100));
+                const gap = g.isFlag ? 0 : Math.max(0, g.need - g.cur);
+                const dotColor = pct>=80?'var(--green2)':pct>=50?'var(--orange)':'var(--red)';
+                return (
+                  <div key={i} style={{display:'flex',alignItems:'center',padding:'8px 0',borderTop:i>0?'1px solid var(--border)':'none'}}>
+                    <span style={{width:8,height:8,borderRadius:'50%',background:dotColor,marginRight:10,flexShrink:0}}></span>
+                    <div style={{flex:1}}>
+                      <div style={{fontSize:12,fontWeight:600}}>{g.label}</div>
+                      <div style={{fontSize:10,color:'var(--text3)'}}>
+                        {g.isFlag ? g.note : '— Need '+fmt(g.need)}
+                      </div>
+                      {!g.isFlag && gap > 0 && <div style={{fontSize:10,color:'var(--red)',fontWeight:600}}>Gap: {fmt(gap)}</div>}
+                    </div>
+                    <div style={{textAlign:'right',flexShrink:0}}>
+                      <div style={{fontSize:13,fontWeight:700,color:dotColor}}>{Math.round(pct)}%</div>
+                      <div style={{fontSize:9,color:'var(--text3)'}}>
+                        {g.isFlag ? '' : '+'+fmt(g.cur)}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+            <div style={{fontSize:9,color:'var(--text3)',marginTop:2}}>
+              Accident & Supplementary — optional, not scored: ADD {coverage.add>0?fmt(coverage.add):'Not held'} · AMR {coverage.amr>0?fmt(coverage.amr):'Not held'} · TCM {coverage.tcm>0?fmt(coverage.tcm):'Not held'}
+            </div>
+            <div style={{marginTop:6,fontSize:11,fontWeight:600}}>
+              Weighted Total: <span style={{color:'var(--text3)',fontWeight:400}}>Death {gaps[0].weight}% · TPD {gaps[1].weight}% · CI {gaps[2].weight}% · ECI {gaps[3].weight}% · DI {gaps[4].weight}% · Hosp {gaps[5].weight}%</span>
+              <span style={{marginLeft:12,fontSize:14,fontWeight:700,color:scoreColor}}>{overallScore}%</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* ═══ CASH VALUE TIMELINE ═══ */}
+      <div className="card" style={{marginBottom:20}}>
+        <h3 style={{fontSize:15,fontWeight:700,marginBottom:4}}>Cash Value & Income Timeline</h3>
+        <p style={{fontSize:11,color:'var(--text3)',marginBottom:12}}>Projected cash values, maturity events, annuity income, and dividend drawdowns — age {age} to {Math.max(retAge+20,90)}</p>
+        <div style={{height:320,marginBottom:16}}><canvas ref={chartRef} /></div>
+
+        {/* Timeline table */}
+        <div style={{maxHeight:400,overflowY:'auto',border:'1px solid var(--border)',borderRadius:8}}>
+          <table style={{width:'100%',fontSize:11,borderCollapse:'collapse'}}>
+            <thead><tr style={{background:'var(--bg2)',position:'sticky',top:0}}>
+              <th style={{padding:'8px 10px',textAlign:'left'}}>Age</th>
+              <th style={{padding:'8px 10px',textAlign:'right'}}>Total CV</th>
+              <th style={{padding:'8px 10px',textAlign:'right'}}>Income/yr</th>
+              <th style={{padding:'8px 10px',textAlign:'right'}}>Maturities</th>
+              <th style={{padding:'8px 10px',textAlign:'right'}}>Dividends</th>
+              <th style={{padding:'8px 10px',textAlign:'left'}}>Policies Contributing</th>
+            </tr></thead>
+            <tbody>
+              {cvTimeline.filter(r => r.totalCV > 0 || r.income > 0 || r.maturities > 0).map(r => (
+                <tr key={r.age} style={{borderTop:'1px solid var(--border)',background:r.age===retAge?'rgba(245,158,11,.08)':''}}>
+                  <td style={{padding:'6px 10px',fontWeight:r.age===retAge?700:400}}>{r.age}{r.age===retAge?' ★':''}</td>
+                  <td style={{padding:'6px 10px',textAlign:'right',color:'var(--blue2)'}}>{r.totalCV>0?fmt(r.totalCV):'-'}</td>
+                  <td style={{padding:'6px 10px',textAlign:'right',color:r.income>0?'var(--green2)':'var(--text3)'}}>{r.income>0?fmt(r.income):'-'}</td>
+                  <td style={{padding:'6px 10px',textAlign:'right',color:r.maturities>0?'var(--orange)':'var(--text3)'}}>{r.maturities>0?fmt(r.maturities):'-'}</td>
+                  <td style={{padding:'6px 10px',textAlign:'right',color:r.dividends>0?'var(--purple)':'var(--text3)'}}>{r.dividends>0?fmt(r.dividends):'-'}</td>
+                  <td style={{padding:'6px 10px',fontSize:10,color:'var(--text3)'}}>{r.policies.map(p=>p.name).join(', ')}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* ═══ AT RETIREMENT SUMMARY ═══ */}
+      {(() => {
+        const retRow = cvTimeline.find(r => r.age === retAge);
+        if(!retRow) return null;
+        return (
+          <div className="card">
+            <h3 style={{fontSize:15,fontWeight:700,marginBottom:10}}>At Retirement (Age {retAge})</h3>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:12}}>
+              <div style={{background:'var(--bg3)',borderRadius:10,padding:14,textAlign:'center'}}>
+                <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',marginBottom:4}}>Total Cash Value</div>
+                <div style={{fontSize:20,fontWeight:700,color:'var(--blue2)'}}>{fmt(retRow.totalCV)}</div>
+              </div>
+              <div style={{background:'var(--bg3)',borderRadius:10,padding:14,textAlign:'center'}}>
+                <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',marginBottom:4}}>Annual Income</div>
+                <div style={{fontSize:20,fontWeight:700,color:'var(--green2)'}}>{fmt(retRow.income)}</div>
+                <div style={{fontSize:10,color:'var(--text3)'}}>{fmt(Math.round(retRow.income/12))}/mth</div>
+              </div>
+              <div style={{background:'var(--bg3)',borderRadius:10,padding:14,textAlign:'center'}}>
+                <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',marginBottom:4}}>Maturities Due</div>
+                <div style={{fontSize:20,fontWeight:700,color:'var(--orange)'}}>{fmt(retRow.maturities)}</div>
+              </div>
+              <div style={{background:'var(--bg3)',borderRadius:10,padding:14,textAlign:'center'}}>
+                <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',marginBottom:4}}>Dividend Income</div>
+                <div style={{fontSize:20,fontWeight:700,color:'var(--purple)'}}>{fmt(retRow.dividends)}</div>
+                <div style={{fontSize:10,color:'var(--text3)'}}>{fmt(Math.round(retRow.dividends/12))}/mth</div>
+              </div>
+            </div>
+            <div style={{marginTop:12,fontSize:11,color:'var(--text3)'}}>
+              {retRow.policies.length > 0 && ('Contributing policies: ' + retRow.policies.map(p=>p.name+' ('+fmt(p.cv)+')').join(' · '))}
+            </div>
+          </div>
+        );
+      })()}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
 // FUND RISK LOOKUP — iFAST curated database
 // ═══════════════════════════════════════════════════════════════
 
@@ -4843,7 +5538,11 @@ function ReportTab() {
       doc.setFillColor(...BLUE);
       doc.rect(0,46,W,2,'F');
       doc.setFont('helvetica','bold');doc.setFontSize(22);doc.setTextColor(...WHITE);
-      doc.text('PolicyLens',M,28);
+      // Add logo to PDF
+      try {
+        doc.addImage(PL_LOGO, 'SVG', M, 10, 12, 12);
+      } catch(e) {}
+      doc.text('PolicyLens',M+15,28);
       doc.setFontSize(11);doc.setFont('helvetica','normal');
       doc.text('Insurance Portfolio Report',M,36);
       if(clientName){doc.setFontSize(10);doc.text(`Client: ${clientName}`,W-M,28,{align:'right'});}
@@ -4956,7 +5655,8 @@ function ReportTab() {
         doc.setPage(i);
         doc.setFillColor(...NAVY);doc.rect(0,285,W,12,'F');
         doc.setFontSize(7);doc.setTextColor(180,180,180);
-        doc.text('PolicyLens v4 — For Financial Consultant Use Only',M,291);
+        try { doc.addImage(PL_ICON, 'SVG', M, 286, 5, 5); } catch(e) {}
+        doc.text('PolicyLens v4 — For Financial Consultant Use Only',M+7,291);
         doc.text(`Page ${i} of ${pageCount}`,W-M,291,{align:'right'});
       }
 
