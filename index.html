@@ -579,7 +579,6 @@ const INSURERS = {
   'moomoo':         {color:'#ff6600',bg:'#fff3e6',logo:'https://logo.clearbit.com/moomoo.com'},
   'Webull':         {color:'#f6475d',bg:'#fde8ec',logo:'https://logo.clearbit.com/webull.com'},
   // CPF / Gov
-  'CPF Board':      {color:'#00629b',bg:'#e6f0f5',logo:'https://logo.clearbit.com/cpf.gov.sg'},
 };
 const INSURER_LIST = Object.keys(INSURERS).sort();
 const getInsurer = (name) => INSURERS[name] || {color:'#64748b',bg:'#f1f5f9',logo:null};
@@ -3343,8 +3342,9 @@ async function geminiExtract(geminiKey, systemPrompt, contentBlocks, maxTokens) 
 
 // Main entry point — uses dual pipeline if both keys exist, Gemini-only otherwise
 async function callAI(systemPrompt, contentBlocks, maxTokens) {
-  const gk = ((await dbGet('settings','geminiKey').catch(()=>null))?.value||'').trim();
-  const ck = ((await dbGet('settings','anthropicKey').catch(()=>null))?.value||'').trim();
+  const uid = window._user?.id || '';
+  const gk = ((await dbGet('settings','geminiKey_'+uid).catch(()=>null))?.value || (await dbGet('settings','geminiKey').catch(()=>null))?.value || '').trim();
+  const ck = ((await dbGet('settings','anthropicKey_'+uid).catch(()=>null))?.value || (await dbGet('settings','anthropicKey').catch(()=>null))?.value || '').trim();
   
   if(!gk) throw new Error('Set your Gemini API key in Settings first');
   
@@ -3541,15 +3541,23 @@ function ProfileTab() {
       <div className="card" style={{marginBottom:16}}>
         <h3 style={{fontSize:14,fontWeight:600,marginBottom:12}}>Financial Profile</h3>
         <div style={{fontSize:11,color:'var(--text3)',marginBottom:10}}>Used for protection gap analysis, retirement projections, and cashflow timeline</div>
-        <div className="grid-3">
-          <div className="field"><label>Gross Annual Income ($)</label><input type="number" value={p.annualIncome||''} onChange={e=>set('annualIncome',e.target.value)} placeholder="e.g. 120000" /><div style={{fontSize:10,color:'var(--text3)'}}>{p.annualIncome ? '$'+(Math.round(p.annualIncome/12)).toLocaleString()+'/mth' : ''}</div></div>
-          <div className="field"><label>Monthly Expenses ($)</label><input type="number" value={p.monthlyExpenses||''} onChange={e=>set('monthlyExpenses',e.target.value)} placeholder="e.g. 4000" /></div>
-          <div className="field"><label>Target Retirement Age</label><input type="number" value={p.retirementAge||65} onChange={e=>set('retirementAge',e.target.value)} /></div>
-        </div>
-        <div className="grid-3">
-          <div className="field"><label>Mortgage Payment ($/mth)</label><input type="number" value={p.mortgagePayment||''} onChange={e=>set('mortgagePayment',e.target.value)} placeholder="0 if none" /></div>
-          <div className="field"><label>Dependant Support ($/mth)</label><input type="number" value={p.dependantSupport||''} onChange={e=>set('dependantSupport',e.target.value)} placeholder="Total for all dependants" /></div>
-          <div className="field"><label>Medical Budget ($/mth)</label><input type="number" value={p.medicalBudget||300} onChange={e=>set('medicalBudget',e.target.value)} /></div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
+          <div style={{background:'var(--bg3)',borderRadius:8,padding:12,border:'1px solid var(--border)'}}>
+            <div style={{fontSize:10,fontWeight:700,color:'var(--gold)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8}}>Income & Retirement</div>
+            <div className="field"><label>Gross Annual Income ($)</label><input type="number" value={p.annualIncome||''} onChange={e=>set('annualIncome',e.target.value)} placeholder="e.g. 120000" /><div style={{fontSize:10,color:'var(--text3)'}}>{p.annualIncome ? '$'+(Math.round(p.annualIncome/12)).toLocaleString()+'/mth' : ''}</div></div>
+            <div className="field"><label>Target Retirement Age</label><input type="number" value={p.retirementAge||65} onChange={e=>set('retirementAge',e.target.value)} /></div>
+          </div>
+          <div style={{background:'var(--bg3)',borderRadius:8,padding:12,border:'1px solid var(--border)'}}>
+            <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8}}>Monthly Outgoings</div>
+            <div className="grid-2">
+              <div className="field"><label>Living Expenses ($)</label><input type="number" value={p.monthlyExpenses||''} onChange={e=>set('monthlyExpenses',e.target.value)} placeholder="e.g. 4000" /></div>
+              <div className="field"><label>Mortgage ($/mth)</label><input type="number" value={p.mortgagePayment||''} onChange={e=>set('mortgagePayment',e.target.value)} placeholder="0" /></div>
+            </div>
+            <div className="grid-2">
+              <div className="field"><label>Dependant Support ($/mth)</label><input type="number" value={p.dependantSupport||''} onChange={e=>set('dependantSupport',e.target.value)} placeholder="0" /></div>
+              <div className="field"><label>Medical ($/mth)</label><input type="number" value={p.medicalBudget||300} onChange={e=>set('medicalBudget',e.target.value)} /></div>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -3618,6 +3626,10 @@ function Dashboard() {
   const [ciYrs,setCiYrs] = useState(5);
   const [eciYrs,setEciYrs] = useState(2);
   const [diPct,setDiPct] = useState(75);
+  const [ciMethod,setCiMethod] = useState('expenses'); // 'income' or 'expenses'
+  const [ciIncExp,setCiIncExp] = useState(true);
+  const [ciIncMort,setCiIncMort] = useState(true);
+  const [ciIncDep,setCiIncDep] = useState(false);
 
   // Dashboard drop handler
   const handleDashDrop = async (files) => {
@@ -3674,9 +3686,10 @@ function Dashboard() {
   // ── REQUIRED COVERAGE — income-based or SA override ──
   const reqDeath = parseFloat(deathOverride) || (annualIncome > 0 ? annualIncome * deathYrs : 500000);
   const reqTPD = parseFloat(tpdOverride) || (annualIncome > 0 ? annualIncome * tpdYrs : 500000);
-  const totalMonthly = monthlyExpenses + (parseFloat(p.mortgagePayment)||0) + (parseFloat(p.medicalBudget)||0);
-  const reqCI = parseFloat(ciOverride) || (annualIncome > 0 ? (totalMonthly > 0 ? totalMonthly : monthlyIncome) * 12 * ciYrs : 300000);
-  const reqECI = parseFloat(eciOverride) || (annualIncome > 0 ? (totalMonthly > 0 ? totalMonthly : monthlyIncome) * 12 * eciYrs : 120000);
+  const selExpenses = (ciIncExp?(parseFloat(p.monthlyExpenses)||0):0) + (ciIncMort?(parseFloat(p.mortgagePayment)||0):0) + (ciIncDep?(parseFloat(p.dependantSupport)||0):0);
+  const ciBasis = ciMethod==='income' ? monthlyIncome : (selExpenses > 0 ? selExpenses : monthlyIncome);
+  const reqCI = parseFloat(ciOverride) || (annualIncome > 0 ? ciBasis * 12 * ciYrs : 300000);
+  const reqECI = parseFloat(eciOverride) || (annualIncome > 0 ? ciBasis * 12 * eciYrs : 120000);
   const reqDI = parseFloat(diOverride) || (annualIncome > 0 ? monthlyIncome * diPct/100 : 3000);
 
   const gaps = [
@@ -3867,27 +3880,41 @@ function Dashboard() {
       </div>
 
       {/* ═══ LIA SETTINGS + SA OVERRIDE ═══ */}
-      <details style={{marginBottom:16}}>
-        <summary style={{fontSize:11,color:'var(--gold)',cursor:'pointer',fontWeight:600}}>⚙ Coverage Guidelines (LIA Framework) & SA Override</summary>
-        <div className="card" style={{marginTop:8}}>
-          <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:8,marginBottom:10}}>
-            <div className="field"><label>Death (yrs)</label><input type="number" value={deathYrs} onChange={e=>setDeathYrs(+e.target.value||10)} /><div style={{fontSize:9,color:'var(--text3)'}}>9–10× income</div></div>
-            <div className="field"><label>TPD (yrs)</label><input type="number" value={tpdYrs} onChange={e=>setTpdYrs(+e.target.value||10)} /></div>
-            <div className="field"><label>CI (yrs)</label><input type="number" value={ciYrs} onChange={e=>setCiYrs(+e.target.value||5)} /></div>
-            <div className="field"><label>ECI (yrs)</label><input type="number" value={eciYrs} onChange={e=>setEciYrs(+e.target.value||2)} /></div>
-            <div className="field"><label>DI %</label><input type="number" value={diPct} onChange={e=>setDiPct(+e.target.value||75)} /></div>
+      <div className="card" style={{marginBottom:16}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
+          <h3 style={{fontSize:13,fontWeight:600}}>Coverage Guidelines (LIA Framework)</h3>
+          <div style={{display:'flex',gap:8,fontSize:10}}>
+            <span style={{color:'var(--text3)'}}>Method:</span>
+            <label style={{display:'flex',alignItems:'center',gap:3,cursor:'pointer',color:ciMethod==='income'?'var(--gold)':'var(--text3)'}}><input type="radio" name="ciMethod" checked={ciMethod==='income'} onChange={()=>setCiMethod('income')} style={{accentColor:'var(--gold)'}} /> Income ×Years</label>
+            <label style={{display:'flex',alignItems:'center',gap:3,cursor:'pointer',color:ciMethod==='expenses'?'var(--gold)':'var(--text3)'}}><input type="radio" name="ciMethod" checked={ciMethod==='expenses'} onChange={()=>setCiMethod('expenses')} style={{accentColor:'var(--gold)'}} /> Expenses ×Years</label>
           </div>
-          <div style={{fontSize:11,fontWeight:600,color:'var(--gold)',marginBottom:6}}>SA Override (for retired clients / manual targets)</div>
-          <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:8}}>
+        </div>
+        {ciMethod==='expenses' && (
+          <div style={{display:'flex',gap:12,marginBottom:8,fontSize:10}}>
+            <span style={{color:'var(--text3)',fontWeight:600}}>Include:</span>
+            <label style={{display:'flex',alignItems:'center',gap:3,cursor:'pointer'}}><input type="checkbox" checked={ciIncExp} onChange={e=>setCiIncExp(e.target.checked)} style={{accentColor:'var(--gold)'}} /> Living Expenses</label>
+            <label style={{display:'flex',alignItems:'center',gap:3,cursor:'pointer'}}><input type="checkbox" checked={ciIncMort} onChange={e=>setCiIncMort(e.target.checked)} style={{accentColor:'var(--gold)'}} /> Mortgage</label>
+            <label style={{display:'flex',alignItems:'center',gap:3,cursor:'pointer'}}><input type="checkbox" checked={ciIncDep} onChange={e=>setCiIncDep(e.target.checked)} style={{accentColor:'var(--gold)'}} /> Dependant Support</label>
+          </div>
+        )}
+        <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:8,marginBottom:8}}>
+          <div className="field"><label>Death (yrs)</label><input type="number" value={deathYrs} onChange={e=>setDeathYrs(+e.target.value||10)} /><div style={{fontSize:9,color:'var(--text3)'}}>LIA: 9–10× income</div></div>
+          <div className="field"><label>TPD (yrs)</label><input type="number" value={tpdYrs} onChange={e=>setTpdYrs(+e.target.value||10)} /><div style={{fontSize:9,color:'var(--text3)'}}>LIA: 9–10× income</div></div>
+          <div className="field"><label>CI (yrs)</label><input type="number" value={ciYrs} onChange={e=>setCiYrs(+e.target.value||5)} /><div style={{fontSize:9,color:'var(--text3)'}}>LIA: 3.5–5× {ciMethod==='income'?'income':'expenses'}</div></div>
+          <div className="field"><label>ECI (yrs)</label><input type="number" value={eciYrs} onChange={e=>setEciYrs(+e.target.value||2)} /><div style={{fontSize:9,color:'var(--text3)'}}>LIA: ~2× {ciMethod==='income'?'income':'expenses'}</div></div>
+          <div className="field"><label>DI — Income %</label><input type="number" value={diPct} onChange={e=>setDiPct(+e.target.value||75)} /><div style={{fontSize:9,color:'var(--text3)'}}>LIA: 75% gross monthly</div></div>
+        </div>
+        <details>
+          <summary style={{fontSize:10,color:'var(--gold)',cursor:'pointer',fontWeight:600}}>SA Override (retired clients / manual targets)</summary>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:8,marginTop:6}}>
             <div className="field"><label>Death SA</label><input type="number" value={deathOverride} onChange={e=>setDeathOverride(e.target.value)} placeholder="Auto" /></div>
             <div className="field"><label>TPD SA</label><input type="number" value={tpdOverride} onChange={e=>setTpdOverride(e.target.value)} placeholder="Auto" /></div>
             <div className="field"><label>CI SA</label><input type="number" value={ciOverride} onChange={e=>setCiOverride(e.target.value)} placeholder="Auto" /></div>
             <div className="field"><label>ECI SA</label><input type="number" value={eciOverride} onChange={e=>setEciOverride(e.target.value)} placeholder="Auto" /></div>
             <div className="field"><label>DI/mth</label><input type="number" value={diOverride} onChange={e=>setDiOverride(e.target.value)} placeholder="Auto" /></div>
           </div>
-          <div style={{fontSize:9,color:'var(--text3)',marginTop:4}}>Leave blank = auto-calculate from income. Override for retired clients or manual targets.</div>
-        </div>
-      </details>
+        </details>
+      </div>
 
       {/* ═══ CASH VALUE & INCOME TIMELINE ═══ */}
       {cvTimeline.some(r=>r.totalCV>0||r.income>0) && (
@@ -4054,6 +4081,130 @@ function mergeToProfile(extracted, currentProfile, saveProfile) {
   }
 }
 
+// ═══════════════════════════════════════════════════════════════
+// BULK VERIFICATION MODAL — shows extracted policies + corrections
+// ═══════════════════════════════════════════════════════════════
+function BulkVerifyModal({extracted, repo, onAccept, onClose}) {
+  const [items, setItems] = useState(extracted.map((p,i) => ({
+    ...p, _idx:i, _selected:true, _corrections:[], _repoMatch:null,
+  })));
+
+  // Find repo matches for each item
+  useEffect(() => {
+    setItems(prev => prev.map(item => {
+      const q = ((item.productName||'')+(item.insurer||'')).toLowerCase();
+      if(!q || q.length < 3) return item;
+      const match = repo.find(r => {
+        const t = ((r.productName||'')+(r.insurer||'')).toLowerCase();
+        return t.includes(q) || q.includes(t) || (item.productName && r.productName && r.productName.toLowerCase()===item.productName.toLowerCase() && r.insurer===item.insurer);
+      });
+      return {...item, _repoMatch: match||null};
+    }));
+  }, [repo]);
+
+  const toggleSelect = (idx) => setItems(prev => prev.map(it => it._idx===idx ? {...it, _selected:!it._selected} : it));
+  const updateField = (idx, field, value) => setItems(prev => prev.map(it => it._idx===idx ? {...it, [field]:value} : it));
+  const toggleRider = (pIdx, rIdx) => setItems(prev => prev.map(it => {
+    if(it._idx!==pIdx) return it;
+    const riders = [...(it.riders||[])];
+    riders[rIdx] = {...riders[rIdx], _selected: !riders[rIdx]._selected};
+    return {...it, riders};
+  }));
+  const applyRepo = (idx) => setItems(prev => prev.map(it => {
+    if(it._idx!==idx || !it._repoMatch) return it;
+    const r = it._repoMatch;
+    return {...it, productName:r.productName, insurer:r.insurer, category:r.category, subType:r.subType, currency:r.currency||it.currency, _appliedRepo:true};
+  }));
+
+  const handleAccept = () => {
+    const selected = items.filter(it => it._selected).map(it => {
+      const p = {...it};
+      // Clean up internal fields
+      delete p._idx; delete p._selected; delete p._corrections; delete p._repoMatch; delete p._appliedRepo;
+      // Filter out deselected riders
+      if(p.riders) p.riders = p.riders.filter(r => r._selected !== false).map(r => { const c={...r}; delete c._selected; return c; });
+      return p;
+    });
+    onAccept(selected);
+  };
+
+  return (
+    <div className="modal-overlay" onClick={e=>{if(e.target===e.currentTarget)onClose()}}>
+      <div className="modal" style={{maxWidth:900,maxHeight:'90vh'}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
+          <div>
+            <h3 style={{fontSize:16,fontWeight:700}}>Verify Extracted Policies</h3>
+            <p style={{fontSize:11,color:'var(--text3)'}}>Review, correct, and select which policies to import. Uncheck to skip.</p>
+          </div>
+          <button onClick={onClose} style={{background:'none',color:'var(--text3)',fontSize:20,padding:4}}>×</button>
+        </div>
+
+        <div style={{maxHeight:'70vh',overflowY:'auto'}}>
+          {items.map((item,i) => (
+            <div key={i} style={{background:item._selected?'var(--bg3)':'var(--bg)',borderRadius:10,padding:14,marginBottom:10,border:'1px solid '+(item._selected?'var(--gold3)':'var(--border)'),opacity:item._selected?1:0.5}}>
+              {/* Header with checkbox */}
+              <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:8}}>
+                <input type="checkbox" checked={item._selected} onChange={()=>toggleSelect(item._idx)} style={{width:18,height:18,accentColor:'var(--gold)'}} />
+                <div style={{flex:1}}>
+                  <div style={{display:'flex',gap:8,alignItems:'center'}}>
+                    <input value={item.productName||''} onChange={e=>updateField(item._idx,'productName',e.target.value)} style={{fontWeight:700,fontSize:14,background:'transparent',border:'1px solid var(--border)',borderRadius:4,padding:'2px 6px',flex:1}} />
+                    <input value={item.insurer||''} onChange={e=>updateField(item._idx,'insurer',e.target.value)} style={{fontSize:12,background:'transparent',border:'1px solid var(--border)',borderRadius:4,padding:'2px 6px',width:120}} />
+                  </div>
+                  <div style={{display:'flex',gap:6,marginTop:4,fontSize:11,color:'var(--text3)'}}>
+                    <span>{item.category||'—'}</span> · <span>{item.subType||'—'}</span> · <span>SA: {item.sumAssured?'$'+(+item.sumAssured).toLocaleString():'—'}</span> · <span>Prem: {item.annualPremium?'$'+(+item.annualPremium).toLocaleString()+'/yr':'—'}</span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Repo match suggestion */}
+              {item._repoMatch && !item._appliedRepo && (
+                <div style={{background:'var(--gold-dim)',borderRadius:6,padding:8,marginBottom:8,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                  <div style={{fontSize:11}}>
+                    <span style={{color:'var(--gold)',fontWeight:600}}>📋 Repository match:</span> {item._repoMatch.insurer} — {item._repoMatch.productName} ({item._repoMatch.subType})
+                  </div>
+                  <button className="btn-primary btn-sm" onClick={()=>applyRepo(item._idx)} style={{fontSize:10}}>Apply Repo Data</button>
+                </div>
+              )}
+              {item._appliedRepo && <div style={{fontSize:10,color:'var(--green2)',marginBottom:6}}>✓ Repository data applied</div>}
+
+              {/* Riders */}
+              {(item.riders||[]).length > 0 && (
+                <div style={{marginTop:6}}>
+                  <div style={{fontSize:10,fontWeight:600,color:'var(--text3)',marginBottom:4}}>RIDERS / BENEFITS</div>
+                  {(item.riders||[]).map((rd,ri) => (
+                    <div key={ri} style={{display:'flex',alignItems:'center',gap:8,padding:'3px 0',borderTop:ri>0?'1px solid var(--border)':'none',fontSize:11}}>
+                      <input type="checkbox" checked={rd._selected!==false} onChange={()=>toggleRider(item._idx,ri)} style={{width:14,height:14,accentColor:'var(--gold)'}} />
+                      <select value={rd.type||'death'} onChange={e=>{const riders=[...(item.riders||[])];riders[ri]={...riders[ri],type:e.target.value};updateField(item._idx,'riders',riders);}} style={{fontSize:10,padding:'2px 4px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:4}}>
+                        <option value="death">Death & TI</option><option value="tpd">TPD</option><option value="ci">CI</option><option value="eci">ECI</option><option value="di">DI</option><option value="accidental">ADD</option><option value="premium_waiver">Waiver</option>
+                      </select>
+                      <input value={rd.riderName||''} onChange={e=>{const riders=[...(item.riders||[])];riders[ri]={...riders[ri],riderName:e.target.value};updateField(item._idx,'riders',riders);}} placeholder="Rider name" style={{flex:1,fontSize:10,padding:'2px 6px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:4}} />
+                      <span style={{fontSize:10,color:'var(--text3)'}}>SA: ${(+rd.sa||0).toLocaleString()}</span>
+                      <span style={{fontSize:10,color:rd.bundled===false?'var(--gold)':'var(--green2)'}}>{rd.bundled===false?'Separate rider':'Part of plan'}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+
+              {/* Notes */}
+              {item.notes && <div style={{fontSize:10,color:'var(--text3)',marginTop:6,fontStyle:'italic'}}>📝 {item.notes}</div>}
+            </div>
+          ))}
+        </div>
+
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:16,paddingTop:12,borderTop:'1px solid var(--border)'}}>
+          <div style={{fontSize:12,color:'var(--text2)'}}>{items.filter(it=>it._selected).length} of {items.length} policies selected</div>
+          <div style={{display:'flex',gap:8}}>
+            <button className="btn-secondary" onClick={onClose}>Cancel</button>
+            <button className="btn-primary" onClick={handleAccept} disabled={items.filter(it=>it._selected).length===0}>
+              Import {items.filter(it=>it._selected).length} Policies
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Policies() {
   const {policies,savePolicy,deletePolicy,repo,apiKey,saveRepo,clientProfile,saveProfile} = useContext(AppCtx);
   const [showForm, setShowForm] = useState(false);
@@ -4063,6 +4214,7 @@ function Policies() {
   const [scanResult, setScanResult] = useState(null);
   const [staged, setStaged] = useState([]);
   const [draftBanner, setDraftBanner] = useState(false);
+  const [bulkExtracted, setBulkExtracted] = useState(null); // for verification modal
 
   // ── Draft auto-save/restore ──
   const DRAFT_KEY = 'policylens_draft';
@@ -4149,6 +4301,15 @@ KEY HIGHLIGHTS — highlights (JSON array of strings, 5-8 items). MUST include:
 
 NOTES: notes (string — concise 3-5 sentence FC review summary)
 
+EXCEL/SPREADSHEET HANDLING: If the input is a spreadsheet or tabular data:
+- Each ROW is likely a separate policy. Extract ALL rows as separate policy objects.
+- Column headers map to fields: look for columns like "Policy Name", "Plan Name", "Insurer", "Company", "Sum Assured", "SA", "Premium", "Annual Premium", etc.
+- If a column mentions "rider" in its name or has separate rider premiums, those are SEPARATE riders (bundled=false, include riderName).
+- If the spreadsheet has rider columns like "CI Rider", "TPD Rider" with SA values, create rider entries for each.
+- Return an ARRAY of policy objects — one per row.
+- Infer category and subType from plan names (e.g. "term" → Term Life, "whole life" / "WL" → Whole Life, "ISP" / "shield" → Integrated Shield Plan, "ILP" → Investment-Linked Policy, "endowment" → Endowment, "annuity" / "income" → Retirement).
+- If a plan has a separate rider premium column, set the rider's bundled=false and premium to that value.
+
 Return ONLY valid JSON. Start with { end with }. No markdown.`;
 
   // ── Stage camera photos ──
@@ -4183,6 +4344,15 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       console.log('[Extract] Parsed:', JSON.stringify(parsed).slice(0,500));
       const arr = Array.isArray(parsed)?parsed:[parsed];
       console.log('[Extract] Policy count:', arr.length, 'Fields in first:', Object.keys(arr[0]||{}).join(','));
+      // Multi-policy: show verification modal
+      if(arr.length > 1) {
+        const processed = arr.map(p => ({...p, id:genId(), status:p.status||'inforce', sumAssured:parseFloat(p.sumAssured||p.faceAmount)||0, annualPremium:parseFloat(p.annualPremium)||0,
+          riders:(p.riders||[]).map(r=>({...r, _selected:true}))
+        }));
+        setBulkExtracted(processed);
+        setScanning(false);
+        return;
+      }
       if(arr.length===1){
         const p=arr[0]; const result = {...p,id:genId(),status:p.status||'inforce',sumAssured:parseFloat(p.sumAssured||p.faceAmount)||0,annualPremium:parseFloat(p.annualPremium)||0};
         // Auto-calc premEndAge if missing
@@ -4312,12 +4482,30 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
               <th>Policy</th><th>Category</th><th>Sub-type</th><th>Insurer</th><th>Currency</th><th>Sum Assured</th><th>Premium</th><th>Actions</th>
             </tr></thead>
             <tbody>
-              {filtered.map(p => (
+              {filtered.map(p => {
+                // Benefit icons
+                const bens = [];
+                const rds = p.riders||[];
+                const hasDeath = rds.some(r=>r.type==='death'&&parseFloat(r.sa)>0) || (p.category==='protection'&&parseFloat(p.sumAssured)>0);
+                const hasTPD = rds.some(r=>r.type==='tpd'&&parseFloat(r.sa)>0);
+                const hasCI = rds.some(r=>r.type==='ci'&&parseFloat(r.sa)>0) || p.subType==='Critical Illness';
+                const hasECI = rds.some(r=>r.type==='eci'&&parseFloat(r.sa)>0);
+                const hasDI = rds.some(r=>r.type==='di'&&parseFloat(r.sa)>0) || p.subType==='Disability Income';
+                const hasCV = parseFloat(p.cashValue)>0 || ['Whole Life','Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(p.subType) || p.category==='savings' || p.category==='investment' || p.category==='retirement';
+                if(hasDeath) bens.push({l:'D',c:'#5b8fd9',t:'Death & TI'});
+                if(hasTPD) bens.push({l:'T',c:'#9d8abf',t:'TPD'});
+                if(hasCI) bens.push({l:'CI',c:'#c97b9a',t:'Critical Illness'});
+                if(hasECI) bens.push({l:'E',c:'#d4a96a',t:'Early CI'});
+                if(hasDI) bens.push({l:'DI',c:'#5ba8a0',t:'Disability'});
+                if(hasCV) bens.push({l:'CV',c:'#d4a96a',t:'Cash Value'});
+                return (
                 <tr key={p.id}>
                   <td>
                     <div style={{fontWeight:500}}>{p.policyName || p.productName || 'Unnamed'}</div>
                     <div style={{fontSize:11,color:'var(--text3)'}}>{p.policyNumber || ''}</div>
-                    {p.highlights && p.highlights.length>0 && <div style={{fontSize:10,color:'var(--orange)',marginTop:2}}>{p.highlights[0]}</div>}
+                    <div style={{display:'flex',gap:3,marginTop:3,flexWrap:'wrap'}}>
+                      {bens.map((b,i) => <span key={i} title={b.t} style={{fontSize:8,fontWeight:700,padding:'1px 4px',borderRadius:3,background:b.c+'22',color:b.c,letterSpacing:'.3px'}}>{b.l}</span>)}
+                    </div>
                   </td>
                   <td><span className="badge" style={{background:`${catColor(p.category)}22`,color:catColor(p.category)}}>{CATEGORIES[p.category]?.label||p.category}</span></td>
                   <td style={{fontSize:12,color:'var(--text2)'}}>{p.subType||'-'}</td>
@@ -4332,11 +4520,26 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
                     </div>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
       )}
+
+      {/* Bulk Verification Modal */}
+      {bulkExtracted && <BulkVerifyModal extracted={bulkExtracted} repo={repo} onClose={()=>setBulkExtracted(null)} onAccept={async(selected) => {
+        let count = 0;
+        for(const p of selected) {
+          const result = {...p, id:genId()};
+          if(result.premStartAge && result.premTerm && !result.premEndAge) result.premEndAge = String(parseInt(result.premStartAge)+parseInt(result.premTerm));
+          if(result.ageAtEntry && !result.premStartAge) result.premStartAge = result.ageAtEntry;
+          await savePolicy(result);
+          count++;
+        }
+        setBulkExtracted(null);
+        alert('Imported '+count+' policies successfully!');
+      }} />}
 
       {showForm && <PolicyFormModal policy={editing||scanResult} onSave={handleFormSave} onClose={handleFormClose} repo={repo} onSaveRepo={saveRepo} onDraftChange={saveDraft} onDraftClear={clearDraft} />}
     </div>
@@ -4475,6 +4678,20 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
   const handleSubmit = () => {
     if(onDraftClear)onDraftClear();
     onSave({...form, sumAssured:parseFloat(form.sumAssured)||0, annualPremium:parseFloat(form.annualPremium)||0, monthlyBenefit:parseFloat(form.monthlyBenefit)||0});
+    // Auto-offer to save to repository if product name is set and not already in repo
+    if(form.productName && form.insurer && repo) {
+      const exists = repo.find(r => r.productName === form.productName && r.insurer === form.insurer);
+      if(!exists && confirm('Save "'+form.insurer+' '+form.productName+'" to the shared Policy Repository?\n\nThis makes it available for all advisors to search and auto-fill.')) {
+        const repoItem = {
+          id:'repo-'+Date.now(),
+          insurer:form.insurer, productName:form.productName, productCode:form.productCode||'',
+          category:form.category, subType:form.subType, currency:form.currency||'SGD',
+          notes:(form.notes||'')+(form.riders&&form.riders.length>0?'\nRiders: '+form.riders.filter(r=>!r.bundled).map(r=>(r.riderName||r.type)+' SA '+(r.sa||0)).join(', '):''),
+          editHistory:[{by:window._prof?.full_name||window._user?.user_metadata?.full_name||'Advisor',at:new Date().toISOString(),action:'created from policy form'}],
+        };
+        if(onSaveRepo) onSaveRepo(repoItem);
+      }
+    }
   };
 
   // ── Scan into existing form ──
@@ -5213,6 +5430,39 @@ function FundAllocationEditor({allocations,onChange}) {
 
 function Repository() {
   const {repo,saveRepo,deleteRepo,refreshRepo,repoSource} = useContext(AppCtx);
+  const [repoScanning, setRepoScanning] = useState(false);
+
+  const handleRepoDrop = async (files) => {
+    if(!files||!files.length) return;
+    setRepoScanning(true);
+    try {
+      const content = [];
+      for(const file of Array.from(files).slice(0,8)) {
+        const blocks = await processFile(file);
+        content.push(...blocks);
+      }
+      content.push({type:'text',text:'Extract ALL insurance product information from these documents. For EACH product, return a JSON object in an array with: insurer, productName, productCode, category (protection/savings/health/investment/retirement/maternity), subType, currency, notes (comprehensive product summary including: charges, features, bonus structure, riders that attach, key terms). This is for a product REPOSITORY — extract product-level data, NOT client-specific data. Return a JSON array of products.'});
+      const text = await callAI('You are an insurance product analyst. Extract product repository data from documents. Return ONLY a JSON array.', content, 8000);
+      const parsed = repairJSON(text);
+      const arr = Array.isArray(parsed)?parsed:[parsed];
+      let added = 0;
+      for(const item of arr) {
+        if(!item.productName) continue;
+        const exists = repo.find(r => r.productName === item.productName && r.insurer === item.insurer);
+        if(exists) {
+          if(confirm('Product "'+item.insurer+' '+item.productName+'" already exists. Update notes?')) {
+            await saveRepo({...exists, notes: item.notes || exists.notes, editHistory:[...(exists.editHistory||[]),{by:window._prof?.full_name||window._user?.user_metadata?.full_name||'Advisor',at:new Date().toISOString(),action:'updated from document'}]});
+            added++;
+          }
+        } else {
+          await saveRepo({id:'repo-'+Date.now()+'-'+Math.random().toString(36).slice(2,6), ...item, editHistory:[{by:window._prof?.full_name||window._user?.user_metadata?.full_name||'Advisor',at:new Date().toISOString(),action:'added from document'}]});
+          added++;
+        }
+      }
+      alert('Added/updated '+added+' products to repository.');
+    } catch(e) { alert('Error: '+e.message); }
+    setRepoScanning(false);
+  };
   const [search, setSearch] = useState('');
   const [expanded, setExpanded] = useState(null);
   const [editingRepo, setEditingRepo] = useState(null); // id of item being edited
@@ -5225,11 +5475,31 @@ function Repository() {
   const userEmail = (window._user?.email || '');
   const isAdmin = window._isAdmin || false;
 
-  const filtered = search ? repo.filter(r =>
+  const filtered = (search ? repo.filter(r =>
     (r.productName+' '+r.insurer+' '+(r.productCode||'')).toLowerCase().includes(search.toLowerCase())
-  ) : repo;
+  ) : repo).slice().sort((a,b) => {
+    const va = Object.values(a.votes||{}).reduce((s,v)=>s+v,0);
+    const vb = Object.values(b.votes||{}).reduce((s,v)=>s+v,0);
+    return vb - va; // highest votes first
+  });
 
-  const addFootprint = (action) => ({name:userName,email:userEmail,date:new Date().toISOString(),action});
+  const addFootprint = (action) => ({name:userName,by:userName,email:userEmail,date:new Date().toISOString(),at:new Date().toISOString(),action});
+
+  // Voting
+  const handleVote = (r, direction) => {
+    const votes = {...(r.votes||{})};
+    const myVote = votes[window._user?.id||'anon'];
+    if(myVote === direction) { delete votes[window._user?.id||'anon']; } // toggle off
+    else { votes[window._user?.id||'anon'] = direction; }
+    saveRepo({...r, votes, editHistory:[...(r.editHistory||[]), addFootprint(direction>0?'Upvoted':'Downvoted')]});
+  };
+  const getVoteCount = (r) => Object.values(r.votes||{}).reduce((s,v)=>s+v,0);
+  const getMyVote = (r) => (r.votes||{})[window._user?.id||'anon']||0;
+  const getContributors = (r) => {
+    const names = new Set();
+    (r.editHistory||[]).forEach(h => { if(h.by||h.name) names.add(h.by||h.name); });
+    return [...names];
+  };
 
   // Admin: save full edit with footprint
   const handleAdminSave = (r) => {
@@ -5265,17 +5535,27 @@ function Repository() {
         </div>
       </div>
 
+      <DropZone active={true} onFiles={handleRepoDrop} label={repoScanning?"🔄 Scanning documents for products...":"📎 Drop product summaries, benefit illustrations, or policy documents here to add to the repository"} />
+
       <div style={{display:'grid',gap:12}}>
         {filtered.map(r => (
           <div key={r.id} className="card card-sm" style={{borderLeft:`3px solid ${catColor(r.category)}`}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',cursor:'pointer'}} onClick={()=>{setExpanded(expanded===r.id?null:r.id);setEditingRepo(null);setComment('');}}>
-              <div>
+              <div style={{flex:1}}>
                 <div style={{fontWeight:600,fontSize:14,display:'flex',alignItems:'center',gap:6}}><InsurerBadge name={r.insurer} size="lg" /> <span>— {r.productName}</span></div>
-                <div style={{fontSize:12,color:'var(--text3)',marginTop:2}}>
-                  {r.productCode} • {r.currency} • <span className="badge" style={{background:`${catColor(r.category)}22`,color:catColor(r.category)}}>{r.subType}</span>
+                <div style={{fontSize:11,color:'var(--text3)',marginTop:2,display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+                  {r.productCode && <span>{r.productCode}</span>}{r.productCode && <span>•</span>}
+                  <span>{r.currency||'SGD'}</span> •
+                  <span className="badge" style={{background:`${catColor(r.category)}22`,color:catColor(r.category)}}>{r.subType}</span>
+                  {getContributors(r).length > 0 && <span style={{fontSize:10,color:'var(--text3)'}}>• {getContributors(r).length} contributor{getContributors(r).length>1?'s':''}</span>}
                 </div>
               </div>
-              <span style={{color:'var(--text3)',fontSize:16}}>{expanded===r.id?'▾':'▸'}</span>
+              <div style={{display:'flex',alignItems:'center',gap:6}} onClick={e=>e.stopPropagation()}>
+                <button onClick={()=>handleVote(r,1)} style={{background:getMyVote(r)===1?'var(--green-dim)':'transparent',border:'1px solid '+(getMyVote(r)===1?'var(--green2)':'var(--border)'),borderRadius:4,padding:'2px 6px',cursor:'pointer',fontSize:12,color:getMyVote(r)===1?'var(--green2)':'var(--text3)'}}>👍</button>
+                <span style={{fontSize:12,fontWeight:700,color:getVoteCount(r)>0?'var(--green2)':getVoteCount(r)<0?'var(--red)':'var(--text3)',minWidth:20,textAlign:'center'}}>{getVoteCount(r)>0?'+':''}{getVoteCount(r)}</span>
+                <button onClick={()=>handleVote(r,-1)} style={{background:getMyVote(r)===-1?'var(--red-dim)':'transparent',border:'1px solid '+(getMyVote(r)===-1?'var(--red)':'var(--border)'),borderRadius:4,padding:'2px 6px',cursor:'pointer',fontSize:12,color:getMyVote(r)===-1?'var(--red)':'var(--text3)'}}>👎</button>
+                <span style={{color:'var(--text3)',fontSize:16,marginLeft:4}}>{expanded===r.id?'▾':'▸'}</span>
+              </div>
             </div>
 
             {expanded===r.id && (
@@ -5364,6 +5644,18 @@ function Repository() {
                   </div>
                 </div>
 
+                {/* Contributors */}
+                {getContributors(r).length > 0 && (
+                  <div style={{marginBottom:10}}>
+                    <div style={{fontSize:11,fontWeight:600,color:'var(--text3)',textTransform:'uppercase',marginBottom:4}}>Contributors</div>
+                    <div style={{display:'flex',gap:4,flexWrap:'wrap'}}>
+                      {getContributors(r).map((name,i) => (
+                        <span key={i} style={{fontSize:10,padding:'2px 8px',borderRadius:10,background:'var(--gold-dim)',color:'var(--gold)',fontWeight:500}}>{name}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 {/* Edit history trail */}
                 {r.editHistory && r.editHistory.length>0 && (
                   <div style={{marginBottom:10}}>
@@ -5371,7 +5663,7 @@ function Repository() {
                     <div style={{fontSize:11,color:'var(--text3)'}}>
                       {r.editHistory.slice(-5).reverse().map((h,i)=>(
                         <div key={i} style={{marginBottom:2}}>
-                          {h.name} — {h.action} — {new Date(h.date).toLocaleDateString('en-SG',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'})}
+                          {h.by||h.name||'—'} — {h.action} — {new Date(h.date||h.at).toLocaleDateString('en-SG',{day:'numeric',month:'short',year:'numeric',hour:'2-digit',minute:'2-digit'})}
                         </div>
                       ))}
                       {r.editHistory.length>5 && <div style={{fontStyle:'italic'}}>…and {r.editHistory.length-5} earlier edits</div>}
@@ -6057,8 +6349,10 @@ function Settings() {
   // Load both keys from IndexedDB on mount
   useEffect(() => {
     (async () => {
-      const gk = await dbGet('settings','geminiKey').catch(()=>null);
-      const ck = await dbGet('settings','anthropicKey').catch(()=>null);
+      // Load API keys — try user-specific first, fallback to global
+      const uid = window._user?.id || '';
+      const gk = await dbGet('settings','geminiKey_'+uid).catch(()=>null) || await dbGet('settings','geminiKey').catch(()=>null);
+      const ck = await dbGet('settings','anthropicKey_'+uid).catch(()=>null) || await dbGet('settings','anthropicKey').catch(()=>null);
       if(gk?.value) setGeminiKey(gk.value);
       if(ck?.value) setAnthropicKey(ck.value);
     })();
@@ -6161,7 +6455,7 @@ function Settings() {
           <div style={{display:'flex',gap:6}}>
             <button className="btn-primary btn-sm" onClick={async()=>{
               const k=geminiKey.trim(); if(!k||!k.startsWith('AIza')){alert('Gemini keys start with AIza...');return;}
-              await dbPut('settings',{key:'geminiKey',value:k}); alert('✅ Gemini key saved!');
+              const uid=window._user?.id||''; await dbPut('settings',{key:'geminiKey_'+uid,value:k}); await dbPut('settings',{key:'geminiKey',value:k}); alert('✅ Gemini key saved to your account!');
             }}>Save</button>
             <button className="btn-secondary btn-sm" onClick={async()=>{
               const k=((await dbGet('settings','geminiKey').catch(()=>null))?.value||'').trim();
@@ -6186,7 +6480,7 @@ function Settings() {
             <button className="btn-primary btn-sm" onClick={async()=>{
               const k=anthropicKey.trim(); if(!k||!k.startsWith('sk-ant-')){alert('Anthropic keys start with sk-ant-...');return;}
               if(k.length<50){alert('Key too short ('+k.length+' chars). Full keys are ~130 chars. Copy the FULL key from Anthropic Console.');return;}
-              await dbPut('settings',{key:'anthropicKey',value:k}); alert('✅ Anthropic key saved! ('+k.length+' chars)');
+              const uid2=window._user?.id||''; await dbPut('settings',{key:'anthropicKey_'+uid2,value:k}); await dbPut('settings',{key:'anthropicKey',value:k}); alert('✅ Anthropic key saved to your account! ('+k.length+' chars)');
             }}>Save</button>
             <button className="btn-secondary btn-sm" onClick={async()=>{
               const k=((await dbGet('settings','anthropicKey').catch(()=>null))?.value||'').trim();
