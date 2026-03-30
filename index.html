@@ -3181,54 +3181,77 @@ function openCameraModal() {
 function CameraModal() {
   const [open, setOpen] = useState(false);
   const [shots, setShots] = useState([]);
-  const [facingMode, setFacingMode] = useState('environment');
   const [error, setError] = useState(null);
+  const [cameras, setCameras] = useState([]);
+  const [camIdx, setCamIdx] = useState(0);
+  const [camLabel, setCamLabel] = useState('');
   const videoRef = useRef(null);
   const streamRef = useRef(null);
   const canvasRef = useRef(null);
 
   useEffect(() => {
-    const handler = () => { setShots([]); setError(null); setOpen(true); };
+    const handler = () => { setShots([]); setError(null); setCamIdx(0); setOpen(true); };
     window.addEventListener('policylens-open-camera', handler);
     return () => window.removeEventListener('policylens-open-camera', handler);
   }, []);
 
-  // Start/stop camera when open changes
+  // Enumerate cameras on first open
   useEffect(() => {
-    if (open) startCamera();
-    else stopCamera();
+    if (!open) { stopCamera(); return; }
+    (async () => {
+      try {
+        // Need a temp stream first to get permission, then enumerate
+        const tempStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+        tempStream.getTracks().forEach(t => t.stop());
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const videoDevices = devices.filter(d => d.kind === 'videoinput');
+        console.log('[Camera] Found devices:', videoDevices.map(d => d.label + ' | ' + d.deviceId.slice(0,8)));
+        setCameras(videoDevices);
+        // Try to find back/rear cameras — pick the first one (usually wide-angle)
+        const backCams = videoDevices.filter(d => {
+          const l = (d.label || '').toLowerCase();
+          return l.includes('back') || l.includes('rear') || l.includes('environment') || l.includes('wide') || l.includes('camera2 0') || l.includes('camera 0');
+        });
+        // If we found specific back cams, start with the widest one
+        if (backCams.length > 0) {
+          const wideIdx = videoDevices.indexOf(backCams.find(d => d.label.toLowerCase().includes('wide')) || backCams[0]);
+          setCamIdx(wideIdx >= 0 ? wideIdx : 0);
+          startCameraByDeviceId(videoDevices[wideIdx >= 0 ? wideIdx : 0].deviceId, videoDevices[wideIdx >= 0 ? wideIdx : 0].label);
+        } else if (videoDevices.length > 0) {
+          startCameraByDeviceId(videoDevices[0].deviceId, videoDevices[0].label);
+        } else {
+          setError('No cameras found on this device.');
+        }
+      } catch (e) {
+        console.warn('[Camera] Enum error:', e);
+        setError('Camera access denied. Please allow camera permission.');
+      }
+    })();
     return () => stopCamera();
-  }, [open, facingMode]);
+  }, [open]);
 
-  const startCamera = async () => {
+  const startCameraByDeviceId = async (deviceId, label) => {
     stopCamera();
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode },
+        video: { deviceId: { exact: deviceId } },
         audio: false
       });
       streamRef.current = stream;
-      // Reset zoom to 1x (widest) if supported
       const track = stream.getVideoTracks()[0];
-      if (track) {
-        const resetZoom = () => {
-          try {
-            const caps = track.getCapabilities ? track.getCapabilities() : {};
-            console.log('[Camera] Capabilities:', JSON.stringify({zoom: caps.zoom, focusDistance: caps.focusDistance}));
-            if (caps.zoom) {
-              const minZoom = caps.zoom.min || 1;
-              console.log('[Camera] Setting zoom to', minZoom);
-              track.applyConstraints({ zoom: minZoom }).catch(e => {
-                console.warn('[Camera] zoom constraint failed, trying advanced:', e);
-                track.applyConstraints({ advanced: [{ zoom: minZoom }] }).catch(() => {});
-              });
-            }
-          } catch(e) { console.warn('[Camera] Zoom reset error:', e); }
-        };
-        // Try immediately and again after stream stabilizes
-        resetZoom();
-        setTimeout(resetZoom, 300);
-        setTimeout(resetZoom, 1000);
+      setCamLabel(track.label || label || '');
+      console.log('[Camera] Active:', track.label, '| Settings:', JSON.stringify(track.getSettings()));
+      // Reset zoom to minimum
+      if (track.getCapabilities) {
+        try {
+          const caps = track.getCapabilities();
+          if (caps.zoom) {
+            const minZ = caps.zoom.min || 1;
+            await track.applyConstraints({ zoom: minZ }).catch(() =>
+              track.applyConstraints({ advanced: [{ zoom: minZ }] }).catch(() => {})
+            );
+          }
+        } catch(e) {}
       }
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
@@ -3236,9 +3259,16 @@ function CameraModal() {
       }
       setError(null);
     } catch (e) {
-      console.warn('[Camera] Error:', e);
-      setError('Camera access denied. Please allow camera permission and try again.');
+      console.warn('[Camera] Start error:', e);
+      setError('Could not open this camera. Try switching.');
     }
+  };
+
+  const switchCamera = () => {
+    if (cameras.length < 2) return;
+    const next = (camIdx + 1) % cameras.length;
+    setCamIdx(next);
+    startCameraByDeviceId(cameras[next].deviceId, cameras[next].label);
   };
 
   const stopCamera = () => {
@@ -3289,7 +3319,7 @@ function CameraModal() {
     if (_cameraResolve) { _cameraResolve([]); _cameraResolve = null; }
   };
 
-  const flip = () => setFacingMode(f => f === 'environment' ? 'user' : 'environment');
+  const flip = () => switchCamera();
 
   if (!open) return null;
 
@@ -3312,6 +3342,14 @@ function CameraModal() {
           <div style={{position:'absolute',top:12,left:12,background:'rgba(212,169,106,.9)',color:'#0b0f1a',
             borderRadius:20,padding:'4px 12px',fontSize:13,fontWeight:700}}>
             {shots.length} photo{shots.length > 1 ? 's' : ''}
+          </div>
+        )}
+        {/* Camera label */}
+        {camLabel && (
+          <div style={{position:'absolute',bottom:8,left:'50%',transform:'translateX(-50%)',
+            background:'rgba(0,0,0,.6)',color:'#fff',borderRadius:12,padding:'3px 10px',fontSize:10,
+            maxWidth:'80%',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+            📷 {camIdx+1}/{cameras.length} — {camLabel}
           </div>
         )}
         {/* Close button */}
