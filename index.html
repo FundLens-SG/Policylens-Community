@@ -3208,13 +3208,27 @@ function CameraModal() {
         audio: false
       });
       streamRef.current = stream;
-      // Reset zoom to 1x if supported
+      // Reset zoom to 1x (widest) if supported
       const track = stream.getVideoTracks()[0];
       if (track) {
-        try {
-          const caps = track.getCapabilities ? track.getCapabilities() : {};
-          if (caps.zoom) track.applyConstraints({ advanced: [{ zoom: caps.zoom.min || 1 }] });
-        } catch(e) {}
+        const resetZoom = () => {
+          try {
+            const caps = track.getCapabilities ? track.getCapabilities() : {};
+            console.log('[Camera] Capabilities:', JSON.stringify({zoom: caps.zoom, focusDistance: caps.focusDistance}));
+            if (caps.zoom) {
+              const minZoom = caps.zoom.min || 1;
+              console.log('[Camera] Setting zoom to', minZoom);
+              track.applyConstraints({ zoom: minZoom }).catch(e => {
+                console.warn('[Camera] zoom constraint failed, trying advanced:', e);
+                track.applyConstraints({ advanced: [{ zoom: minZoom }] }).catch(() => {});
+              });
+            }
+          } catch(e) { console.warn('[Camera] Zoom reset error:', e); }
+        };
+        // Try immediately and again after stream stabilizes
+        resetZoom();
+        setTimeout(resetZoom, 300);
+        setTimeout(resetZoom, 1000);
       }
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
