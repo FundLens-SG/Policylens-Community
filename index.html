@@ -4,6 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PolicyLens v4</title>
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0b0f1a">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="PolicyLens">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<script>if('serviceWorker' in navigator && location.hostname.includes('github.io')){window.addEventListener('load',()=>{navigator.serviceWorker.register('sw.js').then(r=>console.log('[SW] Registered:',r.scope)).catch(e=>console.warn('[SW] Failed:',e));});}</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
@@ -93,8 +100,13 @@ label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;lett
 #admin-panel table{width:100%;border-collapse:collapse}
 #admin-panel th{text-align:left;padding:8px;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text3);border-bottom:1px solid var(--border)}
 #admin-panel td{padding:8px;font-size:13px;border-bottom:1px solid var(--border)}
-.logout-pill{position:fixed;top:12px;right:16px;z-index:9998;background:var(--bg3);border:1px solid var(--border2);border-radius:8px;padding:6px 12px;font-size:11px;font-weight:500;cursor:pointer;color:var(--text3);font-family:inherit;display:none}
-.logout-pill:hover{background:var(--bg4)}
+.logout-pill{display:none!important}
+
+
+/* ── Mobile nav: hide scrollbar, compact spacing ── */
+@media(max-width:768px){
+  .modal{max-width:95vw!important;max-height:90vh!important;padding:16px!important;}
+}
 </style>
 </head>
 <body>
@@ -294,6 +306,61 @@ function authGrant(){
   document.getElementById('auth-gate').style.display='none';
   document.getElementById('logout-pill').style.display='block';
   if(_isAdmin)document.getElementById('admin-fab').style.display='flex';
+  // Sync API keys from Supabase to IndexedDB on login
+  syncKeysFromSupabase();
+  // Check onboarding
+  checkOnboarding();
+}
+
+// ── Sync API keys from Supabase user_settings → IndexedDB ──
+async function syncKeysFromSupabase(){
+  try {
+    const s=getSB();if(!s||!_user) return;
+    const {data,error}=await s.from('user_settings').select('gemini_api_key,anthropic_api_key').eq('user_id',_user.id).maybeSingle();
+    if(error||!data) return;
+    const uid=_user.id;
+    if(data.gemini_api_key){
+      await dbPut('settings',{key:'geminiKey_'+uid,value:data.gemini_api_key});
+      await dbPut('settings',{key:'geminiKey',value:data.gemini_api_key});
+    }
+    if(data.anthropic_api_key){
+      await dbPut('settings',{key:'anthropicKey_'+uid,value:data.anthropic_api_key});
+      await dbPut('settings',{key:'anthropicKey',value:data.anthropic_api_key});
+    }
+    console.log('[Auth] API keys synced from Supabase');
+  } catch(e){console.warn('[Auth] Key sync error:',e);}
+}
+
+// ── Save API key to Supabase user_settings ──
+async function saveKeyToSupabase(keyType, value){
+  try {
+    const s=getSB();if(!s||!_user) return;
+    const col = keyType==='gemini'?'gemini_api_key':'anthropic_api_key';
+    const {error}=await s.from('user_settings').upsert({user_id:_user.id,[col]:value},{onConflict:'user_id'});
+    if(error) console.warn('[Auth] Key save error:',error.message);
+    else console.log('[Auth] '+keyType+' key saved to Supabase');
+  } catch(e){console.warn('[Auth] Key save error:',e);}
+}
+
+// ── Onboarding check ──
+async function checkOnboarding(){
+  try {
+    const s=getSB();if(!s||!_user) return;
+    const {data}=await s.from('user_settings').select('onboarding_completed').eq('user_id',_user.id).maybeSingle();
+    if(data && !data.onboarding_completed){
+      window._showOnboarding = true;
+      // Trigger React re-render by dispatching a custom event
+      window.dispatchEvent(new Event('policylens-onboarding'));
+    }
+  } catch(e){console.warn('[Auth] Onboarding check error:',e);}
+}
+
+async function completeOnboarding(){
+  try {
+    const s=getSB();if(!s||!_user) return;
+    await s.from('user_settings').upsert({user_id:_user.id,onboarding_completed:true},{onConflict:'user_id'});
+    window._showOnboarding = false;
+  } catch(e){console.warn('[Auth] Onboarding complete error:',e);}
 }
 
 // ── Admin ──
@@ -3098,6 +3165,81 @@ async function sbRepoDelete(id) {
   return !error;
 }
 
+
+// ═══════════════════════════════════════════════════════════════
+// ONBOARDING MODAL — First-time user guide
+// ═══════════════════════════════════════════════════════════════
+
+function OnboardingModal() {
+  const [show, setShow] = useState(false);
+  useEffect(() => {
+    if(window._showOnboarding) setShow(true);
+    const handler = () => { if(window._showOnboarding) setShow(true); };
+    const manualHandler = () => setShow(true);
+    window.addEventListener('policylens-onboarding', handler);
+    window.addEventListener('policylens-open-guide', manualHandler);
+    return () => { window.removeEventListener('policylens-onboarding', handler); window.removeEventListener('policylens-open-guide', manualHandler); };
+  }, []);
+
+  if(!show) return null;
+
+  const dismiss = () => {
+    setShow(false);
+    if(window.completeOnboarding) completeOnboarding();
+  };
+
+  const menuItems = [
+    {icon:'👤',name:'My Client',desc:'Client profile — name, NRIC, DOB, income, expenses, dependants. All gap analysis auto-calculates from here.'},
+    {icon:'📊',name:'Dashboard',desc:'Portfolio overview — premium allocation, protection gap scoring (LIA standards), cash value timeline.'},
+    {icon:'📋',name:'Policies',desc:'Your client\'s policies. Scan documents with AI, upload files, or add manually. Supports all plan types.'},
+    {icon:'🗄️',name:'Policy Repository',desc:'Shared cloud database of products & riders. Auto-fills when you type product names.'},
+    {icon:'📉',name:'Fund Repository',desc:'2,200+ ILP sub-funds with risk ratings. Search and attach to investment-linked policies.'},
+    {icon:'📄',name:'PDF Report',desc:'Generate a professional client review PDF with all policies, gaps, and projections.'},
+    {icon:'⚙️',name:'Settings',desc:'API keys (Gemini + Anthropic), save/load portfolios, PDF unlock passwords.'},
+  ];
+
+  return (
+    <div className="modal-overlay" onClick={dismiss}>
+      <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:540,padding:28}}>
+        <div style={{textAlign:'center',marginBottom:20}}>
+          <div style={{fontSize:40,marginBottom:8}}>✨</div>
+          <h2 style={{fontSize:20,fontWeight:700,marginBottom:6}}>Welcome to PolicyLens</h2>
+          <p style={{color:'var(--text2)',fontSize:13,lineHeight:1.5}}>
+            Your AI-powered policy review toolkit. Here's how to get started in 30 seconds:
+          </p>
+        </div>
+
+        <div className="card" style={{padding:16,marginBottom:16,background:'var(--bg3)',borderColor:'var(--gold3)'}}>
+          <div style={{fontSize:13,fontWeight:600,color:'var(--gold2)',marginBottom:8}}>⚡ Quick Start</div>
+          <div style={{fontSize:12,color:'var(--text)',lineHeight:1.6}}>
+            <strong>1.</strong> Go to <strong>⚙️ Settings</strong> and add your Gemini API key (free tier works)<br/>
+            <strong>2.</strong> Hit <strong>📷 Camera</strong> or <strong>📄 Upload</strong> on any policy document<br/>
+            <strong>3.</strong> AI extracts everything — insurer, plan, coverage, riders, premiums<br/>
+            <strong>4.</strong> Fill in <strong>👤 My Client</strong> for automatic gap analysis & PDF reports
+          </div>
+        </div>
+
+        <div style={{fontSize:12,fontWeight:600,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8}}>Menu Guide</div>
+        <div style={{display:'flex',flexDirection:'column',gap:6,marginBottom:20,maxHeight:240,overflowY:'auto'}}>
+          {menuItems.map((m,i) => (
+            <div key={i} style={{display:'flex',gap:10,alignItems:'flex-start',padding:'8px 10px',background:'var(--bg3)',borderRadius:8}}>
+              <span style={{fontSize:18,flexShrink:0,marginTop:1}}>{m.icon}</span>
+              <div>
+                <div style={{fontSize:12,fontWeight:600,color:'var(--text)'}}>{m.name}</div>
+                <div style={{fontSize:11,color:'var(--text2)',lineHeight:1.4}}>{m.desc}</div>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        <button className="btn-primary" style={{width:'100%',fontSize:14,padding:'12px 0'}} onClick={dismiss}>
+          Got it — Let's Go! 🚀
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ═══════════════════════════════════════════════════════════════
 // MAIN APP
 // ═══════════════════════════════════════════════════════════════
@@ -3244,28 +3386,51 @@ function Header() {
     {id:'profile',label:'My Client',icon:'👤'},
     {id:'dashboard',label:'Dashboard',icon:'📊'},
     {id:'policies',label:'Policies',icon:'📋'},
-    {id:'repository',label:'Policy Repository',icon:'🗄️'},
-    {id:'funds',label:'Fund Repository',icon:'📉'},
-    {id:'report',label:'PDF Report',icon:'📄'},
+    {id:'repository',label:'Repository',icon:'🗄️'},
+    {id:'funds',label:'Funds',icon:'📉'},
+    {id:'report',label:'Report',icon:'📄'},
     {id:'settings',label:'Settings',icon:'⚙️'},
   ];
   return (
-    <div style={{background:'var(--bg2)',borderBottom:'1px solid var(--border)',padding:'0 20px',display:'flex',alignItems:'center',gap:8,flexShrink:0,overflow:'auto'}}>
-      <div style={{display:'flex',alignItems:'center',gap:8,padding:'12px 0',marginRight:16,flexShrink:0}}>
-        <LogoMark size={26} />
-        <span style={{fontWeight:700,fontSize:17,letterSpacing:'-0.3px',color:'#d4a96a'}}>PolicyLens</span>
-        <span style={{fontSize:10,color:'var(--gold3)',fontWeight:600,background:'var(--gold-dim)',padding:'2px 6px',borderRadius:4}}>v4</span>
-        {clientName && <span style={{fontSize:12,color:'var(--text3)',marginLeft:8}}>— {clientName}</span>}
+    <div style={{background:'var(--bg2)',borderBottom:'1px solid var(--border)',flexShrink:0}}>
+      {/* ── Row 1: Logo + client + help + sign out ── */}
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'8px 12px 4px'}}>
+        <div style={{display:'flex',alignItems:'center',gap:6}}>
+          <LogoMark size={22} />
+          <span style={{fontWeight:700,fontSize:15,letterSpacing:'-0.3px',color:'#d4a96a'}}>PolicyLens</span>
+          <span style={{fontSize:9,color:'var(--gold3)',fontWeight:600,background:'var(--gold-dim)',padding:'1px 5px',borderRadius:4}}>v4</span>
+          {clientName && <span style={{fontSize:11,color:'var(--text3)',marginLeft:4,maxWidth:120,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>— {clientName}</span>}
+        </div>
+        <div style={{display:'flex',alignItems:'center',gap:6}}>
+          <button onClick={()=>window.dispatchEvent(new Event('policylens-open-guide'))}
+            title="Guide"
+            style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.2)',width:30,height:30,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:14,fontWeight:700,flexShrink:0}}>
+            ?
+          </button>
+          <button onClick={()=>window.authLogout&&authLogout()}
+            style={{background:'transparent',color:'var(--text3)',border:'1px solid var(--border2)',padding:'5px 10px',borderRadius:8,fontSize:11,fontWeight:400,cursor:'pointer',whiteSpace:'nowrap'}}>
+            Sign Out
+          </button>
+        </div>
       </div>
-      {tabs.map(t => (
-        <button key={t.id} onClick={()=>setTab(t.id)}
-          style={{background:tab===t.id?'rgba(212,169,106,.1)':'transparent',color:tab===t.id?'var(--gold)':'var(--text3)',border:tab===t.id?'1px solid rgba(212,169,106,.2)':'1px solid transparent',
-            padding:'10px 14px',borderRadius:8,fontSize:13,fontWeight:tab===t.id?600:400,
-            display:'flex',alignItems:'center',gap:5,whiteSpace:'nowrap',flexShrink:0}}>
-          <span style={{fontSize:14}}>{t.icon}</span>{t.label}
-          {t.id==='policies' && policies.length>0 && <span style={{background:'var(--gold)',color:'#0b0f1a',fontSize:10,padding:'1px 5px',borderRadius:8,marginLeft:2}}>{policies.length}</span>}
-        </button>
-      ))}
+      {/* ── Row 2: Tab bar — icons + short labels, fits on one line ── */}
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'0 6px 6px',gap:2}}>
+        {tabs.map(t => (
+          <button key={t.id} onClick={()=>setTab(t.id)}
+            style={{
+              flex:'1 1 0',minWidth:0,
+              background:tab===t.id?'rgba(212,169,106,.12)':'transparent',
+              color:tab===t.id?'var(--gold)':'var(--text3)',
+              border:tab===t.id?'1px solid rgba(212,169,106,.2)':'1px solid transparent',
+              padding:'6px 2px',borderRadius:8,
+              display:'flex',flexDirection:'column',alignItems:'center',gap:2,
+              cursor:'pointer',position:'relative'}}>
+            <span style={{fontSize:16}}>{t.icon}</span>
+            <span style={{fontSize:9,fontWeight:tab===t.id?700:400,letterSpacing:'-0.2px',lineHeight:1}}>{t.label}</span>
+            {t.id==='policies' && policies.length>0 && <span style={{position:'absolute',top:2,right:'calc(50% - 16px)',background:'var(--gold)',color:'#0b0f1a',fontSize:8,padding:'0px 4px',borderRadius:6,fontWeight:700}}>{policies.length}</span>}
+          </button>
+        ))}
+      </div>
     </div>
   );
 }
@@ -3863,16 +4028,86 @@ function Dashboard() {
     return () => {if(chartInst.current)chartInst.current.destroy()};
   }, [byCategory]);
 
+  // ── Welcome camera ref ──
+  const welcomeCamRef = useRef(null);
+  const [welcomeStaged, setWelcomeStaged] = useState([]);
+  const welcomeUploadRef = useRef(null);
+
+  const handleWelcomeCamera = (files) => {
+    if(!files||!files.length) return;
+    const newStaged = [];
+    for(const f of Array.from(files)) newStaged.push({file:f, preview:URL.createObjectURL(f)});
+    setWelcomeStaged(prev => [...prev, ...newStaged].slice(0,12));
+  };
+
+  const handleWelcomeExtract = async () => {
+    if(welcomeStaged.length === 0) return;
+    // Switch to policies tab and trigger extraction there
+    setTab('policies');
+    // Store staged files globally so Policies component can pick them up
+    window._pendingScanFiles = welcomeStaged.map(s=>s.file);
+    window.dispatchEvent(new Event('policylens-pending-scan'));
+  };
+
   if(policies.length === 0) return (
-    <div className="fade-in" style={{textAlign:'center',padding:'60px 20px'}}>
+    <div className="fade-in" style={{textAlign:'center',padding:'40px 16px'}}>
+      <input ref={welcomeCamRef} type="file" accept="image/*" capture="environment" style={{display:'none'}} onChange={e=>{handleWelcomeCamera(e.target.files);e.target.value='';}} />
+      <input ref={welcomeUploadRef} type="file" accept="image/*,.pdf,.xlsx,.xls,.csv,.doc,.docx,.html,.htm,.txt,.rtf" multiple style={{display:'none'}} onChange={e=>{
+        // Direct upload goes to policies tab
+        setTab('policies');
+        window._pendingScanFiles = Array.from(e.target.files);
+        window.dispatchEvent(new Event('policylens-pending-scan'));
+        e.target.value='';
+      }} />
       <LogoMark size={56} />
       <h2 style={{fontSize:22,fontWeight:600,marginBottom:8}}>Welcome to PolicyLens v4</h2>
-      <p style={{color:'var(--text2)',maxWidth:480,margin:'0 auto 24px'}}>
+      <p style={{color:'var(--text2)',maxWidth:480,margin:'0 auto 20px'}}>
         AI-powered policy analysis • Protection gap scoring • Cash value projections • PDF reports
       </p>
-      <button className="btn-primary" style={{fontSize:15,padding:'12px 28px'}} onClick={()=>setTab('policies')}>
-        Add Your First Policy →
-      </button>
+
+      {/* ── Camera CTA ── */}
+      <div style={{maxWidth:420,margin:'0 auto 20px'}}>
+        <button onClick={()=>welcomeCamRef.current?.click()}
+          style={{width:'100%',background:'linear-gradient(135deg,rgba(212,169,106,.15),rgba(212,169,106,.05))',border:'2px dashed var(--gold3)',borderRadius:16,padding:'28px 20px',cursor:'pointer',transition:'all .2s'}}>
+          <div style={{fontSize:48,marginBottom:8}}>📷</div>
+          <div style={{fontSize:16,fontWeight:600,color:'var(--gold2)',marginBottom:4}}>Scan a Policy Document</div>
+          <div style={{fontSize:12,color:'var(--text2)'}}>Not sure what to do? Snap a photo of any policy contract, benefit illustration, or your client's CRM screen — AI does the rest</div>
+        </button>
+      </div>
+
+      {/* ── Staged photos from welcome ── */}
+      {welcomeStaged.length > 0 && (
+        <div className="card" style={{maxWidth:420,margin:'0 auto 16px',padding:14,borderLeft:'3px solid var(--blue)',textAlign:'left'}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
+            <div style={{fontSize:13,fontWeight:600}}>📷 {welcomeStaged.length} photo{welcomeStaged.length>1?'s':''} staged</div>
+            <div style={{display:'flex',gap:6}}>
+              <button className="btn-secondary btn-sm" onClick={()=>welcomeCamRef.current?.click()}>+ More</button>
+              <button className="btn-primary btn-sm" onClick={handleWelcomeExtract}>✨ Extract All</button>
+              <button className="btn-danger btn-sm" onClick={()=>{welcomeStaged.forEach(s=>URL.revokeObjectURL(s.preview));setWelcomeStaged([]);}}>Clear</button>
+            </div>
+          </div>
+          <div style={{display:'flex',gap:8,overflowX:'auto',paddingBottom:4}}>
+            {welcomeStaged.map((s,i) => (
+              <div key={i} style={{position:'relative',flexShrink:0}}>
+                <img src={s.preview} style={{width:60,height:60,objectFit:'cover',borderRadius:8,border:'1px solid var(--border2)'}} />
+                <div style={{position:'absolute',bottom:2,left:2,background:'rgba(0,0,0,.6)',color:'#fff',fontSize:9,padding:'1px 4px',borderRadius:4}}>{i+1}</div>
+              </div>
+            ))}
+          </div>
+          <div style={{fontSize:10,color:'var(--text3)',marginTop:6}}>Take all the photos you need, then hit Extract All</div>
+        </div>
+      )}
+
+      <div style={{display:'flex',gap:10,justifyContent:'center',flexWrap:'wrap'}}>
+        <button className="btn-primary" style={{fontSize:14,padding:'10px 24px'}} onClick={()=>setTab('policies')}>
+          📋 Add Policy Manually
+        </button>
+        <button className="btn-secondary" style={{fontSize:14,padding:'10px 24px'}} onClick={()=>welcomeUploadRef.current?.click()}>
+          📄 Upload Documents
+        </button>
+      </div>
+
+      <OnboardingModal />
     </div>
   );
 
@@ -3882,6 +4117,7 @@ function Dashboard() {
   return (
     <div className="fade-in">
       <DropZone active={true} onFiles={handleDashDrop} label="📎 Drop or paste any document — client profile, policy contracts, benefit illustrations" />
+      <OnboardingModal />
 
       {/* ═══ SUMMARY CARDS ═══ */}
       <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:10,marginBottom:16}}>
@@ -4377,6 +4613,19 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
     setStaged(prev => { const n=[...prev]; URL.revokeObjectURL(n[idx].preview); n.splice(idx,1); return n; });
   };
   const clearStaged = () => { staged.forEach(s=>URL.revokeObjectURL(s.preview)); setStaged([]); };
+
+  // Listen for pending scans from welcome screen
+  useEffect(() => {
+    const handler = () => {
+      const files = window._pendingScanFiles;
+      if(files && files.length > 0) {
+        window._pendingScanFiles = null;
+        handleExtract(files);
+      }
+    };
+    window.addEventListener('policylens-pending-scan', handler);
+    return () => window.removeEventListener('policylens-pending-scan', handler);
+  }, []);
 
   // ── Extract from any files ──
   const handleExtract = async (files) => {
@@ -6524,7 +6773,7 @@ function Settings() {
           <div style={{display:'flex',gap:6}}>
             <button className="btn-primary btn-sm" onClick={async()=>{
               const k=geminiKey.trim(); if(!k||!k.startsWith('AIza')){alert('Gemini keys start with AIza...');return;}
-              const uid=window._user?.id||''; await dbPut('settings',{key:'geminiKey_'+uid,value:k}); await dbPut('settings',{key:'geminiKey',value:k}); alert('✅ Gemini key saved to your account!');
+              const uid=window._user?.id||''; await dbPut('settings',{key:'geminiKey_'+uid,value:k}); await dbPut('settings',{key:'geminiKey',value:k}); if(window.saveKeyToSupabase) await saveKeyToSupabase('gemini',k); alert('✅ Gemini key saved & synced to your account!');
             }}>Save</button>
             <button className="btn-secondary btn-sm" onClick={async()=>{
               const k=((await dbGet('settings','geminiKey').catch(()=>null))?.value||'').trim();
