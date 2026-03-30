@@ -711,6 +711,55 @@ const SEED_REPOSITORY = [
   {id:'repo-rider-ccr3',insurer:'Manulife',productName:'Critical Care Rider (III)',productCode:'CC3',category:'protection',subType:'Rider',currency:'SGD',notes:'Advanced stage CI rider. Attaches to LifeReady Plus (II) and ReadyMummy child conversion policies. Covers 36 CI conditions at advanced stage.',editHistory:[]},
   {id:'repo-rider-ccw3',insurer:'Manulife',productName:'Critical Care Waiver Rider III',productCode:'WPQ10',category:'protection',subType:'Rider',currency:'SGD',notes:'Waives all premiums (base + riders) on diagnosis of any covered advanced/extended advanced stage CI (35 + 20 conditions). 90-day waiting cancer/heart/coronary. Does NOT cover TI. Premiums NOT guaranteed. Attaches to: Early CompleteCare (Deluxe).',editHistory:[]},
   {id:'repo-rider-lbm3',insurer:'Manulife',productName:'Life Benefit Multiplier (III)',productCode:'CK205',category:'protection',subType:'Rider',currency:'SGD',notes:'Multiplies base SA by 2×-5× for death/TI benefit until age 70. After age 70, reverts to base SA + bonuses. Non-par rider. Premium guaranteed. Attaches to: LifeReady Plus (II).',editHistory:[]},
+
+  // ═══ AIA SINGAPORE ═══
+  {id:'repo-aia-gpp4',insurer:'AIA',productName:'Guaranteed Protect Plus (IV)',productCode:'GPP4',category:'protection',subType:'Whole Life',currency:'SGD',notes:'Par whole life. Limited pay options. Death+TI to age 100, TPD to age 70. Non-guaranteed annual bonuses + terminal bonus. Premium Pass Option (1×, after 3rd yr, involuntary retrenchment). Optional riders: Early Critical Protector Life (IV) covers 150 multi-stage CI + 15 special conditions, Critical Protector Life (IV) covers 73 major CI. AIA Vitality discount up to 15%. SDIC protected.',editHistory:[]},
+  {id:'repo-aia-ucc',insurer:'AIA',productName:'Ultimate Critical Cover',productCode:'UCC',category:'protection',subType:'Critical Illness',currency:'SGD',notes:'Non-par term CI. 150 medical conditions incl 73 CI across stages. Market-first unlimited reset benefit — coverage resets to 100% after 12 months of being claim-free. Max 500% SA for early/intermediate stages. Cap $350k/life for early/intermediate combined. Accidental death benefit 100% SA. 1-year waiting period. AIA Vitality 10% first-year discount. Premiums NOT guaranteed.',editHistory:[]},
+  {id:'repo-aia-acc',insurer:'AIA',productName:'Absolute Critical Cover',productCode:'ACC',category:'protection',subType:'Critical Illness',currency:'SGD',notes:'Par whole life CI. Covers critical illnesses + chronic diseases + future unknown diseases. Pre-early benefit for chronic conditions. Multi-stage CI payouts. Potential cash value accumulation. AIA Vitality compatible. SDIC protected.',editHistory:[]},
+  {id:'repo-aia-sft',insurer:'AIA',productName:'Secure Flexi Term',productCode:'SFT',category:'protection',subType:'Term Life',currency:'SGD',notes:'Non-par regular premium term life. Death + TI + terminal cancer. Flexible coverage duration. Renewable at end of term (premium not guaranteed). Conversion privilege to WL/endowment/ILP before age 65 without medical underwriting. Optional add-ons: Critical Cover (43 CI), Early Critical Cover (32 early + 29 intermediate CI + 5 special conditions), TPD, premium waivers. AIA Vitality discount up to 15%.',editHistory:[]},
+  {id:'repo-aia-plp2',insurer:'AIA',productName:'Pro Lifetime Protector (II)',productCode:'PLP2',category:'investment',subType:'Investment-Linked Policy (ILP)',currency:'SGD',notes:'ILP with protection. Death + accidental disability + multi-stage CI (150 conditions via Lifetime Critical Cover rider with power reset up to 300% SA). Optional Relapse Benefit rider. Guided portfolios: Pro Adventurous/Balanced/Cautious (Mercer). 100%/102% premiums invested from Yr5/Yr10. No-lapse guarantee first 10 years. Cash access from Yr2 no charges. AIA Vitality +10% coverage +10% rider discount Yr1.',editHistory:[]},
+  {id:'repo-aia-wlc2',insurer:'AIA',productName:'Whole Life Cover (II)',productCode:'WLC2',category:'protection',subType:'Whole Life',currency:'SGD',notes:'Direct Purchase Insurance (DPI). Par whole life. Death+TI to age 100, TPD to age 65. Up to 5× boosted coverage. Annual bonuses + terminal bonus. Stable cash value accumulation. Low-cost, no-advice channel. Optional CI add-on to age 100. Available online at aia.com.sg.',editHistory:[]},
+
+  // ═══ PRUDENTIAL SINGAPORE ═══
+  {id:'repo-pru-pat',insurer:'Prudential',productName:'PRUActive Term',productCode:'PAT',category:'protection',subType:'Term Life',currency:'SGD',notes:'Non-par protection term. Death+TI+TPD (to age 70). Customisable policy term 10-82 yrs, premium term 5-82 yrs. Annual SA increase option 1-10% without medical exam. Optional supplementary: Crisis Care III (multi-stage CI, premiums NOT guaranteed), premium waivers. Conversion privilege available.',editHistory:[]},
+  {id:'repo-pru-shield-premier',insurer:'Prudential',productName:'PRUShield Premier',productCode:'PRUSHP',category:'health',subType:'Integrated Shield Plan',currency:'SGD',notes:'ISP — Private hospital ward. MediSave-approved. Enhanced cancer drug treatment. Mobile Inpatient Care @ Home. Congenital abnormalities benefit. Premium adjustments apply. PRUExtra Preferred CoPay rider available (claims-based pricing, PRUPanel Connect discount).',editHistory:[]},
+  {id:'repo-pru-shield-plus',insurer:'Prudential',productName:'PRUShield Plus',productCode:'PRUSHPL',category:'health',subType:'Integrated Shield Plan',currency:'SGD',notes:'ISP — Class A restructured hospital. MediSave-approved. Cancer Drug List coverage. Mobile Inpatient Care @ Home. Congenital abnormalities benefit. PRUExtra rider for co-pay reduction. PRUPanel Connect programme for claims-based pricing discounts. No premium increase from Oct 2024.',editHistory:[]},
+  {id:'repo-pru-vas',insurer:'Prudential',productName:'PRUVantage Assure Series',productCode:'PVAS',category:'investment',subType:'Investment-Linked Policy (ILP)',currency:'SGD',notes:'ILP with Wealth Assure feature — locks in coverage at peak policy value for death + accidental disability. Dual Accounts: Growth Account + Flex Account (regular income from Day 1). Low charges from 0.8% p.a. for limited years. Welcome Bonus + Loyalty Bonus. Wealth Share feature for legacy transfer during lifetime. Premium waiver on 35 CI. Available as Single Premium (PRUVantage Assure SP) or Regular Premium (PRUVantage Assure II). Max S$20M or 3× lifetime premium.',editHistory:[]},
+  {id:'repo-pru-cancer360',insurer:'Prudential',productName:'PRUCancer 360',productCode:'PC360',category:'protection',subType:'Critical Illness',currency:'SGD',notes:'Non-par standalone cancer plan. Coverage age 1-100 (max renewal 95). SA $10k-$300k (increments of $10k, max $100k for age 1-16). Early + intermediate + major cancer stages. Only 1 health question to apply. 90-day waiting period for cancer/heart/coronary. Survival period 7 days. Premiums NOT guaranteed. No savings/CV component. SDIC protected.',editHistory:[]},
+  {id:'repo-pru-lady',insurer:'Prudential',productName:'PRULady',productCode:'PLADY',category:'protection',subType:'Critical Illness',currency:'SGD',notes:'Non-par female-specific CI plan. Covers female cancers (breast, cervical, ovarian, uterine, fallopian) + pregnancy complications. Standalone or supplementary. Premiums NOT guaranteed. No savings/CV.',editHistory:[]},
+  {id:'repo-pru-pa',insurer:'Prudential',productName:'PRUPersonal Accident',productCode:'PPA',category:'protection',subType:'Personal Accident',currency:'SGD',notes:'Personal accident plan. Accidental death + disability. Hospital income benefit. Available as PRUPersonal Accident (full) or PRUPersonal Accident Compact (simplified). Yearly renewable.',editHistory:[]},
+  {id:'repo-pru-wealth-income',insurer:'Prudential',productName:'PRUWealth Income',productCode:'PWI',category:'retirement',subType:'Retirement Income (Par WL)',currency:'SGD',notes:'Par whole life income plan. Regular monthly income payouts with guaranteed + non-guaranteed components. Designed for retirement income supplementation. Participating fund growth potential. SDIC protected.',editHistory:[]},
+  {id:'repo-pru-first-promise',insurer:'Prudential',productName:'PRUFirst Promise',productCode:'PFP',category:'maternity',subType:'Maternity Coverage',currency:'SGD',notes:'Bundled maternity plan. Protects mum + baby from week 13 pregnancy. Baby covered from Day 1. Pregnancy complications + congenital conditions. Child conversion privilege to protection plans without medical underwriting.',editHistory:[]},
+
+  // ═══ GREAT EASTERN ═══
+  {id:'repo-ge-gsh-pplus',insurer:'Great Eastern',productName:'GREAT SupremeHealth P Plus',productCode:'GSHPP',category:'health',subType:'Integrated Shield Plan',currency:'SGD',notes:'ISP — Private hospital. Annual limit $1.5M. Enhanced with GREAT TotalCare rider covers up to 95% of hospitalisation bill. TotalCare Elite: 5% co-pay. TotalCare Classic: deductible or 5% whichever higher. Loss Limit $3,000 (panel provider). Health Connect concierge — priority appointment booking, pre-authorisation, coverage guidance. Cancer drug treatment up to 20× MSL limit. Rehabilitation coverage 365 days post-discharge.',editHistory:[]},
+  {id:'repo-ge-gsh-pprime',insurer:'Great Eastern',productName:'GREAT SupremeHealth P Prime',productCode:'GSHPM',category:'health',subType:'Integrated Shield Plan',currency:'SGD',notes:'ISP — Private hospital (curated panel). New plan launched Oct 2025. Cost-conscious private coverage through curated medical provider partnerships. Lower premiums than P Plus. Same GREAT TotalCare rider. Medical concierge service included.',editHistory:[]},
+  {id:'repo-ge-gsh-aplus',insurer:'Great Eastern',productName:'GREAT SupremeHealth A Plus',productCode:'GSHAP',category:'health',subType:'Integrated Shield Plan',currency:'SGD',notes:'ISP — Class A restructured hospital. Annual limit $1.4M. GREAT TotalCare A rider. Post-stroke outpatient care. Cell/tissue/gene therapy coverage beyond MOH list (from Nov 2025). Medical concierge. Competitive premiums for restructured hospital coverage.',editHistory:[]},
+  {id:'repo-ge-gsh-bplus',insurer:'Great Eastern',productName:'GREAT SupremeHealth B Plus',productCode:'GSHBP',category:'health',subType:'Integrated Shield Plan',currency:'SGD',notes:'ISP — Class B1 restructured hospital. GREAT TotalCare B rider available for co-pay reduction. Medical concierge service. Affordable tier for basic restructured hospital coverage. MediSave-approved.',editHistory:[]},
+  {id:'repo-ge-supreme-protector',insurer:'Great Eastern',productName:'Supreme Protector',productCode:'GESP',category:'protection',subType:'Whole Life',currency:'SGD',notes:'Par whole life plan. Death + TPD coverage. Annual reversionary bonuses + terminal bonus (non-guaranteed). One of Great Eastern\'s longest-running protection product lines. Various limited pay options. SDIC protected.',editHistory:[]},
+
+  // ═══ NTUC INCOME ═══
+  {id:'repo-ntuc-grfp2',insurer:'NTUC Income',productName:'Gro Retire Flex Pro II',productCode:'GRFP2',category:'retirement',subType:'Retirement Income (Par WL)',currency:'SGD',notes:'Par annuity plan. Singapore only plan allowing retirement age change after inception. Premium options: single, 5/10/15/20 yrs. Accumulation 10-50 yrs. Payout 10/15/20 yrs or to age 100. Disability Care Benefit: waives premiums + lump sum 6× monthly guaranteed income (accumulation) + 50% monthly benefit (payout). Retrenchment benefit: 6-month premium waiver + 6-month deferral. No medical underwriting for main plan. Capital guaranteed. One of highest yields among SG retirement plans.',editHistory:[]},
+  {id:'repo-ntuc-gre',insurer:'NTUC Income',productName:'Gro Retire Ease',productCode:'GRE',category:'retirement',subType:'Retirement Income (Par WL)',currency:'SGD',notes:'Par retirement plan. Premium term 5 or 10 yrs. Accumulation 10 or 15 yrs. Payout 10/20/30 yrs. Capital guaranteed on basic plan. Guaranteed yield up to 2.7% p.a., illustrated total yield up to 4.84%. Death benefit: 105% net premiums + 100% terminal bonus (accumulation), accidental death +105% before age 70. Disability care benefit included.',editHistory:[]},
+  {id:'repo-ntuc-gap',insurer:'NTUC Income',productName:'Gro Annuity Pro',productCode:'GAP',category:'retirement',subType:'Annuity',currency:'SGD',notes:'Single premium par annuity. Lifetime payouts. Min single premium $10,000. Entry age 40-85 (last birthday). Immediate monthly payouts. Death benefit = single premium less payouts made. Bonuses declared annually (non-guaranteed). NTUC Income par fund has consistently low expense ratio.',editHistory:[]},
+  {id:'repo-ntuc-luv-term',insurer:'NTUC Income',productName:'LUV Term',productCode:'LUVT',category:'protection',subType:'Term Life',currency:'SGD',notes:'Direct Purchase Insurance (DPI) term life. Death + TI. Affordable premiums. NTUC member special rates available. Apply online at income.com.sg. No advice channel — lower cost.',editHistory:[]},
+  {id:'repo-ntuc-enhanced-income',insurer:'NTUC Income',productName:'Enhanced IncomeShield',productCode:'EIS',category:'health',subType:'Integrated Shield Plan',currency:'SGD',notes:'ISP suite. Plans: Preferred (private), Standard (Class A), Basic (Class B1), Advantage. MediSave-approved. Enhanced IncomeShield riders available for co-pay/deductible reduction. Claims-based pricing rewards low claimants.',editHistory:[]},
+
+  // ═══ FWD SINGAPORE ═══
+  {id:'repo-fwd-term',insurer:'FWD',productName:'FWD Term Life',productCode:'FWDT',category:'protection',subType:'Term Life',currency:'SGD',notes:'Online direct purchase term life. Death + TI. Competitive premiums — digital-first insurer. Apply online at fwd.com.sg. No medical exam for basic coverage.',editHistory:[]},
+  {id:'repo-fwd-ci',insurer:'FWD',productName:'FWD Critical Illness',productCode:'FWDCI',category:'protection',subType:'Critical Illness',currency:'SGD',notes:'Critical illness coverage. Available online via fwd.com.sg. Digital-first application. Affordable CI protection.',editHistory:[]},
+
+  // ═══ SINGLIFE ═══
+  {id:'repo-sl-flexi-ret2',insurer:'Singlife',productName:'Flexi Retirement II',productCode:'SFR2',category:'retirement',subType:'Retirement Income (Par WL)',currency:'SGD',notes:'Par retirement plan. Previously Aviva MyRetirementChoice. Known for high guaranteed payout among SG retirement plans. Flexible retirement age and payout period. Capital guaranteed. SDIC protected.',editHistory:[]},
+
+  // ═══ CHINA TAIPING ═══
+  {id:'repo-ct-iretire2',insurer:'China Taiping',productName:'i-Retire (II)',productCode:'IR2',category:'retirement',subType:'Retirement Income (Par WL)',currency:'SGD',notes:'Par retirement plan. Premium: single/5/10/15 yrs. Among lowest premiums in SG retirement plans. Disability Income benefit: Loss of Independence payout. Capital guaranteed. Payout options: 10/15/20 yrs. SDIC protected.',editHistory:[]},
+
+  // ═══ TOKIO MARINE ═══
+  {id:'repo-tm-tmsavings',insurer:'Tokio Marine',productName:'TM Ace Savings',productCode:'TMAS',category:'savings',subType:'Endowment',currency:'SGD',notes:'Par endowment savings plan. Short-to-medium term. Guaranteed maturity benefit + non-guaranteed bonuses. Available through Tokio Marine agents and bank partners.',editHistory:[]},
+
+  // ═══ HSBC LIFE ═══
+  {id:'repo-hsbc-lwp',insurer:'HSBC Life',productName:'Life Wealth Protect',productCode:'LWP',category:'protection',subType:'Whole Life',currency:'SGD',notes:'Par whole life protection plan. Death + TPD. Distributed through HSBC bank branches (bancassurance). Annual bonuses + terminal bonus (non-guaranteed). SDIC protected.',editHistory:[]},
 ];
 
 // ═══════════════════════════════════════════════════════════════
@@ -3086,9 +3135,10 @@ function App() {
         setRepoSource('supabase');
         // Merge: ensure seed products exist in Supabase (add missing, never overwrite)
         const sbIds = new Set(repoData.map(r=>r.id));
+        const sbNames = new Set(repoData.map(r=>(r.insurer||'')+'|'+(r.productName||'')));
         let seeded = 0;
         for(const s of SEED_REPOSITORY) {
-          if(!sbIds.has(s.id)) { await sbRepoSave(s); repoData.push(s); seeded++; }
+          if(!sbIds.has(s.id) && !sbNames.has(s.insurer+'|'+s.productName)) { await sbRepoSave(s); repoData.push(s); seeded++; }
         }
         if(seeded) console.log('[Repo] Seeded', seeded, 'missing products to Supabase');
         setRepo(repoData);
@@ -3098,7 +3148,9 @@ function App() {
         setRepoSource('local');
         const rs = await dbGetAll('repository').catch(()=>[]);
         if(!rs || rs.length === 0) {
-          for(const s of SEED_REPOSITORY) await dbPut('repository', s);
+          // Merge seed: only add if not exists
+          const existingNames = new Set(rs.map(r=>(r.insurer||'')+'|'+(r.productName||'')));
+          for(const s of SEED_REPOSITORY) { if(!existingNames.has(s.insurer+'|'+s.productName)) await dbPut('repository', s); }
           setRepo(SEED_REPOSITORY);
         } else {
           setRepo(rs);
@@ -4678,18 +4730,35 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
   const handleSubmit = () => {
     if(onDraftClear)onDraftClear();
     onSave({...form, sumAssured:parseFloat(form.sumAssured)||0, annualPremium:parseFloat(form.annualPremium)||0, monthlyBenefit:parseFloat(form.monthlyBenefit)||0});
-    // Auto-offer to save to repository if product name is set and not already in repo
+    // Auto-offer to save to repository
     if(form.productName && form.insurer && repo) {
       const exists = repo.find(r => r.productName === form.productName && r.insurer === form.insurer);
+      const advisorName = window._prof?.full_name||window._user?.user_metadata?.full_name||'Advisor';
       if(!exists && confirm('Save "'+form.insurer+' '+form.productName+'" to the shared Policy Repository?\n\nThis makes it available for all advisors to search and auto-fill.')) {
+        // Build clean notes from form data
+        const notesParts = [];
+        if(form.subType) notesParts.push(form.subType+'.');
+        if(form.premiumStructure) notesParts.push('Premium: '+form.premiumStructure+'.');
+        if(form.notes) notesParts.push(form.notes);
+        // Rider summary
+        const riderNotes = (form.riders||[]).filter(r=>r.riderName||!r.bundled).map(r=>(r.riderName||{death:'Death & TI',tpd:'TPD',ci:'CI',eci:'ECI',di:'DI',accidental:'ADD',premium_waiver:'Waiver'}[r.type]||r.type)+' SA $'+(parseFloat(r.sa)||0).toLocaleString()+(r.bundled===false?' (separate rider)':' (part of plan)')).join('; ');
+        if(riderNotes) notesParts.push('Riders: '+riderNotes+'.');
         const repoItem = {
           id:'repo-'+Date.now(),
           insurer:form.insurer, productName:form.productName, productCode:form.productCode||'',
           category:form.category, subType:form.subType, currency:form.currency||'SGD',
-          notes:(form.notes||'')+(form.riders&&form.riders.length>0?'\nRiders: '+form.riders.filter(r=>!r.bundled).map(r=>(r.riderName||r.type)+' SA '+(r.sa||0)).join(', '):''),
-          editHistory:[{by:window._prof?.full_name||window._user?.user_metadata?.full_name||'Advisor',at:new Date().toISOString(),action:'created from policy form'}],
+          notes:notesParts.join(' '),
+          votes:{}, editHistory:[{by:advisorName,name:advisorName,at:new Date().toISOString(),date:new Date().toISOString(),action:'Created from policy form'}],
         };
         if(onSaveRepo) onSaveRepo(repoItem);
+      } else if(exists) {
+        // Product exists — offer to update with this advisor's version
+        const hasNewInfo = form.notes && form.notes.length > 20 && !exists.notes?.includes(form.notes.slice(0,30));
+        if(hasNewInfo && confirm('Update repository notes for "'+exists.productName+'" with your version?')) {
+          const advisorName2 = window._prof?.full_name||window._user?.user_metadata?.full_name||'Advisor';
+          const updatedNotes = exists.notes + '\n\n📝 '+advisorName2+' ('+new Date().toLocaleDateString('en-SG',{day:'numeric',month:'short',year:'numeric'})+'):\n'+form.notes;
+          if(onSaveRepo) onSaveRepo({...exists, notes:updatedNotes, editHistory:[...(exists.editHistory||[]),{by:advisorName2,name:advisorName2,at:new Date().toISOString(),date:new Date().toISOString(),action:'Updated notes from policy form'}]});
+        }
       }
     }
   };
