@@ -3167,6 +3167,188 @@ async function sbRepoDelete(id) {
 
 
 // ═══════════════════════════════════════════════════════════════
+// CAMERA MODAL — In-app camera for multi-snap without leaving
+// ═══════════════════════════════════════════════════════════════
+
+let _cameraResolve = null;
+function openCameraModal() {
+  return new Promise(resolve => {
+    _cameraResolve = resolve;
+    window.dispatchEvent(new Event('policylens-open-camera'));
+  });
+}
+
+function CameraModal() {
+  const [open, setOpen] = useState(false);
+  const [shots, setShots] = useState([]);
+  const [facingMode, setFacingMode] = useState('environment');
+  const [error, setError] = useState(null);
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const canvasRef = useRef(null);
+
+  useEffect(() => {
+    const handler = () => { setShots([]); setError(null); setOpen(true); };
+    window.addEventListener('policylens-open-camera', handler);
+    return () => window.removeEventListener('policylens-open-camera', handler);
+  }, []);
+
+  // Start/stop camera when open changes
+  useEffect(() => {
+    if (open) startCamera();
+    else stopCamera();
+    return () => stopCamera();
+  }, [open, facingMode]);
+
+  const startCamera = async () => {
+    stopCamera();
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode, width: { ideal: 1920 }, height: { ideal: 1080 } },
+        audio: false
+      });
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.play().catch(() => {});
+      }
+      setError(null);
+    } catch (e) {
+      console.warn('[Camera] Error:', e);
+      setError('Camera access denied. Please allow camera permission and try again.');
+    }
+  };
+
+  const stopCamera = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(t => t.stop());
+      streamRef.current = null;
+    }
+  };
+
+  const snap = () => {
+    if (!videoRef.current || !canvasRef.current) return;
+    const v = videoRef.current;
+    const c = canvasRef.current;
+    c.width = v.videoWidth || 1920;
+    c.height = v.videoHeight || 1080;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(v, 0, 0, c.width, c.height);
+    c.toBlob(blob => {
+      if (!blob) return;
+      const file = new File([blob], 'scan_' + Date.now() + '.jpg', { type: 'image/jpeg' });
+      setShots(prev => [...prev, { file, preview: URL.createObjectURL(blob) }]);
+    }, 'image/jpeg', 0.85);
+    // Flash effect
+    if (videoRef.current) {
+      videoRef.current.style.opacity = '0.3';
+      setTimeout(() => { if (videoRef.current) videoRef.current.style.opacity = '1'; }, 100);
+    }
+  };
+
+  const removeShot = (idx) => {
+    setShots(prev => { const n = [...prev]; URL.revokeObjectURL(n[idx].preview); n.splice(idx, 1); return n; });
+  };
+
+  const done = () => {
+    stopCamera();
+    setOpen(false);
+    if (_cameraResolve) {
+      _cameraResolve(shots.map(s => s.file));
+      _cameraResolve = null;
+    }
+  };
+
+  const cancel = () => {
+    stopCamera();
+    shots.forEach(s => URL.revokeObjectURL(s.preview));
+    setShots([]);
+    setOpen(false);
+    if (_cameraResolve) { _cameraResolve([]); _cameraResolve = null; }
+  };
+
+  const flip = () => setFacingMode(f => f === 'environment' ? 'user' : 'environment');
+
+  if (!open) return null;
+
+  return (
+    <div style={{position:'fixed',inset:0,zIndex:10000,background:'#000',display:'flex',flexDirection:'column'}}>
+      {/* Viewfinder */}
+      <div style={{flex:1,position:'relative',overflow:'hidden',display:'flex',alignItems:'center',justifyContent:'center'}}>
+        {error ? (
+          <div style={{color:'var(--red2)',textAlign:'center',padding:20}}>
+            <div style={{fontSize:48,marginBottom:12}}>📷</div>
+            <div style={{fontSize:14}}>{error}</div>
+            <button className="btn-secondary" style={{marginTop:16}} onClick={cancel}>Close</button>
+          </div>
+        ) : (
+          <video ref={videoRef} autoPlay playsInline muted
+            style={{width:'100%',height:'100%',objectFit:'cover',transition:'opacity .1s'}} />
+        )}
+        {/* Shot counter */}
+        {shots.length > 0 && (
+          <div style={{position:'absolute',top:12,left:12,background:'rgba(212,169,106,.9)',color:'#0b0f1a',
+            borderRadius:20,padding:'4px 12px',fontSize:13,fontWeight:700}}>
+            {shots.length} photo{shots.length > 1 ? 's' : ''}
+          </div>
+        )}
+        {/* Close button */}
+        <button onClick={cancel}
+          style={{position:'absolute',top:12,right:12,width:36,height:36,borderRadius:'50%',
+            background:'rgba(0,0,0,.5)',border:'none',color:'#fff',fontSize:20,cursor:'pointer',
+            display:'flex',alignItems:'center',justifyContent:'center'}}>×</button>
+      </div>
+
+      {/* Thumbnail strip */}
+      {shots.length > 0 && (
+        <div style={{background:'rgba(0,0,0,.8)',padding:'6px 8px',display:'flex',gap:6,overflowX:'auto'}}>
+          {shots.map((s, i) => (
+            <div key={i} style={{position:'relative',flexShrink:0}}>
+              <img src={s.preview} style={{width:48,height:48,objectFit:'cover',borderRadius:6,border:'2px solid var(--gold)'}} />
+              <button onClick={() => removeShot(i)}
+                style={{position:'absolute',top:-4,right:-4,width:16,height:16,borderRadius:'50%',
+                  background:'var(--red)',color:'#fff',border:'none',fontSize:9,cursor:'pointer',
+                  display:'flex',alignItems:'center',justifyContent:'center'}}>×</button>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Controls bar */}
+      <div style={{background:'rgba(0,0,0,.9)',padding:'12px 20px 24px',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+        {/* Flip camera */}
+        <button onClick={flip}
+          style={{width:44,height:44,borderRadius:'50%',background:'rgba(255,255,255,.15)',border:'none',
+            color:'#fff',fontSize:20,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}>
+          🔄
+        </button>
+
+        {/* Shutter */}
+        <button onClick={snap} disabled={!!error}
+          style={{width:64,height:64,borderRadius:'50%',background:'#fff',border:'4px solid var(--gold)',
+            cursor:'pointer',boxShadow:'0 0 20px rgba(212,169,106,.3)',transition:'transform .1s',
+            display:'flex',alignItems:'center',justifyContent:'center'}}
+          onTouchStart={e => e.currentTarget.style.transform = 'scale(0.9)'}
+          onTouchEnd={e => e.currentTarget.style.transform = 'scale(1)'}>
+          <div style={{width:52,height:52,borderRadius:'50%',background:'#fff',border:'2px solid #ccc'}} />
+        </button>
+
+        {/* Done */}
+        <button onClick={done}
+          style={{minWidth:44,height:44,borderRadius:22,background:shots.length > 0 ? 'var(--gold)' : 'rgba(255,255,255,.15)',
+            border:'none',color:shots.length > 0 ? '#0b0f1a' : '#fff',
+            fontSize:12,fontWeight:700,cursor:'pointer',padding:'0 14px'}}>
+          {shots.length > 0 ? 'Done ✓' : 'Skip'}
+        </button>
+      </div>
+
+      <canvas ref={canvasRef} style={{display:'none'}} />
+    </div>
+  );
+}
+
+
+// ═══════════════════════════════════════════════════════════════
 // ONBOARDING MODAL — First-time user guide
 // ═══════════════════════════════════════════════════════════════
 
@@ -3362,6 +3544,7 @@ function App() {
 
   return (
     <AppCtx.Provider value={ctx}>
+      <CameraModal />
       <Header />
       <div style={{flex:1,overflow:'auto',padding:'16px 20px 40px'}}>
         {tab==='profile' && <ProfileTab />}
@@ -3725,7 +3908,7 @@ function ProfileTab() {
         <div style={{display:'flex',gap:6}}>
           <input ref={camRef} type="file" accept="image/*" capture="environment" multiple style={{display:'none'}} onChange={e=>{scanProfile(e.target.files);e.target.value='';}} />
           <input ref={uploadRef} type="file" accept="image/*,.pdf,.xlsx,.xls,.doc,.docx" multiple style={{display:'none'}} onChange={e=>{scanProfile(e.target.files);e.target.value='';}} />
-          <button className="btn-secondary btn-sm" onClick={()=>camRef.current?.click()} disabled={scanning}>{scanning?'Scanning…':'📷 Scan'}</button>
+          <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length) scanProfile(files);}} disabled={scanning}>{scanning?'Scanning…':'📷 Scan'}</button>
           <button className="btn-secondary btn-sm" onClick={()=>uploadRef.current?.click()} disabled={scanning}>{scanning?'…':'📄 Upload'}</button>
         </div>
       </div>
@@ -4067,7 +4250,7 @@ function Dashboard() {
 
       {/* ── Camera CTA ── */}
       <div style={{maxWidth:420,margin:'0 auto 20px'}}>
-        <button onClick={()=>welcomeCamRef.current?.click()}
+        <button onClick={async()=>{const files=await openCameraModal();if(files&&files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setWelcomeStaged(prev=>[...prev,...newStaged].slice(0,12));}}}
           style={{width:'100%',background:'linear-gradient(135deg,rgba(212,169,106,.15),rgba(212,169,106,.05))',border:'2px dashed var(--gold3)',borderRadius:16,padding:'28px 20px',cursor:'pointer',transition:'all .2s'}}>
           <div style={{fontSize:48,marginBottom:8}}>📷</div>
           <div style={{fontSize:16,fontWeight:600,color:'var(--gold2)',marginBottom:4}}>Scan a Policy Document</div>
@@ -4081,7 +4264,7 @@ function Dashboard() {
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
             <div style={{fontSize:13,fontWeight:600}}>📷 {welcomeStaged.length} photo{welcomeStaged.length>1?'s':''} staged</div>
             <div style={{display:'flex',gap:6}}>
-              <button className="btn-secondary btn-sm" onClick={()=>welcomeCamRef.current?.click()}>+ More</button>
+              <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setWelcomeStaged(prev=>[...prev,...newStaged].slice(0,12));}}}>+ More</button>
               <button className="btn-primary btn-sm" onClick={handleWelcomeExtract}>✨ Extract All</button>
               <button className="btn-danger btn-sm" onClick={()=>{welcomeStaged.forEach(s=>URL.revokeObjectURL(s.preview));setWelcomeStaged([]);}}>Clear</button>
             </div>
@@ -4697,8 +4880,8 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
           <input ref={cameraRef} type="file" accept="image/*" capture="environment" style={{display:'none'}} onChange={e=>{stagePhotos(e.target.files);e.target.value='';}} />
           <input ref={uploadRef} type="file" accept="image/*,.pdf,.xlsx,.xls,.csv,.doc,.docx,.html,.htm,.txt,.rtf" multiple style={{display:'none'}} onChange={e=>{handleExtract(Array.from(e.target.files));e.target.value='';}} />
-          <button className="btn-secondary btn-sm" onClick={()=>cameraRef.current?.click()} disabled={scanning}>
-            "📷" {staged.length>0?'('+staged.length+') Take More':'Camera'}
+          <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setStaged(prev=>[...prev,...newStaged].slice(0,12));}}} disabled={scanning}>
+            📷 {staged.length>0?'('+staged.length+') Take More':'Camera'}
           </button>
           <button className="btn-secondary btn-sm" onClick={()=>uploadRef.current?.click()} disabled={scanning}>
             {scanning?'Extracting…':'📄 Upload'}
@@ -4732,7 +4915,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
             <div style={{fontSize:13,fontWeight:600}}>"📷" {staged.length} photo{staged.length>1?'s':''} staged</div>
             <div style={{display:'flex',gap:6}}>
-              <button className="btn-secondary btn-sm" onClick={()=>cameraRef.current?.click()}>+ Take More</button>
+              <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setStaged(prev=>[...prev,...newStaged].slice(0,12));}}}>+ Take More</button>
               <button className="btn-primary btn-sm" onClick={()=>handleExtract(staged.map(s=>s.file))} disabled={scanning}>{scanning?'Extracting…':'✨ Extract All'}</button>
               <button className="btn-danger btn-sm" onClick={clearStaged}>Clear</button>
             </div>
@@ -5053,7 +5236,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
           <div style={{display:'flex',gap:6,alignItems:'center'}}>
             <input ref={formCamRef} type="file" accept="image/*" capture="environment" multiple style={{display:'none'}} onChange={e=>{scanIntoForm(e.target.files);e.target.value='';}} />
             <input ref={formUploadRef} type="file" accept="image/*,.pdf,.xlsx,.xls,.csv,.doc,.docx" multiple style={{display:'none'}} onChange={e=>{scanIntoForm(e.target.files);e.target.value='';}} />
-            <button className="btn-secondary btn-sm" onClick={()=>formCamRef.current?.click()} disabled={formScanning}>{formScanning?'Scanning…':'📷'}</button>
+            <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length) scanIntoForm(files);}} disabled={formScanning}>{formScanning?'Scanning…':'📷'}</button>
             <button className="btn-secondary btn-sm" onClick={()=>formUploadRef.current?.click()} disabled={formScanning}>{formScanning?'…':'📄'}</button>
             <button onClick={onClose} style={{background:'none',color:'var(--text3)',fontSize:20,marginLeft:4}}>×</button>
           </div>
