@@ -3825,7 +3825,7 @@ function DropZone({onFiles, label, active}) {
       for(const item of items) {
         if(item.kind==='file') files.push(item.getAsFile());
       }
-      if(files.length) { e.preventDefault(); setStaged(prev=>[...prev,...files.map(f=>({file:f,preview:f.type.startsWith('image/')?URL.createObjectURL(f):null}))].slice(0,12)); }
+      if(files.length) { e.preventDefault(); setStaged(prev=>[...prev,...files.map(f=>({file:f,preview:f.type.startsWith('image/')?URL.createObjectURL(f):null}))].slice(0,20)); }
     };
     window.addEventListener('paste', handler);
     return () => window.removeEventListener('paste', handler);
@@ -3834,7 +3834,7 @@ function DropZone({onFiles, label, active}) {
   const onDrop = (e) => {
     e.preventDefault(); setDragOver(false);
     const files = Array.from(e.dataTransfer.files);
-    if(files.length) setStaged(prev=>[...prev,...files.map(f=>({file:f,preview:f.type.startsWith('image/')?URL.createObjectURL(f):null}))].slice(0,12));
+    if(files.length) setStaged(prev=>[...prev,...files.map(f=>({file:f,preview:f.type.startsWith('image/')?URL.createObjectURL(f):null}))].slice(0,20));
   };
   const removeStaged = (i) => { setStaged(prev=>{const n=[...prev];if(n[i].preview)URL.revokeObjectURL(n[i].preview);n.splice(i,1);return n;}); };
   const clearStaged = () => { staged.forEach(s=>{if(s.preview)URL.revokeObjectURL(s.preview)}); setStaged([]); };
@@ -4257,7 +4257,7 @@ function Dashboard() {
     if(!files||!files.length) return;
     const newStaged = [];
     for(const f of Array.from(files)) newStaged.push({file:f, preview:URL.createObjectURL(f)});
-    setWelcomeStaged(prev => [...prev, ...newStaged].slice(0,12));
+    setWelcomeStaged(prev => [...prev, ...newStaged].slice(0,20));
   };
 
   const handleWelcomeExtract = async () => {
@@ -4287,7 +4287,7 @@ function Dashboard() {
 
       {/* ── Camera CTA ── */}
       <div style={{maxWidth:420,margin:'0 auto 20px'}}>
-        <button onClick={async()=>{const files=await openCameraModal();if(files&&files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setWelcomeStaged(prev=>[...prev,...newStaged].slice(0,12));}}}
+        <button onClick={async()=>{const files=await openCameraModal();if(files&&files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setWelcomeStaged(prev=>[...prev,...newStaged].slice(0,20));}}}
           style={{width:'100%',background:'linear-gradient(135deg,rgba(212,169,106,.15),rgba(212,169,106,.05))',border:'2px dashed var(--gold3)',borderRadius:16,padding:'28px 20px',cursor:'pointer',transition:'all .2s'}}>
           <div style={{fontSize:48,marginBottom:8}}>📷</div>
           <div style={{fontSize:16,fontWeight:600,color:'var(--gold2)',marginBottom:4}}>Scan a Policy Document</div>
@@ -4301,7 +4301,7 @@ function Dashboard() {
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
             <div style={{fontSize:13,fontWeight:600}}>📷 {welcomeStaged.length} photo{welcomeStaged.length>1?'s':''} staged</div>
             <div style={{display:'flex',gap:6}}>
-              <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setWelcomeStaged(prev=>[...prev,...newStaged].slice(0,12));}}}>+ More</button>
+              <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setWelcomeStaged(prev=>[...prev,...newStaged].slice(0,20));}}}>+ More</button>
               <button className="btn-primary btn-sm" onClick={handleWelcomeExtract}>✨ Extract All</button>
               <button className="btn-danger btn-sm" onClick={()=>{welcomeStaged.forEach(s=>URL.revokeObjectURL(s.preview));setWelcomeStaged([]);}}>Clear</button>
             </div>
@@ -4534,7 +4534,7 @@ function GapBar({label,current,rec,pct,fmt:fmtFn,color}) {
 // SMART PROFILE MERGE — extracts client details from policy scans
 // ═══════════════════════════════════════════════════════════════
 const PROFILE_FIELDS = {
-  lifeInsured:{profileKey:'name',label:'Name'},
+  policyOwner:{profileKey:'name',label:'Client Name (Policy Owner)'},
   gender:{profileKey:'gender',label:'Gender'},
   dob:{profileKey:'dob',label:'Date of Birth'},
   smoker:{profileKey:'smoker',label:'Smoker Status'},
@@ -4585,6 +4585,29 @@ function mergeToProfile(extracted, currentProfile, saveProfile) {
       const updated = {...currentProfile, ...adds, ...overrides};
       saveProfile(updated);
       console.log('[Profile Merge] Overrides applied:', conflicts.map(c=>c.key).join(', '));
+    }
+  }
+
+  // ── Auto-add Life Assured as dependant if different from Policy Owner ──
+  const liName = (extracted.lifeInsured||'').trim();
+  const ownerName = (extracted.policyOwner||currentProfile.name||'').trim();
+  if(liName && ownerName && !isNameMatch(liName, ownerName)) {
+    const deps = currentProfile.dependants || [];
+    const alreadyExists = deps.some(d => isNameMatch(d.name, liName));
+    if(!alreadyExists) {
+      const newDep = {
+        id: 'dep_' + Date.now() + Math.random().toString(36).slice(2,4),
+        name: liName,
+        relationship: 'Life Assured',
+        dob: extracted.dob || '',
+        gender: extracted.gender || '',
+        smoker: extracted.smoker || '',
+        nationality: extracted.nationality || '',
+        occupation: extracted.occupation || '',
+      };
+      const updatedProfile = {...currentProfile, ...adds, dependants: [...deps, newDep]};
+      saveProfile(updatedProfile);
+      console.log('[Profile Merge] Auto-added life assured as dependant:', liName);
     }
   }
 }
@@ -4782,7 +4805,7 @@ For EACH policy, return a JSON object with:
 
 CORE: insurer, productName, policyName, policyNumber, category (protection/savings/health/investment/retirement/maternity), subType (Term Life/Whole Life/Universal Life (UL)/Indexed UL (IUL)/Variable UL (VUL)/Critical Illness/Personal Accident/Disability Income/Long-term Care/Endowment/Lifetime Endowment/Education Plan/Short-term Endowment/Integrated Shield Plan/Hospital Income/Investment-Linked Policy (ILP)/Retirement/Annuity/Maternity Coverage), currency (default SGD), sumAssured (number), annualPremium (number), premiumStructure (Single Premium/Regular Premium/Limited Pay/Flexible Premium), paymentMethod (Cash/MediSave/SRS/MediSave+Cash/CPF OA)
 
-CLIENT: lifeInsured, gender (Male/Female), dob (YYYY-MM-DD), ageAtEntry (number), smoker (Non-smoker/Smoker), nationality (SC/PR/Foreigner), occupation
+CLIENT: policyOwner (string — name of policy owner/purchaser), lifeInsured (string — name of life assured/insured person, may differ from policyOwner), gender (Male/Female — of life insured), dob (YYYY-MM-DD — of life insured), ageAtEntry (number — of life insured at cover start), smoker (Non-smoker/Smoker), nationality (SC/PR/Foreigner), occupation
 
 PREMIUM TERM: premStartAge (number), premTerm (number — PREMIUM PAYMENT years, NOT policy term. Calculate as premEndAge minus premStartAge), premEndAge (number — age when premium payments stop, NOT maturity age)
 
@@ -4827,7 +4850,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
     for(const f of Array.from(files)){
       newStaged.push({file:f, preview:URL.createObjectURL(f)});
     }
-    setStaged(prev => [...prev, ...newStaged].slice(0,12));
+    setStaged(prev => [...prev, ...newStaged].slice(0,20));
   };
   const removeStaged = (idx) => {
     setStaged(prev => { const n=[...prev]; URL.revokeObjectURL(n[idx].preview); n.splice(idx,1); return n; });
@@ -4854,7 +4877,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
     setScanning(true);
     try {
       const content = [];
-      for(const file of Array.from(files).slice(0,12)){
+      for(const file of Array.from(files).slice(0,20)){
         const blocks = await processFile(file);
         content.push(...blocks);
       }
@@ -4930,7 +4953,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
           <input ref={cameraRef} type="file" accept="image/*" capture="environment" style={{display:'none'}} onChange={e=>{stagePhotos(e.target.files);e.target.value='';}} />
           <input ref={uploadRef} type="file" accept="image/*,.pdf,.xlsx,.xls,.csv,.doc,.docx,.html,.htm,.txt,.rtf" multiple style={{display:'none'}} onChange={e=>{handleExtract(Array.from(e.target.files));e.target.value='';}} />
-          <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setStaged(prev=>[...prev,...newStaged].slice(0,12));}}} disabled={scanning}>
+          <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setStaged(prev=>[...prev,...newStaged].slice(0,20));}}} disabled={scanning}>
             📷 {staged.length>0?'('+staged.length+') Take More':'Camera'}
           </button>
           <button className="btn-secondary btn-sm" onClick={()=>uploadRef.current?.click()} disabled={scanning}>
@@ -4965,7 +4988,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
             <div style={{fontSize:13,fontWeight:600}}>"📷" {staged.length} photo{staged.length>1?'s':''} staged</div>
             <div style={{display:'flex',gap:6}}>
-              <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setStaged(prev=>[...prev,...newStaged].slice(0,12));}}}>+ Take More</button>
+              <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setStaged(prev=>[...prev,...newStaged].slice(0,20));}}}>+ Take More</button>
               <button className="btn-primary btn-sm" onClick={()=>handleExtract(staged.map(s=>s.file))} disabled={scanning}>{scanning?'Extracting…':'✨ Extract All'}</button>
               <button className="btn-danger btn-sm" onClick={clearStaged}>Clear</button>
             </div>
@@ -5119,7 +5142,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
   const [form, setForm] = useState(policy || {
     id:genId(), category:'protection', subType:'', insurer:'', productName:'', policyName:'', policyNumber:'',
     currency:'SGD', sumAssured:'', annualPremium:'', premiumStructure:'Regular Premium',
-    lifeInsured:'', gender:'', dob:'', ageAtEntry:'', smoker:'', nationality:'', occupation:'',
+    policyOwner:'', lifeInsured:'', gender:'', dob:'', ageAtEntry:'', smoker:'', nationality:'', occupation:'',
     inceptionDate:'', maturityDate:'', status:'inforce', paymentMethod:'',
     // Premium structure (RetireWell)
     premStartAge:'', premTerm:'', premEndAge:'65', premSingle:false, premWholeLife:false,
@@ -5256,7 +5279,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         const blocks = await processFile(file);
         content.push(...blocks);
       }
-      const formExtractPrompt = 'Extract insurance policy details. Return a JSON object with ALL fields: insurer, productName, policyNumber, category (protection/savings/health/investment/retirement/maternity), subType, currency, sumAssured (number), annualPremium (number), premiumStructure, paymentMethod, lifeInsured, gender, dob, ageAtEntry, smoker, nationality, occupation, inceptionDate, maturityDate, status, premStartAge, premTerm, premEndAge. Riders: riders (array of {type:death/tpd/ci/eci/di/accidental/premium_waiver, riderName:string (product name if separate rider e.g. Early CompleteCare Rider III), sa:number, premium:number (0 if part of main plan), expiryAge:number, bundled:boolean (true if part of main plan, false if separate rider product), multiClaim:boolean, totalClaimPct:number}). IMPORTANT: distinguish between benefits that are PART OF the main plan (bundled=true, no riderName) vs separate RIDER products (bundled=false, include riderName and rider premium). SA: saMultiplier, multiplierEndAge. ISP: ispClass, hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance. ILP: ilpSubtype, ilpGrowth, ilpDivYield, ilpMgmtFee. Cash: cashValue, cvGrowthRate, surrenderPeriod. Notes: notes (FC review headline). Return ONLY valid JSON starting with { ending with }.';
+      const formExtractPrompt = 'Extract insurance policy details. Return a JSON object with ALL fields: insurer, productName, policyNumber, category (protection/savings/health/investment/retirement/maternity), subType, currency, sumAssured (number), annualPremium (number), premiumStructure, paymentMethod, policyOwner, lifeInsured, gender, dob, ageAtEntry, smoker, nationality, occupation, inceptionDate, maturityDate, status, premStartAge, premTerm, premEndAge. Riders: riders (array of {type:death/tpd/ci/eci/di/accidental/premium_waiver, riderName:string (product name if separate rider e.g. Early CompleteCare Rider III), sa:number, premium:number (0 if part of main plan), expiryAge:number, bundled:boolean (true if part of main plan, false if separate rider product), multiClaim:boolean, totalClaimPct:number}). IMPORTANT: distinguish between benefits that are PART OF the main plan (bundled=true, no riderName) vs separate RIDER products (bundled=false, include riderName and rider premium). SA: saMultiplier, multiplierEndAge. ISP: ispClass, hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance. ILP: ilpSubtype, ilpGrowth, ilpDivYield, ilpMgmtFee. Cash: cashValue, cvGrowthRate, surrenderPeriod. Notes: notes (FC review headline). Return ONLY valid JSON starting with { ending with }.';
       content.push({type:'text',text:'Extract all policy information from these documents/images.'});
       const rawText2 = await callAI(formExtractPrompt, content, 4000);
       const parsed = repairJSON(rawText2);
@@ -5335,7 +5358,15 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         {/* ═══ SECTION 2: POLICY IDENTITY ═══ */}
         <div className="grid-3">
           <div className="field"><label>Policy Number</label><input value={form.policyNumber} onChange={e=>set('policyNumber',e.target.value)} placeholder="e.g. 12345678" /></div>
-          <div className="field"><label>Life Insured</label>
+          <div className="field"><label>Policy Owner</label>
+            <select value={form.policyOwner||''} onChange={e=>set('policyOwner',e.target.value)}>
+              <option value="">— Select from profile —</option>
+              {profileNames.map(n=><option key={n} value={n}>{n}</option>)}
+              <option value="__other">Other (type below)</option>
+            </select>
+            {form.policyOwner==='__other' && <input value={form.policyOwnerOther||''} onChange={e=>set('policyOwnerOther',e.target.value)} placeholder="Owner name" style={{marginTop:4}} />}
+          </div>
+          <div className="field"><label>Life Assured</label>
             <select value={form.lifeInsured||''} onChange={e=>set('lifeInsured',e.target.value)}>
               <option value="">— Select from profile —</option>
               {profileNames.map(n=><option key={n} value={n}>{n}</option>)}
