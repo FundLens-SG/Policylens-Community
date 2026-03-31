@@ -226,7 +226,8 @@ async function authSignup(){
     // Create profile
     if(r.data&&r.data.user){
       var isAdm=ADMIN_EMAILS.indexOf(e)>=0;
-      await sb().from('profiles').upsert({id:r.data.user.id,email:e,full_name:n,approved:isAdm,role:isAdm?'admin':'user'});
+      var pIns=await sb().from('profiles').upsert({id:r.data.user.id,email:e,full_name:n,approved:isAdm,role:isAdm?'admin':'user'});
+      if(pIns.error) console.warn('[Auth] Profile upsert error (non-blocking):', pIns.error.message);
       if(isAdm){
         // Admin — sign in directly
         _user=r.data.user;_isAdmin=true;_prof={email:e,full_name:n,approved:true,role:'admin'};
@@ -282,19 +283,33 @@ async function authCheck(){
   // NON-ADMIN PATH — query profiles table
   var p=await s.from('profiles').select('*').eq('id',_user.id).maybeSingle();
   console.log('[Auth] Profile:', p.error?p.error.message:'ok', p.data?'found':'missing');
-  if(p.error){
-    authMsg('Database error: '+p.error.message);return;
+  
+  if(p.data) {
+    // Profile exists — check approval
+    _prof=p.data;
+    _isAdmin=_prof.role==='admin';
+    if(!_prof.approved){authShow('pending');return;}
+    authGrant();
+    return;
   }
-  if(!p.data){
-    var m=_user.user_metadata||{};
-    var ins=await s.from('profiles').insert({id:_user.id,email:_user.email,full_name:m.full_name||'',approved:false,role:'user'});
-    if(ins.error) console.warn('[Auth] Insert error:', ins.error.message);
-    authShow('pending');return;
+  
+  // Profile missing or SELECT errored — try to create it
+  var m=_user.user_metadata||{};
+  var profileData={id:_user.id,email:_user.email,full_name:m.full_name||'',approved:false,role:'user'};
+  console.log('[Auth] Creating profile for', _user.email);
+  
+  // Try insert first, then upsert as fallback
+  var ins=await s.from('profiles').insert(profileData);
+  if(ins.error) {
+    console.warn('[Auth] Insert error:', ins.error.message, '— trying upsert');
+    var ups=await s.from('profiles').upsert(profileData);
+    if(ups.error) {
+      console.error('[Auth] Upsert also failed:', ups.error.message);
+      authMsg('Account setup failed: '+ups.error.message+'. Please contact your admin.');
+      return;
+    }
   }
-  _prof=p.data;
-  _isAdmin=_prof.role==='admin';
-  if(!_prof.approved){authShow('pending');return;}
-  authGrant();
+  authShow('pending');return;
   } catch(err) {
     console.error('[Auth] Error:', err);
     if(_user && ADMIN_EMAILS.indexOf(_user.email)>=0){_isAdmin=true;authGrant();return;}
@@ -3181,92 +3196,60 @@ function openCameraModal() {
 function CameraModal() {
   const [open, setOpen] = useState(false);
   const [shots, setShots] = useState([]);
-  const [mode, setMode] = useState(() => localStorage.getItem('pl_cam_mode') || 'burst');
-  const [flash, setFlash] = useState(null);
   const containerRef = useRef(null);
-  const autoReopenRef = useRef(false);
   const shotCountRef = useRef(0);
+  const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
 
   useEffect(() => {
-    const handler = () => { setShots([]); setFlash(null); shotCountRef.current = 0; setOpen(true); };
+    const handler = () => { setShots([]); shotCountRef.current = 0; setOpen(true); };
     window.addEventListener('policylens-open-camera', handler);
     return () => window.removeEventListener('policylens-open-camera', handler);
   }, []);
 
-  // Detect mobile
-  const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+  // Auto-open camera on first mount (mobile only)
+  useEffect(() => {
+    if (open && shotCountRef.current === 0 && isMobile) {
+      setTimeout(() => triggerNative('camera'), 150);
+    }
+  }, [open]);
 
-  // Create a FRESH input element each time — forces browser to open camera, not gallery
-  const triggerCamera = () => {
+  // Create fresh input each time to avoid browser caching the intent
+  const triggerNative = (source) => {
     if (!containerRef.current) return;
     containerRef.current.innerHTML = '';
     const inp = document.createElement('input');
     inp.type = 'file';
     inp.accept = 'image/*';
-    if (isMobile) {
+    if (source === 'camera' && isMobile) {
       inp.setAttribute('capture', 'environment');
     } else {
-      // Desktop: allow multi-select from file picker
       inp.setAttribute('multiple', 'true');
     }
     inp.style.display = 'none';
     inp.addEventListener('change', (e) => {
       const files = e.target.files;
       if (!files || !files.length) {
-        autoReopenRef.current = false;
         if (shotCountRef.current === 0) finish([]);
         return;
       }
       const newShots = [];
       for (const f of Array.from(files)) newShots.push({ file: f, preview: URL.createObjectURL(f) });
       setShots(prev => { const updated = [...prev, ...newShots].slice(0, 20); shotCountRef.current = updated.length; return updated; });
-      // Destroy this input immediately
       if (containerRef.current) containerRef.current.innerHTML = '';
-      // BURST: only on mobile — flash then create a brand new input
-      if (isMobile && mode === 'burst' && autoReopenRef.current) {
-        setFlash(shotCountRef.current);
-        setTimeout(() => {
-          setFlash(null);
-          if (autoReopenRef.current) triggerCamera();
-        }, 500);
-      }
     });
     containerRef.current.appendChild(inp);
     setTimeout(() => inp.click(), 50);
   };
 
-  useEffect(() => {
-    if (open && shotCountRef.current === 0) {
-      autoReopenRef.current = (mode === 'burst');
-      setTimeout(() => triggerCamera(), 120);
-    }
-  }, [open]);
-
-  const takeAnother = () => {
-    if (mode === 'burst') autoReopenRef.current = true;
-    triggerCamera();
-  };
-
   const removeShot = (idx) => {
-    setShots(prev => { const n = [...prev]; URL.revokeObjectURL(n[idx].preview); n.splice(idx, 1); return n; });
+    setShots(prev => { const n = [...prev]; URL.revokeObjectURL(n[idx].preview); n.splice(idx, 1); shotCountRef.current = n.length; return n; });
   };
-
   const finish = (result) => {
-    autoReopenRef.current = false;
     setOpen(false);
     if (_cameraResolve) { _cameraResolve(result || shots.map(s => s.file)); _cameraResolve = null; }
   };
-
   const cancel = () => {
-    autoReopenRef.current = false;
-    shots.forEach(s => URL.revokeObjectURL(s.preview));
-    setShots([]);
-    finish([]);
-  };
-
-  const switchMode = (m) => {
-    setMode(m);
-    localStorage.setItem('pl_cam_mode', m);
+    shots.forEach(s => URL.revokeObjectURL(s.preview)); setShots([]); shotCountRef.current = 0; finish([]);
   };
 
   if (!open) return null;
@@ -3275,39 +3258,15 @@ function CameraModal() {
     <div style={{position:'fixed',inset:0,zIndex:10000,background:'var(--bg)',display:'flex',flexDirection:'column'}}>
       <div ref={containerRef} style={{display:'none'}} />
 
-      {/* ── Burst flash overlay ── */}
-      {flash !== null && (
-        <div style={{position:'absolute',inset:0,zIndex:10001,background:'rgba(11,15,26,.92)',
-          display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',
-          animation:'fadeIn .15s ease'}}>
-          <div style={{fontSize:64,marginBottom:12}}>✅</div>
-          <div style={{fontSize:22,fontWeight:700,color:'var(--gold)'}}>Photo {flash} captured!</div>
-          <div style={{fontSize:13,color:'var(--text2)',marginTop:6}}>Reopening camera…</div>
-        </div>
-      )}
-
-      {/* ── Header ── */}
+      {/* Header */}
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',
         padding:'12px 16px',borderBottom:'1px solid var(--border)',flexShrink:0}}>
         <button onClick={cancel}
           style={{background:'none',border:'none',color:'var(--text3)',fontSize:14,cursor:'pointer',padding:'4px 8px'}}>
           ✕ Cancel
         </button>
-        <div style={{display:'flex',alignItems:'center',gap:8}}>
-          <div style={{fontSize:14,fontWeight:600,color:'var(--text)'}}>
-            📷 {shots.length} photo{shots.length !== 1 ? 's' : ''}
-          </div>
-          {/* Mode toggle pills — mobile only */}
-          {isMobile && <div style={{display:'flex',borderRadius:6,overflow:'hidden',border:'1px solid var(--border2)'}}>
-            <button onClick={()=>switchMode('standard')}
-              style={{padding:'3px 8px',fontSize:10,fontWeight:600,border:'none',cursor:'pointer',
-                background:mode==='standard'?'var(--gold)':'var(--bg3)',
-                color:mode==='standard'?'#0b0f1a':'var(--text3)'}}>STD</button>
-            <button onClick={()=>switchMode('burst')}
-              style={{padding:'3px 8px',fontSize:10,fontWeight:600,border:'none',cursor:'pointer',
-                background:mode==='burst'?'var(--gold)':'var(--bg3)',
-                color:mode==='burst'?'#0b0f1a':'var(--text3)'}}>BURST ⚡</button>
-          </div>}
+        <div style={{fontSize:14,fontWeight:600,color:'var(--text)'}}>
+          {shots.length} item{shots.length !== 1 ? 's' : ''} staged
         </div>
         <button onClick={() => finish()}
           style={{background:shots.length > 0 ? 'var(--gold)' : 'var(--bg3)',
@@ -3317,28 +3276,19 @@ function CameraModal() {
         </button>
       </div>
 
-      {/* ── Burst mode explainer — mobile only ── */}
-      {isMobile && mode === 'burst' && shots.length === 0 && !flash && (
-        <div style={{padding:'8px 16px',background:'var(--gold-dim)',borderBottom:'1px solid rgba(212,169,106,.2)',
-          fontSize:11,color:'var(--gold)',textAlign:'center'}}>
-          ⚡ Burst Mode — camera auto-reopens after each shot. Press Back in camera to stop.
-        </div>
-      )}
-      {/* ── Desktop tip ── */}
-      {!isMobile && shots.length === 0 && !flash && (
-        <div style={{padding:'8px 16px',background:'var(--gold-dim)',borderBottom:'1px solid rgba(212,169,106,.2)',
-          fontSize:11,color:'var(--gold)',textAlign:'center'}}>
-          💡 Select multiple images at once — hold Ctrl/Cmd to pick several files
-        </div>
-      )}
-
-      {/* ── Photo grid ── */}
+      {/* Photo grid */}
       <div style={{flex:1,overflow:'auto',padding:12}}>
-        {shots.length === 0 && !flash ? (
-          <div style={{textAlign:'center',padding:'60px 20px',color:'var(--text3)'}}>
+        {shots.length === 0 ? (
+          <div style={{textAlign:'center',padding:'40px 20px',color:'var(--text3)'}}>
             <div style={{fontSize:48,marginBottom:12}}>📷</div>
-            <div style={{fontSize:14}}>{isMobile ? 'Opening camera...' : 'Opening file picker...'}</div>
-            <div style={{fontSize:12,marginTop:8}}>{isMobile ? 'If camera didn\'t open, tap below' : 'Select images to scan'}</div>
+            <div style={{fontSize:15,fontWeight:600,color:'var(--text2)',marginBottom:4}}>
+              {isMobile ? 'Camera is opening...' : 'Select images below'}
+            </div>
+            <div style={{fontSize:12}}>
+              {isMobile
+                ? 'Take a photo, or pick from gallery. Add as many as you need before extracting.'
+                : 'Select multiple files with Ctrl/Cmd+Click'}
+            </div>
           </div>
         ) : (
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(90px,1fr))',gap:8}}>
@@ -3359,25 +3309,35 @@ function CameraModal() {
         )}
       </div>
 
-      {/* ── Bottom action bar ── */}
-      <div style={{padding:'12px 16px 24px',borderTop:'1px solid var(--border)',
-        display:'flex',gap:10,flexShrink:0}}>
-        <button onClick={takeAnother}
-          style={{flex:1,background:'var(--bg3)',border:'2px dashed var(--gold3)',borderRadius:12,
-            padding:'14px',cursor:'pointer',textAlign:'center'}}>
-          <span style={{fontSize:24}}>📷</span>
-          <div style={{fontSize:13,fontWeight:600,color:'var(--gold2)',marginTop:4}}>
-            {isMobile && mode==='burst' ? 'Resume Burst' : isMobile ? 'Take Another Photo' : 'Add More Files'}
-          </div>
-        </button>
+      {/* Bottom action buttons */}
+      <div style={{padding:'12px 16px 24px',borderTop:'1px solid var(--border)',flexShrink:0}}>
+        <div style={{display:'flex',gap:8,marginBottom:shots.length > 0 ? 10 : 0}}>
+          {isMobile && (
+            <button onClick={() => triggerNative('camera')}
+              style={{flex:1,background:'var(--bg3)',border:'2px dashed var(--gold3)',borderRadius:12,
+                padding:'14px 8px',cursor:'pointer',textAlign:'center'}}>
+              <span style={{fontSize:22}}>📷</span>
+              <div style={{fontSize:12,fontWeight:600,color:'var(--gold2)',marginTop:3}}>Take Photo</div>
+            </button>
+          )}
+          <button onClick={() => triggerNative('gallery')}
+            style={{flex:1,background:'var(--bg3)',border:'2px dashed var(--blue)',borderRadius:12,
+              padding:'14px 8px',cursor:'pointer',textAlign:'center'}}>
+            <span style={{fontSize:22}}>🖼️</span>
+            <div style={{fontSize:12,fontWeight:600,color:'var(--blue2)',marginTop:3}}>
+              {isMobile ? 'Gallery' : 'Select Files'}
+            </div>
+            <div style={{fontSize:9,color:'var(--text3)',marginTop:2}}>Multi-select</div>
+          </button>
+        </div>
         {shots.length > 0 && (
           <button onClick={() => finish()}
-            style={{flex:1,background:'var(--gold)',border:'none',borderRadius:12,
+            style={{width:'100%',background:'var(--gold)',border:'none',borderRadius:12,
               padding:'14px',cursor:'pointer',textAlign:'center'}}>
-            <span style={{fontSize:24}}>✨</span>
-            <div style={{fontSize:13,fontWeight:700,color:'#0b0f1a',marginTop:4}}>
-              Extract {shots.length} Photo{shots.length > 1 ? 's' : ''}
-            </div>
+            <span style={{fontSize:20}}>✨</span>
+            <span style={{fontSize:14,fontWeight:700,color:'#0b0f1a',marginLeft:8}}>
+              Extract {shots.length} Item{shots.length > 1 ? 's' : ''}
+            </span>
           </button>
         )}
       </div>
