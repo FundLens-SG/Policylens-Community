@@ -3786,14 +3786,20 @@ async function geminiRead(geminiKey, contentBlocks) {
 // Step 2: Claude structures the extracted text → perfect JSON
 async function claudeExtract(anthropicKey, systemPrompt, rawText, maxTokens) {
   console.log('[Claude Extract] Sending:', rawText.length, 'chars to Claude');
-  const resp = await fetch('https://api.anthropic.com/v1/messages',{
-    method:'POST',
-    headers:{'Content-Type':'application/json','x-api-key':anthropicKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-    body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:maxTokens||4000,
-      system:systemPrompt+'\n\nRespond with ONLY valid JSON. Start with { end with }.',
-      messages:[{role:'user',content:rawText}]
-    })
-  });
+  let resp;
+  try {
+    resp = await fetch('https://api.anthropic.com/v1/messages',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','x-api-key':anthropicKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:maxTokens||4000,
+        system:systemPrompt+'\n\nRespond with ONLY valid JSON. Start with { end with }.',
+        messages:[{role:'user',content:rawText}]
+      })
+    });
+  } catch(fetchErr) {
+    throw new Error('Network error calling Claude API — check internet connection and API key. ('+fetchErr.message+')');
+  }
+  if(!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error('Claude API '+resp.status+': '+(e.error?.message||'Unknown error')); }
   const data = await resp.json();
   if(data.error) throw new Error('Claude: '+data.error.message);
   const raw = data.content?.[0]?.text||'';
@@ -3809,14 +3815,20 @@ async function geminiExtract(geminiKey, systemPrompt, contentBlocks, maxTokens) 
     else if(block.type==='image') parts.push({inlineData:{mimeType:block.source.media_type,data:block.source.data}});
     else if(block.type==='document') parts.push({inlineData:{mimeType:block.source.media_type||'application/pdf',data:block.source.data}});
   }
-  const resp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='+geminiKey,{
-    method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({
-      contents:[{parts}],
-      systemInstruction:{parts:[{text:systemPrompt+'\n\nRespond with ONLY valid JSON. Start with { end with }.'}]},
-      generationConfig:{maxOutputTokens:maxTokens||8000,responseMimeType:'application/json'}
-    })
-  });
+  let resp;
+  try {
+    resp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='+geminiKey,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        contents:[{parts}],
+        systemInstruction:{parts:[{text:systemPrompt+'\n\nRespond with ONLY valid JSON. Start with { end with }.'}]},
+        generationConfig:{maxOutputTokens:maxTokens||8000,responseMimeType:'application/json'}
+      })
+    });
+  } catch(fetchErr) {
+    throw new Error('Network error calling Gemini API — check internet connection and API key. ('+fetchErr.message+')');
+  }
+  if(!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error('Gemini API '+resp.status+': '+(e.error?.message||'Unknown error')); }
   const data = await resp.json();
   if(data.error) throw new Error('Gemini: '+data.error.message);
   const raw = data.candidates?.[0]?.content?.parts?.[0]?.text||'';
@@ -3836,10 +3848,20 @@ async function callAI(systemPrompt, contentBlocks, maxTokens) {
   const forceAnthropic = contentBlocks.some(b=>b._forceAnthropic);
   const textParts = contentBlocks.filter(b=>b.type==='text').map(b=>b.text).join('\n');
   
-  // ── Text-only → Claude directly (cheapest) ──
+  // ── Text-only → Claude directly (cheapest), with Gemini fallback ──
   if(ck && !hasMedia) {
     console.log('[AI] Text-only → Claude direct');
-    return await claudeExtract(ck, systemPrompt, textParts, maxTokens);
+    try {
+      return await claudeExtract(ck, systemPrompt, textParts, maxTokens);
+    } catch(claudeErr) {
+      console.warn('[AI] Claude text-only failed:', claudeErr.message);
+      if(gk) {
+        console.log('[AI] Falling back to Gemini for text-only');
+        try { return await geminiExtract(gk, systemPrompt, contentBlocks, maxTokens); }
+        catch(geminiErr) { throw new Error('Both AI providers failed. Claude: '+claudeErr.message+' | Gemini: '+geminiErr.message); }
+      }
+      throw claudeErr;
+    }
   }
 
   // ── Force Anthropic (e.g. docx files Gemini can't handle) ──
