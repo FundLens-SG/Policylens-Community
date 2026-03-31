@@ -7,7 +7,7 @@
 <script>window.onerror=function(m,s){if(!s||m==='Script error.')return true;return false};window.onunhandledrejection=function(e){if(!e||!e.reason)return;var r=String(e.reason);if(r==='Script error.')e.preventDefault();};
 // Suppress noisy library warnings
 (function(){var _warn=console.warn,_error=console.error;
-console.warn=function(){var m=arguments[0]||'';if(typeof m==='string'&&(m.includes('gotrue-js')||m.includes('lock:')||m.includes('not released within')))return;_warn.apply(console,arguments)};
+console.warn=function(){var m=arguments[0]||'';if(typeof m==='string'&&(m.includes('gotrue-js')||m.includes('lock:')||m.includes('not released within')||m.includes('this.lock')))return;_warn.apply(console,arguments)};
 console.error=function(){var m=arguments[0]||'';if(typeof m==='string'&&m.includes('deoptimised'))return;_error.apply(console,arguments)};
 })();
 </script>
@@ -29,6 +29,10 @@ if('serviceWorker' in navigator && location.hostname.includes('github.io')){wind
 <script crossorigin="anonymous" src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 <script crossorigin="anonymous" src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 <!-- Gemini handles PDFs natively — no pdf.js needed -->
+<script>
+// Polyfill navigator.locks for older Android WebViews that don't support it
+if(!navigator.locks){navigator.locks={request:function(name,opts,cb){if(typeof opts==='function'){cb=opts;opts={}}return Promise.resolve(cb({name:name}))}};}
+</script>
 <script crossorigin="anonymous" src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script crossorigin="anonymous" src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='38' fill='none' stroke='%23d4a96a' stroke-width='3'/%3E%3Ccircle cx='50' cy='50' r='2.5' fill='%23d4a96a'/%3E%3Cline x1='50' y1='32' x2='50' y2='42' stroke='%23d4a96a' stroke-width='2' stroke-linecap='round'/%3E%3Cline x1='50' y1='58' x2='50' y2='68' stroke='%23d4a96a' stroke-width='2' stroke-linecap='round'/%3E%3Cline x1='32' y1='50' x2='42' y2='50' stroke='%23d4a96a' stroke-width='2' stroke-linecap='round'/%3E%3Cline x1='58' y1='50' x2='68' y2='50' stroke='%23d4a96a' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
@@ -212,9 +216,7 @@ var ADMIN_EMAILS = ['chungakwanc@gmail.com'];
 // ── SINGLE global Supabase client — created once, used by auth + React ──
 var _SB = null;
 try { if(window.supabase) _SB = window.supabase.createClient(SB_URL, SB_KEY, {
-  auth: { storageKey: 'policylens-auth', autoRefreshToken: true, persistSession: true, detectSessionInUrl: false, flowType: 'implicit',
-    lock: { acquireTimeout: 15000, debug: false }
-  }
+  auth: { storageKey: 'policylens-auth', autoRefreshToken: true, persistSession: true, detectSessionInUrl: false, flowType: 'implicit' }
 }); } catch(e){ console.warn('[Auth] Supabase init error:',e); }
 
 var _sb=null,_user=null,_prof=null,_isAdmin=false;
