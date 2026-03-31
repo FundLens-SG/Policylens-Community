@@ -4,7 +4,13 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PolicyLens V1.0</title>
-<script>window.onerror=function(m,s){if(!s||m==='Script error.')return true;return false};window.onunhandledrejection=function(e){if(!e||!e.reason)return;var r=String(e.reason);if(r==='Script error.')e.preventDefault();};</script>
+<script>window.onerror=function(m,s){if(!s||m==='Script error.')return true;return false};window.onunhandledrejection=function(e){if(!e||!e.reason)return;var r=String(e.reason);if(r==='Script error.')e.preventDefault();};
+// Suppress noisy library warnings
+(function(){var _warn=console.warn,_error=console.error;
+console.warn=function(){var m=arguments[0]||'';if(typeof m==='string'&&(m.includes('gotrue-js')||m.includes('lock:')||m.includes('not released within')))return;_warn.apply(console,arguments)};
+console.error=function(){var m=arguments[0]||'';if(typeof m==='string'&&m.includes('deoptimised'))return;_error.apply(console,arguments)};
+})();
+</script>
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#0b0f1a">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -59,7 +65,7 @@ th{text-align:left;padding:8px 12px;font-size:11px;font-weight:600;text-transfor
 td{padding:8px 12px;font-size:13px;border-bottom:1px solid var(--border)}
 .card{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:20px}
 .card-sm{padding:14px}
-.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.7);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;z-index:100}
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.8);display:flex;align-items:center;justify-content:center;z-index:100}
 .modal{background:var(--bg2);border:1px solid var(--border2);border-radius:16px;max-width:720px;width:95%;max-height:85vh;overflow-y:auto;padding:24px;box-shadow:0 24px 64px rgba(0,0,0,.4)}
 .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .grid-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
@@ -121,7 +127,7 @@ label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;lett
 .auth-pending-title{font-size:16px;font-weight:600;margin-bottom:6px;color:var(--gold)}
 .auth-pending-sub{font-size:13px;color:var(--text3);line-height:1.5}
 #admin-fab{position:fixed;bottom:20px;right:20px;z-index:9998;background:var(--gold);color:#0b0f1a;border:none;border-radius:50%;width:48px;height:48px;font-size:20px;cursor:pointer;box-shadow:0 4px 16px rgba(212,169,106,.3);display:none}
-#admin-panel{position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.7);backdrop-filter:blur(6px);display:none;align-items:center;justify-content:center;padding:20px}
+#admin-panel{position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.8);display:none;align-items:center;justify-content:center;padding:20px}
 #admin-panel .acard{background:var(--bg2);border:1px solid var(--border2);border-radius:16px;max-width:640px;width:100%;max-height:80vh;overflow-y:auto;padding:24px}
 #admin-panel .atitle{font-size:16px;font-weight:600;margin-bottom:16px;display:flex;justify-content:space-between;align-items:center;color:var(--gold)}
 #admin-panel table{width:100%;border-collapse:collapse}
@@ -205,7 +211,11 @@ var ADMIN_EMAILS = ['chungakwanc@gmail.com'];
 
 // ── SINGLE global Supabase client — created once, used by auth + React ──
 var _SB = null;
-try { if(window.supabase) _SB = window.supabase.createClient(SB_URL, SB_KEY); } catch(e){ console.warn('[Auth] Supabase init error:',e); }
+try { if(window.supabase) _SB = window.supabase.createClient(SB_URL, SB_KEY, {
+  auth: { storageKey: 'policylens-auth', autoRefreshToken: true, persistSession: true, detectSessionInUrl: false, flowType: 'implicit',
+    lock: { acquireTimeout: 15000, debug: false }
+  }
+}); } catch(e){ console.warn('[Auth] Supabase init error:',e); }
 
 var _sb=null,_user=null,_prof=null,_isAdmin=false;
 function sb(){return _SB;}
@@ -4846,8 +4856,18 @@ function RetirementLiteDashboard({data,age,retAge,p,policies,cvTimeline,toSGD,fx
   const generateShareView = () => {
     const clientName = p.name || 'Client';
     const retRow = cvTimeline.find(r => r.age === retAge);
-    const totalPrem = policies.filter(pol=>pol.category!=='cash_investments'&&!pol.premSingle&&pol.premiumStructure!=='Single Premium'&&pol.premFrequency!=='single').reduce((s,pol)=>s+(parseFloat(pol.annualPremium)||0),0);
-    const totalSinglePrem = policies.filter(pol=>pol.category!=='cash_investments'&&(pol.premSingle||pol.premiumStructure==='Single Premium'||pol.premFrequency==='single')).reduce((s,pol)=>s+(parseFloat(pol.annualPremium)||0),0);
+    const totalPrem = policies.filter(pol=>pol.category!=='cash_investments'&&!pol.premSingle&&pol.premiumStructure!=='Single Premium'&&pol.premFrequency!=='single'&&pol.status!=='matured').reduce((s,pol)=>s+(pol.premFrequency==='monthly'?(parseFloat(pol.annualPremium)||0)*12:(parseFloat(pol.annualPremium)||0)),0);
+    const totalSinglePrem = policies.filter(pol=>pol.category!=='cash_investments'&&(pol.premSingle||pol.premiumStructure==='Single Premium'||pol.premFrequency==='single')&&pol.status!=='matured').reduce((s,pol)=>s+(parseFloat(pol.annualPremium)||0),0);
+    // Premium by mode
+    const premByMode = {cash:0, srs:0, cpfoa:0, medisave:0};
+    policies.filter(pol=>pol.category!=='cash_investments'&&pol.status!=='matured'&&!pol.premSingle&&pol.premiumStructure!=='Single Premium'&&pol.premFrequency!=='single').forEach(pol => {
+      const prem = pol.premFrequency==='monthly'?(parseFloat(pol.annualPremium)||0)*12:(parseFloat(pol.annualPremium)||0);
+      const method = (pol.paymentMethod||'').toLowerCase();
+      if(method.includes('medisave')) premByMode.medisave += prem;
+      else if(method.includes('srs')) premByMode.srs += prem;
+      else if(method.includes('cpf')) premByMode.cpfoa += prem;
+      else premByMode.cash += prem;
+    });
     const activePols = policies.filter(pol => !(pol.category==='cash_investments' && pol.fdMaturityDate && new Date(pol.fdMaturityDate)<new Date() && !pol.fdAutoRenew));
 
     // Coverage totals
@@ -4878,17 +4898,48 @@ function RetirementLiteDashboard({data,age,retAge,p,policies,cvTimeline,toSGD,fx
     const catCounts = {};
     activePols.forEach(pol => { const c = CATEGORIES[pol.category]?.label||pol.category; catCounts[c] = (catCounts[c]||0)+1; });
 
-    // Policy table rows
-    const policyRows = activePols.map(pol => {
-      const prem = parseFloat(pol.annualPremium)||0;
-      const isFD = pol.category==='cash_investments';
-      return `<tr>
-        <td style="padding:5px 8px;font-size:10px">${pol.insurer||''}</td>
-        <td style="padding:5px 8px;font-size:10px">${pol.productName||pol.policyName||pol.subType||''}</td>
-        <td style="padding:5px 8px;font-size:10px;text-align:center"><span style="background:${pol.category==='protection'?'rgba(91,143,217,.12)':pol.category==='savings'?'rgba(91,168,160,.12)':pol.category==='health'?'rgba(201,123,154,.12)':pol.category==='investment'?'rgba(157,138,191,.12)':pol.category==='retirement'?'rgba(212,169,106,.12)':'rgba(91,168,160,.12)'};color:${pol.category==='protection'?'#5b8fd9':pol.category==='savings'?'#5ba8a0':pol.category==='health'?'#c97b9a':pol.category==='investment'?'#9d8abf':pol.category==='retirement'?'#d4a96a':'#5ba8a0'};padding:1px 6px;border-radius:4px;font-size:9px;font-weight:600">${isFD?pol.subType:(CATEGORIES[pol.category]?.label||pol.category)}</span></td>
-        <td style="padding:5px 8px;font-size:10px;text-align:right">${isFD?(pol.fdPrincipal?'$'+parseInt(pol.fdPrincipal).toLocaleString():''):(parseFloat(pol.sumAssured)?'$'+parseInt(pol.sumAssured).toLocaleString():'')}</td>
-        <td style="padding:5px 8px;font-size:10px;text-align:right">${isFD?(pol.fdYieldPct?pol.fdYieldPct+'%':''):(prem?'$'+Math.round(prem).toLocaleString()+(pol.premFrequency==='monthly'?'/mth':'/yr'):'')}</td>
-      </tr>`;
+    // Grouped policy sections
+    const policyGroups = [
+      {id:'protection', main:'Insurance', sub:'🛡 Protection', match: pol => pol.category==='protection' && !['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(pol.subType), cols:['Provider','Product','Sub-type','Sum Assured','Premium','Mode']},
+      {id:'ul', main:'Insurance', sub:'💎 Universal Life', match: pol => ['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(pol.subType), cols:['Provider','Product','Sub-type','Sum Assured','Premium','Mode']},
+      {id:'investment', main:'Insurance', sub:'📈 Investment', match: pol => pol.category==='investment', cols:['Provider','Product','Sub-type','Sum Assured','Premium','Mode']},
+      {id:'savings_ret', main:'Insurance', sub:'🏦 Endowment, Retirement & Annuities', match: pol => pol.category==='savings' || pol.category==='retirement', cols:['Provider','Product','Sub-type','SA / Premium','Yield','Mode']},
+      {id:'health', main:'Insurance', sub:'🏥 Accident & Medical', match: pol => pol.category==='health' || pol.category==='maternity', cols:['Provider','Product','Sub-type','—','Premium','Mode']},
+      {id:'fi', main:'Fixed Deposits, T-bills & Bonds', sub:null, match: pol => pol.category==='cash_investments', cols:['Bank','Product','Type','Principal','Yield']},
+    ];
+    const groupedData = policyGroups.map(g => ({...g, items: activePols.filter(g.match)})).filter(g => g.items.length > 0);
+    let lastMain = '';
+    const policyGroupsHTML = groupedData.map(g => {
+      const isFI = g.id === 'fi';
+      const showMain = g.main !== lastMain;
+      lastMain = g.main;
+      const headerRow = showMain ? `<tr><td colspan="6" style="padding:12px 8px 4px;font-size:13px;font-weight:700;color:#d4a96a;border:none">${g.main}</td></tr>` : '';
+      const subRow = g.sub ? `<tr><td colspan="6" style="padding:2px 8px 6px;font-size:10px;font-weight:600;color:#a39580;text-transform:uppercase;letter-spacing:.5px;border:none">${g.sub} (${g.items.length})</td></tr>` : '';
+      const sortedItems = [...g.items].sort((a,b) => (a.insurer||'').localeCompare(b.insurer||'') || (a.productName||'').localeCompare(b.productName||''));
+      const rows = sortedItems.map(pol => {
+        const prem = parseFloat(pol.annualPremium)||0;
+        if(isFI) {
+          return `<tr>
+            <td style="padding:4px 8px;font-size:10px">${pol.insurer||''}</td>
+            <td style="padding:4px 8px;font-size:10px">${pol.productName||pol.subType||''}</td>
+            <td style="padding:4px 8px;font-size:10px">${pol.subType||'FD'}</td>
+            <td style="padding:4px 8px;font-size:10px;text-align:right">${pol.fdPrincipal?'$'+parseInt(pol.fdPrincipal).toLocaleString():''}</td>
+            <td style="padding:4px 8px;font-size:10px;text-align:right;color:#5ba8a0;font-weight:600">${pol.fdYieldPct?pol.fdYieldPct+'% p.a.':''}</td>
+          </tr>`;
+        }
+        const isSP = pol.premSingle||pol.premFrequency==='single'||pol.premiumStructure==='Single Premium';
+        const premStr = isSP ? '$'+Math.round(prem).toLocaleString()+' <span style="font-size:8px;color:#d4a96a">SP</span>' : prem ? '$'+Math.round(pol.premFrequency==='monthly'?prem*12:prem).toLocaleString()+'/yr' : '';
+        const method = pol.paymentMethod || 'Cash';
+        return `<tr>
+          <td style="padding:4px 8px;font-size:10px">${pol.insurer||''}</td>
+          <td style="padding:4px 8px;font-size:10px">${pol.productName||pol.policyName||''}</td>
+          <td style="padding:4px 8px;font-size:10px">${pol.subType||''}</td>
+          <td style="padding:4px 8px;font-size:10px;text-align:right">${parseFloat(pol.sumAssured)?'$'+parseInt(pol.sumAssured).toLocaleString():''}</td>
+          <td style="padding:4px 8px;font-size:10px;text-align:right">${premStr}</td>
+          <td style="padding:4px 8px;font-size:9px;color:#a39580">${method}</td>
+        </tr>`;
+      }).join('');
+      return headerRow + subRow + rows;
     }).join('');
 
     // Waterfall data
@@ -4939,7 +4990,10 @@ td{border-bottom:1px solid rgba(212,169,106,.04)}
 <!-- KPI ROW -->
 <div class="grid g5">
 <div class="card" style="text-align:center"><div class="kl">Policies</div><div class="kv">${activePols.length}</div></div>
-<div class="card" style="text-align:center"><div class="kl">Annual Premiums</div><div class="kv gd">$${Math.round(totalPrem).toLocaleString()}</div>${totalSinglePrem>0?'<div style="font-size:9px;color:#a39580">+ $'+Math.round(totalSinglePrem).toLocaleString()+' single</div>':'<div style="font-size:9px;color:#a39580">$'+Math.round(totalPrem/12).toLocaleString()+'/mth</div>'}</div>
+<div class="card" style="text-align:center"><div class="kl">Annual Premiums</div><div class="kv gd">$${Math.round(totalPrem).toLocaleString()}/yr</div>
+<div style="font-size:9px;color:#a39580;line-height:1.6;text-align:left;padding:4px 8px">
+${premByMode.cash>0?'Cash: $'+Math.round(premByMode.cash).toLocaleString()+'/yr<br>':''}${premByMode.medisave>0?'MediSave: $'+Math.round(premByMode.medisave).toLocaleString()+'/yr<br>':''}${premByMode.srs>0?'SRS: $'+Math.round(premByMode.srs).toLocaleString()+'/yr<br>':''}${premByMode.cpfoa>0?'CPF OA: $'+Math.round(premByMode.cpfoa).toLocaleString()+'/yr<br>':''}${totalSinglePrem>0?'<span style="color:#d4a96a">Single premiums: $'+Math.round(totalSinglePrem).toLocaleString()+'</span>':''}
+</div></div>
 <div class="card" style="text-align:center"><div class="kl">Total Coverage</div><div class="kv b">$${cvDeath>1e6?(cvDeath/1e6).toFixed(1)+'M':Math.round(cvDeath).toLocaleString()}</div></div>
 <div class="card" style="text-align:center"><div class="kl">Retirement Income</div><div class="kv g">$${totalAtRet.toLocaleString()}/m</div></div>
 <div class="card" style="text-align:center;border-left:3px solid ${coveragePct>=80?'#5ba8a0':coveragePct>=50?'#d4a96a':'#ef5350'}"><div class="kl">vs Target</div><div class="kv ${coveragePct>=80?'g':coveragePct>=50?'gd':'r'}">${coveragePct}%</div></div>
@@ -4983,9 +5037,8 @@ ${fdTotal>0?`<div class="card"><div class="kl">Fixed Deposits</div><div class="k
 <!-- POLICY LIST -->
 <div class="section">📋 Policy Portfolio (${activePols.length})</div>
 <div class="card" style="padding:0;overflow:hidden;margin-bottom:12px">
-<table>
-<thead><tr><th>Provider</th><th>Product</th><th style="text-align:center">Type</th><th style="text-align:right">SA / Principal</th><th style="text-align:right">Premium / Yield</th></tr></thead>
-<tbody>${policyRows}</tbody>
+<table style="width:100%">
+${policyGroupsHTML}
 </table>
 </div>
 
@@ -5336,19 +5389,31 @@ function Dashboard() {
     return m;
   }, [policies]);
 
-  const totalPremium = useMemo(() => {
-    let annual = 0, single = 0;
+  // Premium breakdown by payment mode and frequency
+  const premiumBreakdown = useMemo(() => {
+    const modes = {cash:{annual:0,single:0}, srs:{annual:0,single:0}, cpfoa:{annual:0,single:0}, medisave:{annual:0,single:0}, other:{annual:0,single:0}};
     policies.forEach(p => {
-      if(p.category==='cash_investments') return; // FDs aren't premiums
-      if(p.status==='matured' || p.status==='surrendered' || p.status==='lapsed') return; // Matured/inactive
+      if(p.category==='cash_investments') return;
+      if(p.status==='matured'||p.status==='surrendered'||p.status==='lapsed') return;
       if(p.maturityDate && new Date(p.maturityDate) < new Date() && p.category==='savings') return;
       const prem = parseFloat(p.annualPremium)||0;
-      if(p.premSingle || p.premiumStructure==='Single Premium' || p.premFrequency==='single') single += prem;
-      else if(p.premFrequency==='monthly') annual += prem * 12; // Monthly → annualize
-      else annual += prem;
+      if(!prem) return;
+      const isSingle = p.premSingle || p.premiumStructure==='Single Premium' || p.premFrequency==='single';
+      const annualized = isSingle ? 0 : (p.premFrequency==='monthly' ? prem*12 : prem);
+      const singleAmt = isSingle ? prem : 0;
+      // Determine mode
+      const method = (p.paymentMethod||'').toLowerCase().replace(/\s/g,'');
+      if(method.includes('medisave')) { modes.medisave.annual += annualized; modes.medisave.single += singleAmt; }
+      else if(method.includes('srs')) { modes.srs.annual += annualized; modes.srs.single += singleAmt; }
+      else if(method.includes('cpfoa')||method.includes('cpf oa')) { modes.cpfoa.annual += annualized; modes.cpfoa.single += singleAmt; }
+      else { modes.cash.annual += annualized; modes.cash.single += singleAmt; }
     });
-    return { annual, single, total: annual + single };
+    const totalAnnual = Object.values(modes).reduce((s,m) => s+m.annual, 0);
+    const totalSingle = Object.values(modes).reduce((s,m) => s+m.single, 0);
+    return { modes, totalAnnual, totalSingle, total: totalAnnual + totalSingle };
   }, [policies]);
+  // Legacy alias
+  const totalPremium = { annual: premiumBreakdown.totalAnnual, single: premiumBreakdown.totalSingle, total: premiumBreakdown.total };
   const totalCoverage = useMemo(() => policies.filter(p=>p.status!=='matured'&&p.status!=='surrendered'&&p.status!=='lapsed').reduce((s,p) => s + (parseFloat(p.sumAssured)||0), 0), [policies]);
 
   // ── COVERAGE FROM ALL POLICIES (riders + base SA) ──
@@ -5718,7 +5783,20 @@ function Dashboard() {
       {/* ═══ SUMMARY CARDS ═══ */}
       <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:10,marginBottom:16}}>
         <div className="card card-sm"><div style={{color:'var(--text3)',fontSize:10,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Policies</div><div style={{fontSize:24,fontWeight:700,marginTop:2}}>{policies.length}</div></div>
-        <div className="card card-sm"><div style={{color:'var(--text3)',fontSize:10,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Premiums</div><div style={{fontSize:24,fontWeight:700,marginTop:2}}>{fmt(totalPremium.annual)}<span style={{fontSize:11,color:'var(--text3)'}}>/yr</span></div>{totalPremium.single>0 && <div style={{fontSize:10,color:'var(--gold)'}}>+ {fmt(totalPremium.single)} single</div>}{premRatio>0 && <div style={{fontSize:10,color:premRatio>15?'var(--red)':'var(--text3)'}}>{premRatio}% of income</div>}</div>
+        <div className="card card-sm"><div style={{color:'var(--text3)',fontSize:10,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Annual Premiums</div>
+          <div style={{fontSize:22,fontWeight:700,marginTop:2}}>{fmt(premiumBreakdown.totalAnnual)}<span style={{fontSize:11,color:'var(--text3)'}}>/yr</span></div>
+          {premRatio>0 && <div style={{fontSize:10,color:premRatio>15?'var(--red)':'var(--text3)'}}>{premRatio}% of income</div>}
+          <div style={{marginTop:4,fontSize:9,lineHeight:1.6}}>
+            {premiumBreakdown.modes.cash.annual > 0 && <div style={{color:'var(--text2)'}}>Cash: {fmt(premiumBreakdown.modes.cash.annual)}/yr</div>}
+            {premiumBreakdown.modes.medisave.annual > 0 && <div style={{color:'var(--teal)'}}>MediSave: {fmt(premiumBreakdown.modes.medisave.annual)}/yr</div>}
+            {premiumBreakdown.modes.srs.annual > 0 && <div style={{color:'#9d8abf'}}>SRS: {fmt(premiumBreakdown.modes.srs.annual)}/yr</div>}
+            {premiumBreakdown.modes.cpfoa.annual > 0 && <div style={{color:'var(--blue2)'}}>CPF OA: {fmt(premiumBreakdown.modes.cpfoa.annual)}/yr</div>}
+          </div>
+          {premiumBreakdown.totalSingle > 0 && <div style={{marginTop:3,paddingTop:3,borderTop:'1px solid var(--border)',fontSize:9,color:'var(--gold)'}}>
+            Single premiums: {fmt(premiumBreakdown.totalSingle)}
+            {premiumBreakdown.modes.srs.single > 0 && <span> (SRS: {fmt(premiumBreakdown.modes.srs.single)})</span>}
+          </div>}
+        </div>
         <div className="card card-sm"><div style={{color:'var(--text3)',fontSize:10,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Total Coverage</div><div style={{fontSize:24,fontWeight:700,marginTop:2}}>{fmt(totalCoverage)}</div></div>
         <div className="card card-sm"><div style={{color:'var(--text3)',fontSize:10,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Coverage Score</div><div style={{fontSize:24,fontWeight:700,marginTop:2,color:scoreColor}}>{overallScore}%</div><div style={{fontSize:10,color:scoreColor}}>{scoreLabel}</div></div>
       </div>
@@ -7051,75 +7129,117 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
           <div style={{fontSize:11,marginTop:8}}>📷 Camera (snap multiple) · 📄 Upload (PDF, Excel, Word, images) · + Add manually</div>
         </div>
       ) : (<>
-        <div style={{overflowX:'auto'}}>
-          <table>
-            <thead><tr>
-              <th style={{width:30}}><input type='checkbox' checked={selected.size===activePolicies.length&&activePolicies.length>0} onChange={selectAll} style={{accentColor:'var(--gold)'}} /></th><th>Policy</th><th>Category</th><th>Sub-type</th><th>{filter==='cash_investments'?'Provider':'Insurer'}</th><th>Currency</th><th>{filter==='cash_investments'?'Principal':'Sum Assured'}</th><th>{filter==='cash_investments'?'Yield':'Premium'}</th><th>Actions</th>
-            </tr></thead>
-            <tbody>
-              {activePolicies.map(p => {
-                // Benefit icons
-                const bens = [];
-                const rds = p.riders||[];
-                const hasDeath = rds.some(r=>r.type==='death'&&parseFloat(r.sa)>0) || (p.category==='protection'&&parseFloat(p.sumAssured)>0);
-                const hasTPD = rds.some(r=>r.type==='tpd'&&parseFloat(r.sa)>0);
-                const hasCI = rds.some(r=>r.type==='ci'&&parseFloat(r.sa)>0) || p.subType==='Critical Illness';
-                const hasECI = rds.some(r=>r.type==='eci'&&parseFloat(r.sa)>0);
-                const hasDI = rds.some(r=>r.type==='di'&&parseFloat(r.sa)>0) || p.subType==='Disability Income';
-                const hasCV = parseFloat(p.cashValue)>0 || ['Whole Life','Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(p.subType) || p.category==='savings' || p.category==='investment' || p.category==='retirement';
-                if(hasDeath) bens.push({l:'D',c:'#5b8fd9',t:'Death & TI'});
-                if(hasTPD) bens.push({l:'T',c:'#9d8abf',t:'TPD'});
-                if(hasCI) bens.push({l:'CI',c:'#c97b9a',t:'Critical Illness'});
-                if(hasECI) bens.push({l:'E',c:'#d4a96a',t:'Early CI'});
-                if(hasDI) bens.push({l:'DI',c:'#5ba8a0',t:'Disability'});
-                if(hasCV) bens.push({l:'SV',c:'#d4a96a',t:'Surrender Value'});
-                return (
-                <tr key={p.id} style={{background:selected.has(p.id)?'rgba(212,169,106,.06)':'transparent'}}>
-                  <td><input type='checkbox' checked={selected.has(p.id)} onChange={()=>toggleSelect(p.id)} style={{accentColor:'var(--gold)'}} /></td>
-                  <td>
-                    <div style={{fontWeight:500}}>{p.policyName || p.productName || 'Unnamed'}</div>
-                    <div style={{fontSize:11,color:'var(--text3)'}}>{p.policyNumber || ''}</div>
-                    {p.userRemarks && <div style={{fontSize:10,color:'var(--gold)',fontStyle:'italic',marginTop:1,display:'flex',alignItems:'center',gap:4}} title={p.userRemarks}>
-                      <span>"{p.userRemarks.length > 40 ? p.userRemarks.substring(0,40)+'...' : p.userRemarks}"</span>
-                      <span style={{cursor:'pointer',fontSize:8,opacity:.6,flexShrink:0}} title="Delete remark" onClick={e=>{e.stopPropagation();const up={...p,userRemarks:''};savePolicy(up);}}>✕</span>
-                    </div>}
-                    <div style={{display:'flex',gap:3,marginTop:3,flexWrap:'wrap'}}>
-                      {bens.map((b,i) => <span key={i} title={b.t} style={{fontSize:8,fontWeight:700,padding:'1px 4px',borderRadius:3,background:b.c+'22',color:b.c,letterSpacing:'.3px'}}>{b.l}</span>)}
-                    </div>
-                  </td>
-                  <td><span className="badge" style={{background:`${catColor(p.category)}22`,color:catColor(p.category)}}>{CATEGORIES[p.category]?.label||p.category}</span></td>
-                  <td style={{fontSize:12,color:'var(--text2)'}}>{p.subType==='Integrated Shield Plan' && p.hasRider ? 'ISP + Rider' : p.subType||'-'}</td>
-                  <td>{p.insurer?<InsurerBadge name={p.insurer} />:'-'}</td>
-                  <td className="mono">{p.currency||'SGD'}</td>
-                  <td className="mono">{p.category==='cash_investments' ? (p.fdPrincipal ? '$'+parseInt(p.fdPrincipal).toLocaleString() : '-') : fmt(p.sumAssured,p.currency||'SGD')}</td>
+        {(() => {
+          // Group policies into sections
+          const groups = [
+            {id:'protection', main:'Insurance', sub:'Protection', icon:'🛡', match: p => p.category==='protection' && !['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(p.subType)},
+            {id:'ul', main:'Insurance', sub:'Universal Life', icon:'💎', match: p => ['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(p.subType)},
+            {id:'investment', main:'Insurance', sub:'Investment', icon:'📈', match: p => p.category==='investment'},
+            {id:'savings_ret', main:'Insurance', sub:'Endowment, Retirement & Annuities', icon:'🏦', match: p => p.category==='savings' || p.category==='retirement'},
+            {id:'health', main:'Insurance', sub:'Accident & Medical', icon:'🏥', match: p => p.category==='health' || p.category==='maternity'},
+            {id:'fi', main:'Fixed Deposits, T-bills & Bonds', sub:null, icon:'💰', match: p => p.category==='cash_investments'},
+          ];
+          // Assign policies to groups (first match wins)
+          const grouped = groups.map(g => ({...g, items: activePolicies.filter(g.match)}));
+          // Unmatched
+          const matched = new Set(grouped.flatMap(g => g.items.map(p => p.id)));
+          const unmatched = activePolicies.filter(p => !matched.has(p.id));
+          if(unmatched.length) grouped.push({id:'other', main:'Other', sub:null, icon:'📋', items:unmatched});
+          // Filter out empty groups
+          const nonEmpty = grouped.filter(g => g.items.length > 0);
+          // Track main headers already rendered
+          let lastMain = '';
+
+          // Row renderer
+          const renderRow = (p, isFI) => {
+            const bens = [];
+            const rds = p.riders||[];
+            if(rds.some(r=>r.type==='death'&&parseFloat(r.sa)>0) || (p.category==='protection'&&parseFloat(p.sumAssured)>0)) bens.push({l:'D',c:'#5b8fd9',t:'Death & TI'});
+            if(rds.some(r=>r.type==='tpd'&&parseFloat(r.sa)>0)) bens.push({l:'T',c:'#9d8abf',t:'TPD'});
+            if(rds.some(r=>r.type==='ci'&&parseFloat(r.sa)>0) || p.subType==='Critical Illness') bens.push({l:'CI',c:'#c97b9a',t:'Critical Illness'});
+            if(rds.some(r=>r.type==='eci'&&parseFloat(r.sa)>0)) bens.push({l:'E',c:'#d4a96a',t:'Early CI'});
+            if(rds.some(r=>r.type==='di'&&parseFloat(r.sa)>0) || p.subType==='Disability Income') bens.push({l:'DI',c:'#5ba8a0',t:'Disability'});
+            if(parseFloat(p.cashValue)>0 || ['Whole Life','Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(p.subType) || p.category==='savings' || p.category==='investment' || p.category==='retirement') bens.push({l:'SV',c:'#d4a96a',t:'Surrender Value'});
+            return (
+              <tr key={p.id} style={{background:selected.has(p.id)?'rgba(212,169,106,.06)':'transparent'}}>
+                <td style={{width:30}}><input type='checkbox' checked={selected.has(p.id)} onChange={()=>toggleSelect(p.id)} style={{accentColor:'var(--gold)'}} /></td>
+                <td>
+                  <div style={{fontWeight:500}}>{p.policyName || p.productName || 'Unnamed'}</div>
+                  {p.policyNumber && <div style={{fontSize:11,color:'var(--text3)'}}>{p.policyNumber}</div>}
+                  {p.userRemarks && <div style={{fontSize:10,color:'var(--gold)',fontStyle:'italic',marginTop:1,display:'flex',alignItems:'center',gap:4}} title={p.userRemarks}>
+                    <span>"{p.userRemarks.length > 40 ? p.userRemarks.substring(0,40)+'...' : p.userRemarks}"</span>
+                    <span style={{cursor:'pointer',fontSize:8,opacity:.6,flexShrink:0}} title="Delete remark" onClick={e=>{e.stopPropagation();savePolicy({...p,userRemarks:''});}}>✕</span>
+                  </div>}
+                  {!isFI && bens.length > 0 && <div style={{display:'flex',gap:3,marginTop:3,flexWrap:'wrap'}}>
+                    {bens.map((b,i) => <span key={i} title={b.t} style={{fontSize:8,fontWeight:700,padding:'1px 4px',borderRadius:3,background:b.c+'22',color:b.c,letterSpacing:'.3px'}}>{b.l}</span>)}
+                  </div>}
+                </td>
+                <td style={{fontSize:12,color:'var(--text2)'}}>{isFI ? (p.subType||'Fixed Deposit') : p.subType==='Integrated Shield Plan' && p.hasRider ? 'ISP + Rider' : p.subType||'-'}</td>
+                <td>{p.insurer?<InsurerBadge name={p.insurer} />:'-'}</td>
+                {isFI ? (<>
+                  <td className="mono">{p.fdPrincipal ? '$'+parseInt(p.fdPrincipal).toLocaleString() : '-'}</td>
+                  <td className="mono">{p.fdYieldPct ? <span style={{color:'var(--green2)',fontWeight:600}}>{p.fdYieldPct}% p.a.</span> : '-'}</td>
+                  <td className="mono" style={{fontSize:11}}>{p.fdMaturityDate ? (new Date(p.fdMaturityDate)<new Date() ? <span style={{color:'var(--gold)'}}>Matured</span> : new Date(p.fdMaturityDate).toLocaleDateString('en-SG',{day:'numeric',month:'short',year:'2-digit'})) : '-'}</td>
+                </>) : (<>
+                  <td className="mono">{fmt(p.sumAssured,p.currency||'SGD')}</td>
                   <td className="mono">
-                      {p.category==='cash_investments' ? (
-                        <div>
-                          {p.fdYieldPct && <div style={{fontSize:11,color:'var(--green2)',fontWeight:600}}>{p.fdYieldPct}% p.a.</div>}
-                          {p.fdMaturityDate && <div style={{fontSize:9,color:new Date(p.fdMaturityDate)<new Date()?'var(--gold)':'var(--text3)'}}>{new Date(p.fdMaturityDate)<new Date()?'Matured':'Mat. '+new Date(p.fdMaturityDate).toLocaleDateString('en-SG',{month:'short',year:'2-digit'})}</div>}
-                        </div>
-                      ) : p.premiumStructure==='Single Premium' || p.premFrequency==='single' || p.premSingle ? (
-                        <div><div style={{fontSize:11}}>{fmt(p.annualPremium,p.currency||'SGD')}</div><div style={{fontSize:9,color:'var(--gold)'}}>Single Premium</div></div>
-                      ) : p.premFrequency==='monthly' ? (
-                        <div><div style={{fontSize:11}}>{fmt(p.annualPremium,p.currency||'SGD')}/mth</div><div style={{fontSize:9,color:'var(--text3)'}}>{fmt(parseFloat(p.annualPremium)*12,p.currency||'SGD')}/yr</div></div>
-                      ) : p.premFrequency==='unknown' ? (
-                        <div><div style={{fontSize:11}}>{fmt(p.annualPremium,p.currency||'SGD')}</div><div style={{fontSize:9,color:'var(--orange)'}}>Freq. unconfirmed</div></div>
-                      ) : (
-                        <div>{fmt(p.annualPremium,p.currency||'SGD')}</div>
-                      )}
-                    </td>
-                  <td>
-                    <div style={{display:'flex',gap:4}}>
-                      <button className="btn-secondary btn-sm" onClick={()=>{setEditing(p);setTimeout(()=>setShowForm(true),50)}}>Edit</button>
-                      <button className="btn-danger btn-sm" onClick={()=>{if(confirm('Delete this policy?'))deletePolicy(p.id)}}>×</button>
-                    </div>
+                    {p.premiumStructure==='Single Premium' || p.premFrequency==='single' || p.premSingle ? (
+                      <div><div style={{fontSize:11}}>{fmt(p.annualPremium,p.currency||'SGD')}</div><div style={{fontSize:9,color:'var(--gold)'}}>Single Premium</div></div>
+                    ) : p.premFrequency==='monthly' ? (
+                      <div><div style={{fontSize:11}}>{fmt(p.annualPremium,p.currency||'SGD')}/mth</div><div style={{fontSize:9,color:'var(--text3)'}}>{fmt(parseFloat(p.annualPremium)*12,p.currency||'SGD')}/yr</div></div>
+                    ) : p.premFrequency==='unknown' ? (
+                      <div><div style={{fontSize:11}}>{fmt(p.annualPremium,p.currency||'SGD')}</div><div style={{fontSize:9,color:'var(--orange)'}}>Freq. unconfirmed</div></div>
+                    ) : (
+                      <div>{fmt(p.annualPremium,p.currency||'SGD')}</div>
+                    )}
                   </td>
-                </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+                </>)}
+                <td>
+                  <div style={{display:'flex',gap:4}}>
+                    <button className="btn-secondary btn-sm" onClick={()=>{setEditing(p);setTimeout(()=>setShowForm(true),50)}}>Edit</button>
+                    <button className="btn-danger btn-sm" onClick={()=>{if(confirm('Delete this policy?'))deletePolicy(p.id)}}>×</button>
+                  </div>
+                </td>
+              </tr>
+            );
+          };
+
+          return nonEmpty.map(group => {
+            const isFI = group.id === 'fi';
+            const showMainHeader = group.main !== lastMain;
+            lastMain = group.main;
+            return (
+              <div key={group.id} style={{marginBottom:4}}>
+                {/* Main header */}
+                {showMainHeader && (
+                  <div style={{padding:'10px 12px 4px',display:'flex',alignItems:'center',gap:8}}>
+                    <span style={{fontSize:14,fontWeight:700,color:'var(--gold)'}}>{group.main}</span>
+                    <div style={{flex:1,height:1,background:'var(--gold3)'}} />
+                  </div>
+                )}
+                {/* Sub header */}
+                {group.sub && (
+                  <div style={{padding:'4px 12px 2px',fontSize:11,fontWeight:600,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.5px'}}>
+                    {group.icon} {group.sub} ({group.items.length})
+                  </div>
+                )}
+                <div style={{overflowX:'auto'}}>
+                  <table style={{marginBottom:0}}>
+                    <thead><tr>
+                      <th style={{width:30}}><input type='checkbox' checked={group.items.every(p=>selected.has(p.id))&&group.items.length>0} onChange={()=>{const ids=group.items.map(p=>p.id);const allSel=ids.every(id=>selected.has(id));setSelected(prev=>{const n=new Set(prev);ids.forEach(id=>allSel?n.delete(id):n.add(id));return n;});}} style={{accentColor:'var(--gold)'}} /></th>
+                      <th>Policy</th><th>Sub-type</th><th>{isFI?'Bank/Provider':'Insurer'}</th>
+                      {isFI ? (<><th>Principal</th><th>Yield</th><th>Maturity</th></>) : (<><th>Sum Assured</th><th>Premium</th></>)}
+                      <th>Actions</th>
+                    </tr></thead>
+                    <tbody>
+                      {[...group.items].sort((a,b) => (a.insurer||'').localeCompare(b.insurer||'') || (a.productName||'').localeCompare(b.productName||'')).map(p => renderRow(p, isFI))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            );
+          });
+        })()}
 
         {/* ═══ MATURED FIXED DEPOSITS / T-BILLS ═══ */}
         {maturedPolicies.length > 0 && (
@@ -9110,33 +9230,92 @@ function ReportTab() {
       });
       y=(doc.lastAutoTable?.finalY||y)+8;
 
-      // ═══ PREMIUM SCHEDULE ═══
+      // ═══ PREMIUM SCHEDULE — GROUPED ═══
       y=sectionHead('Premium Schedule',y);
       if(y>240){doc.addPage();y=pageHeader('Premium Schedule','Annual premium commitments');y+=4;}
-      doc.autoTable({
-        startY:y,margin:{left:M,right:M},
-        head:[['Policy','Insurer','Premium/yr','Method','Term','Paid-up Age']],
-        body:policies.map(pol=>[
-          pol.productName||pol.policyName||'-',
-          pol.insurer||'-',
-          (pol.currency||'SGD')+' '+(parseFloat(pol.annualPremium)||0).toLocaleString(),
-          pol.paymentMethod||'Cash',
-          pol.premSingle?'Single':(pol.premTerm||'-')+' yrs',
-          pol.premWholeLife?'Whole Life':pol.premEndAge||'-',
-        ]),
-        styles:{fontSize:7.5,cellPadding:2.5},
-        headStyles:{fillColor:DARK,textColor:CREAM,fontStyle:'bold',fontSize:7.5},
-        foot:[['TOTAL','',fmt(totalPrem)+'/yr','','','']],
-        footStyles:{fillColor:[245,243,238],textColor:DARK,fontStyle:'bold'},
+
+      const pdfGroups = [
+        {id:'protection', main:'Insurance', sub:'Protection', match: pol => pol.category==='protection' && !['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(pol.subType)},
+        {id:'ul', main:'Insurance', sub:'Universal Life', match: pol => ['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(pol.subType)},
+        {id:'investment', main:'Insurance', sub:'Investment', match: pol => pol.category==='investment'},
+        {id:'savings_ret', main:'Insurance', sub:'Endowment, Retirement & Annuities', match: pol => pol.category==='savings' || pol.category==='retirement'},
+        {id:'health', main:'Insurance', sub:'Accident & Medical', match: pol => pol.category==='health' || pol.category==='maternity'},
+        {id:'fi', main:'Fixed Deposits, T-bills & Bonds', sub:null, match: pol => pol.category==='cash_investments'},
+      ].map(g => ({...g, items: policies.filter(g.match)})).filter(g => g.items.length > 0);
+
+      let pdfLastMain = '';
+      pdfGroups.forEach(g => {
+        const isFI = g.id === 'fi';
+        if(y>240){doc.addPage();y=pageHeader('Premium Schedule (cont.)','');y+=4;}
+
+        // Main header
+        if(g.main !== pdfLastMain) {
+          doc.setFont('helvetica','bold');doc.setFontSize(9);doc.setTextColor(...GOLD);
+          doc.text(g.main,M,y+4);
+          doc.setDrawColor(...GOLD);doc.setLineWidth(0.3);doc.line(M+doc.getTextWidth(g.main)+3,y+2,W-M,y+2);
+          y+=8;
+          pdfLastMain = g.main;
+        }
+        // Sub header
+        if(g.sub) {
+          doc.setFont('helvetica','bold');doc.setFontSize(7.5);doc.setTextColor(120,120,120);
+          doc.text(g.sub.toUpperCase()+' ('+g.items.length+')',M+2,y+3);
+          y+=6;
+        }
+
+        if(isFI) {
+          doc.autoTable({
+            startY:y,margin:{left:M,right:M},
+            head:[['Bank/Provider','Product','Principal','Yield % p.a.','Maturity']],
+            body:g.items.map(pol=>[
+              pol.insurer||'-',
+              pol.productName||pol.subType||'-',
+              pol.fdPrincipal?'$'+parseInt(pol.fdPrincipal).toLocaleString():'-',
+              pol.fdYieldPct?pol.fdYieldPct+'%':'-',
+              pol.fdMaturityDate?new Date(pol.fdMaturityDate).toLocaleDateString('en-SG',{day:'numeric',month:'short',year:'2-digit'}):'-',
+            ]),
+            styles:{fontSize:7.5,cellPadding:2},
+            headStyles:{fillColor:DARK,textColor:CREAM,fontStyle:'bold',fontSize:7},
+          });
+        } else {
+          doc.autoTable({
+            startY:y,margin:{left:M,right:M},
+            head:[['Policy','Insurer','Premium','Method','Term','Paid-up']],
+            body:g.items.map(pol=>[
+              pol.productName||pol.policyName||'-',
+              pol.insurer||'-',
+              (pol.currency||'SGD')+' '+(parseFloat(pol.annualPremium)||0).toLocaleString()+(pol.premFrequency==='monthly'?'/mth':pol.premSingle?'(SP)':'/yr'),
+              pol.paymentMethod||'Cash',
+              pol.premSingle?'Single':(pol.premTerm||'-')+' yrs',
+              pol.premWholeLife?'WL':pol.premEndAge||'-',
+            ]),
+            styles:{fontSize:7.5,cellPadding:2},
+            headStyles:{fillColor:DARK,textColor:CREAM,fontStyle:'bold',fontSize:7},
+          });
+        }
+        y=(doc.lastAutoTable?.finalY||y)+6;
       });
-      y=(doc.lastAutoTable?.finalY||y)+12;
+      // Total footer
+      doc.setFont('helvetica','bold');doc.setFontSize(8);doc.setTextColor(...DARK);
+      doc.text('Total Annual Premiums: '+fmt(totalPrem)+'/yr',M,y+3);
+      if(policies.some(p=>p.premSingle||p.premFrequency==='single')) {
+        const singleTotal = policies.filter(p=>p.premSingle||p.premFrequency==='single').reduce((s,p)=>s+(parseFloat(p.annualPremium)||0),0);
+        doc.text(' + '+fmt(singleTotal)+' single',M+doc.getTextWidth('Total Annual Premiums: '+fmt(totalPrem)+'/yr')+2,y+3);
+      }
+      y+=12;
 
-      // ═══ PAGE 2+: PER-POLICY DETAIL BLOCKS ═══
-      const cats = {};policies.forEach(pol=>{if(!cats[pol.category])cats[pol.category]=[];cats[pol.category].push(pol)});
+      // ═══ PAGE 2+: PER-POLICY DETAIL BLOCKS — GROUPED ═══
+      const detailGroups = [
+        {label:'Protection', match: pol => pol.category==='protection' && !['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(pol.subType)},
+        {label:'Universal Life', match: pol => ['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(pol.subType)},
+        {label:'Investment', match: pol => pol.category==='investment'},
+        {label:'Endowment, Retirement & Annuities', match: pol => pol.category==='savings' || pol.category==='retirement'},
+        {label:'Accident & Medical', match: pol => pol.category==='health' || pol.category==='maternity'},
+        {label:'Fixed Deposits, T-bills & Bonds', match: pol => pol.category==='cash_investments'},
+      ].map(g => ({...g, items: policies.filter(g.match)})).filter(g => g.items.length > 0);
 
-      Object.entries(cats).forEach(([cat,ps])=>{
+      detailGroups.forEach(({label:catLabel, items:ps}) => {
         if(y>220){doc.addPage();y=pageHeader('Policy Details','Individual policy analysis');}
-        const catLabel = CATEGORIES[cat]?.label||cat;
         doc.setFillColor(...GOLD);doc.rect(M,y,CW,0.5,'F');
         y=sectionHead(catLabel+' — '+ps.length+' polic'+(ps.length===1?'y':'ies'),y+2);
 
@@ -9152,15 +9331,30 @@ function ReportTab() {
           doc.text((pol.productName||pol.policyName||'Policy'),M+6,y+5);
           doc.setFont('helvetica','normal');doc.setFontSize(8);doc.setTextColor(...GRAY);
           doc.text((pol.insurer||'')+'  |  '+(pol.subType||'')+'  |  '+(pol.policyNumber||''),M+6,y+11);
-          // Right side: SA + premium
-          doc.setFont('helvetica','bold');doc.setFontSize(9);doc.setTextColor(...DARK);
-          doc.text('SA '+(pol.currency||'SGD')+' '+(parseFloat(pol.sumAssured)||0).toLocaleString(),W-M,y+5,{align:'right'});
-          doc.setFont('helvetica','normal');doc.setFontSize(8);doc.setTextColor(...GRAY);
-          doc.text(fmt(parseFloat(pol.annualPremium)||0)+'/yr  ·  '+(pol.status||'inforce'),W-M,y+11,{align:'right'});
+          // Right side: SA + premium (adapted for FDs)
+          if(pol.category==='cash_investments') {
+            doc.setFont('helvetica','bold');doc.setFontSize(9);doc.setTextColor(...DARK);
+            doc.text('$'+(parseFloat(pol.fdPrincipal)||0).toLocaleString(),W-M,y+5,{align:'right'});
+            doc.setFont('helvetica','normal');doc.setFontSize(8);doc.setTextColor(...GRAY);
+            doc.text((pol.fdYieldPct||'?')+'% p.a.  ·  '+(pol.status||'inforce'),W-M,y+11,{align:'right'});
+          } else {
+            doc.setFont('helvetica','bold');doc.setFontSize(9);doc.setTextColor(...DARK);
+            doc.text('SA '+(pol.currency||'SGD')+' '+(parseFloat(pol.sumAssured)||0).toLocaleString(),W-M,y+5,{align:'right'});
+            doc.setFont('helvetica','normal');doc.setFontSize(8);doc.setTextColor(...GRAY);
+            doc.text(fmt(parseFloat(pol.annualPremium)||0)+(pol.premSingle||pol.premFrequency==='single'?' SP':'/yr')+'  ·  '+(pol.status||'inforce'),W-M,y+11,{align:'right'});
+          }
           y+=16;
 
           // Key metrics row
           const metrics = [];
+          if(pol.category==='cash_investments') {
+            if(pol.fdPrincipal) metrics.push(['Principal','$'+parseInt(pol.fdPrincipal).toLocaleString()]);
+            if(pol.fdYieldPct) metrics.push(['Yield',pol.fdYieldPct+'% p.a.']);
+            if(pol.fdStartDate) metrics.push(['Start',new Date(pol.fdStartDate).toLocaleDateString('en-SG',{day:'numeric',month:'short',year:'2-digit'})]);
+            if(pol.fdMaturityDate) metrics.push(['Maturity',new Date(pol.fdMaturityDate).toLocaleDateString('en-SG',{day:'numeric',month:'short',year:'2-digit'})]);
+            if(pol.fdTenureMonths) metrics.push(['Tenure',pol.fdTenureMonths+' mths']);
+            if(pol.fdAutoRenew) metrics.push(['Auto-Renew','Yes']);
+          } else {
           metrics.push(['Entry Age',pol.premStartAge||pol.ageAtEntry||'-']);
           metrics.push(['Prem Term',pol.premSingle?'Single':(pol.premTerm||'-')+' yrs']);
           metrics.push(['Prem End',pol.premWholeLife?'WL':pol.premEndAge||'-']);
@@ -9168,6 +9362,7 @@ function ReportTab() {
           if(pol.cvGrowthRate) metrics.push(['CV Yield',pol.cvGrowthRate+'%']);
           if(pol.category==='retirement') { metrics.push(['Payout',fmt(parseFloat(pol.annuityMonthly)||parseFloat(pol.monthlyBenefit)||0)+'/mth']); metrics.push(['Age',pol.annuityStartAge+'→'+pol.annuityEndAge]); }
           if(pol.category==='savings') { metrics.push(['Yield',pol.endYield||'-']); if(pol.endPolicyTerm) metrics.push(['Mat Age',String((parseInt(pol.premStartAge)||30)+parseInt(pol.endPolicyTerm))]); }
+          }
 
           doc.autoTable({
             startY:y,margin:{left:M,right:M},
