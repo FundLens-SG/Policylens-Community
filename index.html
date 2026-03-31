@@ -3262,6 +3262,7 @@ var FUND_DB=[
 ['PRULink Global Signature CIO Growth Fund','mixed','global','multi_sector',6,'ILP',null],
 ['PRULink Global Signature CIO Income Fund','mixed','global','dividend_inc',4,'ILP',null],
 ['PRULink ActiveInvest Portfolio - Conservative','mixed','global','multi_sector',3,'ILP',null],
+['PRULink US Dividend Wealth Fund','equity','us','dividend_inc',6,'ILP',null],
 ['AIA Growth Fund','mixed','global','multi_sector',6,'ILP',null],
 ['AIA Global Balanced Fund','mixed','global','multi_sector',5,'ILP',null],
 ['AIA Portfolio 50','mixed','global','multi_sector',5,'ILP',null],
@@ -5639,6 +5640,7 @@ function Dashboard() {
           });
           return cumPrem;
         }),borderColor:'rgba(239,83,80,.6)',backgroundColor:'rgba(239,83,80,.03)',fill:true,tension:.3,pointRadius:0,borderWidth:1.5,borderDash:[5,3]},
+        ...(cvTimeline.some(r=>r.maturities>0)?[{label:'Maturities',data:cvTimeline.map(r=>r.maturities),type:'bar',backgroundColor:'rgba(91,168,160,.5)',borderRadius:3,barPercentage:.4}]:[]),
       ]},
       options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
         scales:{
@@ -6716,7 +6718,7 @@ SA MULTIPLIER: saMultiplier (number), multiplierEndAge (number)
 ISP: ispClass (A/B1/B2+), hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance
 CASH VALUE: cashValue (number), cvGrowthRate (% p.a.), surrenderPeriod (years)
 UL/IUL/VUL: creditingMechanism, creditingRates {current, guaranteed}, loyaltyBonus {rate, startYear}
-ILP: ilpGrowth, ilpDivYield, ilpMgmtFee
+ILP: ilpGrowth, ilpDivYield, ilpMgmtFee, fundAllocations (JSON array of {fundName:string, allocation:number (percentage e.g. 80)}). CRITICAL ILP FUND EXTRACTION: If the document mentions fund names with percentages like "80% Manulife Global Multi Asset 20% Neuberger Berman", extract as fundAllocations:[{fundName:"Manulife Global Multi Asset",allocation:80},{fundName:"Neuberger Berman",allocation:20}]. If only ONE fund is mentioned (e.g. "PRULink US Dividend Wealth Fund"), set allocation to 100. Look in remarks, notes columns, and any fund composition fields.
 
 RETIREMENT/ANNUITY/INCOME PLANS: annuityPayout (annual payout amount, number), annuityMonthly (monthly payout, number), annuityStartAge (number), annuityEndAge (number), retMaturitySum (maturity/terminal value at end)
 
@@ -7026,6 +7028,73 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
           if(result.category === 'cash_investments') result.status = 'matured';
           else if(result.maturityDate && new Date(result.maturityDate) < new Date()) result.status = 'matured';
           else result.status = 'inforce'; // paid-up but not matured
+        }
+
+        // ── AUTO-POPULATE fundAllocations from remarks ──
+        if(result.category === 'investment' && (!result.fundAllocations || result.fundAllocations.length === 0)) {
+          const remarkText = (result.userRemarks||'') + ' ' + (result.notes||'');
+          if(remarkText.trim()) {
+            const fundAllocs = [];
+            // Pattern: "80% Fund Name 20% Fund Name" or "80% Fund Name, 20% Fund Name"
+            const pctPattern = /(\d+)\s*%\s*([A-Z][A-Za-z\s\-\.&]+?)(?=\s+\d+\s*%|\s*$|,|\.|Redirected|from|redirected)/g;
+            let m;
+            while((m = pctPattern.exec(remarkText)) !== null) {
+              const pct = parseInt(m[1]);
+              const name = m[2].trim().replace(/\s+/g,' ');
+              if(pct > 0 && pct <= 100 && name.length > 3) fundAllocs.push({fundName:name, allocation:pct});
+            }
+            // If only one fund name found without percentage, assume 100%
+            if(fundAllocs.length === 0) {
+              const knownFundPatterns = ['PRULink','Manulife','AIA','Great Eastern','NTUC','Allianz','BlackRock','Neuberger','Fidelity','Schroder','Aberdeen','Franklin','JPMorgan','PIMCO'];
+              for(const pat of knownFundPatterns) {
+                const idx = remarkText.indexOf(pat);
+                if(idx >= 0) {
+                  const rest = remarkText.slice(idx).split(/[,\.\[\]\(\)]/)[0].trim();
+                  if(rest.length > 5) { fundAllocs.push({fundName:rest, allocation:100}); break; }
+                }
+              }
+            }
+            // Fuzzy match extracted names to FUND_DB for exact names
+            if(fundAllocs.length > 0 && typeof FUND_DB !== 'undefined') {
+              fundAllocs.forEach((fa,i) => {
+                const q = fa.fundName.toLowerCase().replace(/\s+/g,' ');
+                // Try exact substring match first
+                let best = FUND_DB.find(f => f[0].toLowerCase().includes(q));
+                // Try key words if no exact match
+                if(!best) {
+                  const words = q.split(' ').filter(w => w.length > 3);
+                  if(words.length >= 2) {
+                    best = FUND_DB.find(f => {
+                      const fn = f[0].toLowerCase();
+                      return words.every(w => fn.includes(w));
+                    });
+                  }
+                }
+                if(best) {
+                  fundAllocs[i].fundName = best[0];
+                  fundAllocs[i].riskRating = best[4];
+                  console.log('[Extract] Matched fund "'+fa.fundName+'" → "'+best[0]+'"');
+                }
+              });
+              result.fundAllocations = fundAllocs;
+              console.log('[Extract] Auto-populated fundAllocations:', fundAllocs);
+            }
+          }
+        }
+        // Also process AI-returned fundAllocations — fuzzy match names to DB
+        if(result.fundAllocations && result.fundAllocations.length > 0 && typeof FUND_DB !== 'undefined') {
+          result.fundAllocations.forEach((fa,i) => {
+            if(!fa.fundName) return;
+            const q = fa.fundName.toLowerCase().replace(/\s+/g,' ');
+            let best = FUND_DB.find(f => f[0].toLowerCase().includes(q));
+            if(!best) {
+              const words = q.split(' ').filter(w => w.length > 3);
+              if(words.length >= 2) best = FUND_DB.find(f => words.every(w => f[0].toLowerCase().includes(w)));
+            }
+            if(best) {
+              result.fundAllocations[i] = {...fa, fundName:best[0], riskRating:best[4]};
+            }
+          });
         }
 
         return result;
@@ -7593,7 +7662,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         const blocks = await processFile(file);
         content.push(...blocks);
       }
-      const formExtractPrompt = 'Extract insurance policy details. Return a JSON object with ALL fields: insurer, productName, policyNumber, category (protection/savings/health/investment/retirement/maternity), subType, currency, sumAssured (number), annualPremium (number), premFrequency (annual/monthly/single/unknown — if document does not clearly state frequency, use unknown), premiumStructure, paymentMethod, policyOwner, lifeInsured, gender, dob, ageAtEntry, smoker, nationality, occupation, inceptionDate, maturityDate, status, premStartAge, premTerm, premEndAge. Riders: riders (array of {type:death/tpd/ci/eci/di/accidental/premium_waiver, riderName:string (product name if separate rider e.g. Early CompleteCare Rider III), sa:number, premium:number (0 if part of main plan), expiryAge:number, bundled:boolean (true if part of main plan, false if separate rider product), multiClaim:boolean, totalClaimPct:number}). IMPORTANT: distinguish between benefits that are PART OF the main plan (bundled=true, no riderName) vs separate RIDER products (bundled=false, include riderName and rider premium). SA: saMultiplier, multiplierEndAge. ISP: ispClass, hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance. ILP: ilpGrowth, ilpDivYield, ilpMgmtFee. Cash: cashValue, cvGrowthRate, surrenderPeriod. Notes: notes (FC review headline). Return ONLY valid JSON starting with { ending with }.';
+      const formExtractPrompt = 'Extract insurance policy details. Return a JSON object with ALL fields: insurer, productName, policyNumber, category (protection/savings/health/investment/retirement/maternity), subType, currency, sumAssured (number), annualPremium (number), premFrequency (annual/monthly/single/unknown — if document does not clearly state frequency, use unknown), premiumStructure, paymentMethod, policyOwner, lifeInsured, gender, dob, ageAtEntry, smoker, nationality, occupation, inceptionDate, maturityDate, status, premStartAge, premTerm, premEndAge. Riders: riders (array of {type:death/tpd/ci/eci/di/accidental/premium_waiver, riderName:string (product name if separate rider e.g. Early CompleteCare Rider III), sa:number, premium:number (0 if part of main plan), expiryAge:number, bundled:boolean (true if part of main plan, false if separate rider product), multiClaim:boolean, totalClaimPct:number}). IMPORTANT: distinguish between benefits that are PART OF the main plan (bundled=true, no riderName) vs separate RIDER products (bundled=false, include riderName and rider premium). SA: saMultiplier, multiplierEndAge. ISP: ispClass, hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance. ILP: ilpGrowth, ilpDivYield, ilpMgmtFee, fundAllocations (array of {fundName:string, allocation:number} — extract fund names and percentages from remarks/notes). Cash: cashValue, cvGrowthRate, surrenderPeriod. Notes: notes (FC review headline). Return ONLY valid JSON starting with { ending with }.';
       content.push({type:'text',text:'Extract all policy information from these documents/images.'});
       const rawText2 = await callAI(formExtractPrompt, content, 4000);
       const parsed = repairJSON(rawText2);
