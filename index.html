@@ -201,7 +201,8 @@ var SB_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZ
 var ADMIN_EMAILS = ['chungakwanc@gmail.com'];
 
 // ── SINGLE global Supabase client — created once, used by auth + React ──
-var _SB = window.supabase ? window.supabase.createClient(SB_URL, SB_KEY) : null;
+var _SB = null;
+try { if(window.supabase) _SB = window.supabase.createClient(SB_URL, SB_KEY); } catch(e){ console.warn('[Auth] Supabase init error:',e); }
 
 var _sb=null,_user=null,_prof=null,_isAdmin=false;
 function sb(){return _SB;}
@@ -4815,7 +4816,8 @@ function RetirementLiteDashboard({data,age,retAge,p,policies,cvTimeline,toSGD,fx
   const generateShareView = () => {
     const clientName = p.name || 'Client';
     const retRow = cvTimeline.find(r => r.age === retAge);
-    const totalPrem = policies.filter(pol=>pol.category!=='cash_investments').reduce((s,pol)=>s+(parseFloat(pol.annualPremium)||0),0);
+    const totalPrem = policies.filter(pol=>pol.category!=='cash_investments'&&!pol.premSingle&&pol.premiumStructure!=='Single Premium'&&pol.premFrequency!=='single').reduce((s,pol)=>s+(parseFloat(pol.annualPremium)||0),0);
+    const totalSinglePrem = policies.filter(pol=>pol.category!=='cash_investments'&&(pol.premSingle||pol.premiumStructure==='Single Premium'||pol.premFrequency==='single')).reduce((s,pol)=>s+(parseFloat(pol.annualPremium)||0),0);
     const activePols = policies.filter(pol => !(pol.category==='cash_investments' && pol.fdMaturityDate && new Date(pol.fdMaturityDate)<new Date() && !pol.fdAutoRenew));
 
     // Coverage totals
@@ -4907,7 +4909,7 @@ td{border-bottom:1px solid rgba(212,169,106,.04)}
 <!-- KPI ROW -->
 <div class="grid g5">
 <div class="card" style="text-align:center"><div class="kl">Policies</div><div class="kv">${activePols.length}</div></div>
-<div class="card" style="text-align:center"><div class="kl">Annual Premium</div><div class="kv gd">$${Math.round(totalPrem).toLocaleString()}</div><div style="font-size:9px;color:#a39580">$${Math.round(totalPrem/12).toLocaleString()}/mth</div></div>
+<div class="card" style="text-align:center"><div class="kl">Annual Premiums</div><div class="kv gd">$${Math.round(totalPrem).toLocaleString()}</div>${totalSinglePrem>0?'<div style="font-size:9px;color:#a39580">+ $'+Math.round(totalSinglePrem).toLocaleString()+' single</div>':'<div style="font-size:9px;color:#a39580">$'+Math.round(totalPrem/12).toLocaleString()+'/mth</div>'}</div>
 <div class="card" style="text-align:center"><div class="kl">Total Coverage</div><div class="kv b">$${cvDeath>1e6?(cvDeath/1e6).toFixed(1)+'M':Math.round(cvDeath).toLocaleString()}</div></div>
 <div class="card" style="text-align:center"><div class="kl">Retirement Income</div><div class="kv g">$${totalAtRet.toLocaleString()}/m</div></div>
 <div class="card" style="text-align:center;border-left:3px solid ${coveragePct>=80?'#5ba8a0':coveragePct>=50?'#d4a96a':'#ef5350'}"><div class="kl">vs Target</div><div class="kv ${coveragePct>=80?'g':coveragePct>=50?'gd':'r'}">${coveragePct}%</div></div>
@@ -5302,7 +5304,16 @@ function Dashboard() {
     return m;
   }, [policies]);
 
-  const totalPremium = useMemo(() => policies.reduce((s,p) => s + (parseFloat(p.annualPremium)||0), 0), [policies]);
+  const totalPremium = useMemo(() => {
+    let annual = 0, single = 0;
+    policies.forEach(p => {
+      if(p.category==='cash_investments') return; // FDs aren't premiums
+      const prem = parseFloat(p.annualPremium)||0;
+      if(p.premSingle || p.premiumStructure==='Single Premium' || p.premFrequency==='single') single += prem;
+      else annual += prem;
+    });
+    return { annual, single, total: annual + single };
+  }, [policies]);
   const totalCoverage = useMemo(() => policies.reduce((s,p) => s + (parseFloat(p.sumAssured)||0), 0), [policies]);
 
   // ── COVERAGE FROM ALL POLICIES (riders + base SA) ──
@@ -5529,7 +5540,7 @@ function Dashboard() {
   useEffect(() => {
     if(!chartRef.current) return;
     if(chartInst.current) chartInst.current.destroy();
-    const cats = Object.keys(CATEGORIES);
+    const cats = Object.keys(CATEGORIES).filter(c => c !== 'cash_investments'); // FDs aren't premiums
     const data = cats.map(c => (byCategory[c]||[]).reduce((s,p) => s + (parseFloat(p.annualPremium)||0), 0));
     chartInst.current = new Chart(chartRef.current, {
       type:'doughnut',
@@ -5621,7 +5632,7 @@ function Dashboard() {
     </div>
   );
 
-  const premRatio = annualIncome > 0 ? Math.round(totalPremium/annualIncome*100) : 0;
+  const premRatio = annualIncome > 0 ? Math.round(totalPremium.annual/annualIncome*100) : 0;
   const retRow = cvTimeline.find(r => r.age === retAge);
 
   return (
@@ -5672,7 +5683,7 @@ function Dashboard() {
       {/* ═══ SUMMARY CARDS ═══ */}
       <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:10,marginBottom:16}}>
         <div className="card card-sm"><div style={{color:'var(--text3)',fontSize:10,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Policies</div><div style={{fontSize:24,fontWeight:700,marginTop:2}}>{policies.length}</div></div>
-        <div className="card card-sm"><div style={{color:'var(--text3)',fontSize:10,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Annual Premium</div><div style={{fontSize:24,fontWeight:700,marginTop:2}}>{fmt(totalPremium)}</div>{premRatio>0 && <div style={{fontSize:10,color:premRatio>15?'var(--red)':'var(--text3)'}}>{premRatio}% of income</div>}</div>
+        <div className="card card-sm"><div style={{color:'var(--text3)',fontSize:10,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Premiums</div><div style={{fontSize:24,fontWeight:700,marginTop:2}}>{fmt(totalPremium.annual)}<span style={{fontSize:11,color:'var(--text3)'}}>/yr</span></div>{totalPremium.single>0 && <div style={{fontSize:10,color:'var(--gold)'}}>+ {fmt(totalPremium.single)} single</div>}{premRatio>0 && <div style={{fontSize:10,color:premRatio>15?'var(--red)':'var(--text3)'}}>{premRatio}% of income</div>}</div>
         <div className="card card-sm"><div style={{color:'var(--text3)',fontSize:10,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Total Coverage</div><div style={{fontSize:24,fontWeight:700,marginTop:2}}>{fmt(totalCoverage)}</div></div>
         <div className="card card-sm"><div style={{color:'var(--text3)',fontSize:10,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Coverage Score</div><div style={{fontSize:24,fontWeight:700,marginTop:2,color:scoreColor}}>{overallScore}%</div><div style={{fontSize:10,color:scoreColor}}>{scoreLabel}</div></div>
       </div>
@@ -7246,7 +7257,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)'}}>
           <h4 style={{fontSize:13,fontWeight:600,marginBottom:10,color:'var(--text2)'}}>Premium Structure</h4>
           <div className="grid-3">
-            <div className="field"><label>Annual Premium ($)</label><input type="number" value={form.annualPremium} onChange={e=>set('annualPremium',e.target.value)} />{form.annualPremium && <div style={{fontSize:10,color:'var(--text3)'}}>${(parseFloat(form.annualPremium)/12).toFixed(0)}/mth</div>}</div>
+            <div className="field"><label>{form.premSingle?'Single Premium ($)':'Annual Premium ($)'}</label><input type="number" value={form.annualPremium} onChange={e=>set('annualPremium',e.target.value)} />{form.annualPremium && !form.premSingle && <div style={{fontSize:10,color:'var(--text3)'}}>${(parseFloat(form.annualPremium)/12).toFixed(0)}/mth</div>}{form.premSingle && <div style={{fontSize:10,color:'var(--gold)'}}>Single lump sum</div>}</div>
             <div className="field"><label>Payment Method</label><select value={form.paymentMethod||''} onChange={e=>set('paymentMethod',e.target.value)}>
               <option value="">—</option>
               <option value="Cash">Cash / GIRO</option>
