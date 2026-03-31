@@ -506,6 +506,7 @@ const CATEGORIES = {
   investment: {label:'Investment',color:'var(--cat-investment)',icon:'📈'},
   retirement: {label:'Retirement',color:'var(--cat-retirement)',icon:'🏖️'},
   maternity: {label:'Maternity',color:'var(--cat-maternity)',icon:'👶'},
+  cash_investments: {label:'Cash / Fixed Income',color:'#5ba8a0',icon:'🏦'},
 };
 
 const SUB_TYPES = {
@@ -515,20 +516,53 @@ const SUB_TYPES = {
   investment: ['ILP (Investment)','Unit Trust','Single Premium Investment'],
   retirement: ['Retirement','Annuity'],
   maternity: ['Maternity Coverage'],
+  cash_investments: ['Fixed Deposit','T-bill','Singapore Savings Bond','Money Market'],
 };
 
 const UL_FAMILY = ['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'];
 
-// ═══ SG INSURANCE CONSTANTS (MOH/CPF Board 2024) ═══
+// ═══ SG INSURANCE CONSTANTS (MOH/CPF Board — from 1 Apr 2025, incl 9% GST) ═══
+// MediShield Life Premium Table B: Premiums before subsidies
+// Source: cpf.gov.sg/content/dam/web/member/healthcare/documents/MediShield%20Life%20Premium%20Table.pdf
+// Uses Age Next Birthday (ANB) bands
+const MSL_PREMIUM_TABLE = [
+  {anbMin:1,  anbMax:20, premium:200},
+  {anbMin:21, anbMax:30, premium:295},
+  {anbMin:31, anbMax:40, premium:503},
+  {anbMin:41, anbMax:50, premium:637},
+  {anbMin:51, anbMax:60, premium:903},
+  {anbMin:61, anbMax:65, premium:1131},
+  {anbMin:66, anbMax:70, premium:1326},
+  {anbMin:71, anbMax:73, premium:1643},
+  {anbMin:74, anbMax:75, premium:1816},
+  {anbMin:76, anbMax:78, premium:2027},
+  {anbMin:79, anbMax:80, premium:2187},
+  {anbMin:81, anbMax:83, premium:2303},
+  {anbMin:84, anbMax:85, premium:2616},
+  {anbMin:86, anbMax:88, premium:2785},
+  {anbMin:89, anbMax:90, premium:2785},
+  {anbMin:91, anbMax:999,premium:2826},
+];
+
 function getMSLPremium(age) {
-  if(age<21) return 150; if(age<31) return 320; if(age<36) return 450;
-  if(age<41) return 630; if(age<46) return 800; if(age<51) return 1000;
-  if(age<56) return 1420; if(age<61) return 1780; if(age<66) return 2480;
-  if(age<71) return 3090; if(age<76) return 3900; if(age<81) return 4660;
-  if(age<86) return 5500; return 6360;
+  // age = current age (last birthday). Convert to ANB = age + 1 for lookup.
+  const anb = age + 1;
+  const row = MSL_PREMIUM_TABLE.find(r => anb >= r.anbMin && anb <= r.anbMax);
+  return row ? row.premium : 2826;
 }
+function getMSLPremiumByANB(anb) {
+  const row = MSL_PREMIUM_TABLE.find(r => anb >= r.anbMin && anb <= r.anbMax);
+  return row ? row.premium : 2826;
+}
+// AWL — Additional Withdrawal Limits for ISP (MOH, unchanged since 2015)
+// Source: ask.gov.sg/moh/questions/cm2vt2dzv00cra71bgenqlr0h
 function getISPAWL(age) {
   const anb = age + 1;
+  if (anb <= 40) return 300;
+  if (anb <= 70) return 600;
+  return 900;
+}
+function getISPAWLByANB(anb) {
   if (anb <= 40) return 300;
   if (anb <= 70) return 600;
   return 900;
@@ -548,26 +582,181 @@ const CPF_CONSTANTS = {
   // 2025 cohort amounts — updated annually ~3.5%
   BRS_2025: 106500, FRS_2025: 213000, ERS_2025: 426000,
   BRS_2026: 110200, FRS_2026: 220400, ERS_2026: 440800,
-  // OA/SA interest
-  OA_RATE: 0.025, SA_RATE: 0.04, RA_RATE: 0.04,
-  // Extra 1% on first $60k, extra 1% on first $30k (55+)
+  // Interest rates
+  OA_RATE: 0.025, SA_RATE: 0.04, RA_RATE: 0.04, MA_RATE: 0.04,
+  // Extra interest: <55 → +1% on first $60k (max $20k from OA); ≥55 → +2% on first $30k + +1% on next $30k
   EXTRA_1PCT_CAP: 60000, EXTRA_1PCT_55_CAP: 30000,
-  // CPF LIFE estimated monthly payouts at age 65 (2025 cohort, Standard Plan)
-  // Source: CPF LIFE Estimator midpoint ranges
+  // OW ceiling 2026
+  OW_CEILING: 8000,
+  // CPF LIFE estimated monthly payouts at age 65 (2026 cohort turning 55, Standard Plan)
+  // Source: CPF LIFE Estimator / MOF Annex E-3
   LIFE_PAYOUTS: {
-    BRS: { standard: {low:870,mid:970,high:1060}, basic: {low:770,mid:860,high:950}, escalating: {low:720,mid:810,high:900} },
-    FRS: { standard: {low:1590,mid:1770,high:1950}, basic: {low:1420,mid:1600,high:1780}, escalating: {low:1320,mid:1480,high:1640} },
-    ERS: { standard: {low:2350,mid:2620,high:2890}, basic: {low:2130,mid:2400,high:2660}, escalating: {low:1950,mid:2200,high:2450} },
+    BRS: { standard: {low:900,mid:950,high:1000},  basic: {low:800,mid:850,high:900},  escalating: {low:750,mid:790,high:830} },
+    FRS: { standard: {low:1680,mid:1780,high:1880}, basic: {low:1500,mid:1600,high:1700}, escalating: {low:1400,mid:1480,high:1560} },
+    ERS: { standard: {low:2460,mid:2610,high:2760}, basic: {low:2230,mid:2380,high:2530}, escalating: {low:2050,mid:2190,high:2330} },
   },
   // Payout increases by ~7% per year of deferment (65-70)
   DEFER_BONUS_PER_YEAR: 0.07,
 };
+
+// CPF Contribution Rates 2026 (SC/PR 3rd yr+, wages > $750)
+// Source: cpf.gov.sg/content/dam/web/employer/employer-obligations/documents/CPFcontributionratesfrom1Jan2026.pdf
+const CPF_CONTRIBUTION_RATES = [
+  {ageLabel:'≤55',   minAge:0,  maxAge:55,  total:0.37, employee:0.20, employer:0.17},
+  {ageLabel:'55–60',  minAge:55, maxAge:60,  total:0.34, employee:0.18, employer:0.16},
+  {ageLabel:'60–65',  minAge:60, maxAge:65,  total:0.25, employee:0.125,employer:0.125},
+  {ageLabel:'65–70',  minAge:65, maxAge:70,  total:0.165,employee:0.075,employer:0.09},
+  {ageLabel:'>70',    minAge:70, maxAge:999, total:0.125,employee:0.05, employer:0.075},
+];
+
+// CPF Allocation Rates 2026
+// Source: cpf.gov.sg/content/dam/web/employer/employer-obligations/documents/CPFAllocationRatesfromJanuary2026.pdf
+const CPF_ALLOCATION_RATES = [
+  {ageLabel:'≤35',   minAge:0,  maxAge:35, oa:0.6217, sa:0.1621, ma:0.2162, raKey:'sa'},
+  {ageLabel:'35–45', minAge:35, maxAge:45, oa:0.5677, sa:0.1891, ma:0.2432, raKey:'sa'},
+  {ageLabel:'45–50', minAge:45, maxAge:50, oa:0.5136, sa:0.2162, ma:0.2702, raKey:'sa'},
+  {ageLabel:'50–55', minAge:50, maxAge:55, oa:0.4055, sa:0.3108, ma:0.2837, raKey:'sa'},
+  {ageLabel:'55–60', minAge:55, maxAge:60, oa:0.3530, sa:0.3382, ma:0.3088, raKey:'ra'},
+  {ageLabel:'60–65', minAge:60, maxAge:65, oa:0.14,   sa:0.44,   ma:0.42,   raKey:'ra'},
+  {ageLabel:'65–70', minAge:65, maxAge:70, oa:0.0607, sa:0.303,  ma:0.6363, raKey:'ra'},
+  {ageLabel:'>70',   minAge:70, maxAge:999,oa:0.08,   sa:0.08,   ma:0.84,   raKey:'ra'},
+];
+
+function getCPFContribRate(age) {
+  return CPF_CONTRIBUTION_RATES.find(r => age <= r.maxAge) || CPF_CONTRIBUTION_RATES[CPF_CONTRIBUTION_RATES.length-1];
+}
+function getCPFAllocRate(age) {
+  return CPF_ALLOCATION_RATES.find(r => age <= r.maxAge) || CPF_ALLOCATION_RATES[CPF_ALLOCATION_RATES.length-1];
+}
+
+// Project CPF balances from current age to payout start age
+// Inputs: currentAge, monthlySalary, oaBal, saBal, maBal, payoutStartAge (65-70)
+function projectCPFToRetirement(currentAge, monthlySalary, oaBal, saBal, maBal, payoutStartAge=65) {
+  let oa = oaBal || 0, sa = saBal || 0, ma = maBal || 0, ra = 0;
+  const BHS = CPF_CONSTANTS.BRS_2026 > 0 ? 79000 : 75500; // 2026 BHS
+
+  for(let age = currentAge; age < payoutStartAge; age++) {
+    // Annual CPF contribution (capped at OW ceiling)
+    const cappedSalary = Math.min(monthlySalary, CPF_CONSTANTS.OW_CEILING);
+    const contribRate = getCPFContribRate(age);
+    const allocRate = getCPFAllocRate(age);
+    const annualContrib = cappedSalary * contribRate.total * 12;
+
+    if(age < 55) {
+      // Pre-55: OA + SA + MA
+      const toMA = annualContrib * allocRate.ma;
+      const toSA = annualContrib * allocRate.sa;
+      const toOA = annualContrib - toMA - toSA;
+      oa += toOA;
+      sa += toSA;
+      ma = Math.min(ma + toMA, BHS); // MA capped at BHS
+    } else if(age === 55) {
+      // At 55: SA closes, transfers to RA up to FRS. OA fills the rest up to FRS.
+      const frs = CPF_CONSTANTS.FRS_2026;
+      ra = Math.min(sa, frs);
+      sa = 0;
+      if(ra < frs) {
+        const fromOA = Math.min(oa, frs - ra);
+        ra += fromOA;
+        oa -= fromOA;
+      }
+      // Then allocate this year's contribution
+      const toMA = annualContrib * allocRate.ma;
+      const toRA = annualContrib * allocRate.sa; // 'sa' column becomes RA for ≥55
+      const toOA = annualContrib - toMA - toRA;
+      ra += toRA;
+      oa += toOA;
+      ma = Math.min(ma + toMA, BHS);
+    } else {
+      // Post-55: contributions go to RA (up to FRS), then OA
+      const toMA = annualContrib * allocRate.ma;
+      const toRA = annualContrib * allocRate.sa; // 'sa/ra' column
+      const toOA = annualContrib - toMA - toRA;
+      const frs = CPF_CONSTANTS.FRS_2026;
+      if(ra < frs) {
+        ra += toRA + toOA; // All to RA up to FRS
+        if(ra > frs) { oa += (ra - frs); ra = frs; }
+      } else {
+        oa += toOA + toRA;
+      }
+      ma = Math.min(ma + toMA, BHS);
+    }
+
+    // Annual interest
+    oa *= (1 + CPF_CONSTANTS.OA_RATE);
+    sa *= (1 + CPF_CONSTANTS.SA_RATE);
+    ma *= (1 + CPF_CONSTANTS.MA_RATE);
+    ra *= (1 + CPF_CONSTANTS.RA_RATE);
+
+    // Extra interest (simplified: +1% on first $60k combined for <55, +2% on first $30k for ≥55)
+    if(age < 55) {
+      const combined = oa + sa + ma;
+      const extraBase = Math.min(combined, 60000);
+      const extraInt = extraBase * 0.01;
+      // Extra interest goes to SA for <55
+      sa += extraInt;
+    } else {
+      const combined = oa + ra + ma;
+      const extra2 = Math.min(combined, 30000) * 0.02;
+      const extra1 = Math.max(0, Math.min(combined, 60000) - 30000) * 0.01;
+      ra += extra2 + extra1;
+    }
+  }
+
+  return { oa: Math.round(oa), sa: Math.round(sa), ma: Math.round(ma), ra: Math.round(ra) };
+}
+
+// Estimate monthly CPF LIFE payout based on RA balance at payout start age
+// Uses annuitisation rate derived from CPF LIFE published examples
+function estimateCPFLifePayout(raAtPayoutAge, plan='standard', payoutStartAge=65) {
+  // CPF LIFE annuitisation rates (monthly payout as % of RA balance, annualised)
+  // Derived from CPF published examples: FRS $220,400 at 55 → ~$319k at 65 → ~$1,780/mo Standard
+  // That's ~$1,780*12/$319,400 = 6.69% annuitisation rate for Standard at 65
+  const annuitisationRate = {
+    standard: 0.0669,
+    basic: 0.0600,
+    escalating: 0.0555,
+  };
+  const rate = annuitisationRate[plan] || annuitisationRate.standard;
+  // Deferment bonus: +7% per year deferred beyond 65
+  const deferYears = Math.max(0, Math.min(5, payoutStartAge - 65));
+  const deferMultiplier = 1 + deferYears * CPF_CONSTANTS.DEFER_BONUS_PER_YEAR;
+  const annualPayout = raAtPayoutAge * rate * deferMultiplier;
+  const monthly = Math.round(annualPayout / 12);
+  return { monthly, annual: Math.round(annualPayout) };
+}
 
 function getCPFLifePayout(scheme='FRS', plan='standard', startAge=65) {
   const base = CPF_CONSTANTS.LIFE_PAYOUTS[scheme]?.[plan] || CPF_CONSTANTS.LIFE_PAYOUTS.FRS.standard;
   const deferYears = Math.max(0, Math.min(5, startAge - 65));
   const multiplier = 1 + deferYears * CPF_CONSTANTS.DEFER_BONUS_PER_YEAR;
   return { low: Math.round(base.low * multiplier), mid: Math.round(base.mid * multiplier), high: Math.round(base.high * multiplier) };
+}
+
+// Get all 3 plan payouts for a given RA balance at payout age
+function getCPFLifePayoutAll(raBalance, payoutStartAge=65) {
+  const plans = ['standard','basic','escalating'];
+  const result = {};
+  plans.forEach(plan => {
+    const est = estimateCPFLifePayout(raBalance, plan, payoutStartAge);
+    result[plan] = est.monthly;
+  });
+  return result;
+}
+
+// Project RA balance at a given age, starting from RA at 55
+function projectRAToAge(raAt55, targetAge) {
+  if(targetAge <= 55) return raAt55;
+  let ra = raAt55;
+  for(let age = 55; age < targetAge; age++) {
+    // RA earns 4% + extra interest
+    ra *= (1 + CPF_CONSTANTS.RA_RATE);
+    // Extra interest for 55+: +2% on first $30k, +1% on next $30k
+    const extra2 = Math.min(ra, 30000) * 0.02;
+    const extra1 = Math.max(0, Math.min(ra, 60000) - 30000) * 0.01;
+    ra += extra2 + extra1;
+  }
+  return Math.round(ra);
 }
 
 function getCPFSchemeAmount(scheme='FRS', year=2026) {
@@ -699,10 +888,26 @@ async function processFile(file) {
         const wb = XLSX.read(ab, {type:'array'});
         let allText = '[Spreadsheet: '+file.name+']\n';
         for(const sheetName of wb.SheetNames) {
-          const csv = XLSX.utils.sheet_to_csv(wb.Sheets[sheetName], {blankrows:false});
-          allText += '\n--- Sheet: '+sheetName+' ---\n'+csv;
+          const ws = wb.Sheets[sheetName];
+          if(!ws || !ws['!ref']) continue;
+          // Get range and limit to actual data area
+          const range = XLSX.utils.decode_range(ws['!ref']);
+          // Find last column with actual data (scan first 5 rows)
+          let maxCol = 0;
+          for(let r=range.s.r; r<=Math.min(range.s.r+30, range.e.r); r++) {
+            for(let c=range.s.c; c<=range.e.c; c++) {
+              const cell = ws[XLSX.utils.encode_cell({r,c})];
+              if(cell && cell.v !== null && cell.v !== undefined && String(cell.v).trim() !== '') maxCol = Math.max(maxCol, c);
+            }
+          }
+          // Limit range to actual data columns
+          const limitedRange = {s:{r:range.s.r, c:range.s.c}, e:{r:Math.min(range.e.r, range.s.r + 200), c:Math.min(maxCol + 1, 20)}};
+          const csv = XLSX.utils.sheet_to_csv(ws, {blankrows:false, range:limitedRange});
+          // Clean: remove trailing commas per line and skip fully empty lines
+          const cleaned = csv.split('\n').map(line => line.replace(/,+$/g, '')).filter(line => line.replace(/,/g,'').trim() !== '').join('\n');
+          if(cleaned.trim()) allText += '\n--- Sheet: '+sheetName+' ---\n'+cleaned;
         }
-        return [{type:'text', text:allText.slice(0,80000)}];
+        return [{type:'text', text:allText.slice(0,60000)}];
       }
     } catch(e) { console.warn('[ProcessFile] Excel parse error:', e); }
     // Final fallback: tell AI we couldn't read it
@@ -831,7 +1036,21 @@ const INSURERS = {
   'Interactive Brokers': {color:'#d81b26',bg:'#fde8ec',logo:'https://logo.clearbit.com/interactivebrokers.com'},
   'moomoo':         {color:'#ff6600',bg:'#fff3e6',logo:'https://logo.clearbit.com/moomoo.com'},
   'Webull':         {color:'#f6475d',bg:'#fde8ec',logo:'https://logo.clearbit.com/webull.com'},
+  // Banks (FD/T-bills/SSB)
+  'Standard Chartered': {color:'#0072AA',bg:'#e6f0f8',logo:'https://logo.clearbit.com/sc.com'},
+  'Maybank':         {color:'#fdb913',bg:'#fef9e6',logo:'https://logo.clearbit.com/maybank.com.sg'},
+  'Bank of China':   {color:'#c10230',bg:'#fde8ec',logo:'https://logo.clearbit.com/bankofchina.com'},
+  'ICBC':            {color:'#c10230',bg:'#fde8ec',logo:'https://logo.clearbit.com/icbc.com.cn'},
+  'CIMB':            {color:'#ec1c24',bg:'#fde8ec',logo:'https://logo.clearbit.com/cimb.com.sg'},
+  'RHB':             {color:'#00205b',bg:'#e6edf8',logo:'https://logo.clearbit.com/rhbgroup.com'},
+  'Hong Leong Finance': {color:'#003399',bg:'#e6edf8',logo:'https://logo.clearbit.com/hlf.com.sg'},
+  'SBI':             {color:'#1a4480',bg:'#e6edf8',logo:'https://logo.clearbit.com/sbi.com.sg'},
+  'GXS Bank':        {color:'#6b4eff',bg:'#f0ecff',logo:'https://logo.clearbit.com/gxs.com.sg'},
+  'Trust Bank':      {color:'#0033a0',bg:'#e6edf8',logo:'https://logo.clearbit.com/trustbank.sg'},
+  'MariBank':        {color:'#ff5a36',bg:'#ffe8e4',logo:'https://logo.clearbit.com/maribank.sg'},
   // CPF / Gov
+  'MAS':             {color:'#003366',bg:'#e6edf8',logo:'https://logo.clearbit.com/mas.gov.sg'},
+  'CPF Board':       {color:'#00a758',bg:'#e6f7ef',logo:'https://logo.clearbit.com/cpf.gov.sg'},
 };
 const INSURER_LIST = Object.keys(INSURERS).sort();
 const getInsurer = (name) => INSURERS[name] || {color:'#64748b',bg:'#f1f5f9',logo:null};
@@ -4206,7 +4425,7 @@ function ProfileTab() {
           <button className="btn-secondary btn-sm" onClick={()=>uploadRef.current?.click()} disabled={scanning}>{scanning?'…':'📄 Upload'}</button>
           <button className="btn-sm" style={{background:'rgba(239,83,80,.08)',color:'var(--red)',border:'1px solid rgba(239,83,80,.15)',fontSize:10,padding:'5px 10px',borderRadius:8,cursor:'pointer'}} onClick={()=>{
             if(!confirm('Delete all client profile data?\n\nClears name, NRIC, DOB, income, expenses, CPF settings, dependants.\n\nPolicies will NOT be deleted.')) return;
-            const blank = {name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[],annualIncome:'',retirementAge:'65',monthlyExpenses:'',mortgagePayment:'',dependantSupport:'',medicalBudget:'',desiredRetIncome:'',cpfScheme:'FRS',cpfPlan:'standard',cpfStartAge:'65',cpfTopUp:'',otherRetIncome:[]};
+            const blank = {name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[],annualIncome:'',retirementAge:'65',monthlyExpenses:'',mortgagePayment:'',dependantSupport:'',medicalBudget:'',desiredRetIncome:'',inflationRate:'2.8',cpfScheme:'FRS',cpfPlan:'standard',cpfStartAge:'65',cpfTopUp:'',otherRetIncome:[]};
             setP(blank); saveProfile(blank); alert('Profile cleared.');
           }}>🗑 Clear Profile</button>
         </div>
@@ -4246,6 +4465,7 @@ function ProfileTab() {
             <div className="field"><label>Gross Annual Income ($)</label><input type="number" value={p.annualIncome||''} onChange={e=>set('annualIncome',e.target.value)} placeholder="e.g. 120000" /><div style={{fontSize:10,color:'var(--text3)'}}>{p.annualIncome ? '$'+(Math.round(p.annualIncome/12)).toLocaleString()+'/mth' : ''}</div></div>
             <div className="field"><label>Target Retirement Age</label><input type="number" value={p.retirementAge||65} onChange={e=>set('retirementAge',e.target.value)} /></div>
             <div className="field"><label>Desired Monthly Income in Retirement</label><input type="number" value={p.desiredRetIncome||''} onChange={e=>set('desiredRetIncome',e.target.value)} placeholder="e.g. 5000" /><div style={{fontSize:10,color:'var(--text3)'}}>Target lifestyle expense in today's dollars</div></div>
+            <div className="field"><label>Inflation Rate (% p.a.)</label><input type="number" step="0.1" value={p.inflationRate||'2.8'} onChange={e=>set('inflationRate',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Default 2.8% — used for retirement target inflation adjustment</div></div>
           </div>
           <div style={{background:'var(--bg3)',borderRadius:8,padding:12,border:'1px solid var(--border)'}}>
             <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8}}>Monthly Outgoings</div>
@@ -4263,38 +4483,162 @@ function ProfileTab() {
         {/* CPF LIFE & Retirement Income */}
         <div className="resp-2col" style={{marginTop:12,gap:16}}>
           <div style={{background:'var(--bg3)',borderRadius:8,padding:12,border:'1px solid rgba(91,168,160,.2)'}}>
-            <div style={{fontSize:10,fontWeight:700,color:'var(--green2)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8}}>CPF LIFE</div>
-            <div className="grid-2">
-              <div className="field"><label>CPF LIFE Scheme</label>
-                <select value={p.cpfScheme||'FRS'} onChange={e=>set('cpfScheme',e.target.value)}>
-                  <option value="none">No CPF LIFE</option>
-                  <option value="BRS">Basic (BRS) — ${getCPFSchemeAmount('BRS').toLocaleString()}</option>
-                  <option value="FRS">Full (FRS) — ${getCPFSchemeAmount('FRS').toLocaleString()}</option>
-                  <option value="ERS">Enhanced (ERS) — ${getCPFSchemeAmount('ERS').toLocaleString()}</option>
-                </select>
-              </div>
-              <div className="field"><label>CPF LIFE Plan</label>
-                <select value={p.cpfPlan||'standard'} onChange={e=>set('cpfPlan',e.target.value)}>
-                  <option value="standard">Standard (higher, level)</option>
-                  <option value="basic">Basic (lower, more bequest)</option>
-                  <option value="escalating">Escalating (starts lower, +2%/yr)</option>
-                </select>
-              </div>
+            <div style={{fontSize:10,fontWeight:700,color:'var(--green2)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8}}>CPF LIFE Projection</div>
+
+            {/* Toggle: Use scheme target vs actual balances */}
+            <div style={{marginBottom:8}}>
+              <label style={{display:'flex',alignItems:'center',gap:6,cursor:'pointer',fontSize:11,color:'var(--text2)'}}>
+                <input type="checkbox" checked={p.cpfUseScheme!==false} onChange={e=>set('cpfUseScheme',e.target.checked)} style={{accentColor:'var(--green2)'}} />
+                <span style={{fontWeight:600}}>Use BRS/FRS/ERS target</span>
+                <span style={{fontSize:9,color:'var(--text3)'}}>— uncheck to enter actual CPF balances</span>
+              </label>
             </div>
-            <div className="grid-2">
-              <div className="field"><label>Payout Start Age</label><input type="number" value={p.cpfStartAge||65} onChange={e=>set('cpfStartAge',e.target.value)} min="65" max="70" /><div style={{fontSize:9,color:'var(--text3)'}}>65–70 (↑7%/yr deferred)</div></div>
-              <div className="field"><label>SA Top-up ($)</label><input type="number" value={p.cpfTopUp||''} onChange={e=>set('cpfTopUp',e.target.value)} placeholder="0" /><div style={{fontSize:9,color:'var(--text3)'}}>Voluntary top-up to RA</div></div>
-            </div>
-            {p.cpfScheme && p.cpfScheme !== 'none' && (() => {
-              const est = getCPFLifePayout(p.cpfScheme, p.cpfPlan||'standard', parseInt(p.cpfStartAge)||65);
-              return (
-                <div style={{marginTop:6,padding:'6px 10px',background:'rgba(91,168,160,.08)',borderRadius:6,fontSize:11}}>
-                  <span style={{fontWeight:700,color:'var(--green2)'}}>${est.mid.toLocaleString()}/mth</span>
-                  <span style={{color:'var(--text3)',marginLeft:6}}>(range ${est.low.toLocaleString()}–${est.high.toLocaleString()})</span>
-                  <span style={{color:'var(--text3)',fontSize:9,marginLeft:4}}>from age {p.cpfStartAge||65} for life</span>
+
+            {p.cpfUseScheme !== false ? (<>
+              {/* Scheme mode */}
+              <div className="grid-2">
+                <div className="field"><label>CPF LIFE Scheme</label>
+                  <select value={p.cpfScheme||'FRS'} onChange={e=>set('cpfScheme',e.target.value)}>
+                    <option value="none">No CPF LIFE</option>
+                    <option value="BRS">Basic (BRS) — ${getCPFSchemeAmount('BRS').toLocaleString()}</option>
+                    <option value="FRS">Full (FRS) — ${getCPFSchemeAmount('FRS').toLocaleString()}</option>
+                    <option value="ERS">Enhanced (ERS) — ${getCPFSchemeAmount('ERS').toLocaleString()}</option>
+                  </select>
                 </div>
-              );
-            })()}
+                <div className="field"><label>CPF LIFE Plan</label>
+                  <select value={p.cpfPlan||'standard'} onChange={e=>set('cpfPlan',e.target.value)}>
+                    <option value="standard">Standard (higher, level)</option>
+                    <option value="basic">Basic (lower, more bequest)</option>
+                    <option value="escalating">Escalating (starts lower, +2%/yr)</option>
+                  </select>
+                </div>
+              </div>
+              <div className="grid-2">
+                <div className="field"><label>Payout Start Age</label><input type="number" value={p.cpfStartAge||65} onChange={e=>set('cpfStartAge',e.target.value)} min="65" max="70" /><div style={{fontSize:9,color:'var(--text3)'}}>65–70 (↑7%/yr deferred)</div></div>
+                <div className="field"><label>SA Top-up ($)</label><input type="number" value={p.cpfTopUp||''} onChange={e=>set('cpfTopUp',e.target.value)} placeholder="0" /><div style={{fontSize:9,color:'var(--text3)'}}>Voluntary top-up to RA</div></div>
+              </div>
+              {p.cpfScheme && p.cpfScheme !== 'none' && (() => {
+                const startAge = parseInt(p.cpfStartAge)||65;
+                return (
+                  <div style={{marginTop:6}}>
+                    {/* All 3 plans comparison */}
+                    <div style={{borderRadius:6,border:'1px solid var(--border)',overflow:'hidden'}}>
+                      <table style={{width:'100%',fontSize:10,borderCollapse:'collapse'}}>
+                        <thead><tr style={{background:'var(--bg2)'}}>
+                          <th style={{padding:'4px 8px',textAlign:'left',fontSize:9}}>Plan</th>
+                          {[65,66,67,68,69,70].filter(a=>a>=65&&a<=70).map(a=>(
+                            <th key={a} style={{padding:'4px 6px',textAlign:'center',fontSize:9,color:a===startAge?'var(--green2)':'var(--text3)',fontWeight:a===startAge?700:400}}>Age {a}</th>
+                          ))}
+                        </tr></thead>
+                        <tbody>
+                          {['standard','basic','escalating'].map(plan => {
+                            const label = {standard:'Standard',basic:'Basic',escalating:'Escalating (+2%/yr)'}[plan];
+                            const isSelected = (p.cpfPlan||'standard') === plan;
+                            return (
+                              <tr key={plan} style={{borderTop:'1px solid var(--border)',background:isSelected?'rgba(91,168,160,.06)':'transparent',cursor:'pointer'}} onClick={()=>set('cpfPlan',plan)}>
+                                <td style={{padding:'4px 8px',fontWeight:isSelected?700:400,color:isSelected?'var(--green2)':'var(--text2)'}}>
+                                  {isSelected?'● ':''}{label}
+                                </td>
+                                {[65,66,67,68,69,70].map(a=>{
+                                  const est = getCPFLifePayout(p.cpfScheme, plan, a);
+                                  const isCur = a === startAge;
+                                  return <td key={a} style={{padding:'4px 6px',textAlign:'center',fontWeight:isCur&&isSelected?700:400,color:isCur&&isSelected?'var(--green2)':'var(--text2)'}}>${est.mid.toLocaleString()}</td>;
+                                })}
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                    <div style={{marginTop:4,fontSize:9,color:'var(--text3)'}}>
+                      Click a row to select plan · {p.cpfScheme} 2026 cohort · Estimates from CPF Board
+                    </div>
+                  </div>
+                );
+              })()}
+            </>) : (<>
+              {/* Custom balance mode */}
+              <div style={{padding:8,background:'rgba(91,168,160,.06)',borderRadius:6,marginBottom:8,fontSize:10,color:'var(--teal)'}}>
+                📊 Enter actual CPF balances to project RA growth → CPF LIFE payout estimates
+              </div>
+              <div className="grid-3" style={{marginBottom:6}}>
+                <div className="field"><label>OA Balance ($)</label><input type="number" value={p.cpfOA||''} onChange={e=>set('cpfOA',e.target.value)} placeholder="0" /><div style={{fontSize:9,color:'var(--text3)'}}>Ordinary Account @ 2.5%</div></div>
+                <div className="field"><label>SA Balance ($)</label><input type="number" value={p.cpfSA||''} onChange={e=>set('cpfSA',e.target.value)} placeholder="0" /><div style={{fontSize:9,color:'var(--text3)'}}>Special Account @ 4.0%</div></div>
+                <div className="field"><label>MA Balance ($)</label><input type="number" value={p.cpfMA||''} onChange={e=>set('cpfMA',e.target.value)} placeholder="0" /><div style={{fontSize:9,color:'var(--text3)'}}>MediSave @ 4.0% · BHS $79k</div></div>
+              </div>
+              <div className="grid-3" style={{marginBottom:6}}>
+                <div className="field"><label>Monthly Salary ($)</label><input type="number" value={p.cpfMonthlySalary||''} onChange={e=>set('cpfMonthlySalary',e.target.value)} placeholder="e.g. 6000" /><div style={{fontSize:9,color:'var(--text3)'}}>OW ceiling: $8,000/mth</div></div>
+                <div className="field"><label>Payout Start Age</label><input type="number" value={p.cpfStartAge||65} onChange={e=>set('cpfStartAge',e.target.value)} min="65" max="70" /></div>
+                <div className="field"><label>CPF LIFE Plan</label>
+                  <select value={p.cpfPlan||'standard'} onChange={e=>set('cpfPlan',e.target.value)}>
+                    <option value="standard">Standard</option><option value="basic">Basic</option><option value="escalating">Escalating</option>
+                  </select>
+                </div>
+              </div>
+
+              {/* Projection result */}
+              {age && parseFloat(p.cpfMonthlySalary) > 0 && (() => {
+                const salary = parseFloat(p.cpfMonthlySalary)||0;
+                const oaBal = parseFloat(p.cpfOA)||0;
+                const saBal = parseFloat(p.cpfSA)||0;
+                const maBal = parseFloat(p.cpfMA)||0;
+                const startAge = parseInt(p.cpfStartAge)||65;
+                const proj = projectCPFToRetirement(age, salary, oaBal, saBal, maBal, startAge);
+                const contribRate = getCPFContribRate(age);
+                const allocRate = getCPFAllocRate(age);
+                const monthlyContrib = Math.round(Math.min(salary, CPF_CONSTANTS.OW_CEILING) * contribRate.total);
+
+                return (
+                  <div style={{marginTop:6}}>
+                    {/* Current contribution info */}
+                    <div style={{padding:'6px 10px',background:'var(--bg2)',borderRadius:6,marginBottom:6,fontSize:10}}>
+                      <strong>Age {age}:</strong> Total CPF {(contribRate.total*100).toFixed(1)}% ({(contribRate.employee*100).toFixed(1)}% ee + {(contribRate.employer*100).toFixed(1)}% er) = <strong>${monthlyContrib.toLocaleString()}/mth</strong>
+                      <span style={{color:'var(--text3)',marginLeft:6}}>· OA {(allocRate.oa*100).toFixed(1)}% · {age>=55?'RA':'SA'} {(allocRate.sa*100).toFixed(1)}% · MA {(allocRate.ma*100).toFixed(1)}%</span>
+                    </div>
+                    {/* Projected balances */}
+                    <div style={{padding:'8px 12px',background:'rgba(91,168,160,.06)',borderRadius:8,marginBottom:6}}>
+                      <div style={{fontSize:9,fontWeight:700,color:'var(--teal)',textTransform:'uppercase',marginBottom:4}}>Projected Balances at Age {startAge}</div>
+                      <div className="grid-3" style={{gap:6}}>
+                        <div><div style={{fontSize:9,color:'var(--text3)'}}>OA</div><div style={{fontSize:14,fontWeight:600}}>${proj.oa.toLocaleString()}</div></div>
+                        <div><div style={{fontSize:9,color:'var(--text3)'}}>RA</div><div style={{fontSize:14,fontWeight:700,color:'var(--green2)'}}>${proj.ra.toLocaleString()}</div></div>
+                        <div><div style={{fontSize:9,color:'var(--text3)'}}>MA</div><div style={{fontSize:14,fontWeight:600}}>${proj.ma.toLocaleString()}</div></div>
+                      </div>
+                    </div>
+                    {/* All 3 plan estimates based on projected RA */}
+                    <div style={{borderRadius:6,border:'1px solid var(--border)',overflow:'hidden'}}>
+                      <table style={{width:'100%',fontSize:10,borderCollapse:'collapse'}}>
+                        <thead><tr style={{background:'var(--bg2)'}}>
+                          <th style={{padding:'4px 8px',textAlign:'left',fontSize:9}}>Plan</th>
+                          <th style={{padding:'4px 8px',textAlign:'right',fontSize:9}}>Est. Monthly</th>
+                          <th style={{padding:'4px 8px',textAlign:'right',fontSize:9}}>Est. Annual</th>
+                        </tr></thead>
+                        <tbody>
+                          {['standard','basic','escalating'].map(plan => {
+                            const est = estimateCPFLifePayout(proj.ra, plan, startAge);
+                            const isSelected = (p.cpfPlan||'standard') === plan;
+                            return (
+                              <tr key={plan} style={{borderTop:'1px solid var(--border)',background:isSelected?'rgba(91,168,160,.06)':'transparent',cursor:'pointer'}} onClick={()=>set('cpfPlan',plan)}>
+                                <td style={{padding:'4px 8px',fontWeight:isSelected?700:400,color:isSelected?'var(--green2)':'var(--text2)'}}>
+                                  {isSelected?'● ':''}{plan.charAt(0).toUpperCase()+plan.slice(1)}{plan==='escalating'?' (+2%/yr)':''}
+                                </td>
+                                <td style={{padding:'4px 8px',textAlign:'right',fontWeight:isSelected?700:500,color:isSelected?'var(--green2)':'var(--text2)'}}>${est.monthly.toLocaleString()}</td>
+                                <td style={{padding:'4px 8px',textAlign:'right',color:'var(--text3)'}}>${est.annual.toLocaleString()}</td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                    <div style={{fontSize:9,color:'var(--text3)',marginTop:4}}>
+                      Based on projected RA ${proj.ra.toLocaleString()} at age {startAge} · Assumes salary constant · CPF rates 2026 · Estimates only
+                    </div>
+                  </div>
+                );
+              })()}
+              {age && !parseFloat(p.cpfMonthlySalary) && (
+                <div style={{fontSize:10,color:'var(--gold)',padding:6}}>Enter monthly salary to see CPF projection</div>
+              )}
+            </>)}
           </div>
           <div style={{background:'var(--bg3)',borderRadius:8,padding:12,border:'1px solid rgba(157,138,191,.2)'}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
@@ -4631,6 +4975,10 @@ function PremiumCashflowChart({policies,age,retAge}) {
     for(let yr=age; yr<=Math.max(retAge+5,80); yr++) {
       const row = {age:yr, total:0, byPolicy:{}};
       policies.forEach(pol => {
+        // Skip matured FDs/T-bills from cashflow
+        if(pol.category==='cash_investments' && pol.fdMaturityDate && new Date(pol.fdMaturityDate) < new Date()) return;
+        // FDs don't have ongoing premiums — skip from cashflow chart
+        if(pol.category==='cash_investments') return;
         const startAge = parseInt(pol.premStartAge)||parseInt(pol.ageAtEntry)||age;
         const premTerm = pol.premSingle ? 1 : (parseInt(pol.premTerm)||10);
         const prem = parseFloat(pol.annualPremium)||0;
@@ -4945,7 +5293,10 @@ function Dashboard() {
 
   // ── RETIREMENT LITE COMPUTATION ──
   const retirementLite = useMemo(() => {
-    const desiredMonthly = parseFloat(p.desiredRetIncome) || parseFloat(p.monthlyExpenses) || monthlyIncome * 0.7 || 5000;
+    const baseDesired = parseFloat(p.desiredRetIncome) || parseFloat(p.monthlyExpenses) || monthlyIncome * 0.7 || 5000;
+    const inflationRate = (parseFloat(p.inflationRate) || 2.8) / 100;
+    const yearsToRet = Math.max(0, retAge - (age||35));
+    const desiredMonthly = Math.round(baseDesired * Math.pow(1 + inflationRate, yearsToRet));
     const cpfScheme = p.cpfScheme || 'FRS';
     const cpfPlan = p.cpfPlan || 'standard';
     const cpfStartAge = parseInt(p.cpfStartAge) || 65;
@@ -4966,7 +5317,9 @@ function Dashboard() {
     const otherMonthly = otherSources.filter(s=>s.active).reduce((sum,s) => sum + s.adjustedAmt, 0);
     const timeline = [];
     for(let yr=Math.max(55,age); yr<=95; yr++) {
-      const row = {age:yr, cpf:0, policy:0, dividends:0, other:0, total:0, desired:desiredMonthly};
+      const yrInflation = Math.pow(1 + inflationRate, yr - (age||35));
+      const desiredAtYr = Math.round(baseDesired * yrInflation);
+      const row = {age:yr, cpf:0, policy:0, dividends:0, other:0, total:0, desired:desiredAtYr};
       if(yr >= cpfStartAge && cpfScheme !== 'none') {
         row.cpf = cpfPlan === 'escalating' ? Math.round(cpfPayout.mid * Math.pow(1.02, yr - cpfStartAge)) : cpfPayout.mid;
       }
@@ -4981,7 +5334,7 @@ function Dashboard() {
       row.total = row.cpf + row.policy + row.dividends + row.other;
       timeline.push(row);
     }
-    return { desiredMonthly, cpfPayout, policyMonthlyIncome, policyDividends, lumpSum, otherMonthly, otherSources, timeline, cpfScheme, cpfStartAge };
+    return { desiredMonthly, baseDesired, inflationRate: inflationRate*100, cpfPayout, policyMonthlyIncome, policyDividends, lumpSum, otherMonthly, otherSources, timeline, cpfScheme, cpfStartAge };
   }, [p, cvTimeline, retAge, age, monthlyIncome]);
 
   // CV timeline chart
@@ -5402,19 +5755,29 @@ function Dashboard() {
       })()}
 
       {/* ═══ TIER 1: RETIREMENT READINESS METER ═══ */}
-      {retRow && (annualIncome > 0 || retRow.totalCV > 0 || retRow.income > 0) && (
+      {retRow && (annualIncome > 0 || retRow.totalCV > 0 || retRow.income > 0 || retirementLite.cpfPayout.mid > 0) && (
         <div className="card" style={{marginBottom:16,background:'linear-gradient(135deg,var(--bg2),rgba(212,169,106,.04))',border:'1px solid rgba(212,169,106,.2)'}}>
           <h3 style={{fontSize:13,fontWeight:600,marginBottom:12}}>Retirement Readiness</h3>
           <div className="resp-2col" style={{gap:16}}>
             {/* Left: Meter */}
             <div style={{textAlign:'center'}}>
               {(() => {
-                const monthlyNeed = monthlyExpenses || monthlyIncome * 0.7 || 3000;
+                const yearsToRet = Math.max(0, retAge - (age||35));
+                const inflationRate = parseFloat(p.inflationRate) || 2.8;
+                const inflationMultiplier = Math.pow(1 + inflationRate/100, yearsToRet);
+                const baseMonthlyNeed = monthlyExpenses || monthlyIncome * 0.7 || 3000;
+                const monthlyNeed = Math.round(baseMonthlyNeed * inflationMultiplier);
+                const cpfLifeMonthly = retirementLite.cpfPayout.mid || 0;
+                const cpfStartAge = parseInt(p.cpfStartAge) || 65;
+                const cpfActive = retAge >= cpfStartAge && (p.cpfScheme||'FRS') !== 'none';
+                const cpfAtRet = cpfActive ? cpfLifeMonthly : 0;
                 const monthlyInc = Math.round(retRow.income/12) + Math.round(retRow.dividends/12);
+                const otherMonthly = retirementLite.otherMonthly || 0;
+                const totalMonthly = monthlyInc + cpfAtRet + otherMonthly;
                 const lumpSum = retRow.totalCV + retRow.maturities;
                 const drawdownMonths = lumpSum > 0 ? Math.round(lumpSum / monthlyNeed) : 0;
                 const drawdownYrs = Math.round(drawdownMonths / 12);
-                const incomePct = monthlyNeed > 0 ? Math.min(100, Math.round(monthlyInc / monthlyNeed * 100)) : 0;
+                const incomePct = monthlyNeed > 0 ? Math.min(100, Math.round(totalMonthly / monthlyNeed * 100)) : 0;
                 const readyScore = Math.min(100, incomePct + Math.min(40, drawdownYrs * 2));
                 const readyColor = readyScore >= 70 ? 'var(--green2)' : readyScore >= 40 ? 'var(--gold)' : 'var(--red)';
                 const readyLabel = readyScore >= 70 ? 'On Track' : readyScore >= 40 ? 'Needs Attention' : 'Action Required';
@@ -5439,10 +5802,19 @@ function Dashboard() {
             {/* Right: Breakdown */}
             <div style={{display:'flex',flexDirection:'column',justifyContent:'center',gap:8}}>
               {(() => {
-                const monthlyNeed = monthlyExpenses || monthlyIncome * 0.7 || 3000;
+                const yearsToRet = Math.max(0, retAge - (age||35));
+                const inflationRate = parseFloat(p.inflationRate) || 2.8;
+                const inflationMultiplier = Math.pow(1 + inflationRate/100, yearsToRet);
+                const baseMonthlyNeed = monthlyExpenses || monthlyIncome * 0.7 || 3000;
+                const monthlyNeed = Math.round(baseMonthlyNeed * inflationMultiplier);
+                const cpfLifeMonthly = retirementLite.cpfPayout.mid || 0;
+                const cpfStartAge = parseInt(p.cpfStartAge) || 65;
+                const cpfActive = retAge >= cpfStartAge && (p.cpfScheme||'FRS') !== 'none';
+                const cpfAtRet = cpfActive ? cpfLifeMonthly : 0;
                 const monthlyInc = Math.round(retRow.income/12);
                 const monthlyDiv = Math.round(retRow.dividends/12);
-                const totalMonthly = monthlyInc + monthlyDiv;
+                const otherMonthly = retirementLite.otherMonthly || 0;
+                const totalMonthly = monthlyInc + monthlyDiv + cpfAtRet + otherMonthly;
                 const lumpSum = retRow.totalCV + retRow.maturities;
                 const gap = Math.max(0, monthlyNeed - totalMonthly);
                 return (
@@ -5450,22 +5822,27 @@ function Dashboard() {
                     <div style={{padding:'8px 12px',background:'var(--bg3)',borderRadius:8}}>
                       <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',fontWeight:600}}>Monthly Passive Income</div>
                       <div style={{fontSize:20,fontWeight:700,color:'var(--green2)'}}>{fmt(totalMonthly)}<span style={{fontSize:11,color:'var(--text3)'}}>/mth</span></div>
+                      {cpfAtRet > 0 && <div style={{fontSize:9,color:'var(--teal)'}}>CPF LIFE: {fmt(cpfAtRet)}</div>}
                       {monthlyInc > 0 && <div style={{fontSize:9,color:'var(--text3)'}}>Annuity/Income: {fmt(monthlyInc)}</div>}
                       {monthlyDiv > 0 && <div style={{fontSize:9,color:'#9d8abf'}}>Dividends: {fmt(monthlyDiv)}</div>}
+                      {otherMonthly > 0 && <div style={{fontSize:9,color:'var(--gold)'}}>Other: {fmt(otherMonthly)}</div>}
                     </div>
                     <div style={{padding:'8px 12px',background:'var(--bg3)',borderRadius:8}}>
                       <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',fontWeight:600}}>Lump Sum Available</div>
                       <div style={{fontSize:20,fontWeight:700,color:'var(--gold)'}}>{fmt(lumpSum)}</div>
                       {lumpSum > 0 && monthlyNeed > 0 && <div style={{fontSize:9,color:'var(--text3)'}}>Sustains {Math.round(lumpSum/monthlyNeed/12)} years at {fmt(monthlyNeed)}/mth</div>}
                     </div>
+                    <div style={{padding:'6px 10px',background:'var(--bg3)',borderRadius:6,fontSize:9,color:'var(--text3)'}}>
+                      Target: {fmt(monthlyNeed)}/mth (today's {fmt(baseMonthlyNeed)} + {inflationRate}% × {yearsToRet}yr inflation)
+                    </div>
                     {gap > 0 && monthlyNeed > 0 && (
                       <div style={{padding:'6px 10px',background:'rgba(239,83,80,.05)',borderRadius:6,fontSize:10,color:'var(--red)'}}>
-                        Monthly shortfall of {fmt(gap)} vs {fmt(monthlyNeed)} target expenses
+                        Monthly shortfall of {fmt(gap)} vs {fmt(monthlyNeed)} inflation-adjusted target
                       </div>
                     )}
                     {gap === 0 && monthlyNeed > 0 && totalMonthly > 0 && (
                       <div style={{padding:'6px 10px',background:'rgba(91,168,160,.08)',borderRadius:6,fontSize:10,color:'var(--green2)'}}>
-                        Passive income covers {Math.round(totalMonthly/monthlyNeed*100)}% of monthly expenses
+                        Passive income covers {Math.round(totalMonthly/monthlyNeed*100)}% of inflation-adjusted expenses
                       </div>
                     )}
                   </>
@@ -5577,7 +5954,7 @@ function Dashboard() {
               }));
               const range = maxAge - minAge;
               const pxPerYear = Math.max(8, Math.min(16, 800/range));
-              const catColors = {protection:'#5b8fd9',savings:'#5ba8a0',health:'#c97b9a',investment:'#9d8abf',retirement:'#d4a96a',maternity:'#c97b9a'};
+              const catColors = {protection:'#5b8fd9',savings:'#5ba8a0',health:'#c97b9a',investment:'#9d8abf',retirement:'#d4a96a',maternity:'#c97b9a',cash_investments:'#5ba8a0'};
               return (
                 <div style={{position:'relative',paddingTop:20,paddingBottom:8}}>
                   {/* Age axis */}
@@ -5944,6 +6321,10 @@ function Policies() {
   const handleFormSave = (p) => { savePolicy(p); setShowForm(false); setScanResult(null); clearDraft(); };
 
   const filtered = filter==='all'?policies:policies.filter(p=>p.category===filter);
+  // Separate matured FDs/T-bills
+  const isMaturedFD = (pol) => pol.category==='cash_investments' && pol.fdMaturityDate && new Date(pol.fdMaturityDate) < new Date() && !pol.fdAutoRenew;
+  const activePolicies = filtered.filter(p => !isMaturedFD(p));
+  const maturedPolicies = filtered.filter(p => isMaturedFD(p));
 
   // ── MIME type detection ──
   const MIME_MAP = {
@@ -5958,11 +6339,30 @@ function Policies() {
   const isImage = file => getMime(file).startsWith('image/');
   const isText = file => ['text/plain','text/html','text/csv'].includes(getMime(file));
 
-  const EXTRACT_PROMPT = `You are a senior insurance policy analyst for a Singapore Financial Advisory firm. Extract ALL insurance policies from this document with institutional-level detail.
+  const EXTRACT_PROMPT = `You are a senior insurance policy analyst for a Singapore Financial Advisory firm. Extract ALL insurance policies AND financial instruments from this document with institutional-level detail.
 
-For EACH policy, return a JSON object with:
+For EACH policy or instrument, return a JSON object with:
 
-CORE: insurer, productName, policyName, policyNumber, category (protection/savings/health/investment/retirement/maternity), subType (Term Life/Whole Life/Universal Life (UL)/Indexed UL (IUL)/Variable UL (VUL)/Critical Illness/Personal Accident/Disability Income/Long-term Care/Endowment/Lifetime Endowment/Education Plan/Short-term Endowment/Integrated Shield Plan/Hospital Income/ILP (Protection)/ILP (Investment)/Retirement/Annuity/Maternity Coverage), currency (default SGD), sumAssured (number), annualPremium (number), premFrequency (annual/monthly/single/unknown — if document does not clearly state frequency, use unknown), premiumStructure (Single Premium/Regular Premium/Limited Pay/Flexible Premium), paymentMethod (Cash/MediSave/SRS/MediSave+Cash/CPF OA)
+CORE: insurer, productName, policyName, policyNumber, category (protection/savings/health/investment/retirement/maternity/cash_investments), subType (Term Life/Whole Life/Universal Life (UL)/Indexed UL (IUL)/Variable UL (VUL)/Critical Illness/Personal Accident/Disability Income/Long-term Care/Endowment/Lifetime Endowment/Education Plan/Short-term Endowment/Integrated Shield Plan/Hospital Income/ILP (Protection)/ILP (Investment)/Retirement/Annuity/Maternity Coverage/Fixed Deposit/T-bill/Singapore Savings Bond/Money Market), currency (default SGD), sumAssured (number), annualPremium (number), premFrequency (annual/monthly/single/unknown — if document does not clearly state frequency, use unknown), premiumStructure (Single Premium/Regular Premium/Limited Pay/Flexible Premium), paymentMethod (Cash/MediSave/SRS/MediSave+Cash/CPF OA)
+
+FIXED DEPOSITS / T-BILLS / SSB (category: cash_investments):
+- insurer = bank name (e.g. "DBS", "OCBC", "ICBC", "BOC", "Standard Chartered")
+- productName = descriptive name (e.g. "12-month FD", "6-month T-bill")
+- fdPrincipal = deposit amount (number)
+- fdYieldPct = interest rate / yield % p.a. (number, e.g. 3.25)
+- fdStartDate = effective/start date (YYYY-MM-DD)
+- fdMaturityDate = maturity date (YYYY-MM-DD)
+- fdTenureMonths = tenure in months (number)
+- fdAutoRenew = boolean
+- status = "inforce" if not yet matured, "matured" if past maturity date, use "Fully Paid" from source as equivalent to "matured" for FDs
+- For matured FDs, still include them — they will be grouped separately
+
+SHORT-TERM ENDOWMENTS (≤3 years, single premium):
+- category: "savings", subType: "Short-term Endowment"
+- annualPremium = total premium paid (single premium amount)
+- premiumStructure: "Single Premium"
+- endYield = expected yield % p.a.
+- endGuaranteedCV = expected maturity sum if given
 
 CLIENT: policyOwner (string — name of policy owner/purchaser), lifeInsured (string — name of life assured/insured person, may differ from policyOwner), gender (Male/Female — of life insured), dob (YYYY-MM-DD — of life insured), ageAtEntry (number — of life insured at cover start), smoker (Non-smoker/Smoker), nationality (SC/PR/Foreigner), occupation
 
@@ -6035,6 +6435,15 @@ OTHER PLANS:
 - "Income" / "Payout" plans → check if monthly income (Annuity) or lump sum (Endowment)
 - "VitalCare" / "VitalHealth" without "Max" prefix → could be standalone, check context
 
+FIXED DEPOSITS / WEALTH SHEET HANDLING:
+- Rows under "Fixed Deposits" heading → category: "cash_investments", subType: "Fixed Deposit"
+- Bank names like ICBC, BOC, DBS, OCBC, UOB, Maybank, Standard Chartered → use as "insurer" field
+- "Fully Paid" status in FD context means the deposit has matured → status: "matured"
+- If multiple FDs at same bank, create SEPARATE entries for each (different amounts/dates = different FDs)
+- Rows under "Short Term Endowments" → category: "savings", subType: "Short-term Endowment"
+- Rows under "Long Term Endowments" → category: "savings", subType: "Endowment"
+- Look for section headings in spreadsheets to determine category context
+
 Return ONLY valid JSON. Start with { end with }. No markdown.`;
 
   // ── Stage camera photos ──
@@ -6075,7 +6484,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         const blocks = await processFile(file);
         content.push(...blocks);
       }
-      content.push({type:'text',text:'Extract all insurance policy information from these documents/images. Follow the system instructions for output format.'});
+      content.push({type:'text',text:'Extract all insurance policies AND financial instruments (fixed deposits, T-bills, endowments, investments) from these documents. Follow the system instructions for output format. Return ONLY valid JSON array or object.'});
       const text = await callAI(EXTRACT_PROMPT, content, 8000);
       console.log('[Extract] Raw response:', text.slice(0,500));
       const parsed = repairJSON(text);
@@ -6092,7 +6501,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         else { arr = [parsed]; }
       } else { arr = [parsed]; }
       // Filter out empty entries
-      arr = arr.filter(p => p && typeof p === 'object' && (p.productName || p.insurer || p.category));
+      arr = arr.filter(p => p && typeof p === 'object' && (p.productName || p.insurer || p.category || p.fdPrincipal));
       console.log('[Extract] Policy count:', arr.length, arr.length>0 ? 'Fields in first: '+Object.keys(arr[0]||{}).join(',') : '(empty)');
       
       if (arr.length === 0) {
@@ -6108,6 +6517,12 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
           monthlyBenefit:parseFloat(p.monthlyBenefit)||0,
           riders:(p.riders||[]).map(r=>({...r, _selected:true}))
         };
+        // FD fields
+        if(result.fdPrincipal) result.fdPrincipal = String(parseFloat(result.fdPrincipal)||0);
+        if(result.fdYieldPct) result.fdYieldPct = String(parseFloat(result.fdYieldPct)||0);
+        if(result.fdTenureMonths) result.fdTenureMonths = String(parseInt(result.fdTenureMonths)||0);
+        // Map "Fully Paid" to matured for FDs
+        if(result.category==='cash_investments' && (result.status==='Fully Paid' || result.status==='fully_paid')) result.status='matured';
         if(result.premStartAge && result.premTerm && !result.premEndAge) result.premEndAge = String(parseInt(result.premStartAge)+parseInt(result.premTerm));
         if(result.ageAtEntry && result.premTerm && !result.premEndAge) result.premEndAge = String(parseInt(result.ageAtEntry)+parseInt(result.premTerm));
         if(result.ageAtEntry && !result.premStartAge) result.premStartAge = result.ageAtEntry;
@@ -6252,14 +6667,14 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
           <div>No policies {filter!=='all'?'in this category':''} yet</div>
           <div style={{fontSize:11,marginTop:8}}>📷 Camera (snap multiple) · 📄 Upload (PDF, Excel, Word, images) · + Add manually</div>
         </div>
-      ) : (
+      ) : (<>
         <div style={{overflowX:'auto'}}>
           <table>
             <thead><tr>
-              <th style={{width:30}}><input type='checkbox' checked={selected.size===filtered.length&&filtered.length>0} onChange={selectAll} style={{accentColor:'var(--gold)'}} /></th><th>Policy</th><th>Category</th><th>Sub-type</th><th>Insurer</th><th>Currency</th><th>Sum Assured</th><th>Premium</th><th>Actions</th>
+              <th style={{width:30}}><input type='checkbox' checked={selected.size===activePolicies.length&&activePolicies.length>0} onChange={selectAll} style={{accentColor:'var(--gold)'}} /></th><th>Policy</th><th>Category</th><th>Sub-type</th><th>{filter==='cash_investments'?'Provider':'Insurer'}</th><th>Currency</th><th>{filter==='cash_investments'?'Principal':'Sum Assured'}</th><th>{filter==='cash_investments'?'Yield':'Premium'}</th><th>Actions</th>
             </tr></thead>
             <tbody>
-              {filtered.map(p => {
+              {activePolicies.map(p => {
                 // Benefit icons
                 const bens = [];
                 const rds = p.riders||[];
@@ -6290,9 +6705,14 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
                   <td style={{fontSize:12,color:'var(--text2)'}}>{p.subType==='Integrated Shield Plan' && p.hasRider ? 'ISP + Rider' : p.subType||'-'}</td>
                   <td>{p.insurer?<InsurerBadge name={p.insurer} />:'-'}</td>
                   <td className="mono">{p.currency||'SGD'}</td>
-                  <td className="mono">{fmt(p.sumAssured,p.currency||'SGD')}</td>
+                  <td className="mono">{p.category==='cash_investments' ? (p.fdPrincipal ? '$'+parseInt(p.fdPrincipal).toLocaleString() : '-') : fmt(p.sumAssured,p.currency||'SGD')}</td>
                   <td className="mono">
-                      {p.premiumStructure==='Single Premium' || p.premFrequency==='single' ? (
+                      {p.category==='cash_investments' ? (
+                        <div>
+                          {p.fdYieldPct && <div style={{fontSize:11,color:'var(--green2)',fontWeight:600}}>{p.fdYieldPct}% p.a.</div>}
+                          {p.fdMaturityDate && <div style={{fontSize:9,color:new Date(p.fdMaturityDate)<new Date()?'var(--gold)':'var(--text3)'}}>{new Date(p.fdMaturityDate)<new Date()?'Matured':'Mat. '+new Date(p.fdMaturityDate).toLocaleDateString('en-SG',{month:'short',year:'2-digit'})}</div>}
+                        </div>
+                      ) : p.premiumStructure==='Single Premium' || p.premFrequency==='single' ? (
                         <div><div style={{fontSize:11}}>{fmt(p.annualPremium,p.currency||'SGD')}</div><div style={{fontSize:9,color:'var(--gold)'}}>Single Premium</div></div>
                       ) : p.premFrequency==='monthly' ? (
                         <div><div style={{fontSize:11}}>{fmt(parseFloat(p.annualPremium)/12,p.currency||'SGD')}/mth</div><div style={{fontSize:9,color:'var(--text3)'}}>{fmt(p.annualPremium,p.currency||'SGD')}/yr</div></div>
@@ -6314,7 +6734,33 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
             </tbody>
           </table>
         </div>
-      )}
+
+        {/* ═══ MATURED FIXED DEPOSITS / T-BILLS ═══ */}
+        {maturedPolicies.length > 0 && (
+          <div style={{marginTop:16}}>
+            <div style={{fontSize:11,fontWeight:700,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8,display:'flex',alignItems:'center',gap:6}}>
+              <span>⏰ Matured ({maturedPolicies.length})</span>
+              <div style={{flex:1,height:1,background:'var(--border)'}} />
+            </div>
+            <div style={{opacity:.6}}>
+              {maturedPolicies.map(p => (
+                <div key={p.id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'8px 12px',background:'var(--bg3)',borderRadius:8,marginBottom:4,border:'1px solid var(--border)'}}>
+                  <div>
+                    <span style={{fontWeight:500,fontSize:12}}>{p.productName||p.subType||'Unnamed'}</span>
+                    <span style={{fontSize:10,color:'var(--text3)',marginLeft:8}}>{p.insurer}</span>
+                    {p.fdMaturityDate && <span style={{fontSize:9,color:'var(--gold)',marginLeft:8}}>Matured {new Date(p.fdMaturityDate).toLocaleDateString('en-SG',{day:'numeric',month:'short',year:'numeric'})}</span>}
+                  </div>
+                  <div style={{display:'flex',gap:8,alignItems:'center'}}>
+                    <span className="mono" style={{fontSize:12}}>{p.fdPrincipal?'$'+parseInt(p.fdPrincipal).toLocaleString():fmt(p.sumAssured,p.currency||'SGD')}</span>
+                    <button className="btn-secondary btn-sm" onClick={()=>{setEditing(p);setShowForm(true);}} style={{fontSize:9,padding:'3px 8px'}}>Edit</button>
+                    <button className="btn-danger btn-sm" onClick={()=>{if(confirm('Delete this matured entry?'))deletePolicy(p.id);}} style={{fontSize:9,padding:'3px 8px'}}>×</button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </>)}
 
       {/* Bulk Verification Modal */}
       {bulkExtracted && <BulkVerifyModal extracted={bulkExtracted} repo={repo} onClose={()=>setBulkExtracted(null)} onAccept={async(selected) => {
@@ -6405,6 +6851,8 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
     addSA:'', accMedical:'', tcmReimb:'',
     // General
     notes:'', userRemarks:'', highlights:[], fundAllocations:[],
+    // Fixed Deposits / T-bills / SSB
+    fdPrincipal:'', fdYieldPct:'', fdStartDate:'', fdMaturityDate:'', fdAutoRenew:false, fdTenureMonths:'',
   });
 
   const set = (k,v) => setForm(f=>{
@@ -6436,6 +6884,8 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
   const isIUL = form.subType==='Indexed UL (IUL)';
   const isVUL = form.subType==='Variable UL (VUL)';
   const isMaternity = form.category === 'maternity';
+  const isCashInvestment = form.category === 'cash_investments';
+  const isFD = ['Fixed Deposit','T-bill','Singapore Savings Bond','Money Market'].includes(form.subType);
   const isILP = form.subType==='ILP (Protection)' || form.subType==='ILP (Investment)';
   const isISP = form.subType==='Integrated Shield Plan';
   const isProtection = form.category==='protection';
@@ -6448,9 +6898,11 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
   const isPA = form.subType==='Personal Accident';
   const isEndowment = isSavings;
   const isAnnuity = isRetirement;
-  const noRiderCategories = isISP || isCSL;
+  const noRiderCategories = isISP || isCSL || isCashInvestment;
   const hasCoverageSection = !noRiderCategories;
-  const hasCV = (isProtection||isSavings||isInvestment||isRetirement) && form.subType!=='Term Life' && !isISP && !isCSL && !isDI && !isPA;
+  const hasCV = (isProtection||isSavings||isInvestment||isRetirement) && form.subType!=='Term Life' && !isISP && !isCSL && !isDI && !isPA && !isCashInvestment;
+  // Matured check for FD/T-bills
+  const fdMatured = isFD && form.fdMaturityDate && new Date(form.fdMaturityDate) < new Date();
 
   // ILP effective rate
   const ilpEffRate = Math.max(0, parseFloat(form.ilpGrowth||6) + parseFloat(form.ilpDivYield||2) - parseFloat(form.ilpMgmtFee||1.5));
@@ -6581,7 +7033,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
           </select></div>
         </div>
         <div className="grid-2">
-          <div className="field"><label>Insurer</label><InsurerSelect value={form.insurer} onChange={v=>set('insurer',v)} /></div>
+          <div className="field"><label>{isCashInvestment ? 'Provider / Bank' : 'Insurer'}</label><InsurerSelect value={form.insurer} onChange={v=>set('insurer',v)} /></div>
           <div className="field"><label>Product Name</label><FuzzyInput value={form.productName} onChange={v=>set('productName',v)} 
             suggestions={repo.filter(r=>!form.insurer||form.insurer===''||r.insurer===form.insurer).map(r=>({label:r.productName,sub:r.insurer+' · '+r.subType+(r.notes?' · '+r.notes.substring(0,60)+'…':''),item:r}))}
             onSelect={item=>{if(item.item){set('insurer',item.item.insurer);set('subType',item.item.subType);set('category',item.item.category);if(item.item.currency)set('currency',item.item.currency);}}}
@@ -6611,6 +7063,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         </div>
 
         {/* ═══ SECTION 3: PREMIUM STRUCTURE (RetireWell-style) ═══ */}
+        {!isCashInvestment && (
         <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)'}}>
           <h4 style={{fontSize:13,fontWeight:600,marginBottom:10,color:'var(--text2)'}}>Premium Structure</h4>
           <div className="grid-3">
@@ -6645,6 +7098,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
             <div className="field"><label>Status</label><select value={form.status} onChange={e=>set('status',e.target.value)}><option value="inforce">In-force</option><option value="lapsed">Lapsed</option><option value="paid-up">Paid-up</option><option value="surrendered">Surrendered</option><option value="matured">Matured</option></select></div>
           </div>
         </div>
+        )}
 
         {/* ═══ RETIREMENT / ANNUITY PLAN ═══ */}
         {isRetirement && (
@@ -6909,13 +7363,33 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         {/* ═══ ISP — INTEGRATED SHIELD PLAN ═══ */}
         {isISP && (
           <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid rgba(59,130,246,.3)'}}>
-            <div style={{fontSize:10,fontWeight:700,color:'var(--teal)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:12}}>ISP Premium Structure — Age {form.premStartAge||30} (AWL: ${getISPAWL(parseInt(form.premStartAge)||30)}/yr)</div>
             {(() => {
-              const age = parseInt(form.premStartAge)||30;
+              // Use client DOB age if available, else fall back to premStartAge field
+              const profileAge = clientAge || 35;
+              const formAge = parseInt(form.premStartAge) || profileAge;
+              const useAge = _cp?.dob ? profileAge : formAge;
+              const anb = useAge + 1;
               const totalPrem = parseFloat(form.annualPremium)||0;
-              const bd = calcISPBreakdown(totalPrem, age);
+              const bd = calcISPBreakdown(totalPrem, useAge);
               const riderPrem = parseFloat(form.riderPremium)||0;
+
+              // Build premium projection for key ages
+              const projectionAges = [];
+              const startProj = Math.max(useAge, 25);
+              for(let a = startProj; a <= 95; a += 5) projectionAges.push(a);
+              // Ensure current age is first
+              if(!projectionAges.includes(useAge)) projectionAges.unshift(useAge);
+              projectionAges.sort((a,b)=>a-b);
+              // Only show reasonable range
+              const projAges = projectionAges.filter(a => a >= useAge && a <= 95).slice(0, 10);
+
               return (<>
+                <div style={{fontSize:10,fontWeight:700,color:'var(--teal)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:12}}>
+                  ISP Premium Structure — Age {useAge} (ANB {anb}) · MediShield Life: <strong>${bd.msl}/yr</strong> · AWL: ${bd.awl}/yr
+                  {_cp?.dob && <span style={{color:'var(--green2)',marginLeft:6}}>✓ from DOB</span>}
+                </div>
+
+                {/* Premium Breakdown Table */}
                 <div style={{borderRadius:8,border:'1px solid var(--border)',overflow:'hidden',marginBottom:10}}>
                   <table style={{width:'100%',fontSize:12,borderCollapse:'collapse'}}>
                     <thead><tr style={{background:'var(--bg2)'}}>
@@ -6926,13 +7400,13 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                     </tr></thead>
                     <tbody>
                       <tr style={{borderTop:'1px solid var(--border)'}}>
-                        <td style={{padding:'6px 10px'}}><strong>① MediShield Life</strong><div style={{fontSize:10,color:'var(--text3)'}}>Mandatory, auto by age · covers B2/C ward</div></td>
+                        <td style={{padding:'6px 10px'}}><strong>① MediShield Life</strong><div style={{fontSize:10,color:'var(--text3)'}}>CPF Board rate · ANB {anb} band · incl 9% GST · fully MediSave</div></td>
                         <td style={{textAlign:'right',padding:'6px 10px'}}>${bd.msl.toLocaleString()}</td>
                         <td style={{textAlign:'right',padding:'6px 10px',color:'var(--teal)',fontWeight:600}}>${bd.msl.toLocaleString()}</td>
                         <td style={{textAlign:'right',padding:'6px 10px',color:'var(--text3)'}}>—</td>
                       </tr>
                       <tr style={{borderTop:'1px solid var(--border)'}}>
-                        <td style={{padding:'6px 10px'}}><strong>② ISP Additional Component</strong><div style={{fontSize:10,color:'var(--text3)'}}>Private coverage top-up · MediSave up to AWL ${bd.awl}/yr (age {age})</div></td>
+                        <td style={{padding:'6px 10px'}}><strong>② ISP Additional Component</strong><div style={{fontSize:10,color:'var(--text3)'}}>Private coverage top-up · MediSave up to AWL ${bd.awl}/yr (ANB {anb})</div></td>
                         <td style={{textAlign:'right',padding:'6px 10px'}}>${bd.ispAdditional.toLocaleString()}</td>
                         <td style={{textAlign:'right',padding:'6px 10px',color:'var(--teal)',fontWeight:600}}>${bd.ispMediSave.toLocaleString()}</td>
                         <td style={{textAlign:'right',padding:'6px 10px',color:bd.ispCash>0?'var(--red)':'var(--text3)',fontWeight:bd.ispCash>0?600:400}}>{bd.ispCash>0?'$'+bd.ispCash.toLocaleString():'—'}</td>
@@ -6953,8 +7427,59 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                   </table>
                 </div>
                 <div style={{fontSize:10,color:'var(--teal)',padding:'6px 10px',background:'rgba(6,182,212,.06)',borderRadius:6,marginBottom:10}}>
-                  📋 <strong>AWL Rule:</strong> Age {age} → MediSave AWL for ISP top-up: <strong>${bd.awl}/yr</strong> (≤40: $300 · 41–70: $600 · 71+: $900) · MSL premiums are fully covered by MediSave on top of AWL
+                  📋 <strong>AWL Rule:</strong> ANB {anb} → MediSave AWL for ISP top-up: <strong>${bd.awl}/yr</strong> (≤40: $300 · 41–70: $600 · 71+: $900) · MSL premiums are fully covered by MediSave on top of AWL
                 </div>
+
+                {/* ═══ PREMIUM PROJECTION BY AGE ═══ */}
+                {totalPrem > 0 && (
+                  <div style={{marginBottom:10}}>
+                    <div style={{fontSize:10,fontWeight:700,color:'var(--text2)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:6}}>
+                      Premium Projection by Age (MediShield Life + AWL)
+                    </div>
+                    <div style={{borderRadius:8,border:'1px solid var(--border)',overflow:'hidden'}}>
+                      <div style={{overflowX:'auto'}}>
+                        <table style={{width:'100%',fontSize:10,borderCollapse:'collapse',minWidth:500}}>
+                          <thead><tr style={{background:'var(--bg2)'}}>
+                            <th style={{padding:'5px 6px',textAlign:'center',fontSize:9}}>Age</th>
+                            <th style={{padding:'5px 6px',textAlign:'center',fontSize:9}}>ANB</th>
+                            <th style={{padding:'5px 6px',textAlign:'right',fontSize:9}}>MSL</th>
+                            <th style={{padding:'5px 6px',textAlign:'right',fontSize:9}}>AWL</th>
+                            <th style={{padding:'5px 6px',textAlign:'right',fontSize:9}}>Max MediSave</th>
+                            <th style={{padding:'5px 6px',textAlign:'right',fontSize:9,color:'var(--red)'}}>Min Cash*</th>
+                          </tr></thead>
+                          <tbody>
+                            {projAges.map(a => {
+                              const projAnb = a + 1;
+                              const projMSL = getMSLPremium(a);
+                              const projAWL = getISPAWL(a);
+                              const projMaxMS = projMSL + projAWL;
+                              // Assume ISP additional component premium grows roughly with MSL ratio
+                              const premRatio = totalPrem > 0 && bd.msl > 0 ? (totalPrem / bd.msl) : 1;
+                              const projTotalPrem = Math.round(projMSL * premRatio);
+                              const projAdditional = Math.max(0, projTotalPrem - projMSL);
+                              const projMediSave = projMSL + Math.min(projAdditional, projAWL);
+                              const projCash = Math.max(0, projAdditional - projAWL) + (parseFloat(form.riderPremium)||0);
+                              const isCurrent = a === useAge;
+                              return (
+                                <tr key={a} style={{borderTop:'1px solid var(--border)',background:isCurrent?'rgba(91,168,160,.06)':'transparent'}}>
+                                  <td style={{padding:'4px 6px',textAlign:'center',fontWeight:isCurrent?700:400}}>{a}{isCurrent?' ●':''}</td>
+                                  <td style={{padding:'4px 6px',textAlign:'center',color:'var(--text3)'}}>{projAnb}</td>
+                                  <td style={{padding:'4px 6px',textAlign:'right'}}>${projMSL.toLocaleString()}</td>
+                                  <td style={{padding:'4px 6px',textAlign:'right',color:'var(--teal)'}}>${projAWL}</td>
+                                  <td style={{padding:'4px 6px',textAlign:'right',color:'var(--teal)',fontWeight:500}}>${projMaxMS.toLocaleString()}</td>
+                                  <td style={{padding:'4px 6px',textAlign:'right',color:projCash>0?'var(--red)':'var(--green2)',fontWeight:projCash>0?600:400}}>{projCash>0?'$'+projCash.toLocaleString():'$0'}</td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </div>
+                      <div style={{fontSize:9,color:'var(--text3)',padding:'4px 8px',background:'var(--bg2)'}}>
+                        * Min Cash = ISP additional beyond AWL + rider premium. Actual ISP premiums change at renewal — projection uses current premium ratio as estimate.
+                      </div>
+                    </div>
+                  </div>
+                )}
               </>);
             })()}
             <div className="grid-3" style={{marginBottom:8}}>
@@ -6978,6 +7503,62 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                 suggestions={repo.filter(r=>r.subType==='Rider'||r.category==='health').map(r=>({label:r.productName,sub:r.insurer+(r.notes?' · '+r.notes.substring(0,50)+'…':'')}))}
                 placeholder="e.g. PRUExtra Premier CoPay" /></div>}
               {form.hasRider && <div className="field"><label>Rider Premium ($/yr, Cash)</label><input type="number" value={form.riderPremium||''} onChange={e=>set('riderPremium',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Always cash — not MediSave payable</div></div>}
+            </div>
+          </div>
+        )}
+
+        {/* ═══ FIXED DEPOSITS / T-BILLS / SSB ═══ */}
+        {isCashInvestment && (
+          <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid rgba(91,168,160,.3)'}}>
+            <div style={{fontSize:10,fontWeight:700,color:'var(--teal)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:12}}>
+              🏦 {form.subType || 'Cash / Fixed Income'} Details
+              {fdMatured && <span style={{marginLeft:8,color:'var(--gold)',fontWeight:600,textTransform:'none'}}>⏰ Matured</span>}
+            </div>
+            <div className="grid-3" style={{marginBottom:8}}>
+              <div className="field"><label>Principal Amount ($)</label><input type="number" value={form.fdPrincipal||''} onChange={e=>set('fdPrincipal',e.target.value)} placeholder="e.g. 50000" />
+                <div style={{fontSize:10,color:'var(--text3)'}}>Amount deposited / invested</div></div>
+              <div className="field"><label>Yield / Coupon (% p.a.)</label><input type="number" step="0.01" value={form.fdYieldPct||''} onChange={e=>set('fdYieldPct',e.target.value)} placeholder="e.g. 3.25" />
+                <div style={{fontSize:10,color:'var(--text3)'}}>{form.subType==='T-bill'?'Discount yield (annualised)':form.subType==='Singapore Savings Bond'?'Average return over holding period':'Annual interest rate'}</div></div>
+              <div className="field"><label>Tenure (months)</label><input type="number" value={form.fdTenureMonths||''} onChange={e=>set('fdTenureMonths',e.target.value)} placeholder={form.subType==='T-bill'?'6':'12'} />
+                <div style={{fontSize:10,color:'var(--text3)'}}>{form.subType==='T-bill'?'6-month or 1-year':'Lock-in period'}</div></div>
+            </div>
+            <div className="grid-3" style={{marginBottom:8}}>
+              <div className="field"><label>Start / Purchase Date</label><input type="date" value={form.fdStartDate||''} onChange={e=>set('fdStartDate',e.target.value)} /></div>
+              <div className="field"><label>Maturity Date</label><input type="date" value={form.fdMaturityDate||''} onChange={e=>set('fdMaturityDate',e.target.value)} />
+                {fdMatured && <div style={{fontSize:10,color:'var(--gold)',fontWeight:600}}>⏰ This has matured — will show in Matured section</div>}
+                {!fdMatured && form.fdMaturityDate && <div style={{fontSize:10,color:'var(--green2)'}}>
+                  {Math.ceil((new Date(form.fdMaturityDate)-new Date())/(86400000*30))} months to maturity
+                </div>}
+              </div>
+              <div className="field"><label>Auto-Renew?</label><select value={form.fdAutoRenew?'yes':'no'} onChange={e=>set('fdAutoRenew',e.target.value==='yes')}>
+                <option value="no">No — matures & returns</option><option value="yes">Yes — auto-rollover</option>
+              </select></div>
+            </div>
+            {/* Interest calculation */}
+            {parseFloat(form.fdPrincipal) > 0 && parseFloat(form.fdYieldPct) > 0 && (
+              <div style={{padding:'8px 12px',background:'rgba(91,168,160,.06)',borderRadius:8,marginBottom:8}}>
+                <div style={{fontSize:10,fontWeight:700,color:'var(--teal)',textTransform:'uppercase',marginBottom:4}}>Projected Returns</div>
+                <div className="grid-3" style={{gap:8}}>
+                  {(() => {
+                    const principal = parseFloat(form.fdPrincipal)||0;
+                    const yieldPct = (parseFloat(form.fdYieldPct)||0)/100;
+                    const tenureMonths = parseInt(form.fdTenureMonths)||12;
+                    const interest = principal * yieldPct * tenureMonths / 12;
+                    const maturityValue = principal + interest;
+                    return (<>
+                      <div><div style={{fontSize:9,color:'var(--text3)'}}>Interest Earned</div><div style={{fontSize:16,fontWeight:700,color:'var(--green2)'}}>${Math.round(interest).toLocaleString()}</div></div>
+                      <div><div style={{fontSize:9,color:'var(--text3)'}}>Maturity Value</div><div style={{fontSize:16,fontWeight:700,color:'var(--teal)'}}>${Math.round(maturityValue).toLocaleString()}</div></div>
+                      <div><div style={{fontSize:9,color:'var(--text3)'}}>Monthly Equiv.</div><div style={{fontSize:16,fontWeight:700,color:'var(--text2)'}}>${Math.round(interest/tenureMonths).toLocaleString()}/mth</div></div>
+                    </>);
+                  })()}
+                </div>
+              </div>
+            )}
+            <div style={{fontSize:10,color:'var(--text3)',padding:'4px 8px',background:'var(--bg2)',borderRadius:6}}>
+              💡 {form.subType==='T-bill'?'T-bills are issued by MAS. Use Provider = MAS and enter the annualised discount yield.':
+                  form.subType==='Singapore Savings Bond'?'SSBs can be redeemed anytime. Enter average yield for your holding period.':
+                  form.subType==='Money Market'?'Enter the fund provider as bank/platform and the current yield rate.':
+                  'Enter the bank as Provider. For promotional rates, note the promotional period in the remarks field.'}
             </div>
           </div>
         )}
