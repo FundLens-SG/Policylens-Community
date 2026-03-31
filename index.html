@@ -7385,7 +7385,6 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                 </div>
               </>);
             })()}
-            </div>
             <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8,cursor:'pointer',userSelect:'none'}} onClick={()=>set('financed',!form.financed)}>
               <div style={{width:36,height:20,borderRadius:10,background:form.financed?'var(--orange)':'var(--border)',position:'relative',flexShrink:0}}>
                 <div style={{position:'absolute',top:2,left:form.financed?18:2,width:16,height:16,borderRadius:'50%',background:'#fff',transition:'left .2s'}}></div>
