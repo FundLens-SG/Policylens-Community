@@ -21,6 +21,7 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.8.2/jspdf.plugin.autotable.min.js"></script>
 <!-- Gemini handles PDFs natively — no pdf.js needed -->
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='38' fill='none' stroke='%23d4a96a' stroke-width='3'/%3E%3Ccircle cx='50' cy='50' r='2.5' fill='%23d4a96a'/%3E%3Cline x1='50' y1='32' x2='50' y2='42' stroke='%23d4a96a' stroke-width='2' stroke-linecap='round'/%3E%3Cline x1='50' y1='58' x2='50' y2='68' stroke='%23d4a96a' stroke-width='2' stroke-linecap='round'/%3E%3Cline x1='32' y1='50' x2='42' y2='50' stroke='%23d4a96a' stroke-width='2' stroke-linecap='round'/%3E%3Cline x1='58' y1='50' x2='68' y2='50' stroke='%23d4a96a' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
@@ -389,11 +390,13 @@ async function loadUsers(){
     var ok=x.approved,col=ok?'var(--green2)':'var(--orange)',bg=ok?'rgba(16,185,129,.1)':'rgba(245,158,11,.1)';
     var d=x.created_at?new Date(x.created_at).toLocaleDateString('en-SG',{day:'numeric',month:'short',year:'numeric'}):'—';
     var uid=x.id;
+    var uemail=x.email||'';
+    var uname=x.full_name||'';
     var btn;
     if(ok){
-      btn='<button onclick="adminAct(&quot;'+uid+'&quot;,false)" style="background:rgba(239,68,68,.15);color:var(--red2);border:none;border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer">Revoke</button>';
+      btn='<button onclick="adminAct(&quot;'+uid+'&quot;,false,&quot;'+uemail+'&quot;,&quot;'+uname+'&quot;)" style="background:rgba(239,68,68,.15);color:var(--red2);border:none;border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer">Revoke</button>';
     } else {
-      btn='<button onclick="adminAct(&quot;'+uid+'&quot;,true)" style="background:rgba(16,185,129,.15);color:var(--green2);border:none;border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer">Approve</button>';
+      btn='<button onclick="adminAct(&quot;'+uid+'&quot;,true,&quot;'+uemail+'&quot;,&quot;'+uname+'&quot;)" style="background:rgba(16,185,129,.15);color:var(--green2);border:none;border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer">Approve</button>';
     }
     h+='<tr><td style="font-weight:500">'+(x.full_name||'—')+'</td><td style="font-size:12px">'+(x.email||'—')+'</td>'
       +'<td><span class="badge" style="background:'+bg+';color:'+col+'">'+(ok?'Approved':'Pending')+'</span></td>'
@@ -402,7 +405,38 @@ async function loadUsers(){
   h+='</tbody></table><div style="font-size:11px;color:var(--text3);margin-top:12px">'+u.length+' users · '+u.filter(function(x){return x.approved}).length+' approved</div>';
   document.getElementById('admin-list').innerHTML=h;
 }
-async function adminAct(id,approve){await sb().from('profiles').update({approved:approve}).eq('id',id);await loadUsers();}
+async function adminAct(id,approve,email,name){
+  await sb().from('profiles').update({approved:approve}).eq('id',id);
+  await loadUsers();
+  if(approve && email) {
+    // Try automated email via Edge Function
+    try {
+      const s = getSB();
+      if(s) {
+        const {data,error} = await s.functions.invoke('send-approval-email', {
+          body: { to: email, name: name || 'there' }
+        });
+        if(!error) { console.log('[Admin] Approval email sent to', email); return; }
+        console.warn('[Admin] Edge function error:', error.message);
+      }
+    } catch(e) { console.warn('[Admin] Auto-email failed:', e.message); }
+    // Fallback: open mailto
+    var subject = encodeURIComponent('PolicyLens Access Approved');
+    var body = encodeURIComponent(
+      'Hi ' + (name||'there') + ',\n\n' +
+      'Great news — your PolicyLens account has been approved!\n\n' +
+      'You can now sign in at:\nhttps://fundlens-sg.github.io/Policylens-Community/\n\n' +
+      'Use the email and password you created during sign-up.\n\n' +
+      'Quick start:\n' +
+      '1. Sign in with your credentials\n' +
+      '2. Go to Settings and add your Gemini API key\n' +
+      '3. Use the Camera or Upload button to scan your first policy\n\n' +
+      'Welcome aboard!\n' +
+      '— PolicyLens Admin'
+    );
+    window.open('mailto:' + email + '?subject=' + subject + '&body=' + body, '_blank');
+  }
+}
 
 // ── Init ──
 document.addEventListener('DOMContentLoaded',function(){
@@ -577,40 +611,93 @@ async function pdfToImages(pdfDoc, maxPages=12) {
 // Master function: takes a File, returns content blocks ready for AI
 async function processFile(file) {
   const isPDF = file.type === 'application/pdf' || file.name?.toLowerCase().endsWith('.pdf');
+  const isExcel = file.name?.match(/\.(xlsx|xls|csv)$/i) || file.type?.includes('spreadsheet') || file.type?.includes('excel');
+  const isWord = file.name?.match(/\.(docx|doc|rtf)$/i) || file.type?.includes('wordprocessing') || file.type?.includes('msword');
   
+  // ── Excel → convert to CSV text via SheetJS ──
+  if(isExcel) {
+    try {
+      if(file.name?.match(/\.csv$/i)) {
+        const text = await file.text();
+        return [{type:'text', text:'[Spreadsheet: '+file.name+']\n'+text.slice(0,80000)}];
+      }
+      const ab = await file.arrayBuffer();
+      if(typeof XLSX !== 'undefined') {
+        const wb = XLSX.read(ab, {type:'array'});
+        let allText = '[Spreadsheet: '+file.name+']\n';
+        for(const sheetName of wb.SheetNames) {
+          const csv = XLSX.utils.sheet_to_csv(wb.Sheets[sheetName], {blankrows:false});
+          allText += '\n--- Sheet: '+sheetName+' ---\n'+csv;
+        }
+        return [{type:'text', text:allText.slice(0,80000)}];
+      }
+    } catch(e) { console.warn('[ProcessFile] Excel parse error:', e); }
+    // Final fallback: tell AI we couldn't read it
+    return [{type:'text', text:'[File: '+file.name+'] — Excel file could not be parsed. SheetJS may not be loaded.'}];
+  }
+
+  // ── Word .docx → extract text (basic XML parse), or send to Claude directly ──
+  if(isWord && file.name?.match(/\.docx$/i)) {
+    try {
+      const ab = await file.arrayBuffer();
+      const uint8 = new Uint8Array(ab);
+      const decoder = new TextDecoder('utf-8', {fatal:false});
+      const raw = decoder.decode(uint8);
+      const matches = raw.match(/<w:t[^>]*>([^<]*)<\/w:t>/g);
+      if(matches && matches.length > 10) {
+        const text = matches.map(m => m.replace(/<[^>]+>/g,'')).join(' ');
+        return [{type:'text', text:'[Document: '+file.name+']\n'+text.slice(0,50000)}];
+      }
+    } catch(e) { console.warn('[ProcessFile] Word parse error:', e); }
+    // Fallback: send as document block for Claude (Gemini can't handle docx)
+    const b64 = await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file)});
+    return [{type:'document', source:{type:'base64', media_type:file.type||'application/octet-stream', data:b64}, _forceAnthropic:true}];
+  }
+  // ── Word .doc / .rtf → force Anthropic ──
+  if(isWord) {
+    const b64 = await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file)});
+    return [{type:'document', source:{type:'base64', media_type:file.type||'application/octet-stream', data:b64}, _forceAnthropic:true}];
+  }
+
+  // ── PDF ──
   if(isPDF) {
     const arrayBuffer = await file.arrayBuffer();
     try {
       const {doc, wasLocked} = await tryUnlockPDF(arrayBuffer);
       if(wasLocked) {
-        // Render pages to images (AI can't read re-encrypted base64)
         const images = await pdfToImages(doc);
         return images.map(b64 => ({type:'image', source:{type:'base64', media_type:'image/jpeg', data:b64}}));
       } else {
-        // Not locked — send raw PDF to Gemini (it handles PDFs natively)
         const b64 = await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file)});
         return [{type:'document', source:{type:'base64', media_type:'application/pdf', data:b64}}];
       }
     } catch(e) {
-      if(e.message.includes('locked') || e.message.includes('password')) {
-        alert(e.message);
-        return [];
-      }
-      // Fallback — send raw base64 (might work if not actually encrypted)
+      if(e.message.includes('locked') || e.message.includes('password')) { alert(e.message); return []; }
       const b64 = await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file)});
       return [{type:'document', source:{type:'base64', media_type:'application/pdf', data:b64}}];
     }
   }
   
-  // Non-PDF handling
+  // ── Images (Gemini + Claude both handle these) ──
   const b64 = await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file)});
   const mime = file.type || 'application/octet-stream';
   if(mime.startsWith('image/')) return [{type:'image', source:{type:'base64', media_type:mime, data:b64}}];
-  if(mime.startsWith('text/') || file.name?.match(/\.(txt|csv|json|md)$/i)) {
+  
+  // ── Text files ──
+  if(mime.startsWith('text/') || file.name?.match(/\.(txt|csv|json|md|html|htm)$/i)) {
     const text = await file.text();
     return [{type:'text', text:'[File: '+file.name+']\n'+text.slice(0,50000)}];
   }
-  return [{type:'document', source:{type:'base64', media_type:mime, data:b64}}];
+  
+  // ── Anything else → try text first, fallback to Claude document block ──
+  try {
+    const text = await file.text();
+    if(text && text.length > 20 && !text.match(/[\x00-\x08\x0E-\x1F]/)) {
+      return [{type:'text', text:'[File: '+file.name+']\n'+text.slice(0,50000)}];
+    }
+  } catch(e){}
+  // Unknown binary → force Anthropic (Claude handles more MIME types than Gemini)
+  return [{type:'document', source:{type:'base64', media_type:mime, data:b64}, _forceAnthropic:true}];
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -3743,27 +3830,103 @@ async function callAI(systemPrompt, contentBlocks, maxTokens) {
   const gk = ((await dbGet('settings','geminiKey_'+uid).catch(()=>null))?.value || (await dbGet('settings','geminiKey').catch(()=>null))?.value || '').trim();
   const ck = ((await dbGet('settings','anthropicKey_'+uid).catch(()=>null))?.value || (await dbGet('settings','anthropicKey').catch(()=>null))?.value || '').trim();
   
-  if(!gk) throw new Error('Set your Gemini API key in Settings first');
+  if(!gk && !ck) throw new Error('Set your Gemini or Anthropic API key in Settings first');
   
   const hasMedia = contentBlocks.some(b=>b.type==='image'||b.type==='document');
+  const forceAnthropic = contentBlocks.some(b=>b._forceAnthropic);
+  const textParts = contentBlocks.filter(b=>b.type==='text').map(b=>b.text).join('\n');
   
-  if(ck && hasMedia) {
-    // DUAL PIPELINE: Gemini reads → Claude extracts
-    console.log('[AI] Dual pipeline: Gemini read → Claude extract');
-    const rawText = await geminiRead(gk, contentBlocks);
-    // Add any text prompts from content blocks
-    const textParts = contentBlocks.filter(b=>b.type==='text').map(b=>b.text).join('\n');
-    return await claudeExtract(ck, systemPrompt, rawText + '\n\n' + textParts, maxTokens);
-  } else if(ck && !hasMedia) {
-    // Text-only → Claude directly (cheapest)
+  // ── Text-only → Claude directly (cheapest) ──
+  if(ck && !hasMedia) {
     console.log('[AI] Text-only → Claude direct');
-    const textParts = contentBlocks.filter(b=>b.type==='text').map(b=>b.text).join('\n');
     return await claudeExtract(ck, systemPrompt, textParts, maxTokens);
-  } else {
-    // GEMINI ONLY (no Anthropic key)
-    console.log('[AI] Gemini-only mode');
-    return await geminiExtract(gk, systemPrompt, contentBlocks, maxTokens);
   }
+
+  // ── Force Anthropic (e.g. docx files Gemini can't handle) ──
+  if(forceAnthropic && ck) {
+    console.log('[AI] Forced Anthropic route (unsupported Gemini MIME)');
+    const claudeContent = contentBlocks.map(b => {
+      if(b.type === 'text') return {type:'text', text:b.text};
+      if(b.type === 'image') return {type:'image', source:b.source};
+      if(b.type === 'document') return {type:'document', source:b.source};
+      return null;
+    }).filter(Boolean);
+    const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      method:'POST',
+      headers:{'Content-Type':'application/json','x-api-key':ck,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body:JSON.stringify({
+        model:'claude-sonnet-4-20250514', max_tokens:maxTokens||8000,
+        system:systemPrompt,
+        messages:[{role:'user', content:claudeContent}]
+      })
+    });
+    if(!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error('Claude: '+(e.error?.message||resp.status)); }
+    const data = await resp.json();
+    return data.content?.map(c=>c.text||'').join('') || '';
+  }
+
+  // ── Dual pipeline: Gemini reads → Claude extracts (with fallback) ──
+  if(ck && hasMedia) {
+    console.log('[AI] Dual pipeline: Gemini read → Claude extract');
+    try {
+      const rawText = await geminiRead(gk, contentBlocks);
+      return await claudeExtract(ck, systemPrompt, rawText + '\n\n' + textParts, maxTokens);
+    } catch(geminiError) {
+      console.warn('[AI] Gemini failed:', geminiError.message, '→ sending media directly to Claude');
+      // Build Claude-native content: images + PDFs sent directly, skip unsupported MIME types
+      const claudeContent = [];
+      for(const block of contentBlocks) {
+        if(block.type === 'text') claudeContent.push(block);
+        else if(block.type === 'image') claudeContent.push(block);
+        else if(block.type === 'document') {
+          const mt = block.source?.media_type || '';
+          // Claude supports: PDF, images, docx, csv, txt, html
+          if(mt === 'application/pdf' || mt.startsWith('image/') || mt.includes('wordprocessing') || mt.includes('msword') ||
+             mt.startsWith('text/') || mt.includes('csv')) {
+            claudeContent.push(block);
+          } else {
+            console.warn('[AI] Skipping unsupported Claude MIME:', mt);
+          }
+        }
+      }
+      // If we have Claude-compatible content, send it directly
+      if(claudeContent.some(b => b.type === 'image' || b.type === 'document')) {
+        console.log('[AI] Sending', claudeContent.length, 'blocks directly to Claude');
+        const resp = await fetch('https://api.anthropic.com/v1/messages', {
+          method:'POST',
+          headers:{'Content-Type':'application/json','x-api-key':ck,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+          body:JSON.stringify({
+            model:'claude-sonnet-4-20250514', max_tokens:maxTokens||8000,
+            system:systemPrompt,
+            messages:[{role:'user', content:claudeContent.map(b => {
+              if(b.type === 'text') return {type:'text', text:b.text};
+              if(b.type === 'image') return {type:'image', source:b.source};
+              if(b.type === 'document') return {type:'document', source:b.source};
+              return {type:'text', text:''};
+            })}]
+          })
+        });
+        if(!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error('Claude: '+(e.error?.message||resp.status)); }
+        const data = await resp.json();
+        return data.content?.map(c=>c.text||'').join('') || '';
+      }
+      // Last resort: text-only to Claude
+      const fallbackText = textParts || 'Document could not be processed. Gemini error: ' + geminiError.message;
+      return await claudeExtract(ck, systemPrompt, fallbackText, maxTokens);
+    }
+  }
+  
+  // ── Gemini only (no Anthropic key) — with error handling ──
+  if(gk) {
+    console.log('[AI] Gemini-only mode');
+    try {
+      return await geminiExtract(gk, systemPrompt, contentBlocks, maxTokens);
+    } catch(e) {
+      throw new Error('Gemini: ' + e.message + (ck ? '' : '. Add an Anthropic key in Settings for better file support.'));
+    }
+  }
+
+  throw new Error('No API keys configured. Go to Settings.');
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -4031,7 +4194,8 @@ function Dashboard() {
   // Dashboard drop handler
   const handleDashDrop = async (files) => {
     const gk = ((await dbGet('settings','geminiKey').catch(()=>null))?.value || '').trim();
-    if(!gk){alert('Set your Gemini API key in Settings first');return;}
+    const ck = ((await dbGet('settings','anthropicKey').catch(()=>null))?.value || '').trim();
+    if(!gk && !ck){alert('Set your Gemini or Anthropic API key in Settings first');return;}
     const choice = confirm('What are these documents?\n\nOK = Client profile (NRIC, FNA, KYC)\nCancel = Policy documents');
     if(choice) setTab('profile');
     else setTab('policies');
@@ -4924,7 +5088,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       </div>
 
       {/* Drop / Paste zone for policy extraction */}
-      {!showForm && <DropZone active={!showForm} onFiles={(files)=>handleExtract(files)} label="📎 Drop or paste policy documents here — AI will extract and populate" />}
+      {!showForm && <DropZone active={!showForm} onFiles={(files)=>handleExtract(files)} label="📎 Drop or paste any document or images — client profile, policy summaries, policy contracts, benefit illustrations" />}
 
       {/* Draft restore banner */}
       {draftBanner && !showForm && (
