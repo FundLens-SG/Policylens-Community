@@ -523,6 +523,7 @@ const CATEGORIES = {
   retirement: {label:'Retirement',color:'var(--cat-retirement)',icon:'🏖️'},
   maternity: {label:'Maternity',color:'var(--cat-maternity)',icon:'👶'},
   cash_investments: {label:'Cash / FI / Bonds / Deposits',color:'#5ba8a0',icon:'🏦'},
+  other_assets: {label:'Other Assets',color:'#8b7355',icon:'🏠'},
 };
 
 const SUB_TYPES = {
@@ -533,6 +534,7 @@ const SUB_TYPES = {
   retirement: ['Retirement','Annuity'],
   maternity: ['Maternity Coverage'],
   cash_investments: ['Fixed Deposit','T-bill','Singapore Savings Bond','Corporate Bond','Money Market'],
+  other_assets: ['Property','Stocks/Equities','Gold/Precious Metals','Fixed Coupon Note (FCN)','Equity Linked Note (ELN)','Options/Futures','Cryptocurrency','Art/Collectibles','Other'],
 };
 
 const UL_FAMILY = ['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'];
@@ -6639,7 +6641,7 @@ function Policies() {
 
 For EACH policy or instrument, return a JSON object with:
 
-CORE: insurer, productName, policyName, policyNumber, category (protection/savings/health/investment/retirement/maternity/cash_investments), subType (Term Life/Whole Life/Universal Life (UL)/Indexed UL (IUL)/Variable UL (VUL)/Critical Illness/Personal Accident/Disability Income/Long-term Care/Endowment/Lifetime Endowment/Education Plan/Short-term Endowment/Integrated Shield Plan/Hospital Income/ILP (Protection)/ILP (Investment)/Retirement/Annuity/Maternity Coverage/Fixed Deposit/T-bill/Singapore Savings Bond/Money Market), currency (default SGD), sumAssured (number), annualPremium (number), premFrequency (annual/monthly/single/unknown — if document does not clearly state frequency, use unknown), premiumStructure (Single Premium/Regular Premium/Limited Pay/Flexible Premium), paymentMethod (Cash/MediSave/SRS/MediSave+Cash/CPF OA)
+CORE: insurer, productName, policyName, policyNumber, category (protection/savings/health/investment/retirement/maternity/cash_investments/other_assets), subType (Term Life/Whole Life/Universal Life (UL)/Indexed UL (IUL)/Variable UL (VUL)/Critical Illness/Personal Accident/Disability Income/Long-term Care/Endowment/Lifetime Endowment/Education Plan/Short-term Endowment/Integrated Shield Plan/Hospital Income/ILP (Protection)/ILP (Investment)/Retirement/Annuity/Maternity Coverage/Fixed Deposit/T-bill/Singapore Savings Bond/Corporate Bond/Money Market/Property/Stocks\/Equities/Gold\/Precious Metals/Fixed Coupon Note (FCN)/Equity Linked Note (ELN)/Options\/Futures/Cryptocurrency/Other), currency (default SGD), sumAssured (number), annualPremium (number), premFrequency (annual/monthly/single/unknown — if document does not clearly state frequency, use unknown), premiumStructure (Single Premium/Regular Premium/Limited Pay/Flexible Premium), paymentMethod (Cash/MediSave/SRS/MediSave+Cash/CPF OA)
 
 FIXED DEPOSITS / T-BILLS / SSB (category: cash_investments):
 - insurer = bank name (e.g. "DBS", "OCBC", "ICBC", "BOC", "Standard Chartered")
@@ -7008,11 +7010,12 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       const errMsg = (e.message||'').toLowerCase();
       if(errMsg.includes('networkerror') || errMsg.includes('failed to fetch') || errMsg.includes('network') || e instanceof TypeError) {
         msg = '🚫 Network Error — API calls are being blocked.\n\nThis is usually caused by:\n\n';
-        msg += '1. Ad blocker (Adblock Plus, uBlock, etc.) — disable it for this site\n';
-        msg += '2. Browser privacy extensions blocking API requests\n';
-        msg += '3. Corporate firewall/proxy blocking external API calls\n\n';
-        msg += 'Fix: Open your ad blocker → whitelist fundlens-sg.github.io\n';
-        msg += 'Or try: Incognito/Private window (extensions are disabled by default)';
+        msg += '1. Firefox Enhanced Tracking Protection — click the shield 🛡️ icon in URL bar → turn OFF for this site\n';
+        msg += '2. Ad blocker (Adblock Plus, uBlock, etc.) — disable for this site\n';
+        msg += '3. Browser privacy extensions blocking API requests\n';
+        msg += '4. Corporate firewall/proxy blocking external API calls\n\n';
+        msg += 'Fix: Click 🛡️ shield icon → disable protection for this site\n';
+        msg += 'Or: Settings → Privacy → Enhanced Tracking Protection → add exception for fundlens-sg.github.io';
       } else if(errMsg.includes('cors') || errMsg.includes('origin')) {
         msg = '🚫 CORS Error — Browser is blocking API requests.\n\nDisable ad blocker or try Incognito mode.';
       } else if(errMsg.includes('parse') || errMsg.includes('json')) {
@@ -7133,114 +7136,164 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       ) : (<>
         {(() => {
           // Group policies into sections
-          const groups = [
-            {id:'protection', main:'Insurance', sub:'Protection', icon:'🛡', match: p => p.category==='protection' && !['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(p.subType)},
-            {id:'ul', main:'Insurance', sub:'Universal Life', icon:'💎', match: p => ['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(p.subType)},
-            {id:'investment', main:'Insurance', sub:'Investment', icon:'📈', match: p => p.category==='investment'},
-            {id:'savings_ret', main:'Insurance', sub:'Endowment, Retirement & Annuities', icon:'🏦', match: p => p.category==='savings' || p.category==='retirement'},
-            {id:'health', main:'Insurance', sub:'Accident & Medical', icon:'🏥', match: p => p.category==='health' || p.category==='maternity'},
-            {id:'fi', main:'Fixed Deposits, T-bills & Bonds', sub:null, icon:'💰', match: p => p.category==='cash_investments'},
+          const insuranceGroups = [
+            {id:'protection', sub:'Protection', icon:'🛡', color:'#5b8fd9', match: p => p.category==='protection' && !['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(p.subType)},
+            {id:'ul', sub:'Universal Life', icon:'💎', color:'#9d8abf', match: p => ['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(p.subType)},
+            {id:'investment', sub:'Investment', icon:'📈', color:'var(--green2)', match: p => p.category==='investment'},
+            {id:'savings_ret', sub:'Endowment, Retirement & Annuities', icon:'🏦', color:'var(--gold)', match: p => p.category==='savings' || p.category==='retirement'},
+            {id:'health', sub:'Accident & Medical', icon:'🏥', color:'#c97b9a', match: p => p.category==='health' || p.category==='maternity'},
           ];
-          // Assign policies to groups (first match wins)
-          const grouped = groups.map(g => ({...g, items: activePolicies.filter(g.match)}));
-          // Unmatched
-          const matched = new Set(grouped.flatMap(g => g.items.map(p => p.id)));
-          const unmatched = activePolicies.filter(p => !matched.has(p.id));
-          if(unmatched.length) grouped.push({id:'other', main:'Other', sub:null, icon:'📋', items:unmatched});
-          // Filter out empty groups
-          const nonEmpty = grouped.filter(g => g.items.length > 0);
-          // Track main headers already rendered
-          let lastMain = '';
+          const fiItems = activePolicies.filter(p => p.category==='cash_investments');
+          const otherItems = activePolicies.filter(p => p.category==='other_assets');
+          const insGroups = insuranceGroups.map(g => ({...g, items: activePolicies.filter(g.match).sort((a,b) => (a.insurer||'').localeCompare(b.insurer||'') || (a.productName||'').localeCompare(b.productName||''))})).filter(g => g.items.length > 0);
+          // Unmatched (not in any group above)
+          const allGrouped = new Set([...insGroups.flatMap(g=>g.items.map(p=>p.id)), ...fiItems.map(p=>p.id), ...otherItems.map(p=>p.id)]);
+          const unmatchedIns = activePolicies.filter(p => !allGrouped.has(p.id));
+          if(unmatchedIns.length) insGroups.push({id:'other_ins', sub:'Other', icon:'📋', color:'var(--text3)', items:unmatchedIns});
+          const hasInsurance = insGroups.length > 0;
+          const hasFI = fiItems.length > 0;
+          const hasOther = otherItems.length > 0;
 
-          // Row renderer
-          const renderRow = (p, isFI) => {
+          // Benefit icons renderer
+          const benIcons = (p) => {
             const bens = [];
             const rds = p.riders||[];
-            if(rds.some(r=>r.type==='death'&&parseFloat(r.sa)>0) || (p.category==='protection'&&parseFloat(p.sumAssured)>0)) bens.push({l:'D',c:'#5b8fd9',t:'Death & TI'});
-            if(rds.some(r=>r.type==='tpd'&&parseFloat(r.sa)>0)) bens.push({l:'T',c:'#9d8abf',t:'TPD'});
-            if(rds.some(r=>r.type==='ci'&&parseFloat(r.sa)>0) || p.subType==='Critical Illness') bens.push({l:'CI',c:'#c97b9a',t:'Critical Illness'});
-            if(rds.some(r=>r.type==='eci'&&parseFloat(r.sa)>0)) bens.push({l:'E',c:'#d4a96a',t:'Early CI'});
-            if(rds.some(r=>r.type==='di'&&parseFloat(r.sa)>0) || p.subType==='Disability Income') bens.push({l:'DI',c:'#5ba8a0',t:'Disability'});
-            if(parseFloat(p.cashValue)>0 || ['Whole Life','Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(p.subType) || p.category==='savings' || p.category==='investment' || p.category==='retirement') bens.push({l:'SV',c:'#d4a96a',t:'Surrender Value'});
-            return (
-              <tr key={p.id} style={{background:selected.has(p.id)?'rgba(212,169,106,.06)':'transparent'}}>
-                <td style={{width:30}}><input type='checkbox' checked={selected.has(p.id)} onChange={()=>toggleSelect(p.id)} style={{accentColor:'var(--gold)'}} /></td>
-                <td>
-                  <div style={{fontWeight:500}}>{p.policyName || p.productName || 'Unnamed'}</div>
-                  {p.policyNumber && <div style={{fontSize:11,color:'var(--text3)'}}>{p.policyNumber}</div>}
-                  {p.userRemarks && <div style={{fontSize:10,color:'var(--gold)',fontStyle:'italic',marginTop:1,display:'flex',alignItems:'center',gap:4}} title={p.userRemarks}>
-                    <span>"{p.userRemarks.length > 40 ? p.userRemarks.substring(0,40)+'...' : p.userRemarks}"</span>
-                    <span style={{cursor:'pointer',fontSize:8,opacity:.6,flexShrink:0}} title="Delete remark" onClick={e=>{e.stopPropagation();savePolicy({...p,userRemarks:''});}}>✕</span>
-                  </div>}
-                  {!isFI && bens.length > 0 && <div style={{display:'flex',gap:3,marginTop:3,flexWrap:'wrap'}}>
-                    {bens.map((b,i) => <span key={i} title={b.t} style={{fontSize:8,fontWeight:700,padding:'1px 4px',borderRadius:3,background:b.c+'22',color:b.c,letterSpacing:'.3px'}}>{b.l}</span>)}
-                  </div>}
-                </td>
-                <td style={{fontSize:12,color:'var(--text2)'}}>{isFI ? (p.subType||'Fixed Deposit') : p.subType==='Integrated Shield Plan' && p.hasRider ? 'ISP + Rider' : p.subType||'-'}</td>
-                <td>{p.insurer?<InsurerBadge name={p.insurer} />:'-'}</td>
-                {isFI ? (<>
-                  <td className="mono">{p.fdPrincipal ? '$'+parseInt(p.fdPrincipal).toLocaleString() : '-'}</td>
-                  <td className="mono">{p.fdYieldPct ? <span style={{color:'var(--green2)',fontWeight:600}}>{p.fdYieldPct}% p.a.</span> : '-'}</td>
-                  <td className="mono" style={{fontSize:11}}>{p.fdMaturityDate ? (new Date(p.fdMaturityDate)<new Date() ? <span style={{color:'var(--gold)'}}>Matured</span> : new Date(p.fdMaturityDate).toLocaleDateString('en-SG',{day:'numeric',month:'short',year:'2-digit'})) : '-'}</td>
-                </>) : (<>
-                  <td className="mono">{fmt(p.sumAssured,p.currency||'SGD')}</td>
-                  <td className="mono">
-                    {p.premiumStructure==='Single Premium' || p.premFrequency==='single' || p.premSingle ? (
-                      <div><div style={{fontSize:11}}>{fmt(p.annualPremium,p.currency||'SGD')}</div><div style={{fontSize:9,color:'var(--gold)'}}>Single Premium</div></div>
-                    ) : p.premFrequency==='monthly' ? (
-                      <div><div style={{fontSize:11}}>{fmt(p.annualPremium,p.currency||'SGD')}/mth</div><div style={{fontSize:9,color:'var(--text3)'}}>{fmt(parseFloat(p.annualPremium)*12,p.currency||'SGD')}/yr</div></div>
-                    ) : p.premFrequency==='unknown' ? (
-                      <div><div style={{fontSize:11}}>{fmt(p.annualPremium,p.currency||'SGD')}</div><div style={{fontSize:9,color:'var(--orange)'}}>Freq. unconfirmed</div></div>
-                    ) : (
-                      <div>{fmt(p.annualPremium,p.currency||'SGD')}</div>
-                    )}
-                  </td>
-                </>)}
-                <td>
-                  <div style={{display:'flex',gap:4}}>
-                    <button className="btn-secondary btn-sm" onClick={()=>{setEditing(p);setTimeout(()=>setShowForm(true),50)}}>Edit</button>
-                    <button className="btn-danger btn-sm" onClick={()=>{if(confirm('Delete this policy?'))deletePolicy(p.id)}}>×</button>
-                  </div>
-                </td>
-              </tr>
-            );
+            if(rds.some(r=>r.type==='death'&&parseFloat(r.sa)>0)||(p.category==='protection'&&parseFloat(p.sumAssured)>0)) bens.push({l:'D',c:'#5b8fd9'});
+            if(rds.some(r=>r.type==='tpd'&&parseFloat(r.sa)>0)) bens.push({l:'T',c:'#9d8abf'});
+            if(rds.some(r=>r.type==='ci'&&parseFloat(r.sa)>0)||p.subType==='Critical Illness') bens.push({l:'CI',c:'#c97b9a'});
+            if(rds.some(r=>r.type==='eci'&&parseFloat(r.sa)>0)) bens.push({l:'E',c:'#d4a96a'});
+            if(rds.some(r=>r.type==='di'&&parseFloat(r.sa)>0)||p.subType==='Disability Income') bens.push({l:'DI',c:'#5ba8a0'});
+            if(parseFloat(p.cashValue)>0||['Whole Life','Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(p.subType)||p.category==='savings'||p.category==='investment'||p.category==='retirement') bens.push({l:'SV',c:'#d4a96a'});
+            return bens;
           };
 
-          return nonEmpty.map(group => {
-            const isFI = group.id === 'fi';
-            const showMainHeader = group.main !== lastMain;
-            lastMain = group.main;
-            return (
-              <div key={group.id} style={{marginBottom:4}}>
-                {/* Main header */}
-                {showMainHeader && (
-                  <div style={{padding:'10px 12px 4px',display:'flex',alignItems:'center',gap:8}}>
-                    <span style={{fontSize:14,fontWeight:700,color:'var(--gold)'}}>{group.main}</span>
-                    <div style={{flex:1,height:1,background:'var(--gold3)'}} />
-                  </div>
-                )}
-                {/* Sub header */}
-                {group.sub && (
-                  <div style={{padding:'4px 12px 2px',fontSize:11,fontWeight:600,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.5px'}}>
-                    {group.icon} {group.sub} ({group.items.length})
-                  </div>
-                )}
-                <div style={{overflowX:'auto'}}>
-                  <table style={{marginBottom:0}}>
-                    <thead><tr>
-                      <th style={{width:30}}><input type='checkbox' checked={group.items.every(p=>selected.has(p.id))&&group.items.length>0} onChange={()=>{const ids=group.items.map(p=>p.id);const allSel=ids.every(id=>selected.has(id));setSelected(prev=>{const n=new Set(prev);ids.forEach(id=>allSel?n.delete(id):n.add(id));return n;});}} style={{accentColor:'var(--gold)'}} /></th>
-                      <th>Policy</th><th>Sub-type</th><th>{isFI?'Bank/Provider':'Insurer'}</th>
-                      {isFI ? (<><th>Principal</th><th>Yield</th><th>Maturity</th></>) : (<><th>Sum Assured</th><th>Premium</th></>)}
-                      <th>Actions</th>
-                    </tr></thead>
-                    <tbody>
-                      {[...group.items].sort((a,b) => (a.insurer||'').localeCompare(b.insurer||'') || (a.productName||'').localeCompare(b.productName||'')).map(p => renderRow(p, isFI))}
-                    </tbody>
-                  </table>
-                </div>
+          // Premium cell
+          const premCell = (p) => {
+            if(p.premSingle||p.premiumStructure==='Single Premium'||p.premFrequency==='single') return <div><div style={{fontSize:11}}>{fmt(p.annualPremium,p.currency||'SGD')}</div><div style={{fontSize:9,color:'var(--gold)'}}>Single Premium</div></div>;
+            if(p.premFrequency==='monthly') return <div><div style={{fontSize:11}}>{fmt(p.annualPremium,p.currency||'SGD')}/mth</div><div style={{fontSize:9,color:'var(--text3)'}}>{fmt(parseFloat(p.annualPremium)*12,p.currency||'SGD')}/yr</div></div>;
+            if(p.premFrequency==='unknown') return <div><div style={{fontSize:11}}>{fmt(p.annualPremium,p.currency||'SGD')}</div><div style={{fontSize:9,color:'var(--orange)'}}>Unconfirmed</div></div>;
+            return <div>{fmt(p.annualPremium,p.currency||'SGD')}</div>;
+          };
+
+          // Action buttons
+          const actions = (p) => <div style={{display:'flex',gap:4}}><button className="btn-secondary btn-sm" onClick={()=>{setEditing(p);setTimeout(()=>setShowForm(true),50)}}>Edit</button><button className="btn-danger btn-sm" onClick={()=>{if(confirm('Delete?'))deletePolicy(p.id)}}>×</button></div>;
+
+          return (<>
+            {/* ═══ INSURANCE ═══ */}
+            {hasInsurance && (<>
+              <div style={{display:'flex',alignItems:'center',gap:10,margin:'8px 0 6px'}}>
+                <h3 style={{fontSize:17,fontWeight:800,color:'var(--gold)',letterSpacing:'.3px',margin:0}}>Insurance</h3>
+                <div style={{flex:1,height:2,background:'linear-gradient(90deg,var(--gold3),transparent)'}} />
               </div>
-            );
-          });
+              <div style={{overflowX:'auto',marginBottom:12}}>
+                <table>
+                  <colgroup><col style={{width:32}}/><col/><col style={{width:'14%'}}/><col style={{width:'12%'}}/><col style={{width:'13%'}}/><col style={{width:'14%'}}/><col style={{width:90}}/></colgroup>
+                  {insGroups.map(group => (
+                    <React.Fragment key={group.id}>
+                      <thead><tr>
+                        <th colSpan={7} style={{padding:'10px 8px 6px',background:'var(--bg2)',borderBottom:'2px solid '+group.color,fontSize:0}}>
+                          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+                            <div style={{display:'flex',alignItems:'center',gap:6}}>
+                              <input type='checkbox' checked={group.items.every(p=>selected.has(p.id))&&group.items.length>0} onChange={()=>{const ids=group.items.map(p=>p.id);const allSel=ids.every(id=>selected.has(id));setSelected(prev=>{const n=new Set(prev);ids.forEach(id=>allSel?n.delete(id):n.add(id));return n;});}} style={{accentColor:'var(--gold)'}} />
+                              <span style={{fontSize:13,fontWeight:700,color:group.color}}>{group.icon} {group.sub}</span>
+                              <span style={{fontSize:11,color:'var(--text3)',fontWeight:400}}>({group.items.length})</span>
+                            </div>
+                          </div>
+                        </th>
+                      </tr>
+                      <tr style={{fontSize:10,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.5px'}}>
+                        <th style={{width:32}}></th><th style={{textAlign:'left'}}>Policy</th><th>Sub-type</th><th>Insurer</th><th style={{textAlign:'right'}}>Sum Assured</th><th style={{textAlign:'right'}}>Premium</th><th>Actions</th>
+                      </tr></thead>
+                      <tbody>
+                        {group.items.map(p => {
+                          const bens = benIcons(p);
+                          return (
+                            <tr key={p.id} style={{background:selected.has(p.id)?'rgba(212,169,106,.06)':'transparent'}}>
+                              <td><input type='checkbox' checked={selected.has(p.id)} onChange={()=>toggleSelect(p.id)} style={{accentColor:'var(--gold)'}} /></td>
+                              <td>
+                                <div style={{fontWeight:500}}>{p.policyName||p.productName||'Unnamed'}</div>
+                                {p.policyNumber && <div style={{fontSize:10,color:'var(--text3)'}}>{p.policyNumber}</div>}
+                                {p.userRemarks && <div style={{fontSize:9,color:'var(--gold)',fontStyle:'italic',display:'flex',alignItems:'center',gap:3}}>"{p.userRemarks.length>35?p.userRemarks.substring(0,35)+'…':p.userRemarks}" <span style={{cursor:'pointer',fontSize:7,opacity:.5}} onClick={e=>{e.stopPropagation();savePolicy({...p,userRemarks:''});}}>✕</span></div>}
+                                {bens.length>0 && <div style={{display:'flex',gap:2,marginTop:2}}>{bens.map((b,i)=><span key={i} style={{fontSize:7,fontWeight:700,padding:'1px 3px',borderRadius:3,background:b.c+'22',color:b.c}}>{b.l}</span>)}</div>}
+                              </td>
+                              <td style={{fontSize:11,color:'var(--text2)'}}>{p.subType==='Integrated Shield Plan'&&p.hasRider?'ISP + Rider':p.subType||'—'}</td>
+                              <td>{p.insurer?<InsurerBadge name={p.insurer}/>:'—'}</td>
+                              <td className="mono" style={{textAlign:'right'}}>{fmt(p.sumAssured,p.currency||'SGD')}</td>
+                              <td className="mono" style={{textAlign:'right'}}>{premCell(p)}</td>
+                              <td>{actions(p)}</td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </React.Fragment>
+                  ))}
+                </table>
+              </div>
+            </>)}
+
+            {/* ═══ FIXED DEPOSITS / BONDS ═══ */}
+            {hasFI && (<>
+              <div style={{display:'flex',alignItems:'center',gap:10,margin:'12px 0 6px'}}>
+                <h3 style={{fontSize:17,fontWeight:800,color:'var(--teal)',letterSpacing:'.3px',margin:0}}>Fixed Deposits, T-bills & Bonds</h3>
+                <div style={{flex:1,height:2,background:'linear-gradient(90deg,rgba(91,168,160,.3),transparent)'}} />
+              </div>
+              <div style={{overflowX:'auto',marginBottom:12}}>
+                <table>
+                  <colgroup><col style={{width:32}}/><col/><col style={{width:'14%'}}/><col style={{width:'12%'}}/><col style={{width:'13%'}}/><col style={{width:'12%'}}/><col style={{width:90}}/></colgroup>
+                  <thead><tr style={{fontSize:10,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.5px'}}>
+                    <th style={{width:32}}><input type='checkbox' checked={fiItems.every(p=>selected.has(p.id))&&fiItems.length>0} onChange={()=>{const ids=fiItems.map(p=>p.id);const allSel=ids.every(id=>selected.has(id));setSelected(prev=>{const n=new Set(prev);ids.forEach(id=>allSel?n.delete(id):n.add(id));return n;});}} style={{accentColor:'var(--gold)'}} /></th>
+                    <th style={{textAlign:'left'}}>Instrument</th><th>Type</th><th>Bank</th><th style={{textAlign:'right'}}>Principal</th><th style={{textAlign:'right'}}>Yield</th><th>Actions</th>
+                  </tr></thead>
+                  <tbody>
+                    {fiItems.sort((a,b)=>(a.insurer||'').localeCompare(b.insurer||'')).map(p => (
+                      <tr key={p.id} style={{background:selected.has(p.id)?'rgba(212,169,106,.06)':'transparent'}}>
+                        <td><input type='checkbox' checked={selected.has(p.id)} onChange={()=>toggleSelect(p.id)} style={{accentColor:'var(--gold)'}} /></td>
+                        <td>
+                          <div style={{fontWeight:500}}>{p.productName||p.policyName||p.subType||'Unnamed'}</div>
+                          {p.userRemarks && <div style={{fontSize:9,color:'var(--gold)',fontStyle:'italic'}}>"{p.userRemarks.length>35?p.userRemarks.substring(0,35)+'…':p.userRemarks}"</div>}
+                          {p.fdMaturityDate && <div style={{fontSize:9,color:new Date(p.fdMaturityDate)<new Date()?'var(--gold)':'var(--text3)'}}>{new Date(p.fdMaturityDate)<new Date()?'Matured':('Mat: '+new Date(p.fdMaturityDate).toLocaleDateString('en-SG',{day:'numeric',month:'short',year:'2-digit'}))}</div>}
+                        </td>
+                        <td style={{fontSize:11,color:'var(--text2)'}}>{p.subType||'FD'}</td>
+                        <td>{p.insurer?<InsurerBadge name={p.insurer}/>:'—'}</td>
+                        <td className="mono" style={{textAlign:'right'}}>{p.fdPrincipal?'$'+parseInt(p.fdPrincipal).toLocaleString():'—'}</td>
+                        <td className="mono" style={{textAlign:'right'}}>{p.fdYieldPct?<span style={{color:'var(--green2)',fontWeight:600}}>{p.fdYieldPct}%</span>:'—'}</td>
+                        <td>{actions(p)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>)}
+
+            {/* ═══ OTHER ASSETS ═══ */}
+            {hasOther && (<>
+              <div style={{display:'flex',alignItems:'center',gap:10,margin:'12px 0 6px'}}>
+                <h3 style={{fontSize:17,fontWeight:800,color:'#8b7355',letterSpacing:'.3px',margin:0}}>Other Assets</h3>
+                <div style={{flex:1,height:2,background:'linear-gradient(90deg,rgba(139,115,85,.3),transparent)'}} />
+              </div>
+              <div style={{overflowX:'auto',marginBottom:12}}>
+                <table>
+                  <colgroup><col style={{width:32}}/><col/><col style={{width:'14%'}}/><col style={{width:'12%'}}/><col style={{width:'13%'}}/><col style={{width:'12%'}}/><col style={{width:90}}/></colgroup>
+                  <thead><tr style={{fontSize:10,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.5px'}}>
+                    <th style={{width:32}}></th><th style={{textAlign:'left'}}>Asset</th><th>Type</th><th>Provider</th><th style={{textAlign:'right'}}>Value</th><th style={{textAlign:'right'}}>Yield / Return</th><th>Actions</th>
+                  </tr></thead>
+                  <tbody>
+                    {otherItems.sort((a,b)=>(a.subType||'').localeCompare(b.subType||'')).map(p => (
+                      <tr key={p.id}>
+                        <td><input type='checkbox' checked={selected.has(p.id)} onChange={()=>toggleSelect(p.id)} style={{accentColor:'var(--gold)'}} /></td>
+                        <td><div style={{fontWeight:500}}>{p.productName||p.policyName||'Unnamed'}</div>{p.userRemarks && <div style={{fontSize:9,color:'var(--gold)',fontStyle:'italic'}}>"{p.userRemarks.length>35?p.userRemarks.substring(0,35)+'…':p.userRemarks}"</div>}</td>
+                        <td style={{fontSize:11,color:'var(--text2)'}}>{p.subType||'—'}</td>
+                        <td>{p.insurer?<InsurerBadge name={p.insurer}/>:'—'}</td>
+                        <td className="mono" style={{textAlign:'right'}}>{p.fdPrincipal?'$'+parseInt(p.fdPrincipal).toLocaleString():p.sumAssured?fmt(p.sumAssured):p.annualPremium?fmt(p.annualPremium):'—'}</td>
+                        <td className="mono" style={{textAlign:'right'}}>{p.fdYieldPct?p.fdYieldPct+'%':p.retAccumYield?p.retAccumYield+'%':'—'}</td>
+                        <td>{actions(p)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>)}
+          </>);
         })()}
 
         {/* ═══ MATURED FIXED DEPOSITS / T-BILLS ═══ */}
@@ -7411,6 +7464,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
   const isVUL = form.subType==='Variable UL (VUL)';
   const isMaternity = form.category === 'maternity';
   const isCashInvestment = form.category === 'cash_investments';
+  const isOtherAsset = form.category === 'other_assets';
   const isFD = ['Fixed Deposit','T-bill','Singapore Savings Bond','Corporate Bond','Money Market'].includes(form.subType);
   const isILP = form.subType==='ILP (Protection)' || form.subType==='ILP (Investment)';
   const isISP = form.subType==='Integrated Shield Plan';
@@ -7589,7 +7643,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         </div>
 
         {/* ═══ SECTION 3: PREMIUM STRUCTURE ═══ */}
-        {!isCashInvestment && (
+        {!isCashInvestment && !isOtherAsset && (
         <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)'}}>
           <h4 style={{fontSize:13,fontWeight:600,marginBottom:10,color:'var(--text2)'}}>Premium Structure</h4>
           <div className="grid-3">
@@ -8150,6 +8204,47 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                   form.subType==='Money Market'?'Enter the fund provider as bank/platform and the current yield rate.':
                   'Enter the bank as Provider. For promotional rates, note the promotional period in the remarks field.'}
             </div>
+          </div>
+        )}
+
+        {/* ═══ OTHER ASSETS ═══ */}
+        {isOtherAsset && (
+          <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid rgba(139,115,85,.3)'}}>
+            <div style={{fontSize:10,fontWeight:700,color:'#8b7355',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:12}}>
+              🏠 {form.subType || 'Other Asset'} Details
+            </div>
+            <div className="grid-3" style={{marginBottom:8}}>
+              <div className="field"><label>{['Property'].includes(form.subType)?'Property Value ($)':'Current Value ($)'}</label>
+                <input type="number" value={form.fdPrincipal||form.sumAssured||''} onChange={e=>{set('fdPrincipal',e.target.value);set('sumAssured',e.target.value);}} placeholder="Market value" />
+              </div>
+              <div className="field"><label>{form.subType==='Property'?'Purchase Price ($)':'Cost Basis ($)'}</label>
+                <input type="number" value={form.annualPremium||''} onChange={e=>set('annualPremium',e.target.value)} placeholder="Original cost" />
+              </div>
+              <div className="field"><label>{form.subType==='Property'?'Rental Yield (% p.a.)':'Return / Yield (% p.a.)'}</label>
+                <input type="number" step="0.1" value={form.fdYieldPct||form.retAccumYield||''} onChange={e=>{set('fdYieldPct',e.target.value);set('retAccumYield',e.target.value);}} placeholder="e.g. 4.5" />
+              </div>
+            </div>
+            <div className="grid-3" style={{marginBottom:8}}>
+              <div className="field"><label>Purchase Date</label><input type="date" value={form.fdStartDate||form.inceptionDate||''} onChange={e=>{set('fdStartDate',e.target.value);set('inceptionDate',e.target.value);}} /></div>
+              <div className="field"><label>{form.subType==='Property'?'Address / Location':'Platform / Broker'}</label>
+                <input value={form.insurer||''} onChange={e=>set('insurer',e.target.value)} placeholder={form.subType==='Property'?'e.g. Blk 123 Ang Mo Kio':'e.g. Tiger Brokers, DBS Vickers'} />
+              </div>
+              <div className="field"><label>Currency</label><select value={form.currency||'SGD'} onChange={e=>set('currency',e.target.value)}><option>SGD</option><option>USD</option><option>HKD</option><option>GBP</option><option>EUR</option></select></div>
+            </div>
+            {form.subType==='Property' && (
+              <div className="grid-3" style={{marginBottom:8}}>
+                <div className="field"><label>Monthly Rental ($)</label><input type="number" value={form.annuityMonthly||''} onChange={e=>{set('annuityMonthly',e.target.value);set('annuityPayout',String((parseFloat(e.target.value)||0)*12));}} placeholder="0 if owner-occupied" /></div>
+                <div className="field"><label>Outstanding Loan ($)</label><input type="number" value={form.finLoan||''} onChange={e=>set('finLoan',e.target.value)} placeholder="0" /></div>
+                <div className="field"><label>Loan Rate (% p.a.)</label><input type="number" step="0.1" value={form.finRate||''} onChange={e=>set('finRate',e.target.value)} placeholder="e.g. 3.5" /></div>
+              </div>
+            )}
+            {(form.subType==='Fixed Coupon Note (FCN)'||form.subType==='Equity Linked Note (ELN)') && (
+              <div className="grid-3" style={{marginBottom:8}}>
+                <div className="field"><label>Coupon Rate (% p.a.)</label><input type="number" step="0.1" value={form.fdYieldPct||''} onChange={e=>set('fdYieldPct',e.target.value)} /></div>
+                <div className="field"><label>Maturity Date</label><input type="date" value={form.fdMaturityDate||form.maturityDate||''} onChange={e=>{set('fdMaturityDate',e.target.value);set('maturityDate',e.target.value);}} /></div>
+                <div className="field"><label>Underlying</label><input value={form.notes||''} onChange={e=>set('notes',e.target.value)} placeholder="e.g. DBS, OCBC, UOB basket" /></div>
+              </div>
+            )}
           </div>
         )}
 
