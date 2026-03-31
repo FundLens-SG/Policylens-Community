@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>PolicyLens v4</title>
+<title>PolicyLens V1.0</title>
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#0b0f1a">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -3989,7 +3989,7 @@ function App() {
       <div style={{flex:1,overflow:'auto',padding:'12px clamp(10px, 3vw, 20px) 40px'}}>
         {tab==='profile' && <ProfileTab />}
         {tab==='dashboard' && <Dashboard />}
-        {tab==='policies' && <Policies />}
+        <div style={{display:tab==='policies'?'block':'none'}}><Policies /></div>
         {tab==='repository' && <Repository />}
         {tab==='funds' && <FundLookup />}
         {tab==='report' && <ReportTab />}
@@ -4021,7 +4021,7 @@ function Header() {
         <div style={{display:'flex',alignItems:'center',gap:6}}>
           <LogoMark size={22} />
           <span style={{fontWeight:700,fontSize:15,letterSpacing:'-0.3px',color:'#d4a96a'}}>PolicyLens</span>
-          <span style={{fontSize:9,color:'var(--gold3)',fontWeight:600,background:'var(--gold-dim)',padding:'1px 5px',borderRadius:4}}>v4</span>
+          <span style={{fontSize:9,color:'var(--gold3)',fontWeight:600,background:'var(--gold-dim)',padding:'1px 5px',borderRadius:4}}>V1.0</span>
           {clientName && <span style={{fontSize:11,color:'var(--text3)',marginLeft:4,maxWidth:120,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>— {clientName}</span>}
         </div>
         <div style={{display:'flex',alignItems:'center',gap:6}}>
@@ -4029,6 +4029,21 @@ function Header() {
             title="Guide"
             style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.2)',width:30,height:30,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:14,fontWeight:700,flexShrink:0}}>
             ?
+          </button>
+          <button onClick={async()=>{
+            if(!confirm('⚠️ WIPE ALL DATA?\n\nThis will permanently delete:\n• All policies\n• Client profile\n• All settings & API keys\n• Saved drafts\n\nThis cannot be undone.')) return;
+            if(!confirm('Are you SURE? Type thinking time...\n\nOK = Yes, wipe everything\nCancel = Keep my data')) return;
+            try {
+              const db = await openDB();
+              for(const store of ['policies','settings','repository']) {
+                try { const tx = db.transaction(store,'readwrite'); tx.objectStore(store).clear(); } catch(e){}
+              }
+            } catch(e){ console.warn('Wipe DB error:', e); }
+            window.location.reload();
+          }}
+            title="Wipe All Data"
+            style={{background:'rgba(239,83,80,.08)',color:'var(--red)',border:'1px solid rgba(239,83,80,.15)',width:30,height:30,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:12,fontWeight:700,flexShrink:0}}>
+            🗑
           </button>
           <button onClick={()=>window.authLogout&&authLogout()}
             style={{background:'transparent',color:'var(--text3)',border:'1px solid var(--border2)',padding:'5px 10px',borderRadius:8,fontSize:11,fontWeight:400,cursor:'pointer',whiteSpace:'nowrap'}}>
@@ -4100,11 +4115,32 @@ function repairJSON(raw) {
   s = s.replace(/,\s*}/g,'}').replace(/,\s*]/g,']');
   
   try { return JSON.parse(s); } catch(e2) {
+    // ── Truncated array recovery ──
+    // Find the array inside a wrapper object like {"policies":[...]}
+    // Extract all COMPLETE objects from the array
+    const arrayMatch = s.match(/\[\s*\{/);
+    if(arrayMatch) {
+      const arrStart = s.indexOf('[', arrayMatch.index);
+      const completeObjects = [];
+      let depth=0, objStart=-1;
+      for(let i=arrStart+1; i<s.length; i++) {
+        if(s[i]==='{') { if(depth===0) objStart=i; depth++; }
+        if(s[i]==='}') { depth--; if(depth===0 && objStart>=0) {
+          try { const obj = JSON.parse(s.slice(objStart, i+1)); completeObjects.push(obj); } catch(e3) {}
+          objStart=-1;
+        }}
+      }
+      if(completeObjects.length > 0) {
+        console.log('[repairJSON] Recovered '+completeObjects.length+' complete objects from truncated response');
+        return completeObjects;
+      }
+    }
+    
     // Last resort — try to extract first complete object
-    let depth=0, start=-1;
+    let depth2=0, start=-1;
     for(let i=0;i<s.length;i++){
-      if(s[i]==='{'){if(start<0)start=i;depth++;}
-      if(s[i]==='}'){depth--;if(depth===0&&start>=0){try{return JSON.parse(s.slice(start,i+1));}catch(e3){start=-1;}}}
+      if(s[i]==='{'){if(start<0)start=i;depth2++;}
+      if(s[i]==='}'){depth2--;if(depth2===0&&start>=0){try{return JSON.parse(s.slice(start,i+1));}catch(e3){start=-1;}}}
     }
     console.error('[repairJSON] Failed to parse. First 500 chars:', s.substring(0, 500));
     throw new Error('Could not parse AI response as JSON. Check browser console (F12) for the raw response.');
@@ -4519,14 +4555,36 @@ function ProfileTab() {
               </div>
               {p.cpfScheme && p.cpfScheme !== 'none' && (() => {
                 const startAge = parseInt(p.cpfStartAge)||65;
+                const clientAge = age || 35;
+                const yearsTo55 = Math.max(0, 55 - clientAge);
+                // Project retirement sum: BRS/FRS/ERS grow ~3.5%/yr
+                const schemeBase = getCPFSchemeAmount(p.cpfScheme);
+                const projectedScheme = Math.round(schemeBase * Math.pow(1.035, yearsTo55));
+                // RA at payout start = scheme amount at 55, compounded at RA rate (4% + extra interest) to startAge
+                const raAtPayout = projectRAToAge(projectedScheme + (parseFloat(p.cpfTopUp)||0), startAge);
                 return (
                   <div style={{marginTop:6}}>
+                    {/* Age-aware info */}
+                    {clientAge && clientAge < 55 && (
+                      <div style={{padding:'6px 10px',background:'rgba(91,168,160,.06)',borderRadius:6,marginBottom:6,fontSize:10}}>
+                        <strong>Age {clientAge}</strong> → turns 55 in {2026 + yearsTo55} · Projected {p.cpfScheme}: <strong>${projectedScheme.toLocaleString()}</strong> (today's ${schemeBase.toLocaleString()} + 3.5%/yr × {yearsTo55}yr)
+                        {parseFloat(p.cpfTopUp)>0 && <span> · +${parseInt(p.cpfTopUp).toLocaleString()} top-up</span>}
+                        <span style={{color:'var(--green2)',marginLeft:6}}>→ RA at {startAge}: <strong>${raAtPayout.toLocaleString()}</strong></span>
+                      </div>
+                    )}
+                    {clientAge >= 55 && (
+                      <div style={{padding:'6px 10px',background:'rgba(91,168,160,.06)',borderRadius:6,marginBottom:6,fontSize:10}}>
+                        <strong>Age {clientAge}</strong> (55+) · {p.cpfScheme}: ${schemeBase.toLocaleString()}
+                        {parseFloat(p.cpfTopUp)>0 && <span> · +${parseInt(p.cpfTopUp).toLocaleString()} top-up</span>}
+                        <span style={{color:'var(--green2)',marginLeft:6}}>→ RA at {startAge}: <strong>${raAtPayout.toLocaleString()}</strong></span>
+                      </div>
+                    )}
                     {/* All 3 plans comparison */}
                     <div style={{borderRadius:6,border:'1px solid var(--border)',overflow:'hidden'}}>
                       <table style={{width:'100%',fontSize:10,borderCollapse:'collapse'}}>
                         <thead><tr style={{background:'var(--bg2)'}}>
                           <th style={{padding:'4px 8px',textAlign:'left',fontSize:9}}>Plan</th>
-                          {[65,66,67,68,69,70].filter(a=>a>=65&&a<=70).map(a=>(
+                          {[65,66,67,68,69,70].map(a=>(
                             <th key={a} style={{padding:'4px 6px',textAlign:'center',fontSize:9,color:a===startAge?'var(--green2)':'var(--text3)',fontWeight:a===startAge?700:400}}>Age {a}</th>
                           ))}
                         </tr></thead>
@@ -4540,9 +4598,10 @@ function ProfileTab() {
                                   {isSelected?'● ':''}{label}
                                 </td>
                                 {[65,66,67,68,69,70].map(a=>{
-                                  const est = getCPFLifePayout(p.cpfScheme, plan, a);
+                                  const raAtA = projectRAToAge(projectedScheme + (parseFloat(p.cpfTopUp)||0), a);
+                                  const est = estimateCPFLifePayout(raAtA, plan, a);
                                   const isCur = a === startAge;
-                                  return <td key={a} style={{padding:'4px 6px',textAlign:'center',fontWeight:isCur&&isSelected?700:400,color:isCur&&isSelected?'var(--green2)':'var(--text2)'}}>${est.mid.toLocaleString()}</td>;
+                                  return <td key={a} style={{padding:'4px 6px',textAlign:'center',fontWeight:isCur&&isSelected?700:400,color:isCur&&isSelected?'var(--green2)':'var(--text2)'}}>${est.monthly.toLocaleString()}</td>;
                                 })}
                               </tr>
                             );
@@ -4551,7 +4610,7 @@ function ProfileTab() {
                       </table>
                     </div>
                     <div style={{marginTop:4,fontSize:9,color:'var(--text3)'}}>
-                      Click a row to select plan · {p.cpfScheme} 2026 cohort · Estimates from CPF Board
+                      Click a row to select plan · {p.cpfScheme} projected for age {clientAge||'—'} cohort · RA grows at 4%+extra interest · Estimates only
                     </div>
                   </div>
                 );
@@ -4744,95 +4803,174 @@ function RetirementLiteDashboard({data,age,retAge,p,policies,cvTimeline,toSGD,fx
     return ()=>{if(chartInst.current)chartInst.current.destroy()};
   },[timeline,retAge]);
 
-  // ── SHARE VIEW GENERATOR ──
+  // ── SHARE VIEW GENERATOR — Full condensed dashboard ──
   const generateShareView = () => {
     const clientName = p.name || 'Client';
     const retRow = cvTimeline.find(r => r.age === retAge);
-    const totalPrem = policies.reduce((s,pol)=>s+(parseFloat(pol.annualPremium)||0),0);
-    const catCounts = {};
-    policies.forEach(pol => { const c = pol.category||'other'; catCounts[c] = (catCounts[c]||0)+1; });
+    const totalPrem = policies.filter(pol=>pol.category!=='cash_investments').reduce((s,pol)=>s+(parseFloat(pol.annualPremium)||0),0);
+    const activePols = policies.filter(pol => !(pol.category==='cash_investments' && pol.fdMaturityDate && new Date(pol.fdMaturityDate)<new Date() && !pol.fdAutoRenew));
 
-    // Build income waterfall data for the share page chart
-    const waterfallData = timeline.filter(r => r.age >= retAge && r.age <= 90);
+    // Coverage totals
+    let cvDeath=0,cvTPD=0,cvCI=0,cvECI=0,cvDI=0;
+    let hasISP=false,ispRiderName='';
+    activePols.forEach(pol => {
+      const sa = parseFloat(pol.sumAssured)||0;
+      if(pol.category==='protection' && !['Personal Accident','Critical Illness','Disability Income'].includes(pol.subType)) { cvDeath+=sa; cvTPD+=sa; }
+      if(pol.subType==='Critical Illness') cvCI+=sa;
+      if(pol.subType==='Disability Income') cvDI+=(parseFloat(pol.diMonthlyBenefit)||0);
+      if(pol.subType==='Integrated Shield Plan') { hasISP=true; if(pol.hasRider) ispRiderName=pol.riderList||'Rider'; }
+      (pol.riders||[]).forEach(rd => {
+        const rsa=parseFloat(rd.sa)||0;
+        if(rd.type==='death') cvDeath+=rsa;
+        if(rd.type==='tpd') cvTPD+=rsa;
+        if(rd.type==='ci') cvCI+=rsa;
+        if(rd.type==='eci') cvECI+=rsa;
+        if(rd.type==='di') cvDI+=rsa;
+      });
+    });
+
+    // Insurer concentration
+    const insurerMap = {};
+    activePols.forEach(pol => { const ins = pol.insurer||'Unknown'; insurerMap[ins]=(insurerMap[ins]||0)+1; });
+    const topInsurers = Object.entries(insurerMap).sort((a,b)=>b[1]-a[1]).slice(0,5);
+
+    // Category summary
+    const catCounts = {};
+    activePols.forEach(pol => { const c = CATEGORIES[pol.category]?.label||pol.category; catCounts[c] = (catCounts[c]||0)+1; });
+
+    // Policy table rows
+    const policyRows = activePols.map(pol => {
+      const prem = parseFloat(pol.annualPremium)||0;
+      const isFD = pol.category==='cash_investments';
+      return `<tr>
+        <td style="padding:5px 8px;font-size:10px">${pol.insurer||''}</td>
+        <td style="padding:5px 8px;font-size:10px">${pol.productName||pol.policyName||pol.subType||''}</td>
+        <td style="padding:5px 8px;font-size:10px;text-align:center"><span style="background:${pol.category==='protection'?'rgba(91,143,217,.12)':pol.category==='savings'?'rgba(91,168,160,.12)':pol.category==='health'?'rgba(201,123,154,.12)':pol.category==='investment'?'rgba(157,138,191,.12)':pol.category==='retirement'?'rgba(212,169,106,.12)':'rgba(91,168,160,.12)'};color:${pol.category==='protection'?'#5b8fd9':pol.category==='savings'?'#5ba8a0':pol.category==='health'?'#c97b9a':pol.category==='investment'?'#9d8abf':pol.category==='retirement'?'#d4a96a':'#5ba8a0'};padding:1px 6px;border-radius:4px;font-size:9px;font-weight:600">${isFD?pol.subType:(CATEGORIES[pol.category]?.label||pol.category)}</span></td>
+        <td style="padding:5px 8px;font-size:10px;text-align:right">${isFD?(pol.fdPrincipal?'$'+parseInt(pol.fdPrincipal).toLocaleString():''):(parseFloat(pol.sumAssured)?'$'+parseInt(pol.sumAssured).toLocaleString():'')}</td>
+        <td style="padding:5px 8px;font-size:10px;text-align:right">${isFD?(pol.fdYieldPct?pol.fdYieldPct+'%':''):(prem?'$'+Math.round(prem).toLocaleString()+(pol.premFrequency==='monthly'?'/mth':'/yr'):'')}</td>
+      </tr>`;
+    }).join('');
+
+    // Waterfall data
+    const waterfallData = data.timeline.filter(r => r.age >= retAge && r.age <= 90);
+
+    // FD summary
+    const fdPols = activePols.filter(p=>p.category==='cash_investments');
+    const fdTotal = fdPols.reduce((s,p)=>s+(parseFloat(p.fdPrincipal)||0),0);
+
+    const inflRate = data.inflationRate || 2.8;
 
     const html = `<!DOCTYPE html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>${clientName} — Portfolio Summary | PolicyLens</title>
+<title>${clientName} — Portfolio Dashboard | PolicyLens</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"><\/script>
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0b0f1a;color:#e8e0d0;min-height:100vh;padding:20px}
-.container{max-width:720px;margin:0 auto}
-.header{text-align:center;padding:24px 0 20px;border-bottom:1px solid rgba(212,169,106,.2);margin-bottom:20px}
-.header h1{font-size:22px;font-weight:700;margin-bottom:4px}
-.header p{font-size:12px;color:#a39580}
-.logo{font-size:11px;color:#d4a96a;font-weight:600;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px}
-.grid{display:grid;gap:10px;margin-bottom:16px}
-.grid-4{grid-template-columns:repeat(4,1fr)}
-.grid-2{grid-template-columns:1fr 1fr}
-.card{background:#141926;border:1px solid rgba(212,169,106,.12);border-radius:12px;padding:14px}
-.kpi-label{font-size:9px;color:#a39580;text-transform:uppercase;font-weight:600;letter-spacing:.5px}
-.kpi-value{font-size:22px;font-weight:700;margin-top:2px}
-.green{color:#5ba8a0}.gold{color:#d4a96a}.red{color:#ef5350}.purple{color:#9d8abf}.blue{color:#5b8fd9}
-.bar{height:6px;border-radius:3px;margin-top:4px}
-.section-title{font-size:13px;font-weight:600;margin-bottom:10px}
-.income-row{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid rgba(212,169,106,.06);font-size:12px}
-.income-row .label{display:flex;align-items:center;gap:6px}
-.dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
-.footer{text-align:center;padding:20px 0;font-size:10px;color:#6b6050;border-top:1px solid rgba(212,169,106,.1);margin-top:20px}
-@media(max-width:600px){.grid-4{grid-template-columns:repeat(2,1fr)}}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0b0f1a;color:#e8e0d0;min-height:100vh;padding:16px}
+.container{max-width:780px;margin:0 auto}
+.header{text-align:center;padding:20px 0 16px;border-bottom:1px solid rgba(212,169,106,.2);margin-bottom:16px}
+.header h1{font-size:20px;font-weight:700;margin-bottom:4px}
+.header p{font-size:11px;color:#a39580}
+.logo{font-size:10px;color:#d4a96a;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;margin-bottom:6px}
+.grid{display:grid;gap:8px;margin-bottom:12px}
+.g5{grid-template-columns:repeat(5,1fr)}.g4{grid-template-columns:repeat(4,1fr)}.g3{grid-template-columns:repeat(3,1fr)}.g2{grid-template-columns:1fr 1fr}
+.card{background:#141926;border:1px solid rgba(212,169,106,.1);border-radius:10px;padding:12px}
+.kl{font-size:8px;color:#a39580;text-transform:uppercase;font-weight:600;letter-spacing:.5px}
+.kv{font-size:18px;font-weight:700;margin-top:2px}
+.kv-sm{font-size:14px;font-weight:700;margin-top:2px}
+.g{color:#5ba8a0}.gd{color:#d4a96a}.r{color:#ef5350}.p{color:#9d8abf}.b{color:#5b8fd9}
+.section{font-size:12px;font-weight:600;margin:14px 0 8px;padding-bottom:4px;border-bottom:1px solid rgba(212,169,106,.1)}
+.row{display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid rgba(212,169,106,.04);font-size:11px}
+.dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;margin-top:4px}
+.footer{text-align:center;padding:16px 0;font-size:9px;color:#6b6050;border-top:1px solid rgba(212,169,106,.1);margin-top:16px}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;padding:5px 8px;font-size:8px;color:#a39580;text-transform:uppercase;font-weight:600;letter-spacing:.3px;border-bottom:1px solid rgba(212,169,106,.15)}
+td{border-bottom:1px solid rgba(212,169,106,.04)}
+@media(max-width:600px){.g5,.g4{grid-template-columns:repeat(2,1fr)}.g3{grid-template-columns:1fr}}
 </style></head><body>
 <div class="container">
+
 <div class="header">
 <div class="logo">PolicyLens</div>
-<h1>${clientName}'s Portfolio Summary</h1>
-<p>Prepared ${new Date().toLocaleDateString('en-SG',{day:'numeric',month:'long',year:'numeric'})} · Age ${age} · Retirement at ${retAge}</p>
+<h1>${clientName}'s Portfolio Dashboard</h1>
+<p>Prepared ${new Date().toLocaleDateString('en-SG',{day:'numeric',month:'long',year:'numeric'})} · Age ${age} · Retirement target: ${retAge}</p>
 </div>
 
-<div class="grid grid-4">
-<div class="card"><div class="kpi-label">Policies</div><div class="kpi-value">${policies.length}</div></div>
-<div class="card"><div class="kpi-label">Annual Premium</div><div class="kpi-value gold">$${Math.round(totalPrem).toLocaleString()}</div></div>
-<div class="card"><div class="kpi-label">Retirement Income</div><div class="kpi-value green">$${totalAtRet.toLocaleString()}/m</div></div>
-<div class="card"><div class="kpi-label">Income vs Target</div><div class="kpi-value ${coveragePct>=80?'green':coveragePct>=50?'gold':'red'}">${coveragePct}%</div></div>
+<!-- KPI ROW -->
+<div class="grid g5">
+<div class="card" style="text-align:center"><div class="kl">Policies</div><div class="kv">${activePols.length}</div></div>
+<div class="card" style="text-align:center"><div class="kl">Annual Premium</div><div class="kv gd">$${Math.round(totalPrem).toLocaleString()}</div><div style="font-size:9px;color:#a39580">$${Math.round(totalPrem/12).toLocaleString()}/mth</div></div>
+<div class="card" style="text-align:center"><div class="kl">Total Coverage</div><div class="kv b">$${cvDeath>1e6?(cvDeath/1e6).toFixed(1)+'M':Math.round(cvDeath).toLocaleString()}</div></div>
+<div class="card" style="text-align:center"><div class="kl">Retirement Income</div><div class="kv g">$${totalAtRet.toLocaleString()}/m</div></div>
+<div class="card" style="text-align:center;border-left:3px solid ${coveragePct>=80?'#5ba8a0':coveragePct>=50?'#d4a96a':'#ef5350'}"><div class="kl">vs Target</div><div class="kv ${coveragePct>=80?'g':coveragePct>=50?'gd':'r'}">${coveragePct}%</div></div>
 </div>
 
-<div class="card" style="margin-bottom:16px">
-<div class="section-title">Monthly Retirement Income at Age ${retAge}</div>
-<div style="font-size:11px;color:#a39580;margin-bottom:10px">Target: $${desiredMonthly.toLocaleString()}/mth</div>
-${cpfScheme!=='none'?`<div class="income-row"><div class="label"><span class="dot" style="background:#5ba8a0"></span>CPF LIFE (${cpfScheme}, ${p.cpfPlan||'standard'})</div><div class="green" style="font-weight:600">$${cpfPayout.mid.toLocaleString()}</div></div>`:''}
-${policyMonthlyIncome>0?`<div class="income-row"><div class="label"><span class="dot" style="background:#d4a96a"></span>Policy Income (annuities, endowments)</div><div class="gold" style="font-weight:600">$${policyMonthlyIncome.toLocaleString()}</div></div>`:''}
-${policyDividends>0?`<div class="income-row"><div class="label"><span class="dot" style="background:#9d8abf"></span>Investment Dividends</div><div class="purple" style="font-weight:600">$${policyDividends.toLocaleString()}</div></div>`:''}
-${otherSources.filter(s=>s.active).map(s=>`<div class="income-row"><div class="label"><span class="dot" style="background:#5b8fd9"></span>${s.source||'Other income'}</div><div class="blue" style="font-weight:600">$${s.adjustedAmt.toLocaleString()}</div></div>`).join('')}
-<div class="income-row" style="border-top:2px solid rgba(212,169,106,.2);padding-top:8px;font-weight:700"><div>Total Monthly Income</div><div class="${totalAtRet>=desiredMonthly?'green':'red'}">$${totalAtRet.toLocaleString()}</div></div>
-${gap>0?`<div style="margin-top:8px;padding:6px 10px;background:rgba(239,83,80,.06);border-radius:6px;font-size:11px;color:#ef5350">Monthly shortfall of $${gap.toLocaleString()} — ${lumpSum>0?'lump sum of $'+Math.round(lumpSum).toLocaleString()+' can sustain ~'+yearsFromLump+' years':'consider additional income planning'}</div>`:''}
+<!-- PROTECTION COVERAGE -->
+<div class="section">🛡 Protection Coverage</div>
+<div class="grid g5">
+<div class="card"><div class="kl">Death / TI</div><div class="kv-sm b">${cvDeath>0?'$'+(cvDeath>1e6?(cvDeath/1e6).toFixed(1)+'M':Math.round(cvDeath).toLocaleString()):'—'}</div></div>
+<div class="card"><div class="kl">TPD</div><div class="kv-sm p">${cvTPD>0?'$'+(cvTPD>1e6?(cvTPD/1e6).toFixed(1)+'M':Math.round(cvTPD).toLocaleString()):'—'}</div></div>
+<div class="card"><div class="kl">Critical Illness</div><div class="kv-sm" style="color:#c97b9a">${cvCI>0?'$'+Math.round(cvCI).toLocaleString():'—'}</div></div>
+<div class="card"><div class="kl">Disability Income</div><div class="kv-sm g">${cvDI>0?'$'+Math.round(cvDI).toLocaleString()+'/m':'—'}</div></div>
+<div class="card"><div class="kl">Hospitalisation</div><div class="kv-sm" style="color:#c97b9a">${hasISP?(ispRiderName?'ISP + '+ispRiderName:'ISP only'):'❌ None'}</div></div>
 </div>
 
-<div class="card" style="margin-bottom:16px">
-<div class="section-title">Retirement Income Projection</div>
-<div style="height:240px"><canvas id="retChart"></canvas></div>
+<!-- RETIREMENT INCOME -->
+<div class="section">🏖 Retirement Income at Age ${retAge}</div>
+<div class="card" style="margin-bottom:12px">
+<div style="font-size:10px;color:#a39580;margin-bottom:8px">Target: $${desiredMonthly.toLocaleString()}/mth (today's $${Math.round(data.baseDesired||desiredMonthly).toLocaleString()} + ${inflRate}% inflation × ${Math.max(0,retAge-(age||35))}yr)</div>
+${cpfScheme!=='none'?`<div class="row"><div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:#5ba8a0"></span>CPF LIFE (${cpfScheme} ${p.cpfPlan||'standard'})</div><div class="g" style="font-weight:600">$${cpfPayout.mid.toLocaleString()}</div></div>`:''}
+${policyMonthlyIncome>0?`<div class="row"><div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:#d4a96a"></span>Policy Income</div><div class="gd" style="font-weight:600">$${policyMonthlyIncome.toLocaleString()}</div></div>`:''}
+${policyDividends>0?`<div class="row"><div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:#9d8abf"></span>Dividends</div><div class="p" style="font-weight:600">$${policyDividends.toLocaleString()}</div></div>`:''}
+${otherSources.filter(s=>s.active).map(s=>`<div class="row"><div style="display:flex;align-items:center;gap:6px"><span class="dot" style="background:#5b8fd9"></span>${s.source||'Other'}</div><div class="b" style="font-weight:600">$${s.adjustedAmt.toLocaleString()}</div></div>`).join('')}
+<div style="display:flex;justify-content:space-between;padding:8px 0 2px;font-weight:700;border-top:2px solid rgba(212,169,106,.15);margin-top:4px"><div>Total</div><div class="${totalAtRet>=desiredMonthly?'g':'r'}">$${totalAtRet.toLocaleString()}/mth</div></div>
+${gap>0?`<div style="margin-top:6px;padding:5px 8px;background:rgba(239,83,80,.06);border-radius:6px;font-size:10px;color:#ef5350">Shortfall: $${gap.toLocaleString()}/mth${lumpSum>0?' · Lump sum $'+Math.round(lumpSum).toLocaleString()+' sustains ~'+yearsFromLump+'yr':''}${gap>0&&lumpSum>0?' · Total runway ~'+Math.round(lumpSum/(gap*12)+(totalAtRet>0?(90-retAge):0))+'yr':''}</div>`:`<div style="margin-top:6px;padding:5px 8px;background:rgba(91,168,160,.06);border-radius:6px;font-size:10px;color:#5ba8a0">✅ Fully funded — surplus $${(totalAtRet-desiredMonthly).toLocaleString()}/mth</div>`}
 </div>
 
-<div class="card" style="margin-bottom:16px">
-<div class="section-title">Lump Sum at Retirement</div>
-<div class="grid grid-2" style="margin-top:8px">
-<div><div class="kpi-label">Cash / Surrender Values</div><div class="kpi-value gold" style="font-size:18px">$${Math.round(retRow?.totalCV||0).toLocaleString()}</div></div>
-<div><div class="kpi-label">Maturities</div><div class="kpi-value gold" style="font-size:18px">$${Math.round(retRow?.maturities||0).toLocaleString()}</div></div>
+<!-- INCOME CHART -->
+<div class="card" style="margin-bottom:12px">
+<div style="font-size:11px;font-weight:600;margin-bottom:6px">Income Projection — Age ${retAge} to 90</div>
+<div style="height:200px"><canvas id="retChart"></canvas></div>
 </div>
+
+<!-- LUMP SUM -->
+<div class="grid g3" style="margin-bottom:12px">
+<div class="card"><div class="kl">Cash / Surrender Values</div><div class="kv-sm gd">$${Math.round(retRow?.totalCV||0).toLocaleString()}</div><div style="font-size:9px;color:#a39580">at age ${retAge}</div></div>
+<div class="card"><div class="kl">Maturities</div><div class="kv-sm gd">$${Math.round(retRow?.maturities||0).toLocaleString()}</div></div>
+${fdTotal>0?`<div class="card"><div class="kl">Fixed Deposits</div><div class="kv-sm g">$${Math.round(fdTotal).toLocaleString()}</div><div style="font-size:9px;color:#a39580">${fdPols.length} instrument${fdPols.length!==1?'s':''}</div></div>`:`<div class="card"><div class="kl">Lump Sum Runway</div><div class="kv-sm gd">${lumpSum>0&&desiredMonthly>0?Math.round(lumpSum/desiredMonthly/12)+' yrs':'—'}</div></div>`}
 </div>
+
+<!-- POLICY LIST -->
+<div class="section">📋 Policy Portfolio (${activePols.length})</div>
+<div class="card" style="padding:0;overflow:hidden;margin-bottom:12px">
+<table>
+<thead><tr><th>Provider</th><th>Product</th><th style="text-align:center">Type</th><th style="text-align:right">SA / Principal</th><th style="text-align:right">Premium / Yield</th></tr></thead>
+<tbody>${policyRows}</tbody>
+</table>
+</div>
+
+<!-- INSURER CONCENTRATION -->
+${topInsurers.length > 1 ? `<div class="section">🏢 Provider Concentration</div>
+<div class="card" style="margin-bottom:12px">
+${topInsurers.map(([name,count]) => {
+  const pct = Math.round(count/activePols.length*100);
+  return `<div style="margin-bottom:6px"><div style="display:flex;justify-content:space-between;font-size:10px;margin-bottom:2px"><span>${name}</span><span style="color:#a39580">${count} (${pct}%)</span></div><div style="height:4px;background:rgba(212,169,106,.08);border-radius:2px"><div style="height:100%;width:${pct}%;background:#d4a96a;border-radius:2px"></div></div></div>`;
+}).join('')}
+</div>` : ''}
 
 <div class="footer">
-Generated by PolicyLens · For discussion purposes only · Not financial advice<br/>
+Generated by PolicyLens V1.0 · For discussion purposes only · Not financial advice<br/>
 ${p.name?'Prepared for '+p.name+' by their financial consultant':''}
 </div>
 </div>
 <script>
 new Chart(document.getElementById('retChart'),{type:'bar',data:{labels:${JSON.stringify(waterfallData.map(r=>r.age))},datasets:[
-{label:'CPF LIFE',data:${JSON.stringify(waterfallData.map(r=>r.cpf))},backgroundColor:'rgba(91,168,160,.7)',stack:'s'},
-{label:'Policy',data:${JSON.stringify(waterfallData.map(r=>r.policy))},backgroundColor:'rgba(212,169,106,.7)',stack:'s'},
-{label:'Dividends',data:${JSON.stringify(waterfallData.map(r=>r.dividends))},backgroundColor:'rgba(157,138,191,.7)',stack:'s'},
-{label:'Other',data:${JSON.stringify(waterfallData.map(r=>r.other))},backgroundColor:'rgba(91,143,217,.5)',stack:'s'},
+{label:'CPF LIFE',data:${JSON.stringify(waterfallData.map(r=>r.cpf))},backgroundColor:'rgba(91,168,160,.7)',stack:'s',borderRadius:1},
+{label:'Policy',data:${JSON.stringify(waterfallData.map(r=>r.policy))},backgroundColor:'rgba(212,169,106,.7)',stack:'s',borderRadius:1},
+{label:'Dividends',data:${JSON.stringify(waterfallData.map(r=>r.dividends))},backgroundColor:'rgba(157,138,191,.7)',stack:'s',borderRadius:1},
+{label:'Other',data:${JSON.stringify(waterfallData.map(r=>r.other))},backgroundColor:'rgba(91,143,217,.5)',stack:'s',borderRadius:1},
 {label:'Target',data:${JSON.stringify(waterfallData.map(r=>r.desired))},type:'line',borderColor:'rgba(239,83,80,.6)',borderWidth:2,borderDash:[6,3],pointRadius:0,fill:false}
-]},options:{responsive:true,maintainAspectRatio:false,scales:{x:{stacked:true,ticks:{color:'#6b6050',font:{size:9}}},y:{stacked:true,ticks:{color:'#6b6050',callback:v=>'$'+v}}},plugins:{legend:{labels:{color:'#a39580',font:{size:9}}}}}});
+]},options:{responsive:true,maintainAspectRatio:false,scales:{x:{stacked:true,grid:{display:false},ticks:{color:'#6b6050',font:{size:8}}},y:{stacked:true,grid:{color:'rgba(212,169,106,.04)'},ticks:{color:'#6b6050',font:{size:8},callback:v=>'$'+v.toLocaleString()}}},plugins:{legend:{labels:{color:'#a39580',font:{size:8},boxWidth:10}},tooltip:{callbacks:{footer:items=>{const t=items.filter(i=>i.dataset.stack==='s').reduce((s,i)=>s+i.raw,0);return'Total: $'+t.toLocaleString()+'/mth';}}}}}});
 <\/script></body></html>`;
     return html;
   };
@@ -4843,7 +4981,7 @@ new Chart(document.getElementById('retChart'),{type:'bar',data:{labels:${JSON.st
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = (p.name||'Client').replace(/[^a-zA-Z0-9]/g,'_') + '_Portfolio_Summary.html';
+    a.download = (p.name||'Client').replace(/[^a-zA-Z0-9]/g,'_') + '_Portfolio_Dashboard.html';
     a.click();
     URL.revokeObjectURL(url);
   };
@@ -4954,7 +5092,7 @@ new Chart(document.getElementById('retChart'),{type:'bar',data:{labels:${JSON.st
             <button className="btn-primary btn-sm" onClick={handleShare} style={{fontSize:10}}>📤 Download HTML</button>
           </div>
           <div style={{padding:12,fontSize:10,color:'var(--text3)'}}>
-            Downloads a clean, standalone HTML file with your client's name, 4 KPIs (policies, premium, retirement income, coverage %), income breakdown, and the projection chart. No API keys, no edit buttons — safe to email or WhatsApp to clients.
+            Downloads a clean, standalone HTML file — full condensed dashboard with protection coverage, retirement income breakdown, policy portfolio table, insurer concentration, income projection chart, and lump sum summary. No API keys, no edit buttons — safe to email or WhatsApp to clients.
           </div>
         </div>
       )}
@@ -5300,7 +5438,24 @@ function Dashboard() {
     const cpfScheme = p.cpfScheme || 'FRS';
     const cpfPlan = p.cpfPlan || 'standard';
     const cpfStartAge = parseInt(p.cpfStartAge) || 65;
-    const cpfPayout = cpfScheme !== 'none' ? getCPFLifePayout(cpfScheme, cpfPlan, cpfStartAge) : {low:0,mid:0,high:0};
+    // Age-aware CPF LIFE payout
+    let cpfPayout = {low:0, mid:0, high:0};
+    if(cpfScheme !== 'none') {
+      if(p.cpfUseScheme === false && parseFloat(p.cpfMonthlySalary) > 0) {
+        // Custom balance mode — project from actual CPF balances
+        const proj = projectCPFToRetirement(age||35, parseFloat(p.cpfMonthlySalary)||0, parseFloat(p.cpfOA)||0, parseFloat(p.cpfSA)||0, parseFloat(p.cpfMA)||0, cpfStartAge);
+        const est = estimateCPFLifePayout(proj.ra, cpfPlan, cpfStartAge);
+        cpfPayout = {low: Math.round(est.monthly*0.94), mid: est.monthly, high: Math.round(est.monthly*1.06)};
+      } else {
+        // Scheme mode — project scheme amount growing 3.5%/yr to age 55, then compound to payout age
+        const schemeBase = getCPFSchemeAmount(cpfScheme);
+        const yearsTo55 = Math.max(0, 55 - (age||35));
+        const projectedScheme = Math.round(schemeBase * Math.pow(1.035, yearsTo55)) + (parseFloat(p.cpfTopUp)||0);
+        const raAtPayout = projectRAToAge(projectedScheme, cpfStartAge);
+        const est = estimateCPFLifePayout(raAtPayout, cpfPlan, cpfStartAge);
+        cpfPayout = {low: Math.round(est.monthly*0.94), mid: est.monthly, high: Math.round(est.monthly*1.06)};
+      }
+    }
     const retRow = cvTimeline.find(r => r.age === retAge);
     const policyMonthlyIncome = retRow ? Math.round(retRow.income/12) : 0;
     const policyDividends = retRow ? Math.round(retRow.dividends/12) : 0;
@@ -5407,7 +5562,7 @@ function Dashboard() {
         e.target.value='';
       }} />
       <LogoMark size={56} />
-      <h2 style={{fontSize:22,fontWeight:600,marginBottom:8}}>Welcome to PolicyLens v4</h2>
+      <h2 style={{fontSize:22,fontWeight:600,marginBottom:8}}>Welcome to PolicyLens V1.0</h2>
       <p style={{color:'var(--text2)',maxWidth:480,margin:'0 auto 20px'}}>
         AI-powered policy analysis • Protection gap scoring • Cash value projections • PDF reports
       </p>
@@ -5454,7 +5609,6 @@ function Dashboard() {
         </button>
       </div>
 
-      <OnboardingModal />
     </div>
   );
 
@@ -5464,13 +5618,12 @@ function Dashboard() {
   return (
     <div className="fade-in">
       <DropZone active={true} onFiles={handleDashDrop} label="📎 Drop or paste any document — client profile, policy contracts, benefit illustrations" />
-      <OnboardingModal />
 
       {/* ═══ PORTFOLIO ACTIONS BAR ═══ */}
       {(() => {
         const loadRef2 = React.createRef();
         const doSave = () => {
-          const data = {version:'PolicyLens_v4',exportedAt:new Date().toISOString(),clientName:p.name||'',clientProfile:p,policies};
+          const data = {version:'PolicyLens_V1',exportedAt:new Date().toISOString(),clientName:p.name||'',clientProfile:p,policies};
           const blob = new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
           const url = URL.createObjectURL(blob);
           const a = document.createElement('a'); a.href=url; a.download=`PolicyLens_${(p.name||'Portfolio').replace(/\s+/g,'_')}_${new Date().toISOString().slice(0,10)}.json`; a.click(); URL.revokeObjectURL(url);
@@ -6485,7 +6638,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         content.push(...blocks);
       }
       content.push({type:'text',text:'Extract all insurance policies AND financial instruments (fixed deposits, T-bills, endowments, investments) from these documents. Follow the system instructions for output format. Return ONLY valid JSON array or object.'});
-      const text = await callAI(EXTRACT_PROMPT, content, 8000);
+      const text = await callAI(EXTRACT_PROMPT, content, 16000);
       console.log('[Extract] Raw response:', text.slice(0,500));
       const parsed = repairJSON(text);
       console.log('[Extract] Parsed:', JSON.stringify(parsed).slice(0,500));
@@ -8515,7 +8668,7 @@ function ReportTab() {
           doc.setPage(i);
           doc.setFillColor(...NAVY);doc.rect(0,285,W,12,'F');
           doc.setFontSize(7);doc.setTextColor(140,140,140);
-          doc.text('PolicyLens v4 — For Financial Consultant Use Only',M,291);
+          doc.text('PolicyLens V1.0 — For Financial Consultant Use Only',M,291);
           if(advisorName) doc.text('Prepared by '+advisorName+(advisorCompany?' | '+advisorCompany:''),W/2,291,{align:'center'});
           doc.text('Page '+i+' / '+pageCount,W-M,291,{align:'right'});
         }
@@ -8817,7 +8970,7 @@ function ReportTab() {
       // Disclaimer
       doc.setFont('helvetica','italic');doc.setFontSize(7);doc.setTextColor(160,160,160);
       doc.text('This report is for illustrative purposes and does not constitute financial advice. All projections are estimates based on stated assumptions.',M,y);
-      doc.text('Please consult your financial advisor for personalised recommendations. Generated by PolicyLens v4.',M,y+4);
+      doc.text('Please consult your financial advisor for personalised recommendations. Generated by PolicyLens V1.0.',M,y+4);
 
       // ═══ FOOTERS ═══
       addFooters();
@@ -8916,7 +9069,7 @@ function Settings() {
 
   const handleSave = () => {
     const data = {
-      version:'PolicyLens_v4',
+      version:'PolicyLens_V1',
       exportedAt: new Date().toISOString(),
       clientName: clientName,
       policies: policies,
@@ -9059,7 +9212,7 @@ function Settings() {
       </div>
 
       <div className="card">
-        <h3 style={{fontSize:14,fontWeight:600,marginBottom:8}}>About PolicyLens v4</h3>
+        <h3 style={{fontSize:14,fontWeight:600,marginBottom:8}}>About PolicyLens V1.0</h3>
         <div style={{fontSize:12,color:'var(--text2)',lineHeight:1.6}}>
           <p>Institutional-grade policy review toolkit for Singapore Financial Consultants. AI-powered document capture with rider-level extraction, shared cloud repository with role-based editing, and comprehensive portfolio analysis.</p>
           <p style={{marginTop:8}}>Coverage & Riders system with SA multipliers, multi-claim CI, ISP premium breakdown, ILP fund projections, and UL crediting structures. Gap analysis against LIA recommended coverage levels.</p>
