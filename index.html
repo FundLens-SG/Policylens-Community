@@ -4863,39 +4863,52 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       console.log('[Extract] Raw response:', text.slice(0,500));
       const parsed = repairJSON(text);
       console.log('[Extract] Parsed:', JSON.stringify(parsed).slice(0,500));
-      const arr = Array.isArray(parsed)?parsed:[parsed];
-      console.log('[Extract] Policy count:', arr.length, 'Fields in first:', Object.keys(arr[0]||{}).join(','));
-      // Multi-policy: show verification modal
-      if(arr.length > 1) {
-        const processed = arr.map(p => ({...p, id:genId(), status:p.status||'inforce', sumAssured:parseFloat(p.sumAssured||p.faceAmount)||0, annualPremium:parseFloat(p.annualPremium)||0,
-          riders:(p.riders||[]).map(r=>({...r, _selected:true}))
-        }));
-        setBulkExtracted(processed);
-        setScanning(false);
-        return;
+      
+      // Unwrap common AI response shapes: {policies:[...]}, {data:[...]}, or bare array
+      let arr;
+      if (Array.isArray(parsed)) {
+        arr = parsed;
+      } else if (parsed && typeof parsed === 'object') {
+        const wrapperKeys = ['policies','data','results','items','extracted','records'];
+        const found = wrapperKeys.find(k => Array.isArray(parsed[k]));
+        if (found) { arr = parsed[found]; console.log('[Extract] Unwrapped from key:', found); }
+        else { arr = [parsed]; }
+      } else { arr = [parsed]; }
+      // Filter out empty entries
+      arr = arr.filter(p => p && typeof p === 'object' && (p.productName || p.insurer || p.category));
+      console.log('[Extract] Policy count:', arr.length, arr.length>0 ? 'Fields in first: '+Object.keys(arr[0]||{}).join(',') : '(empty)');
+      
+      if (arr.length === 0) {
+        alert('Could not extract any policy information. Try clearer images or a different document.');
+        clearStaged(); setScanning(false); return;
       }
-      if(arr.length===1){
-        const p=arr[0]; const result = {...p,id:genId(),status:p.status||'inforce',sumAssured:parseFloat(p.sumAssured||p.faceAmount)||0,annualPremium:parseFloat(p.annualPremium)||0};
-        // Auto-calc premEndAge if missing
+
+      // Process all policies uniformly
+      const processed = arr.map(p => {
+        const result = {...p, id:genId(), status:p.status||'inforce',
+          sumAssured:parseFloat(p.sumAssured||p.faceAmount)||0,
+          annualPremium:parseFloat(p.annualPremium)||0,
+          monthlyBenefit:parseFloat(p.monthlyBenefit)||0,
+          riders:(p.riders||[]).map(r=>({...r, _selected:true}))
+        };
         if(result.premStartAge && result.premTerm && !result.premEndAge) result.premEndAge = String(parseInt(result.premStartAge)+parseInt(result.premTerm));
         if(result.ageAtEntry && result.premTerm && !result.premEndAge) result.premEndAge = String(parseInt(result.ageAtEntry)+parseInt(result.premTerm));
-        // Sync ageAtEntry ↔ premStartAge
         if(result.ageAtEntry && !result.premStartAge) result.premStartAge = result.ageAtEntry;
         if(result.premStartAge && !result.ageAtEntry) result.ageAtEntry = result.premStartAge;
-        // Ensure highlights is array
         if(result.highlights && typeof result.highlights === 'string') try { result.highlights = JSON.parse(result.highlights); } catch(e){}
         if(!Array.isArray(result.highlights)) result.highlights = [];
-        console.log('[Extract] Setting form with:', Object.entries(result).filter(([k,v])=>v&&v!==''&&v!==0).map(([k])=>k).join(','));
-        mergeToProfile(p, clientProfile, saveProfile);
-        setEditing(result); setShowForm(true); // Open edit form directly
+        return result;
+      });
+
+      // Merge client info from first policy
+      if(arr[0]) mergeToProfile(arr[0], clientProfile, saveProfile);
+
+      if (processed.length === 1) {
+        // Single policy — show preview card, user clicks "Review & Save" to open form
+        setScanResult(processed[0]);
       } else {
-        if(confirm('Found '+arr.length+' policies. Import all?')){
-          let c=0; for(const p of arr){await savePolicy({...p,id:genId(),status:p.status||'inforce',sumAssured:parseFloat(p.sumAssured||p.faceAmount)||0,annualPremium:parseFloat(p.annualPremium)||0,monthlyBenefit:parseFloat(p.monthlyBenefit)||0});c++;}
-          alert('Imported '+c+' policies');
-          if(arr[0]) mergeToProfile(arr[0], clientProfile, saveProfile);
-        } else { const p=arr[0]; const result={...p,id:genId(),status:p.status||'inforce',sumAssured:parseFloat(p.sumAssured||p.faceAmount)||0,annualPremium:parseFloat(p.annualPremium)||0};
-          mergeToProfile(p, clientProfile, saveProfile);
-          setEditing(result);setShowForm(true); }
+        // Multiple policies — show verification modal
+        setBulkExtracted(processed);
       }
       clearStaged(); setScanning(false);
     } catch(e){console.error(e);alert('Extraction error: '+e.message);setScanning(false);}
@@ -5982,7 +5995,14 @@ function Repository() {
       content.push({type:'text',text:'Extract ALL insurance product information from these documents. For EACH product, return a JSON object in an array with: insurer, productName, productCode, category (protection/savings/health/investment/retirement/maternity), subType, currency, notes (comprehensive product summary including: charges, features, bonus structure, riders that attach, key terms). This is for a product REPOSITORY — extract product-level data, NOT client-specific data. Return a JSON array of products.'});
       const text = await callAI('You are an insurance product analyst. Extract product repository data from documents. Return ONLY a JSON array.', content, 8000);
       const parsed = repairJSON(text);
-      const arr = Array.isArray(parsed)?parsed:[parsed];
+      let arr;
+      if (Array.isArray(parsed)) arr = parsed;
+      else if (parsed && typeof parsed === 'object') {
+        const wk = ['products','data','results','items','extracted','records'];
+        const found = wk.find(k => Array.isArray(parsed[k]));
+        arr = found ? parsed[found] : [parsed];
+      } else arr = [parsed];
+      arr = arr.filter(p => p && typeof p === 'object' && (p.productName || p.insurer));
       let added = 0;
       for(const item of arr) {
         if(!item.productName) continue;
