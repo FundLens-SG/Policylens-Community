@@ -5626,18 +5626,27 @@ function Dashboard() {
     chartInst2.current = new Chart(chartRef2.current, {
       type:'line',
       data:{labels:cvTimeline.map(r=>r.age),datasets:[
-        {label:'Total Surrender Value',data:cvTimeline.map(r=>r.totalCV),borderColor:'#d4a96a',backgroundColor:'rgba(212,169,106,.08)',fill:true,tension:.3,pointRadius:0,yAxisID:'y'},
-        {label:'Premium Outflow',data:cvTimeline.map(r=>{let tot=0;policies.forEach(pol=>{if(pol.status==='matured'||pol.status==='surrendered')return;const sa=parseInt(pol.premStartAge)||parseInt(pol.ageAtEntry)||age;const pt=pol.premSingle?1:(parseInt(pol.premTerm)||10);if(r.age>=sa&&r.age<sa+pt)tot+=(pol.premFrequency==='monthly'?(parseFloat(pol.annualPremium)||0)*12:(parseFloat(pol.annualPremium)||0));});return tot;}),borderColor:'rgba(239,83,80,.5)',backgroundColor:'rgba(239,83,80,.04)',fill:true,tension:.3,pointRadius:0,borderDash:[4,4],yAxisID:'y1'},
-        ...(cvTimeline.some(r=>r.income>0)?[{label:'Income (Annual)',data:cvTimeline.map(r=>r.income),borderColor:'#5ba8a0',backgroundColor:'rgba(91,168,160,.08)',fill:true,tension:.3,pointRadius:0,yAxisID:'y1'}]:[]),
-        ...(cvTimeline.some(r=>r.maturities>0)?[{label:'Maturities',data:cvTimeline.map(r=>r.maturities),type:'bar',backgroundColor:'rgba(212,169,106,.4)',borderRadius:3,yAxisID:'y'}]:[]),
+        {label:'Surrender Value',data:cvTimeline.map(r=>r.totalCV),borderColor:'#d4a96a',backgroundColor:'rgba(212,169,106,.06)',fill:true,tension:.3,pointRadius:0,borderWidth:2},
+        {label:'Cumulative Premiums Paid',data:cvTimeline.map(r=>{
+          let cumPrem=0;
+          policies.forEach(pol=>{
+            if(pol.status==='matured'||pol.status==='surrendered'||pol.category==='cash_investments'||pol.category==='other_assets') return;
+            const sa=parseInt(pol.premStartAge)||parseInt(pol.ageAtEntry)||age;
+            const pt=pol.premSingle?1:(parseInt(pol.premTerm)||10);
+            const annPrem=pol.premFrequency==='monthly'?(parseFloat(pol.annualPremium)||0)*12:(parseFloat(pol.annualPremium)||0);
+            const yrsInForce=Math.max(0, Math.min(r.age-sa, pt));
+            cumPrem += pol.premSingle ? annPrem : annPrem * yrsInForce;
+          });
+          return cumPrem;
+        }),borderColor:'rgba(239,83,80,.6)',backgroundColor:'rgba(239,83,80,.03)',fill:true,tension:.3,pointRadius:0,borderWidth:1.5,borderDash:[5,3]},
       ]},
       options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
         scales:{
           x:{grid:{color:'rgba(212,169,106,.06)'},ticks:{color:'#6b6050',font:{size:10}}},
-          y:{position:'left',grid:{color:'rgba(212,169,106,.06)'},ticks:{color:'#d4a96a',font:{size:10},callback:v=>v>=1e6?'$'+(v/1e6).toFixed(1)+'M':v>=1e3?'$'+(v/1e3).toFixed(0)+'K':'$'+v},title:{display:true,text:'Portfolio Value',color:'#d4a96a',font:{size:10}}},
-          y1:{position:'right',grid:{drawOnChartArea:false},ticks:{color:'#5ba8a0',font:{size:10},callback:v=>v>=1e3?'$'+(v/1e3).toFixed(0)+'K':'$'+v},title:{display:true,text:'Income / Premiums',color:'#5ba8a0',font:{size:10}}}
+          y:{grid:{color:'rgba(212,169,106,.06)'},ticks:{color:'#d4a96a',font:{size:10},callback:v=>v>=1e6?'$'+(v/1e6).toFixed(1)+'M':v>=1e3?'$'+(v/1e3).toFixed(0)+'K':'$'+v}}
         },
-        plugins:{legend:{labels:{color:'#a39580',font:{size:10},usePointStyle:true,pointStyleWidth:8}}}
+        plugins:{legend:{labels:{color:'#a39580',font:{size:10},usePointStyle:true,pointStyleWidth:8}},
+          tooltip:{callbacks:{label:ctx=>ctx.dataset.label+': $'+Math.round(ctx.raw).toLocaleString()}}}
       }
     });
     return ()=>{if(chartInst2.current)chartInst2.current.destroy()};
@@ -5790,43 +5799,48 @@ function Dashboard() {
       })()}
 
       {/* ═══ SUMMARY CARDS ═══ */}
-      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:8,marginBottom:14}}>
-        <div className="card card-sm"><div style={{color:'var(--text3)',fontSize:9,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Active Policies</div><div style={{fontSize:22,fontWeight:700,marginTop:4}}>{policies.filter(p=>p.status!=='matured'&&p.status!=='surrendered'&&p.status!=='lapsed').length}</div></div>
-        <div className="card card-sm"><div style={{color:'var(--text3)',fontSize:9,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Total Coverage</div><div style={{fontSize:22,fontWeight:700,marginTop:4}}>{totalCoverage>=1e6?'$'+(totalCoverage/1e6).toFixed(1)+'M':fmt(totalCoverage)}</div></div>
-        <div className="card card-sm"><div style={{color:'var(--text3)',fontSize:9,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Coverage Score</div><div style={{fontSize:22,fontWeight:700,marginTop:4,color:scoreColor}}>{overallScore}%</div><div style={{fontSize:9,color:scoreColor}}>{scoreLabel}</div></div>
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:14}}>
+        <div className="card card-sm"><div style={{color:'var(--text3)',fontSize:9,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Active Policies</div><div style={{fontSize:22,fontWeight:700,marginTop:4}}>{policies.filter(p=>p.status!=='matured'&&p.status!=='surrendered'&&p.status!=='lapsed').length}</div><div style={{fontSize:10,color:'var(--text3)'}}>Total coverage: {totalCoverage>=1e6?'$'+(totalCoverage/1e6).toFixed(1)+'M':fmt(totalCoverage)}</div></div>
+        <div className="card card-sm" style={{borderLeft:`4px solid ${scoreColor}`,background:overallScore<50?'rgba(239,83,80,.04)':overallScore<80?'rgba(212,169,106,.04)':'rgba(91,168,160,.04)'}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+            <div>
+              <div style={{color:scoreColor,fontSize:9,fontWeight:700,textTransform:'uppercase',letterSpacing:'.5px'}}>{overallScore>=80?'✅ Well Protected':overallScore>=50?'⚠️ Needs Attention':'🚨 Underprotected'}</div>
+              <div style={{fontSize:28,fontWeight:800,color:scoreColor,marginTop:2}}>{overallScore}%</div>
+            </div>
+            <div style={{width:48,height:48,borderRadius:'50%',border:`3px solid ${scoreColor}`,display:'flex',alignItems:'center',justifyContent:'center',background:`${scoreColor}15`}}>
+              <svg viewBox="0 0 36 36" width="36" height="36"><circle cx="18" cy="18" r="16" fill="none" stroke="var(--border)" strokeWidth="3"/><circle cx="18" cy="18" r="16" fill="none" stroke={scoreColor} strokeWidth="3" strokeDasharray={`${overallScore} ${100-overallScore}`} strokeDashoffset="25" strokeLinecap="round"/></svg>
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* ═══ PREMIUM BREAKDOWN ═══ */}
       <div className="card" style={{marginBottom:14,padding:14}}>
-        <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',marginBottom:8}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',marginBottom:10}}>
           <h3 style={{fontSize:13,fontWeight:700,margin:0}}>Premium Summary</h3>
-          {premRatio>0 && <span style={{fontSize:10,color:premRatio>15?'var(--red)':'var(--text3)'}}>{premRatio}% of income</span>}
+          {premRatio>0 && <span style={{fontSize:10,color:premRatio>15?'var(--red)':'var(--text3)',fontWeight:600}}>{premRatio}% of income</span>}
         </div>
         <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(120px,1fr))',gap:8}}>
-          <div style={{background:'var(--bg3)',borderRadius:8,padding:10}}>
-            <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',fontWeight:600}}>Annual Total</div>
-            <div style={{fontSize:18,fontWeight:700,color:'var(--gold)',marginTop:2}}>{fmt(premiumBreakdown.totalAnnual)}<span style={{fontSize:10,color:'var(--text3)'}}>/yr</span></div>
-            <div style={{fontSize:10,color:'var(--text3)',marginTop:1}}>{fmt(Math.round(premiumBreakdown.totalAnnual/12))}/mth</div>
+          <div style={{background:'var(--bg3)',borderRadius:8,padding:12}}>
+            <div style={{fontSize:9,color:'var(--gold)',textTransform:'uppercase',fontWeight:700,letterSpacing:'.5px'}}>Annual Recurring</div>
+            <div style={{fontSize:20,fontWeight:700,color:'var(--gold)',marginTop:4}}>{fmt(premiumBreakdown.totalAnnual)}</div>
+            <div style={{fontSize:10,color:'var(--text3)',marginTop:2}}>{fmt(Math.round(premiumBreakdown.totalAnnual/12))}/mth</div>
           </div>
-          {premiumBreakdown.modes.cash.annual > 0 && <div style={{background:'var(--bg3)',borderRadius:8,padding:10}}>
-            <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',fontWeight:600}}>Cash / GIRO</div>
-            <div style={{fontSize:16,fontWeight:600,marginTop:2}}>{fmt(premiumBreakdown.modes.cash.annual)}<span style={{fontSize:9,color:'var(--text3)'}}>/yr</span></div>
+          {premiumBreakdown.modes.medisave.annual > 0 && <div style={{background:'var(--bg3)',borderRadius:8,padding:12}}>
+            <div style={{fontSize:9,color:'var(--teal)',textTransform:'uppercase',fontWeight:700}}>MediSave</div>
+            <div style={{fontSize:18,fontWeight:600,color:'var(--teal)',marginTop:4}}>{fmt(premiumBreakdown.modes.medisave.annual)}<span style={{fontSize:9,color:'var(--text3)'}}>/yr</span></div>
           </div>}
-          {premiumBreakdown.modes.medisave.annual > 0 && <div style={{background:'var(--bg3)',borderRadius:8,padding:10}}>
-            <div style={{fontSize:9,color:'var(--teal)',textTransform:'uppercase',fontWeight:600}}>MediSave</div>
-            <div style={{fontSize:16,fontWeight:600,color:'var(--teal)',marginTop:2}}>{fmt(premiumBreakdown.modes.medisave.annual)}<span style={{fontSize:9,color:'var(--text3)'}}>/yr</span></div>
+          {premiumBreakdown.modes.srs.annual > 0 && <div style={{background:'var(--bg3)',borderRadius:8,padding:12}}>
+            <div style={{fontSize:9,color:'#9d8abf',textTransform:'uppercase',fontWeight:700}}>SRS</div>
+            <div style={{fontSize:18,fontWeight:600,color:'#9d8abf',marginTop:4}}>{fmt(premiumBreakdown.modes.srs.annual)}<span style={{fontSize:9,color:'var(--text3)'}}>/yr</span></div>
           </div>}
-          {premiumBreakdown.modes.srs.annual > 0 && <div style={{background:'var(--bg3)',borderRadius:8,padding:10}}>
-            <div style={{fontSize:9,color:'#9d8abf',textTransform:'uppercase',fontWeight:600}}>SRS</div>
-            <div style={{fontSize:16,fontWeight:600,color:'#9d8abf',marginTop:2}}>{fmt(premiumBreakdown.modes.srs.annual)}<span style={{fontSize:9,color:'var(--text3)'}}>/yr</span></div>
+          {premiumBreakdown.modes.cpfoa.annual > 0 && <div style={{background:'var(--bg3)',borderRadius:8,padding:12}}>
+            <div style={{fontSize:9,color:'var(--blue2)',textTransform:'uppercase',fontWeight:700}}>CPF OA</div>
+            <div style={{fontSize:18,fontWeight:600,color:'var(--blue2)',marginTop:4}}>{fmt(premiumBreakdown.modes.cpfoa.annual)}<span style={{fontSize:9,color:'var(--text3)'}}>/yr</span></div>
           </div>}
-          {premiumBreakdown.modes.cpfoa.annual > 0 && <div style={{background:'var(--bg3)',borderRadius:8,padding:10}}>
-            <div style={{fontSize:9,color:'var(--blue2)',textTransform:'uppercase',fontWeight:600}}>CPF OA</div>
-            <div style={{fontSize:16,fontWeight:600,color:'var(--blue2)',marginTop:2}}>{fmt(premiumBreakdown.modes.cpfoa.annual)}<span style={{fontSize:9,color:'var(--text3)'}}>/yr</span></div>
-          </div>}
-          {premiumBreakdown.totalSingle > 0 && <div style={{background:'var(--bg3)',borderRadius:8,padding:10,borderLeft:'3px solid var(--gold)'}}>
-            <div style={{fontSize:9,color:'var(--gold)',textTransform:'uppercase',fontWeight:600}}>Single Premiums</div>
-            <div style={{fontSize:16,fontWeight:600,color:'var(--gold)',marginTop:2}}>{fmt(premiumBreakdown.totalSingle)}</div>
+          {premiumBreakdown.totalSingle > 0 && <div style={{background:'var(--bg3)',borderRadius:8,padding:12,borderLeft:'3px solid var(--gold)'}}>
+            <div style={{fontSize:9,color:'var(--gold)',textTransform:'uppercase',fontWeight:700}}>Single Premiums</div>
+            <div style={{fontSize:18,fontWeight:600,color:'var(--gold)',marginTop:4}}>{fmt(premiumBreakdown.totalSingle)}</div>
             <div style={{fontSize:9,color:'var(--text3)'}}>One-time (not recurring)</div>
           </div>}
         </div>
@@ -5964,37 +5978,38 @@ function Dashboard() {
         </details>
       </div>
 
-      {/* ═══ CASH VALUE & INCOME TIMELINE ═══ */}
-      {cvTimeline.some(r=>r.totalCV>0||r.income>0) && (
+      {/* ═══ SURRENDER VALUE vs PREMIUMS PAID ═══ */}
+      {cvTimeline.some(r=>r.totalCV>0) && (
         <div className="card" style={{marginBottom:16}}>
-          <h3 style={{fontSize:13,fontWeight:600,marginBottom:4}}>Surrender Value & Income Timeline</h3>
-          <p style={{fontSize:10,color:'var(--text3)',marginBottom:10}}>Projected cash values, maturity events, and income streams — age {age} to {Math.max(retAge+20,90)}</p>
-          <div style={{height:280,marginBottom:12}}><canvas ref={chartRef2} /></div>
+          <h3 style={{fontSize:13,fontWeight:600,marginBottom:4}}>Surrender Value vs Premiums Paid</h3>
+          <p style={{fontSize:10,color:'var(--text3)',marginBottom:10}}>Cumulative premiums paid versus total portfolio surrender value — age {age} to {Math.max(retAge+20,90)}</p>
+          <div style={{height:260,marginBottom:12}}><canvas ref={chartRef2} /></div>
 
-          {/* At Retirement KPIs */}
+          {/* At Retirement KPIs — only CV and premiums */}
           {retRow && (
-            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(120px,1fr))',gap:8,marginBottom:12}}>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:8,marginBottom:8}}>
               <div style={{background:'var(--bg3)',borderRadius:8,padding:10,textAlign:'center'}}>
-                <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>CV at {retAge}</div>
+                <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Surrender Value at {retAge}</div>
                 <div style={{fontSize:18,fontWeight:700,color:'var(--gold)'}}>{fmt(retRow.totalCV)}</div>
               </div>
               <div style={{background:'var(--bg3)',borderRadius:8,padding:10,textAlign:'center'}}>
-                <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Income/yr</div>
-                <div style={{fontSize:18,fontWeight:700,color:'var(--green2)'}}>{fmt(retRow.income)}</div>
-                <div style={{fontSize:9,color:'var(--text3)'}}>{fmt(Math.round(retRow.income/12))}/mth</div>
+                <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Total Premiums Paid</div>
+                <div style={{fontSize:18,fontWeight:700,color:'var(--red)'}}>
+                  {fmt((() => {let t=0;policies.forEach(pol=>{if(pol.status==='matured'||pol.category==='cash_investments'||pol.category==='other_assets')return;const sa=parseInt(pol.premStartAge)||parseInt(pol.ageAtEntry)||age;const pt=pol.premSingle?1:(parseInt(pol.premTerm)||10);const ann=pol.premFrequency==='monthly'?(parseFloat(pol.annualPremium)||0)*12:(parseFloat(pol.annualPremium)||0);t+=pol.premSingle?ann:ann*pt;});return t;})())}
+                </div>
               </div>
               <div style={{background:'var(--bg3)',borderRadius:8,padding:10,textAlign:'center'}}>
-                <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Maturities</div>
-                <div style={{fontSize:18,fontWeight:700,color:'var(--gold2)'}}>{fmt(retRow.maturities)}</div>
-              </div>
-              <div style={{background:'var(--bg3)',borderRadius:8,padding:10,textAlign:'center'}}>
-                <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Dividends</div>
-                <div style={{fontSize:18,fontWeight:700,color:'#9d8abf'}}>{fmt(retRow.dividends)}</div>
+                <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Net Gain / (Loss)</div>
+                {(() => {
+                  let totalPaid=0;policies.forEach(pol=>{if(pol.status==='matured'||pol.category==='cash_investments'||pol.category==='other_assets')return;const pt=pol.premSingle?1:(parseInt(pol.premTerm)||10);const ann=pol.premFrequency==='monthly'?(parseFloat(pol.annualPremium)||0)*12:(parseFloat(pol.annualPremium)||0);totalPaid+=pol.premSingle?ann:ann*pt;});
+                  const net = retRow.totalCV - totalPaid;
+                  return <div style={{fontSize:18,fontWeight:700,color:net>=0?'var(--green2)':'var(--red)'}}>{net>=0?'+':''}{fmt(net)}</div>;
+                })()}
               </div>
             </div>
           )}
 
-          {/* Timeline table — collapsed by default */}
+          {/* Timeline table — collapsed */}
           <details>
             <summary style={{fontSize:11,color:'var(--gold)',cursor:'pointer',fontWeight:600}}>📊 View Full Timeline Table</summary>
             <div style={{maxHeight:300,overflowY:'auto',border:'1px solid var(--border)',borderRadius:8,marginTop:8}}>
@@ -6994,10 +7009,14 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         }
 
         // ── SYNC: premFrequency defaults ──
+        // SRS payments are almost always single premium unless explicitly stated otherwise
+        if((result.paymentMethod||'').toLowerCase().includes('srs') && !result.premFrequency) {
+          result.premFrequency = 'single'; result.premSingle = true; result.premiumStructure = 'Single Premium';
+        }
         // If frequency is unknown but it has a premium term or is clearly regular, default to annual
         if(result.premFrequency === 'unknown' || !result.premFrequency) {
           if(result.premSingle || result.premiumStructure === 'Single Premium') result.premFrequency = 'single';
-          else if(parseInt(result.premTerm) > 1) result.premFrequency = 'annual'; // Has multi-year term → annual
+          else if(parseInt(result.premTerm) > 1) result.premFrequency = 'annual';
           else if(result.category === 'retirement' || result.category === 'savings') result.premFrequency = 'annual';
           else result.premFrequency = result.premFrequency || 'unknown';
         }
@@ -7163,19 +7182,21 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       ) : (<>
         {(() => {
           // Group policies into sections
+          const isCPFLifePolicy = p => (p.insurer||'').toLowerCase().includes('cpf board') || (p.productName||'').toLowerCase().includes('cpf life');
           const insuranceGroups = [
             {id:'protection', sub:'Protection', icon:'🛡', color:'#5b8fd9', match: p => p.category==='protection' && !['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(p.subType)},
             {id:'ul', sub:'Universal Life', icon:'💎', color:'#9d8abf', match: p => ['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(p.subType)},
             {id:'investment', sub:'Investment', icon:'📈', color:'var(--green2)', match: p => p.category==='investment'},
             {id:'savings', sub:'Endowment & Savings', icon:'💰', color:'var(--blue2)', match: p => p.category==='savings'},
-            {id:'retirement', sub:'Retirement & Annuities', icon:'🏦', color:'var(--green2)', match: p => p.category==='retirement'},
+            {id:'retirement', sub:'Retirement & Annuities', icon:'🏦', color:'var(--green2)', match: p => p.category==='retirement' && !isCPFLifePolicy(p)},
             {id:'health', sub:'Accident & Medical', icon:'🏥', color:'#c97b9a', match: p => p.category==='health' || p.category==='maternity'},
           ];
           const fiItems = activePolicies.filter(p => p.category==='cash_investments');
           const otherItems = activePolicies.filter(p => p.category==='other_assets');
           const insGroups = insuranceGroups.map(g => ({...g, items: activePolicies.filter(g.match).sort((a,b) => (a.subType||'').localeCompare(b.subType||'') || (a.insurer||'').localeCompare(b.insurer||'') || (parseFloat(b.annualPremium)||0)-(parseFloat(a.annualPremium)||0))})).filter(g => g.items.length > 0);
           // Unmatched (not in any group above)
-          const allGrouped = new Set([...insGroups.flatMap(g=>g.items.map(p=>p.id)), ...fiItems.map(p=>p.id), ...otherItems.map(p=>p.id)]);
+          const cpfLifePols = activePolicies.filter(isCPFLifePolicy);
+          const allGrouped = new Set([...insGroups.flatMap(g=>g.items.map(p=>p.id)), ...fiItems.map(p=>p.id), ...otherItems.map(p=>p.id), ...cpfLifePols.map(p=>p.id)]);
           const unmatchedIns = activePolicies.filter(p => !allGrouped.has(p.id));
           if(unmatchedIns.length) insGroups.push({id:'other_ins', sub:'Other', icon:'📋', color:'var(--text3)', items:unmatchedIns});
           const hasInsurance = insGroups.length > 0;
@@ -9279,8 +9300,20 @@ function ReportTab() {
       y=88;
 
       // Coverage score badge
-      const totalPrem = policies.reduce((s,p)=>s+(parseFloat(p.annualPremium)||0),0);
-      const totalCover = policies.reduce((s,p)=>s+(parseFloat(p.sumAssured)||0),0);
+      const activePols2 = policies.filter(p=>p.status!=='matured'&&p.status!=='surrendered'&&p.status!=='lapsed'&&p.category!=='cash_investments'&&p.category!=='other_assets');
+      const totalPrem = activePols2.filter(p=>!p.premSingle&&p.premiumStructure!=='Single Premium'&&p.premFrequency!=='single').reduce((s,p)=>s+(p.premFrequency==='monthly'?(parseFloat(p.annualPremium)||0)*12:(parseFloat(p.annualPremium)||0)),0);
+      const totalSinglePrem2 = activePols2.filter(p=>p.premSingle||p.premiumStructure==='Single Premium'||p.premFrequency==='single').reduce((s,p)=>s+(parseFloat(p.annualPremium)||0),0);
+      const totalCover = policies.filter(p=>p.status!=='matured'&&p.status!=='surrendered').reduce((s,p)=>s+(parseFloat(p.sumAssured)||0),0);
+      // Premium breakdown by mode for PDF
+      const premiumBreakdown = {totalAnnual:totalPrem,totalSingle:totalSinglePrem2,modes:{cash:{annual:0},medisave:{annual:0},srs:{annual:0},cpfoa:{annual:0}}};
+      activePols2.filter(p=>!p.premSingle&&p.premiumStructure!=='Single Premium'&&p.premFrequency!=='single').forEach(p=>{
+        const prem=p.premFrequency==='monthly'?(parseFloat(p.annualPremium)||0)*12:(parseFloat(p.annualPremium)||0);
+        const m=(p.paymentMethod||'').toLowerCase();
+        if(m.includes('medisave'))premiumBreakdown.modes.medisave.annual+=prem;
+        else if(m.includes('srs'))premiumBreakdown.modes.srs.annual+=prem;
+        else if(m.includes('cpf'))premiumBreakdown.modes.cpfoa.annual+=prem;
+        else premiumBreakdown.modes.cash.annual+=prem;
+      });
 
       // Compute coverage
       let cDeath=0,cTPD=0,cCI=0,cECI=0,cDI=0,hasISP=false;
@@ -9398,7 +9431,7 @@ function ReportTab() {
         else if(m.includes('cpf')){modeCalc.cpfoa.annual+=ann;modeCalc.cpfoa.single+=sp;}
         else{modeCalc.cash.annual+=ann;modeCalc.cash.single+=sp;}
       });
-      if(modeCalc.cash.annual>0) premModes.push(['Cash / GIRO','$'+Math.round(modeCalc.cash.annual).toLocaleString()+'/yr','$'+Math.round(modeCalc.cash.annual/12).toLocaleString()+'/mth']);
+      if(modeCalc.cash.annual>0) premModes.push(['Cash','$'+Math.round(modeCalc.cash.annual).toLocaleString()+'/yr','$'+Math.round(modeCalc.cash.annual/12).toLocaleString()+'/mth']);
       if(modeCalc.medisave.annual>0) premModes.push(['MediSave','$'+Math.round(modeCalc.medisave.annual).toLocaleString()+'/yr','$'+Math.round(modeCalc.medisave.annual/12).toLocaleString()+'/mth']);
       if(modeCalc.srs.annual>0) premModes.push(['SRS','$'+Math.round(modeCalc.srs.annual).toLocaleString()+'/yr','$'+Math.round(modeCalc.srs.annual/12).toLocaleString()+'/mth']);
       if(modeCalc.cpfoa.annual>0) premModes.push(['CPF OA','$'+Math.round(modeCalc.cpfoa.annual).toLocaleString()+'/yr','$'+Math.round(modeCalc.cpfoa.annual/12).toLocaleString()+'/mth']);
