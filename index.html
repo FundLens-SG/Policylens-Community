@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PolicyLens V1.0</title>
-<script>window.onerror=function(m,s){if(!s||m==='Script error.')return true;return false};window.onunhandledrejection=function(e){if(!e||!e.reason)return;var r=String(e.reason);if(r.includes('Script error')||r.includes('Failed to fetch')||r.includes('NetworkError'))e.preventDefault();};</script>
+<script>window.onerror=function(m,s){if(!s||m==='Script error.')return true;return false};window.onunhandledrejection=function(e){if(!e||!e.reason)return;var r=String(e.reason);if(r==='Script error.')e.preventDefault();};</script>
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#0b0f1a">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -4252,9 +4252,13 @@ async function callAI(systemPrompt, contentBlocks, maxTokens) {
       return await claudeExtract(ck, systemPrompt, textParts, maxTokens);
     } catch(claudeErr) {
       console.warn('[AI] Claude failed:', claudeErr.message);
-      if(gk && (claudeErr.message.includes('fetch') || claudeErr.message.includes('network') || claudeErr.message.includes('CONNECTION'))) {
-        console.log('[AI] Falling back to Gemini for text extraction');
-        return await geminiExtract(gk, systemPrompt, contentBlocks, maxTokens);
+      if(gk) {
+        // Fall back to Gemini for any network/fetch error, overload, or rate limit
+        const msg = (claudeErr.message||'').toLowerCase();
+        if(msg.includes('fetch') || msg.includes('network') || msg.includes('failed') || msg.includes('overload') || msg.includes('529') || msg.includes('rate') || claudeErr instanceof TypeError) {
+          console.log('[AI] Falling back to Gemini for text extraction');
+          return await geminiExtract(gk, systemPrompt, [{type:'text',text:textParts}], maxTokens);
+        }
       }
       throw claudeErr;
     }
@@ -5126,6 +5130,8 @@ function PremiumCashflowChart({policies,age,retAge}) {
     for(let yr=age; yr<=Math.max(retAge+5,80); yr++) {
       const row = {age:yr, total:0, byPolicy:{}};
       policies.forEach(pol => {
+        // Skip inactive policies from cashflow
+        if(pol.status==='matured'||pol.status==='surrendered'||pol.status==='lapsed') return;
         // Skip matured FDs/T-bills from cashflow
         if(pol.category==='cash_investments' && pol.fdMaturityDate && new Date(pol.fdMaturityDate) < new Date()) return;
         // FDs don't have ongoing premiums — skip from cashflow chart
@@ -5311,13 +5317,16 @@ function Dashboard() {
     let annual = 0, single = 0;
     policies.forEach(p => {
       if(p.category==='cash_investments') return; // FDs aren't premiums
+      if(p.status==='matured' || p.status==='surrendered' || p.status==='lapsed') return; // Matured/inactive
+      if(p.maturityDate && new Date(p.maturityDate) < new Date() && p.category==='savings') return;
       const prem = parseFloat(p.annualPremium)||0;
       if(p.premSingle || p.premiumStructure==='Single Premium' || p.premFrequency==='single') single += prem;
+      else if(p.premFrequency==='monthly') annual += prem * 12; // Monthly → annualize
       else annual += prem;
     });
     return { annual, single, total: annual + single };
   }, [policies]);
-  const totalCoverage = useMemo(() => policies.reduce((s,p) => s + (parseFloat(p.sumAssured)||0), 0), [policies]);
+  const totalCoverage = useMemo(() => policies.filter(p=>p.status!=='matured'&&p.status!=='surrendered'&&p.status!=='lapsed').reduce((s,p) => s + (parseFloat(p.sumAssured)||0), 0), [policies]);
 
   // ── COVERAGE FROM ALL POLICIES (riders + base SA) ──
   const coverage = useMemo(() => {
@@ -6497,10 +6506,18 @@ function Policies() {
   const handleFormSave = (p) => { savePolicy(p); setShowForm(false); setScanResult(null); clearDraft(); };
 
   const filtered = filter==='all'?policies:policies.filter(p=>p.category===filter);
-  // Separate matured FDs/T-bills
-  const isMaturedFD = (pol) => pol.category==='cash_investments' && pol.fdMaturityDate && new Date(pol.fdMaturityDate) < new Date() && !pol.fdAutoRenew;
-  const activePolicies = filtered.filter(p => !isMaturedFD(p));
-  const maturedPolicies = filtered.filter(p => isMaturedFD(p));
+  // Separate matured policies (FDs past maturity OR any policy with status=matured)
+  const isMaturedPolicy = (pol) => {
+    // FDs/T-bills past maturity date
+    if(pol.category==='cash_investments' && pol.fdMaturityDate && new Date(pol.fdMaturityDate) < new Date() && !pol.fdAutoRenew) return true;
+    // Any policy with status explicitly set to matured
+    if(pol.status==='matured') return true;
+    // Endowments past maturity date
+    if(pol.maturityDate && new Date(pol.maturityDate) < new Date() && (pol.category==='savings' || pol.category==='cash_investments')) return true;
+    return false;
+  };
+  const activePolicies = filtered.filter(p => !isMaturedPolicy(p));
+  const maturedPolicies = filtered.filter(p => isMaturedPolicy(p));
 
   // ── MIME type detection ──
   const MIME_MAP = {
@@ -6554,6 +6571,10 @@ CASH VALUE: cashValue (number), cvGrowthRate (% p.a.), surrenderPeriod (years)
 UL/IUL/VUL: creditingMechanism, creditingRates {current, guaranteed}, loyaltyBonus {rate, startYear}
 ILP: ilpSubtype (protection/investment), ilpGrowth, ilpDivYield, ilpMgmtFee
 
+RETIREMENT/ANNUITY/INCOME PLANS: annuityPayout (annual payout amount, number), annuityMonthly (monthly payout, number), annuityStartAge (number), annuityEndAge (number), retMaturitySum (maturity/terminal value at end)
+
+PREMIUM FINANCING: financed (boolean), finLoan (loan amount, number), finRate (interest rate %, number — use midpoint of range), finTenure (loan tenure years, number)
+
 KEY HIGHLIGHTS — highlights (JSON array of strings, 5-8 items). MUST include:
 - Total death/TI payout and conditions
 - CI payout (single or multi-claim total)
@@ -6576,6 +6597,33 @@ EXCEL/SPREADSHEET HANDLING: If the input is a spreadsheet or tabular data:
 - Return an ARRAY of policy objects — one per row.
 - Infer category and subType from plan names (e.g. "term" → Term Life, "whole life" / "WL" → Whole Life, "ISP" / "shield" → Integrated Shield Plan, "ILP" → ILP (Investment), "endowment" → Endowment, "annuity" / "income" → Retirement).
 - If a plan has a separate rider premium column, set the rider's bundled=false and premium to that value.
+
+PREMIUM AMOUNT SANITY: Double-check premium amounts:
+- Short-term endowments (≤3yr): typically $10,000–$500,000 single premium. If "$30,000.00" appears in source, annualPremium=30000, NOT 3000000. Watch decimal places: "$30,000.00" = 30000, NOT 3000000. Be careful with comma-separated thousands: $30,000 = thirty thousand, $300,000 = three hundred thousand.
+- Regular annual premiums for life/CI/endowment: typically $500–$50,000/year
+- ILP/Investment single premiums: typically $10,000–$500,000
+- Only universal life financed policies reach $500k+ single premiums
+
+REMARKS/NOTES COLUMN PARSING — CRITICAL: The "Remarks" column often contains vital info:
+- "Premium stop date: 8 Jul 2027" → Calculate premTerm = years from inceptionDate to stop date. If inception is 8 Jul 2023 and stop is 8 Jul 2027, premTerm = 4.
+- "$360,000 financing: $140,000 cash" → Set financed=true, finLoan=360000 (the financed amount), the total premium is 360000+140000=500000.
+- "Interest repayment: 3%-4.5%" → Set finRate to the MIDPOINT (3.75) or the lower bound (3). Store full range in notes.
+- "Breakeven @ 2029: $510,749" → Note in highlights.
+- "2025 - Lifetime: ~$18,500/year" → This is annual income payout. Set annuityPayout=18500.
+- "Total Premiums: $162,037.83" → Useful cross-check for premium calculation.
+- "Expected account value @ 2035: $176,283" → Note in highlights.
+- "Expected dividends @ 2034 $12,486/year" → Set annuityPayout=12486 for investment policies.
+
+NET INCOME / PAYOUT COLUMN: If the spreadsheet has a "Net Income earned / year" or "Net Income / year" column:
+- Map this value to annuityPayout (annual income)
+- Calculate annuityMonthly = annuityPayout / 12
+- This applies to retirement/annuity/income plans
+
+AGE TO CLAIM / PAYOUT AGE COLUMN: If there's an "Age to claim" or "Payout Age" column:
+- Map to annuityStartAge
+- For income plans, also estimate annuityEndAge from maturity date if available
+
+PREMIUM SHORTFALL COLUMN: If highlighted or flagged (e.g. red text, negative values), note in userRemarks.
 
 IMPORTANT PLAN IDENTIFICATION: When you see a plan name, use your knowledge of Singapore insurance products to correctly classify it:
 
@@ -6610,6 +6658,18 @@ OTHER PLANS:
 - "GreatLink" / "PRULink" / "InvestReady" → ILP (Investment)
 - "Income" / "Payout" plans → check if monthly income (Annuity) or lump sum (Endowment)
 - "VitalCare" / "VitalHealth" without "Max" prefix → could be standalone, check context
+
+KNOWN PRODUCT PREMIUM TERMS — auto-fill premTerm if not stated in document:
+- Manulife InvestReady (III) 13 Yrs Flexi 10 → premTerm: 10 (the "Flexi 10" indicates 10-year premium term)
+- Manulife InvestReady (III) 10 Yrs Flexi 5 → premTerm: 5
+- Manulife InvestReady Growth → check product name for premium term hint (Flexi 5/10/15)
+- AIA PRO Achiever → premTerm: typically 5, 10, or 15 (check context)
+- PRULink → premTerm from MIP years (usually in product name)
+- China Life Lifetime Income Plan → premTerm usually 10 years unless stated otherwise
+- "X Yrs Flexi Y" pattern → premTerm = Y, policy term = X
+- If product name contains "10 YRS FLEXI 10" → premTerm=10
+- If product name contains "13 YRS FLEXI 10" → premTerm=10
+- If product name contains "15 Years Flexi 10" → premTerm=10
 
 FIXED DEPOSITS / WEALTH SHEET HANDLING:
 - Rows under "Fixed Deposits" heading → category: "cash_investments", subType: "Fixed Deposit"
@@ -6708,6 +6768,115 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         if(result.premStartAge && !result.ageAtEntry) result.ageAtEntry = result.premStartAge;
         if(result.highlights && typeof result.highlights === 'string') try { result.highlights = JSON.parse(result.highlights); } catch(e){}
         if(!Array.isArray(result.highlights)) result.highlights = [];
+
+        // ── PREMIUM SANITY CHECK ──
+        // Short-term endowments: premiums are typically $10k-$500k, NOT millions
+        if(result.subType === 'Short-term Endowment' && result.annualPremium > 500000) {
+          // Likely misread decimal: $30,000.00 read as 3000000. Divide by 100.
+          if(result.annualPremium >= 1000000 && result.annualPremium % 100 === 0) {
+            console.warn('[Extract] Premium sanity fix:', result.productName, result.annualPremium, '→', result.annualPremium/100);
+            result.annualPremium = result.annualPremium / 100;
+          }
+        }
+        // Cross-check: if endGuaranteedCV (maturity sum) exists and premium > maturity sum × 2, premium is likely wrong
+        if(result.endGuaranteedCV && result.annualPremium > parseFloat(result.endGuaranteedCV) * 2) {
+          const expectedPrem = parseFloat(result.endGuaranteedCV) * 0.95; // typical short-term yield ~5%
+          if(result.annualPremium > expectedPrem * 50) {
+            result.annualPremium = Math.round(result.annualPremium / 100);
+          }
+        }
+
+        // ── PARSE REMARKS FOR PREMIUM STOP DATE ──
+        const allRemarks = [result.notes, result.userRemarks, ...(result.highlights||[])].filter(Boolean).join(' ');
+        const stopMatch = allRemarks.match(/[Pp]remium\s*stop\s*date[:\s]+(\d{1,2})\s*(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\s*(\d{4})/i);
+        if(stopMatch && result.inceptionDate && !result.premTerm) {
+          const months = {jan:0,feb:1,mar:2,apr:3,may:4,jun:5,jul:6,aug:7,sep:8,oct:9,nov:10,dec:11};
+          const stopDate = new Date(parseInt(stopMatch[3]), months[stopMatch[2].toLowerCase().slice(0,3)], parseInt(stopMatch[1]));
+          const incDate = new Date(result.inceptionDate);
+          if(stopDate > incDate) {
+            const yrs = Math.round((stopDate - incDate) / (365.25 * 24 * 60 * 60 * 1000));
+            result.premTerm = String(yrs);
+            if(result.ageAtEntry) result.premEndAge = String(parseInt(result.ageAtEntry) + yrs);
+            console.log('[Extract] Premium stop date parsed:', result.productName, yrs, 'years');
+          }
+        }
+
+        // ── PARSE REMARKS FOR FINANCING INFO ──
+        const finMatch = allRemarks.match(/\$?([\d,]+)\s*financ/i);
+        if(finMatch && !result.financed) {
+          result.financed = true;
+          result.finLoan = parseFloat(finMatch[1].replace(/,/g, ''));
+        }
+        const cashMatch = allRemarks.match(/\$?([\d,]+)\s*cash/i);
+        if(cashMatch && result.financed) {
+          // Total premium = financed + cash portion
+          const cashPortion = parseFloat(cashMatch[1].replace(/,/g, ''));
+          if(cashPortion > 0 && result.finLoan > 0) {
+            const totalPrem = result.finLoan + cashPortion;
+            if(totalPrem > result.annualPremium * 0.8 && totalPrem < result.annualPremium * 1.2) {
+              // Premiums already close — good
+            } else if(result.annualPremium === 0 || Math.abs(totalPrem - result.annualPremium) > totalPrem * 0.3) {
+              result.annualPremium = totalPrem;
+              result.premSingle = true;
+              result.premiumStructure = 'Single Premium';
+            }
+          }
+        }
+        // Interest rate (handle ranges like "3%-4.5%")
+        const intMatch = allRemarks.match(/[Ii]nterest\s*(?:repayment)?[:\s]*([\d.]+)\s*%-?\s*([\d.]+)\s*%/);
+        if(intMatch && result.financed) {
+          result.finRate = String(((parseFloat(intMatch[1]) + parseFloat(intMatch[2])) / 2).toFixed(1));
+        } else {
+          const intSingle = allRemarks.match(/[Ii]nterest\s*(?:repayment)?[:\s]*([\d.]+)\s*%/);
+          if(intSingle && result.financed) result.finRate = intSingle[1];
+        }
+
+        // ── PARSE INCOME / PAYOUT FROM REMARKS ──
+        const incomeMatch = allRemarks.match(/~?\$?([\d,]+)\s*\/?\s*(?:per\s*)?(?:year|yr|annum|p\.?a\.?)/i);
+        if(incomeMatch && (result.category === 'retirement' || result.subType === 'Annuity' || allRemarks.toLowerCase().includes('income') || allRemarks.toLowerCase().includes('payout'))) {
+          const annualInc = parseFloat(incomeMatch[1].replace(/,/g, ''));
+          if(annualInc > 0 && !result.annuityPayout) {
+            result.annuityPayout = String(annualInc);
+            result.annuityMonthly = String(Math.round(annualInc / 12));
+          }
+        }
+        // Also check if "Net Income earned / year" column value exists directly
+        if(result.netIncomePerYear && !result.annuityPayout) {
+          result.annuityPayout = String(parseFloat(result.netIncomePerYear) || 0);
+          result.annuityMonthly = String(Math.round((parseFloat(result.netIncomePerYear)||0) / 12));
+        }
+
+        // ── SYNC: annuityPayout ↔ annuityMonthly ──
+        if(result.annuityPayout && !result.annuityMonthly) result.annuityMonthly = String(Math.round(parseFloat(result.annuityPayout) / 12));
+        if(result.annuityMonthly && !result.annuityPayout) result.annuityPayout = String(Math.round(parseFloat(result.annuityMonthly) * 12));
+
+        // ── AUTO-FILL premTerm from product name ──
+        if(!result.premTerm && result.productName) {
+          const name = result.productName;
+          // "X Yrs Flexi Y" → premTerm = Y
+          const flexiMatch = name.match(/(\d+)\s*(?:Yrs?|Years?)\s*Flexi\s*(\d+)/i);
+          if(flexiMatch) { result.premTerm = flexiMatch[2]; result.endPolicyTerm = flexiMatch[1]; }
+          // "Flexi Y" standalone → premTerm = Y
+          const flexiOnly = name.match(/Flexi\s*(\d+)/i);
+          if(flexiOnly && !result.premTerm) result.premTerm = flexiOnly[1];
+        }
+
+        // ── SYNC: premFrequency defaults ──
+        // If frequency is unknown but it has a premium term or is clearly regular, default to annual
+        if(result.premFrequency === 'unknown' || !result.premFrequency) {
+          if(result.premSingle || result.premiumStructure === 'Single Premium') result.premFrequency = 'single';
+          else if(parseInt(result.premTerm) > 1) result.premFrequency = 'annual'; // Has multi-year term → annual
+          else if(result.category === 'retirement' || result.category === 'savings') result.premFrequency = 'annual';
+          else result.premFrequency = result.premFrequency || 'unknown';
+        }
+
+        // ── MAP "Fully Paid" to appropriate status ──
+        if(result.status === 'Fully Paid' || result.status === 'fully_paid') {
+          if(result.category === 'cash_investments') result.status = 'matured';
+          else if(result.maturityDate && new Date(result.maturityDate) < new Date()) result.status = 'matured';
+          else result.status = 'inforce'; // paid-up but not matured
+        }
+
         return result;
       });
 
@@ -6894,10 +7063,10 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
                           {p.fdYieldPct && <div style={{fontSize:11,color:'var(--green2)',fontWeight:600}}>{p.fdYieldPct}% p.a.</div>}
                           {p.fdMaturityDate && <div style={{fontSize:9,color:new Date(p.fdMaturityDate)<new Date()?'var(--gold)':'var(--text3)'}}>{new Date(p.fdMaturityDate)<new Date()?'Matured':'Mat. '+new Date(p.fdMaturityDate).toLocaleDateString('en-SG',{month:'short',year:'2-digit'})}</div>}
                         </div>
-                      ) : p.premiumStructure==='Single Premium' || p.premFrequency==='single' ? (
+                      ) : p.premiumStructure==='Single Premium' || p.premFrequency==='single' || p.premSingle ? (
                         <div><div style={{fontSize:11}}>{fmt(p.annualPremium,p.currency||'SGD')}</div><div style={{fontSize:9,color:'var(--gold)'}}>Single Premium</div></div>
                       ) : p.premFrequency==='monthly' ? (
-                        <div><div style={{fontSize:11}}>{fmt(parseFloat(p.annualPremium)/12,p.currency||'SGD')}/mth</div><div style={{fontSize:9,color:'var(--text3)'}}>{fmt(p.annualPremium,p.currency||'SGD')}/yr</div></div>
+                        <div><div style={{fontSize:11}}>{fmt(p.annualPremium,p.currency||'SGD')}/mth</div><div style={{fontSize:9,color:'var(--text3)'}}>{fmt(parseFloat(p.annualPremium)*12,p.currency||'SGD')}/yr</div></div>
                       ) : p.premFrequency==='unknown' ? (
                         <div><div style={{fontSize:11}}>{fmt(p.annualPremium,p.currency||'SGD')}</div><div style={{fontSize:9,color:'var(--orange)'}}>Freq. unconfirmed</div></div>
                       ) : (
@@ -6921,19 +7090,21 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         {maturedPolicies.length > 0 && (
           <div style={{marginTop:16}}>
             <div style={{fontSize:11,fontWeight:700,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8,display:'flex',alignItems:'center',gap:6}}>
-              <span>⏰ Matured ({maturedPolicies.length})</span>
+              <span>⏰ Matured / Completed ({maturedPolicies.length})</span>
               <div style={{flex:1,height:1,background:'var(--border)'}} />
             </div>
             <div style={{opacity:.6}}>
               {maturedPolicies.map(p => (
                 <div key={p.id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'8px 12px',background:'var(--bg3)',borderRadius:8,marginBottom:4,border:'1px solid var(--border)'}}>
-                  <div>
-                    <span style={{fontWeight:500,fontSize:12}}>{p.productName||p.subType||'Unnamed'}</span>
+                  <div style={{flex:1,minWidth:0}}>
+                    <span style={{fontWeight:500,fontSize:12}}>{p.productName||p.policyName||p.subType||'Unnamed'}</span>
                     <span style={{fontSize:10,color:'var(--text3)',marginLeft:8}}>{p.insurer}</span>
-                    {p.fdMaturityDate && <span style={{fontSize:9,color:'var(--gold)',marginLeft:8}}>Matured {new Date(p.fdMaturityDate).toLocaleDateString('en-SG',{day:'numeric',month:'short',year:'numeric'})}</span>}
+                    {p.maturityDate && <span style={{fontSize:9,color:'var(--gold)',marginLeft:8}}>Matured {new Date(p.maturityDate).toLocaleDateString('en-SG',{day:'numeric',month:'short',year:'numeric'})}</span>}
+                    {p.fdMaturityDate && !p.maturityDate && <span style={{fontSize:9,color:'var(--gold)',marginLeft:8}}>Matured {new Date(p.fdMaturityDate).toLocaleDateString('en-SG',{day:'numeric',month:'short',year:'numeric'})}</span>}
+                    <span style={{fontSize:9,marginLeft:8,padding:'1px 5px',borderRadius:3,background:`${catColor(p.category)}15`,color:catColor(p.category)}}>{CATEGORIES[p.category]?.label||p.category}</span>
                   </div>
-                  <div style={{display:'flex',gap:8,alignItems:'center'}}>
-                    <span className="mono" style={{fontSize:12}}>{p.fdPrincipal?'$'+parseInt(p.fdPrincipal).toLocaleString():fmt(p.sumAssured,p.currency||'SGD')}</span>
+                  <div style={{display:'flex',gap:8,alignItems:'center',flexShrink:0}}>
+                    <span className="mono" style={{fontSize:12}}>{p.fdPrincipal?'$'+parseInt(p.fdPrincipal).toLocaleString():p.sumAssured?fmt(p.sumAssured,p.currency||'SGD'):p.annualPremium?fmt(p.annualPremium,p.currency||'SGD'):''}</span>
                     <button className="btn-secondary btn-sm" onClick={()=>{setEditing(p);setShowForm(true);}} style={{fontSize:9,padding:'3px 8px'}}>Edit</button>
                     <button className="btn-danger btn-sm" onClick={()=>{if(confirm('Delete this matured entry?'))deletePolicy(p.id);}} style={{fontSize:9,padding:'3px 8px'}}>×</button>
                   </div>
@@ -7039,7 +7210,8 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
     fdPrincipal:'', fdYieldPct:'', fdStartDate:'', fdMaturityDate:'', fdAutoRenew:false, fdTenureMonths:'',
   };
     // Sync premSingle from premiumStructure on load
-    if(init.premiumStructure==='Single Premium' || init.premFrequency==='single') init.premSingle = true;
+    if(init.premiumStructure==='Single Premium' || init.premFrequency==='single') { init.premSingle = true; init.premFrequency = 'single'; }
+    if(!init.premFrequency) init.premFrequency = init.premSingle ? 'single' : 'annual';
     return init;
   });
 
@@ -7049,11 +7221,15 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
     if(k==='subType' && DEFAULT_RIDERS[v] && (!f.riders || f.riders.length===0)){
       nf.riders = DEFAULT_RIDERS[v].map(r=>({...r,id:'r_'+Date.now()+Math.random().toString(36).slice(2,5)}));
     }
-    // Sync premSingle ↔ premiumStructure
-    if(k==='premSingle' && v) nf.premiumStructure = 'Single Premium';
-    if(k==='premSingle' && !v && nf.premiumStructure==='Single Premium') nf.premiumStructure = 'Regular Premium';
-    if(k==='premiumStructure') nf.premSingle = (v === 'Single Premium');
-    if(k==='premFrequency' && v==='single') { nf.premSingle = true; nf.premiumStructure = 'Single Premium'; }
+    // Sync premSingle ↔ premiumStructure ↔ premFrequency
+    if(k==='premFrequency') {
+      nf.premSingle = (v === 'single');
+      if(v === 'single') nf.premiumStructure = 'Single Premium';
+      else if(nf.premiumStructure === 'Single Premium') nf.premiumStructure = 'Regular Premium';
+    }
+    if(k==='premSingle' && v) { nf.premiumStructure = 'Single Premium'; nf.premFrequency = 'single'; }
+    if(k==='premSingle' && !v && nf.premiumStructure==='Single Premium') { nf.premiumStructure = 'Regular Premium'; if(nf.premFrequency==='single') nf.premFrequency = 'annual'; }
+    if(k==='premiumStructure') { nf.premSingle = (v === 'Single Premium'); if(v==='Single Premium') nf.premFrequency = 'single'; }
     // Auto-calc premium end age
     // Bidirectional premium sync
     if(!nf.premWholeLife && !nf.premSingle) {
@@ -7255,12 +7431,27 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
           <div className="field"><label>Currency</label><select value={form.currency} onChange={e=>set('currency',e.target.value)}><option>SGD</option><option>USD</option><option>HKD</option><option>GBP</option><option>EUR</option><option>AUD</option><option>MYR</option></select></div>
         </div>
 
-        {/* ═══ SECTION 3: PREMIUM STRUCTURE (RetireWell-style) ═══ */}
+        {/* ═══ SECTION 3: PREMIUM STRUCTURE ═══ */}
         {!isCashInvestment && (
         <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)'}}>
           <h4 style={{fontSize:13,fontWeight:600,marginBottom:10,color:'var(--text2)'}}>Premium Structure</h4>
           <div className="grid-3">
-            <div className="field"><label>{form.premSingle?'Single Premium ($)':'Annual Premium ($)'}</label><input type="number" value={form.annualPremium} onChange={e=>set('annualPremium',e.target.value)} />{form.annualPremium && !form.premSingle && <div style={{fontSize:10,color:'var(--text3)'}}>${(parseFloat(form.annualPremium)/12).toFixed(0)}/mth</div>}{form.premSingle && <div style={{fontSize:10,color:'var(--gold)'}}>Single lump sum</div>}</div>
+            <div className="field">
+              <label style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                <span>Premium ($)</span>
+                <select value={form.premFrequency||'annual'} onChange={e=>set('premFrequency',e.target.value)} style={{fontSize:10,padding:'2px 6px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:4,color:form.premFrequency==='unknown'?'var(--orange)':'var(--text2)'}}>
+                  <option value="annual">Annual</option>
+                  <option value="monthly">Monthly</option>
+                  <option value="single">Single</option>
+                  <option value="unknown">Unconfirmed</option>
+                </select>
+              </label>
+              <input type="number" value={form.annualPremium} onChange={e=>set('annualPremium',e.target.value)} />
+              {form.annualPremium && form.premFrequency==='annual' && <div style={{fontSize:10,color:'var(--text3)'}}>${(parseFloat(form.annualPremium)/12).toFixed(0)}/mth</div>}
+              {form.annualPremium && form.premFrequency==='monthly' && <div style={{fontSize:10,color:'var(--teal)'}}>${Math.round(parseFloat(form.annualPremium)*12).toLocaleString()}/yr annualised</div>}
+              {form.premFrequency==='single' && <div style={{fontSize:10,color:'var(--gold)'}}>Single lump sum</div>}
+              {form.premFrequency==='unknown' && <div style={{fontSize:10,color:'var(--orange)'}}>Confirm frequency above</div>}
+            </div>
             <div className="field"><label>Payment Method</label><select value={form.paymentMethod||''} onChange={e=>set('paymentMethod',e.target.value)}>
               <option value="">—</option>
               <option value="Cash">Cash / GIRO</option>
@@ -7277,13 +7468,13 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
             <div className="field"><label>Age at Entry</label><input type="number" value={form.premStartAge||form.ageAtEntry||''} onChange={e=>{set('premStartAge',e.target.value);set('ageAtEntry',e.target.value)}} placeholder="e.g. 30" /></div>
             <div className="field">
               <label>Premium Term (years)</label>
-              <input type="number" value={form.premTerm||''} onChange={e=>set('premTerm',e.target.value)} placeholder="e.g. 25" disabled={form.premSingle||form.premWholeLife} />
+              <input type="number" value={form.premTerm||''} onChange={e=>set('premTerm',e.target.value)} placeholder="e.g. 25" disabled={form.premSingle||form.premWholeLife} style={form.premSingle?{opacity:.4}:{}} />
               <div style={{display:'flex',gap:12,marginTop:4}}>
-                <label style={{fontSize:11,display:'flex',alignItems:'center',gap:3,cursor:'pointer'}}><input type="checkbox" checked={form.premSingle||false} onChange={e=>{set('premSingle',e.target.checked);if(e.target.checked)set('premWholeLife',false);}} /> Single</label>
-                <label style={{fontSize:11,display:'flex',alignItems:'center',gap:3,cursor:'pointer'}}><input type="checkbox" checked={form.premWholeLife||false} onChange={e=>{set('premWholeLife',e.target.checked);if(e.target.checked){set('premSingle',false);set('premEndAge','Whole Life');}}} /> Whole Life</label>
+                <label style={{fontSize:11,display:'flex',alignItems:'center',gap:3,cursor:'pointer',color:form.premWholeLife?'var(--gold)':'var(--text3)'}}><input type="checkbox" checked={form.premWholeLife||false} onChange={e=>{set('premWholeLife',e.target.checked);if(e.target.checked){set('premSingle',false);set('premEndAge','Whole Life');}}} /> Whole Life</label>
               </div>
+              {form.premSingle && <div style={{fontSize:9,color:'var(--gold)',marginTop:2}}>N/A — single premium</div>}
             </div>
-            <div className="field"><label>Premium End Age</label><input type="number" value={form.premWholeLife?'':form.premEndAge||''} disabled={form.premWholeLife} onChange={e=>set('premEndAge',e.target.value)} placeholder={form.premWholeLife?'Whole Life':'auto: start + term'} />{form.premWholeLife && <div style={{fontSize:10,color:'var(--gold)'}}>Whole Life</div>}</div>
+            <div className="field"><label>Premium End Age</label><input type="number" value={form.premWholeLife?'':form.premEndAge||''} disabled={form.premWholeLife||form.premSingle} onChange={e=>set('premEndAge',e.target.value)} placeholder={form.premWholeLife?'Whole Life':form.premSingle?'N/A':'auto: start + term'} style={form.premSingle?{opacity:.4}:{}} />{form.premWholeLife && <div style={{fontSize:10,color:'var(--gold)'}}>Whole Life</div>}</div>
           </div>
           <div className="grid-3" style={{marginTop:4}}>
             <div className="field"><label>Inception Date</label><input type="date" value={form.inceptionDate} onChange={e=>set('inceptionDate',e.target.value)} /></div>
