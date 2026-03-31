@@ -449,410 +449,12 @@ document.addEventListener('DOMContentLoaded',function(){
 </script>
 
 <div id="root"></div>
-<script type="text/babel">
-const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext} = React;
-
-// PolicyLens Logo — inline SVG, works everywhere
-const LogoSVG = ({size=24,color='#d4a96a'}) => (
-  <svg width={size} height={size} viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
-    {/* Lens circle */}
-    <circle cx="50" cy="50" r="38" fill="none" stroke={color} strokeWidth="2.5"/>
-    {/* 4-point star / crosshair */}
-    <circle cx="50" cy="50" r="2" fill={color}/>
-    <line x1="50" y1="32" x2="50" y2="42" stroke={color} strokeWidth="1.5" strokeLinecap="round"/>
-    <line x1="50" y1="58" x2="50" y2="68" stroke={color} strokeWidth="1.5" strokeLinecap="round"/>
-    <line x1="32" y1="50" x2="42" y2="50" stroke={color} strokeWidth="1.5" strokeLinecap="round"/>
-    <line x1="58" y1="50" x2="68" y2="50" stroke={color} strokeWidth="1.5" strokeLinecap="round"/>
-    {/* Subtle diamond accents on star tips */}
-    <path d="M50 30 L51.5 32 L50 34 L48.5 32Z" fill={color} opacity="0.8"/>
-    <path d="M50 66 L51.5 68 L50 70 L48.5 68Z" fill={color} opacity="0.8"/>
-    <path d="M30 50 L32 51.5 L34 50 L32 48.5Z" fill={color} opacity="0.8"/>
-    <path d="M66 50 L68 51.5 L70 50 L68 48.5Z" fill={color} opacity="0.8"/>
-  </svg>
-);
-const LogoMark = ({size=24}) => <LogoSVG size={size} />;
-
-// ═══════════════════════════════════════════════════════════════
-// CONSTANTS & DATA MODEL
-// ═══════════════════════════════════════════════════════════════
-
-const CATEGORIES = {
-  protection: {label:'Protection',color:'var(--cat-protection)',icon:'🛡️'},
-  savings: {label:'Savings / Endowment',color:'var(--cat-savings)',icon:'💰'},
-  health: {label:'Health / Medical',color:'var(--cat-health)',icon:'🏥'},
-  investment: {label:'Investment',color:'var(--cat-investment)',icon:'📈'},
-  retirement: {label:'Retirement',color:'var(--cat-retirement)',icon:'🏖️'},
-  maternity: {label:'Maternity',color:'var(--cat-maternity)',icon:'👶'},
-};
-
-const SUB_TYPES = {
-  protection: ['Term Life','Whole Life','Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)','Critical Illness','Personal Accident','Disability Income','Long-term Care','Maternity','Rider'],
-  savings: ['Endowment','Lifetime Endowment','Education Plan','Short-term Endowment'],
-  health: ['Integrated Shield Plan','ISP Rider','Hospital Income','CareShield Life Supplement'],
-  investment: ['Investment-Linked Policy (Investment)','Unit Trust','Single Premium Investment'],
-  retirement: ['Retirement','Annuity'],
-  maternity: ['Maternity Coverage'],
-};
-
-const UL_FAMILY = ['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'];
-
-// ═══ SG INSURANCE CONSTANTS (MOH/CPF Board 2024) ═══
-function getMSLPremium(age) {
-  if(age<21) return 150; if(age<31) return 320; if(age<36) return 450;
-  if(age<41) return 630; if(age<46) return 800; if(age<51) return 1000;
-  if(age<56) return 1420; if(age<61) return 1780; if(age<66) return 2480;
-  if(age<71) return 3090; if(age<76) return 3900; if(age<81) return 4660;
-  if(age<86) return 5500; return 6360;
-}
-function getISPAWL(age) {
-  const anb = age + 1;
-  if (anb <= 40) return 300;
-  if (anb <= 70) return 600;
-  return 900;
-}
-function calcISPBreakdown(totalPrem, age) {
-  const msl = getMSLPremium(age);
-  const awl = getISPAWL(age);
-  const ispAdditional = Math.max(0, totalPrem - msl);
-  const ispMediSave = Math.min(ispAdditional, awl);
-  const ispCash = Math.max(0, ispAdditional - awl);
-  return { msl, awl, ispAdditional, ispMediSave, ispCash, totalMediSave: msl + ispMediSave, totalCash: ispCash };
-}
-const CARESHIELD_MEDISAVE_CAP = 600;
-
-// ═══ PDF UNLOCK — tries preset passwords to decrypt locked PDFs ═══
-async function getPresetPasswords() {
-  const stored = await dbGet('settings','pdfPasswords').catch(()=>null);
-  const custom = (stored?.value || '').split('\n').map(s=>s.trim()).filter(Boolean);
-  // Auto-generate from client profile
-  const cp = await dbGet('settings','clientProfile').catch(()=>null);
-  const p = cp?.value || {};
-  const auto = [];
-  if(p.nric) {
-    auto.push(p.nric); // Full NRIC: S1234567X
-    auto.push(p.nric.toUpperCase());
-    auto.push(p.nric.toLowerCase());
-    auto.push(p.nric.slice(1,8)); // digits only: 1234567
-    auto.push(p.nric.slice(-4)); // last 4: 567X
-  }
-  if(p.dob) {
-    const d = new Date(p.dob);
-    const dd = String(d.getDate()).padStart(2,'0');
-    const mm = String(d.getMonth()+1).padStart(2,'0');
-    const yyyy = String(d.getFullYear());
-    const yy = yyyy.slice(-2);
-    auto.push(dd+mm+yyyy); // 18061979
-    auto.push(yyyy+mm+dd); // 19790618
-    auto.push(dd+mm+yy);   // 180679
-    auto.push(dd+'/'+mm+'/'+yyyy); // 18/06/1979
-    auto.push(dd+'-'+mm+'-'+yyyy); // 18-06-1979
-    auto.push(yyyy+'-'+mm+'-'+dd); // 1979-06-18
-  }
-  // Also try dependant NRICs/DOBs
-  (p.dependants||[]).forEach(dep => {
-    if(dep.nric) { auto.push(dep.nric); auto.push(dep.nric.toUpperCase()); auto.push(dep.nric.slice(1,8)); }
-    if(dep.dob) {
-      const d2 = new Date(dep.dob);
-      auto.push(String(d2.getDate()).padStart(2,'0')+String(d2.getMonth()+1).padStart(2,'0')+String(d2.getFullYear()));
-    }
-  });
-  // Dedupe
-  return [...new Set([...custom, ...auto])].filter(Boolean);
-}
-
-async function tryUnlockPDF(arrayBuffer) {
-  // Try without password first
-  try {
-    const doc = await pdfjsLib.getDocument({data: new Uint8Array(arrayBuffer)}).promise;
-    return {doc, password: null, wasLocked: false};
-  } catch(e) {
-    if(e.name !== 'PasswordException') throw e;
-  }
-  // Try preset passwords
-  const passwords = await getPresetPasswords();
-  for(const pw of passwords) {
-    try {
-      const doc = await pdfjsLib.getDocument({data: new Uint8Array(arrayBuffer), password: pw}).promise;
-      console.log('[PDF] Unlocked with password:', pw.slice(0,3)+'***');
-      return {doc, password: pw, wasLocked: true};
-    } catch(e) {
-      if(e.name !== 'PasswordException') throw e;
-    }
-  }
-  // Prompt user as last resort
-  const manual = prompt('This PDF is password-protected.\nCommon passwords: NRIC, DOB (DDMMYYYY)\n\nEnter password:');
-  if(!manual) throw new Error('PDF is locked and no password provided');
-  try {
-    const doc = await pdfjsLib.getDocument({data: new Uint8Array(arrayBuffer), password: manual}).promise;
-    return {doc, password: manual, wasLocked: true};
-  } catch(e) {
-    throw new Error('Wrong password — PDF could not be unlocked');
-  }
-}
-
-async function pdfToImages(pdfDoc, maxPages=12) {
-  const pages = Math.min(pdfDoc.numPages, maxPages);
-  const images = [];
-  for(let i=1; i<=pages; i++) {
-    const page = await pdfDoc.getPage(i);
-    const scale = 2; // high-res for OCR
-    const vp = page.getViewport({scale});
-    const canvas = document.createElement('canvas');
-    canvas.width = vp.width;
-    canvas.height = vp.height;
-    const ctx = canvas.getContext('2d');
-    await page.render({canvasContext:ctx, viewport:vp}).promise;
-    const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
-    images.push(dataUrl.split(',')[1]); // base64 only
-  }
-  return images;
-}
-
-// Master function: takes a File, returns content blocks ready for AI
-async function processFile(file) {
-  const isPDF = file.type === 'application/pdf' || file.name?.toLowerCase().endsWith('.pdf');
-  const isExcel = file.name?.match(/\.(xlsx|xls|csv)$/i) || file.type?.includes('spreadsheet') || file.type?.includes('excel');
-  const isWord = file.name?.match(/\.(docx|doc|rtf)$/i) || file.type?.includes('wordprocessing') || file.type?.includes('msword');
-  
-  // ── Excel → convert to CSV text via SheetJS ──
-  if(isExcel) {
-    try {
-      if(file.name?.match(/\.csv$/i)) {
-        const text = await file.text();
-        return [{type:'text', text:'[Spreadsheet: '+file.name+']\n'+text.slice(0,80000)}];
-      }
-      const ab = await file.arrayBuffer();
-      if(typeof XLSX !== 'undefined') {
-        const wb = XLSX.read(ab, {type:'array'});
-        let allText = '[Spreadsheet: '+file.name+']\n';
-        for(const sheetName of wb.SheetNames) {
-          const csv = XLSX.utils.sheet_to_csv(wb.Sheets[sheetName], {blankrows:false});
-          allText += '\n--- Sheet: '+sheetName+' ---\n'+csv;
-        }
-        return [{type:'text', text:allText.slice(0,80000)}];
-      }
-    } catch(e) { console.warn('[ProcessFile] Excel parse error:', e); }
-    // Final fallback: tell AI we couldn't read it
-    return [{type:'text', text:'[File: '+file.name+'] — Excel file could not be parsed. SheetJS may not be loaded.'}];
-  }
-
-  // ── Word .docx → extract text (basic XML parse), or send to Claude directly ──
-  if(isWord && file.name?.match(/\.docx$/i)) {
-    try {
-      const ab = await file.arrayBuffer();
-      const uint8 = new Uint8Array(ab);
-      const decoder = new TextDecoder('utf-8', {fatal:false});
-      const raw = decoder.decode(uint8);
-      const matches = raw.match(/<w:t[^>]*>([^<]*)<\/w:t>/g);
-      if(matches && matches.length > 10) {
-        const text = matches.map(m => m.replace(/<[^>]+>/g,'')).join(' ');
-        return [{type:'text', text:'[Document: '+file.name+']\n'+text.slice(0,50000)}];
-      }
-    } catch(e) { console.warn('[ProcessFile] Word parse error:', e); }
-    // Fallback: send as document block for Claude (Gemini can't handle docx)
-    const b64 = await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file)});
-    return [{type:'document', source:{type:'base64', media_type:file.type||'application/octet-stream', data:b64}, _forceAnthropic:true}];
-  }
-  // ── Word .doc / .rtf → force Anthropic ──
-  if(isWord) {
-    const b64 = await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file)});
-    return [{type:'document', source:{type:'base64', media_type:file.type||'application/octet-stream', data:b64}, _forceAnthropic:true}];
-  }
-
-  // ── PDF ──
-  if(isPDF) {
-    const arrayBuffer = await file.arrayBuffer();
-    try {
-      const {doc, wasLocked} = await tryUnlockPDF(arrayBuffer);
-      if(wasLocked) {
-        const images = await pdfToImages(doc);
-        return images.map(b64 => ({type:'image', source:{type:'base64', media_type:'image/jpeg', data:b64}}));
-      } else {
-        const b64 = await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file)});
-        return [{type:'document', source:{type:'base64', media_type:'application/pdf', data:b64}}];
-      }
-    } catch(e) {
-      if(e.message.includes('locked') || e.message.includes('password')) { alert(e.message); return []; }
-      const b64 = await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file)});
-      return [{type:'document', source:{type:'base64', media_type:'application/pdf', data:b64}}];
-    }
-  }
-  
-  // ── Images (Gemini + Claude both handle these) ──
-  const b64 = await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file)});
-  const mime = file.type || 'application/octet-stream';
-  if(mime.startsWith('image/')) return [{type:'image', source:{type:'base64', media_type:mime, data:b64}}];
-  
-  // ── Text files ──
-  if(mime.startsWith('text/') || file.name?.match(/\.(txt|csv|json|md|html|htm)$/i)) {
-    const text = await file.text();
-    return [{type:'text', text:'[File: '+file.name+']\n'+text.slice(0,50000)}];
-  }
-  
-  // ── Anything else → try text first, fallback to Claude document block ──
-  try {
-    const text = await file.text();
-    if(text && text.length > 20 && !text.match(/[\x00-\x08\x0E-\x1F]/)) {
-      return [{type:'text', text:'[File: '+file.name+']\n'+text.slice(0,50000)}];
-    }
-  } catch(e){}
-  // Unknown binary → force Anthropic (Claude handles more MIME types than Gemini)
-  return [{type:'document', source:{type:'base64', media_type:mime, data:b64}, _forceAnthropic:true}];
-}
-
-// ═══════════════════════════════════════════════════════════════
-// INSURER REGISTRY — brand colors + logos for SG market
-// ═══════════════════════════════════════════════════════════════
-const INSURERS = {
-  // Life insurers
-  'Manulife':       {color:'#00a758',bg:'#e6f7ef',logo:'https://logo.clearbit.com/manulife.com.sg'},
-  'AIA':            {color:'#e4002b',bg:'#fde8ec',logo:'https://logo.clearbit.com/aia.com.sg'},
-  'Prudential':     {color:'#e31837',bg:'#fde8ec',logo:'https://logo.clearbit.com/prudential.com.sg'},
-  'Great Eastern':  {color:'#003da5',bg:'#e6edf8',logo:'https://logo.clearbit.com/greateasternlife.com'},
-  'NTUC Income':    {color:'#f47920',bg:'#fef3e8',logo:'https://logo.clearbit.com/income.com.sg'},
-  'FWD':            {color:'#e87722',bg:'#fef3e8',logo:'https://logo.clearbit.com/fwd.com.sg'},
-  'Singlife':       {color:'#ff4f5b',bg:'#ffe8ea',logo:'https://logo.clearbit.com/singlife.com'},
-  'Tokio Marine':   {color:'#0033a0',bg:'#e6edf8',logo:'https://logo.clearbit.com/tokiomarine.com'},
-  'HSBC Life':      {color:'#db0011',bg:'#fde8ec',logo:'https://logo.clearbit.com/hsbc.com.sg'},
-  'China Life':     {color:'#c10230',bg:'#fde8ec',logo:'https://logo.clearbit.com/chinalife.com.sg'},
-  'China Taiping':  {color:'#c41230',bg:'#fde8ec',logo:'https://logo.clearbit.com/sg.cntaiping.com'},
-  'Etiqa':          {color:'#00205b',bg:'#e6edf8',logo:'https://logo.clearbit.com/etiqa.com.sg'},
-  'Zurich':         {color:'#003399',bg:'#e6edf8',logo:'https://logo.clearbit.com/zurich.com.sg'},
-  'Sun Life':       {color:'#fdb813',bg:'#fef9e6',logo:'https://logo.clearbit.com/sunlife.com.sg'},
-  'Aviva/Singlife': {color:'#ffcc00',bg:'#fef9e6',logo:'https://logo.clearbit.com/singlife.com'},
-  'AXA':            {color:'#00008f',bg:'#e6e6f8',logo:'https://logo.clearbit.com/axa.com.sg'},
-  'Raffles Health':  {color:'#1a4480',bg:'#e6edf8',logo:'https://logo.clearbit.com/raffleshealth.com'},
-  'Swiss Life':     {color:'#e30613',bg:'#fde8ec',logo:'https://logo.clearbit.com/swisslife.com'},
-  // General insurers
-  'MSIG':           {color:'#004ea2',bg:'#e6edf8',logo:'https://logo.clearbit.com/msig.com.sg'},
-  'Sompo':          {color:'#003c71',bg:'#e6edf8',logo:'https://logo.clearbit.com/sompo.com.sg'},
-  'Chubb':          {color:'#a3080c',bg:'#fde8ec',logo:'https://logo.clearbit.com/chubb.com'},
-  'QBE':            {color:'#003087',bg:'#e6edf8',logo:'https://logo.clearbit.com/qbe.com'},
-  'Liberty':        {color:'#1e3a5f',bg:'#e6edf8',logo:'https://logo.clearbit.com/libertyinsurance.com.sg'},
-  // Brokerages / platforms
-  'iFAST':          {color:'#003366',bg:'#e6edf8',logo:'https://logo.clearbit.com/ifastfinancial.com'},
-  'Tiger Brokers':  {color:'#ff6600',bg:'#fff3e6',logo:'https://logo.clearbit.com/tigerbrokers.com.sg'},
-  'Phillip Securities': {color:'#003087',bg:'#e6edf8',logo:'https://logo.clearbit.com/poems.com.sg'},
-  'UOB Kay Hian':   {color:'#0033a1',bg:'#e6edf8',logo:'https://logo.clearbit.com/utrade.com.sg'},
-  'DBS':            {color:'#e21a22',bg:'#fde8ec',logo:'https://logo.clearbit.com/dbs.com.sg'},
-  'OCBC':           {color:'#ef3e23',bg:'#fde8ec',logo:'https://logo.clearbit.com/ocbc.com'},
-  'UOB':            {color:'#0033a1',bg:'#e6edf8',logo:'https://logo.clearbit.com/uob.com.sg'},
-  'Citibank':       {color:'#003b70',bg:'#e6edf8',logo:'https://logo.clearbit.com/citibank.com.sg'},
-  'StashAway':      {color:'#00c2a8',bg:'#e6f9f5',logo:'https://logo.clearbit.com/stashaway.sg'},
-  'Endowus':        {color:'#2d46b9',bg:'#e8ecf8',logo:'https://logo.clearbit.com/endowus.com'},
-  'Syfe':           {color:'#1a1a2e',bg:'#e8e8ec',logo:'https://logo.clearbit.com/syfe.com'},
-  'MoneyOwl':       {color:'#5b2c6f',bg:'#f0e8f5',logo:'https://logo.clearbit.com/moneyowl.com.sg'},
-  'FSMOne':         {color:'#003366',bg:'#e6edf8',logo:'https://logo.clearbit.com/fsmone.com'},
-  'Saxo':           {color:'#0b4f6c',bg:'#e6f0f5',logo:'https://logo.clearbit.com/home.saxo'},
-  'Interactive Brokers': {color:'#d81b26',bg:'#fde8ec',logo:'https://logo.clearbit.com/interactivebrokers.com'},
-  'moomoo':         {color:'#ff6600',bg:'#fff3e6',logo:'https://logo.clearbit.com/moomoo.com'},
-  'Webull':         {color:'#f6475d',bg:'#fde8ec',logo:'https://logo.clearbit.com/webull.com'},
-  // CPF / Gov
-};
-const INSURER_LIST = Object.keys(INSURERS).sort();
-const getInsurer = (name) => INSURERS[name] || {color:'#64748b',bg:'#f1f5f9',logo:null};
-
-// Insurer badge component
-const InsurerBadge = ({name, size='sm'}) => {
-  const ins = getInsurer(name);
-  const sz = size==='lg'?{h:24,f:13,p:'3px 10px',img:18}:{h:18,f:11,p:'2px 8px',img:14};
-  return React.createElement('span',{style:{display:'inline-flex',alignItems:'center',gap:4,background:ins.bg,color:ins.color,fontSize:sz.f,fontWeight:600,padding:sz.p,borderRadius:6,border:`1px solid ${ins.color}22`,whiteSpace:'nowrap'}},
-    ins.logo && React.createElement('img',{src:ins.logo,style:{width:sz.img,height:sz.img,borderRadius:3,objectFit:'contain'},onError:e=>{e.target.style.display='none'}}),
-    name||'Unknown'
-  );
-};
-
-// Insurer dropdown component
-const InsurerSelect = ({value,onChange,style}) => {
-  const [other,setOther] = React.useState(value && !INSURERS[value] && value!=='' ? value : '');
-  const isOther = value && !INSURERS[value] && value!=='';
-  return React.createElement('div',null,
-    React.createElement('select',{value:isOther?'__other':value||'',onChange:e=>{if(e.target.value==='__other'){onChange(other||'Other');setOther(other||'');}else{onChange(e.target.value);setOther('');}},style:{...style,color:getInsurer(value).color,fontWeight:600}},
-      React.createElement('option',{value:''},'Select insurer…'),
-      INSURER_LIST.map(n=>React.createElement('option',{key:n,value:n},n)),
-      React.createElement('option',{value:'__other'},'Other…')
-    ),
-    isOther && React.createElement('input',{value:other,onChange:e=>{setOther(e.target.value);onChange(e.target.value);},placeholder:'Type insurer name',style:{marginTop:4,width:'100%',fontSize:12}})
-  );
-};
-
-// Fuzzy autocomplete input — shows matching suggestions from a list as user types
-const FuzzyInput = ({value,onChange,suggestions,placeholder,style,onSelect}) => {
-  const [open,setOpen] = useState(false);
-  const [filtered,setFiltered] = useState([]);
-  const inputRef = useRef(null);
-  const dropRef = useRef(null);
-  const [pos,setPos] = useState({top:0,left:0,width:0});
-
-  useEffect(() => {
-    if(!value || value.length < 1 || !suggestions || suggestions.length === 0) { setFiltered([]); setOpen(false); return; }
-    const q = value.toLowerCase();
-    const matches = suggestions.filter(s => {
-      const t = (s.label||s||'').toLowerCase();
-      return t.includes(q) || q.split('').every(c=>t.includes(c));
-    }).slice(0,10);
-    setFiltered(matches);
-    setOpen(matches.length > 0);
-  }, [value, suggestions]);
-
-  useEffect(() => {
-    const handler = (e) => {
-      if(inputRef.current && !inputRef.current.contains(e.target) && dropRef.current && !dropRef.current.contains(e.target)) setOpen(false);
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, []);
-
-  const updatePos = useCallback(() => {
-    if(!inputRef.current) return;
-    const rect = inputRef.current.getBoundingClientRect();
-    setPos({top:rect.bottom+2, left:rect.left, width:rect.width});
-  }, []);
-
-  return (
-    <>
-      <input ref={inputRef} value={value||''} onChange={e=>{onChange(e.target.value);updatePos();}}
-        onFocus={()=>{updatePos();if(filtered.length>0)setOpen(true);}} placeholder={placeholder} style={{...style,width:'100%'}} />
-      {open && filtered.length > 0 && ReactDOM.createPortal(
-        <div ref={dropRef} style={{position:'fixed',top:pos.top,left:pos.left,width:pos.width,background:'var(--bg3)',border:'1px solid var(--gold3)',borderRadius:8,maxHeight:240,overflowY:'auto',zIndex:10000,boxShadow:'0 8px 32px rgba(0,0,0,.5)'}}>
-          {filtered.map((item,i) => {
-            const label = item.label || item;
-            const sub = item.sub || '';
-            return (
-              <div key={i} style={{padding:'8px 12px',cursor:'pointer',borderBottom:'1px solid var(--border)',fontSize:12,transition:'background .1s'}}
-                onMouseEnter={e=>e.currentTarget.style.background='var(--bg4)'}
-                onMouseLeave={e=>e.currentTarget.style.background='transparent'}
-                onMouseDown={e=>{e.preventDefault();onChange(label);if(onSelect)onSelect(item);setOpen(false);}}>
-                <div style={{fontWeight:600,color:'var(--gold)'}}>{label}</div>
-                {sub && <div style={{fontSize:10,color:'var(--text3)',marginTop:2}}>{sub}</div>}
-              </div>
-            );
-          })}
-        </div>,
-        document.body
-      )}
-    </>
-  );
-};
-
-
-const CURRENCIES = ['SGD','USD','GBP','EUR','HKD','AUD','JPY','CNY','MYR'];
-
-const PREMIUM_STRUCTURES = ['Single Premium','Regular Premium','Limited Pay','Flexible Premium'];
-
-// Gap analysis recommended coverage (SGD)
-const RECOMMENDED_COVERAGE = {
-  protection: {death:500000,ci:300000,tpd:500000},
-  health: {isp:true,hospitalCash:200},
-  savings: {targetFund:100000},
-  retirement: {monthlyIncome:3000},
-};
-
-// ═══════════════════════════════════════════════════════════════
+<script>
+// Data arrays extracted from Babel tag to stay under 500KB transpile limit
 // REPOSITORY SEED DATA — from memory specs
 // ═══════════════════════════════════════════════════════════════
 
-const SEED_REPOSITORY = [
+var SEED_REPOSITORY = [
   // ══════════════════════════════════════════════════
   // MANULIFE — PRODUCTS (verified from policy contracts)
   // ══════════════════════════════════════════════════
@@ -3155,6 +2757,426 @@ var FUND_DB=[
 ['Hang Seng TECH Index ETF','etf','cn','tech',10,null,null],
 ['CSOP HSCEI Covered Call Active ETF Class A HKD','etf','asia','multi_sector',9,null,null],
 ];
+</script>
+
+<script>
+// Suppress Babel 500KB deoptimization note (cosmetic — does not affect functionality)
+(function(){var oe=console.error,ow=console.warn;
+console.error=function(){if(typeof arguments[0]==='string'&&arguments[0].indexOf('[BABEL]')!==-1)return;oe.apply(console,arguments);};
+console.warn=function(){if(typeof arguments[0]==='string'&&arguments[0].indexOf('[BABEL]')!==-1)return;ow.apply(console,arguments);};
+})();
+</script>
+
+<script type="text/babel">
+const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext} = React;
+
+// PolicyLens Logo — inline SVG, works everywhere
+const LogoSVG = ({size=24,color='#d4a96a'}) => (
+  <svg width={size} height={size} viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+    {/* Lens circle */}
+    <circle cx="50" cy="50" r="38" fill="none" stroke={color} strokeWidth="2.5"/>
+    {/* 4-point star / crosshair */}
+    <circle cx="50" cy="50" r="2" fill={color}/>
+    <line x1="50" y1="32" x2="50" y2="42" stroke={color} strokeWidth="1.5" strokeLinecap="round"/>
+    <line x1="50" y1="58" x2="50" y2="68" stroke={color} strokeWidth="1.5" strokeLinecap="round"/>
+    <line x1="32" y1="50" x2="42" y2="50" stroke={color} strokeWidth="1.5" strokeLinecap="round"/>
+    <line x1="58" y1="50" x2="68" y2="50" stroke={color} strokeWidth="1.5" strokeLinecap="round"/>
+    {/* Subtle diamond accents on star tips */}
+    <path d="M50 30 L51.5 32 L50 34 L48.5 32Z" fill={color} opacity="0.8"/>
+    <path d="M50 66 L51.5 68 L50 70 L48.5 68Z" fill={color} opacity="0.8"/>
+    <path d="M30 50 L32 51.5 L34 50 L32 48.5Z" fill={color} opacity="0.8"/>
+    <path d="M66 50 L68 51.5 L70 50 L68 48.5Z" fill={color} opacity="0.8"/>
+  </svg>
+);
+const LogoMark = ({size=24}) => <LogoSVG size={size} />;
+
+// ═══════════════════════════════════════════════════════════════
+// CONSTANTS & DATA MODEL
+// ═══════════════════════════════════════════════════════════════
+
+const CATEGORIES = {
+  protection: {label:'Protection',color:'var(--cat-protection)',icon:'🛡️'},
+  savings: {label:'Savings / Endowment',color:'var(--cat-savings)',icon:'💰'},
+  health: {label:'Health / Medical',color:'var(--cat-health)',icon:'🏥'},
+  investment: {label:'Investment',color:'var(--cat-investment)',icon:'📈'},
+  retirement: {label:'Retirement',color:'var(--cat-retirement)',icon:'🏖️'},
+  maternity: {label:'Maternity',color:'var(--cat-maternity)',icon:'👶'},
+};
+
+const SUB_TYPES = {
+  protection: ['Term Life','Whole Life','Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)','Critical Illness','Personal Accident','Disability Income','Long-term Care','ILP (Protection)'],
+  savings: ['Endowment','Lifetime Endowment','Education Plan','Short-term Endowment'],
+  health: ['Integrated Shield Plan','Hospital Income','CareShield Life Supplement'],
+  investment: ['ILP (Investment)','Unit Trust','Single Premium Investment'],
+  retirement: ['Retirement','Annuity'],
+  maternity: ['Maternity Coverage'],
+};
+
+const UL_FAMILY = ['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'];
+
+// ═══ SG INSURANCE CONSTANTS (MOH/CPF Board 2024) ═══
+function getMSLPremium(age) {
+  if(age<21) return 150; if(age<31) return 320; if(age<36) return 450;
+  if(age<41) return 630; if(age<46) return 800; if(age<51) return 1000;
+  if(age<56) return 1420; if(age<61) return 1780; if(age<66) return 2480;
+  if(age<71) return 3090; if(age<76) return 3900; if(age<81) return 4660;
+  if(age<86) return 5500; return 6360;
+}
+function getISPAWL(age) {
+  const anb = age + 1;
+  if (anb <= 40) return 300;
+  if (anb <= 70) return 600;
+  return 900;
+}
+function calcISPBreakdown(totalPrem, age) {
+  const msl = getMSLPremium(age);
+  const awl = getISPAWL(age);
+  const ispAdditional = Math.max(0, totalPrem - msl);
+  const ispMediSave = Math.min(ispAdditional, awl);
+  const ispCash = Math.max(0, ispAdditional - awl);
+  return { msl, awl, ispAdditional, ispMediSave, ispCash, totalMediSave: msl + ispMediSave, totalCash: ispCash };
+}
+const CARESHIELD_MEDISAVE_CAP = 600;
+
+// ═══ PDF UNLOCK — tries preset passwords to decrypt locked PDFs ═══
+async function getPresetPasswords() {
+  const stored = await dbGet('settings','pdfPasswords').catch(()=>null);
+  const custom = (stored?.value || '').split('\n').map(s=>s.trim()).filter(Boolean);
+  // Auto-generate from client profile
+  const cp = await dbGet('settings','clientProfile').catch(()=>null);
+  const p = cp?.value || {};
+  const auto = [];
+  if(p.nric) {
+    auto.push(p.nric); // Full NRIC: S1234567X
+    auto.push(p.nric.toUpperCase());
+    auto.push(p.nric.toLowerCase());
+    auto.push(p.nric.slice(1,8)); // digits only: 1234567
+    auto.push(p.nric.slice(-4)); // last 4: 567X
+  }
+  if(p.dob) {
+    const d = new Date(p.dob);
+    const dd = String(d.getDate()).padStart(2,'0');
+    const mm = String(d.getMonth()+1).padStart(2,'0');
+    const yyyy = String(d.getFullYear());
+    const yy = yyyy.slice(-2);
+    auto.push(dd+mm+yyyy); // 18061979
+    auto.push(yyyy+mm+dd); // 19790618
+    auto.push(dd+mm+yy);   // 180679
+    auto.push(dd+'/'+mm+'/'+yyyy); // 18/06/1979
+    auto.push(dd+'-'+mm+'-'+yyyy); // 18-06-1979
+    auto.push(yyyy+'-'+mm+'-'+dd); // 1979-06-18
+  }
+  // Also try dependant NRICs/DOBs
+  (p.dependants||[]).forEach(dep => {
+    if(dep.nric) { auto.push(dep.nric); auto.push(dep.nric.toUpperCase()); auto.push(dep.nric.slice(1,8)); }
+    if(dep.dob) {
+      const d2 = new Date(dep.dob);
+      auto.push(String(d2.getDate()).padStart(2,'0')+String(d2.getMonth()+1).padStart(2,'0')+String(d2.getFullYear()));
+    }
+  });
+  // Dedupe
+  return [...new Set([...custom, ...auto])].filter(Boolean);
+}
+
+async function tryUnlockPDF(arrayBuffer) {
+  // Try without password first
+  try {
+    const doc = await pdfjsLib.getDocument({data: new Uint8Array(arrayBuffer)}).promise;
+    return {doc, password: null, wasLocked: false};
+  } catch(e) {
+    if(e.name !== 'PasswordException') throw e;
+  }
+  // Try preset passwords
+  const passwords = await getPresetPasswords();
+  for(const pw of passwords) {
+    try {
+      const doc = await pdfjsLib.getDocument({data: new Uint8Array(arrayBuffer), password: pw}).promise;
+      console.log('[PDF] Unlocked with password:', pw.slice(0,3)+'***');
+      return {doc, password: pw, wasLocked: true};
+    } catch(e) {
+      if(e.name !== 'PasswordException') throw e;
+    }
+  }
+  // Prompt user as last resort
+  const manual = prompt('This PDF is password-protected.\nCommon passwords: NRIC, DOB (DDMMYYYY)\n\nEnter password:');
+  if(!manual) throw new Error('PDF is locked and no password provided');
+  try {
+    const doc = await pdfjsLib.getDocument({data: new Uint8Array(arrayBuffer), password: manual}).promise;
+    return {doc, password: manual, wasLocked: true};
+  } catch(e) {
+    throw new Error('Wrong password — PDF could not be unlocked');
+  }
+}
+
+async function pdfToImages(pdfDoc, maxPages=12) {
+  const pages = Math.min(pdfDoc.numPages, maxPages);
+  const images = [];
+  for(let i=1; i<=pages; i++) {
+    const page = await pdfDoc.getPage(i);
+    const scale = 2; // high-res for OCR
+    const vp = page.getViewport({scale});
+    const canvas = document.createElement('canvas');
+    canvas.width = vp.width;
+    canvas.height = vp.height;
+    const ctx = canvas.getContext('2d');
+    await page.render({canvasContext:ctx, viewport:vp}).promise;
+    const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+    images.push(dataUrl.split(',')[1]); // base64 only
+  }
+  return images;
+}
+
+// Master function: takes a File, returns content blocks ready for AI
+async function processFile(file) {
+  const isPDF = file.type === 'application/pdf' || file.name?.toLowerCase().endsWith('.pdf');
+  const isExcel = file.name?.match(/\.(xlsx|xls|csv)$/i) || file.type?.includes('spreadsheet') || file.type?.includes('excel');
+  const isWord = file.name?.match(/\.(docx|doc|rtf)$/i) || file.type?.includes('wordprocessing') || file.type?.includes('msword');
+  
+  // ── Excel → convert to CSV text via SheetJS ──
+  if(isExcel) {
+    try {
+      if(file.name?.match(/\.csv$/i)) {
+        const text = await file.text();
+        return [{type:'text', text:'[Spreadsheet: '+file.name+']\n'+text.slice(0,80000)}];
+      }
+      const ab = await file.arrayBuffer();
+      if(typeof XLSX !== 'undefined') {
+        const wb = XLSX.read(ab, {type:'array'});
+        let allText = '[Spreadsheet: '+file.name+']\n';
+        for(const sheetName of wb.SheetNames) {
+          const csv = XLSX.utils.sheet_to_csv(wb.Sheets[sheetName], {blankrows:false});
+          allText += '\n--- Sheet: '+sheetName+' ---\n'+csv;
+        }
+        return [{type:'text', text:allText.slice(0,80000)}];
+      }
+    } catch(e) { console.warn('[ProcessFile] Excel parse error:', e); }
+    // Final fallback: tell AI we couldn't read it
+    return [{type:'text', text:'[File: '+file.name+'] — Excel file could not be parsed. SheetJS may not be loaded.'}];
+  }
+
+  // ── Word .docx → extract text (basic XML parse), or send to Claude directly ──
+  if(isWord && file.name?.match(/\.docx$/i)) {
+    try {
+      const ab = await file.arrayBuffer();
+      const uint8 = new Uint8Array(ab);
+      const decoder = new TextDecoder('utf-8', {fatal:false});
+      const raw = decoder.decode(uint8);
+      const matches = raw.match(/<w:t[^>]*>([^<]*)<\/w:t>/g);
+      if(matches && matches.length > 10) {
+        const text = matches.map(m => m.replace(/<[^>]+>/g,'')).join(' ');
+        return [{type:'text', text:'[Document: '+file.name+']\n'+text.slice(0,50000)}];
+      }
+    } catch(e) { console.warn('[ProcessFile] Word parse error:', e); }
+    // Fallback: send as document block for Claude (Gemini can't handle docx)
+    const b64 = await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file)});
+    return [{type:'document', source:{type:'base64', media_type:file.type||'application/octet-stream', data:b64}, _forceAnthropic:true}];
+  }
+  // ── Word .doc / .rtf → force Anthropic ──
+  if(isWord) {
+    const b64 = await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file)});
+    return [{type:'document', source:{type:'base64', media_type:file.type||'application/octet-stream', data:b64}, _forceAnthropic:true}];
+  }
+
+  // ── PDF ──
+  if(isPDF) {
+    const arrayBuffer = await file.arrayBuffer();
+    try {
+      const {doc, wasLocked} = await tryUnlockPDF(arrayBuffer);
+      if(wasLocked) {
+        const images = await pdfToImages(doc);
+        return images.map(b64 => ({type:'image', source:{type:'base64', media_type:'image/jpeg', data:b64}}));
+      } else {
+        const b64 = await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file)});
+        return [{type:'document', source:{type:'base64', media_type:'application/pdf', data:b64}}];
+      }
+    } catch(e) {
+      if(e.message.includes('locked') || e.message.includes('password')) { alert(e.message); return []; }
+      const b64 = await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file)});
+      return [{type:'document', source:{type:'base64', media_type:'application/pdf', data:b64}}];
+    }
+  }
+  
+  // ── Images (Gemini + Claude both handle these) ──
+  const b64 = await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file)});
+  const mime = file.type || 'application/octet-stream';
+  if(mime.startsWith('image/')) return [{type:'image', source:{type:'base64', media_type:mime, data:b64}}];
+  
+  // ── Text files ──
+  if(mime.startsWith('text/') || file.name?.match(/\.(txt|csv|json|md|html|htm)$/i)) {
+    const text = await file.text();
+    return [{type:'text', text:'[File: '+file.name+']\n'+text.slice(0,50000)}];
+  }
+  
+  // ── Anything else → try text first, fallback to Claude document block ──
+  try {
+    const text = await file.text();
+    if(text && text.length > 20 && !text.match(/[\x00-\x08\x0E-\x1F]/)) {
+      return [{type:'text', text:'[File: '+file.name+']\n'+text.slice(0,50000)}];
+    }
+  } catch(e){}
+  // Unknown binary → force Anthropic (Claude handles more MIME types than Gemini)
+  return [{type:'document', source:{type:'base64', media_type:mime, data:b64}, _forceAnthropic:true}];
+}
+
+// ═══════════════════════════════════════════════════════════════
+// INSURER REGISTRY — brand colors + logos for SG market
+// ═══════════════════════════════════════════════════════════════
+const INSURERS = {
+  // Life insurers
+  'Manulife':       {color:'#00a758',bg:'#e6f7ef',logo:'https://logo.clearbit.com/manulife.com.sg'},
+  'AIA':            {color:'#e4002b',bg:'#fde8ec',logo:'https://logo.clearbit.com/aia.com.sg'},
+  'Prudential':     {color:'#e31837',bg:'#fde8ec',logo:'https://logo.clearbit.com/prudential.com.sg'},
+  'Great Eastern':  {color:'#003da5',bg:'#e6edf8',logo:'https://logo.clearbit.com/greateasternlife.com'},
+  'NTUC Income':    {color:'#f47920',bg:'#fef3e8',logo:'https://logo.clearbit.com/income.com.sg'},
+  'FWD':            {color:'#e87722',bg:'#fef3e8',logo:'https://logo.clearbit.com/fwd.com.sg'},
+  'Singlife':       {color:'#ff4f5b',bg:'#ffe8ea',logo:'https://logo.clearbit.com/singlife.com'},
+  'Tokio Marine':   {color:'#0033a0',bg:'#e6edf8',logo:'https://logo.clearbit.com/tokiomarine.com'},
+  'HSBC Life':      {color:'#db0011',bg:'#fde8ec',logo:'https://logo.clearbit.com/hsbc.com.sg'},
+  'China Life':     {color:'#c10230',bg:'#fde8ec',logo:'https://logo.clearbit.com/chinalife.com.sg'},
+  'China Taiping':  {color:'#c41230',bg:'#fde8ec',logo:'https://logo.clearbit.com/sg.cntaiping.com'},
+  'Etiqa':          {color:'#00205b',bg:'#e6edf8',logo:'https://logo.clearbit.com/etiqa.com.sg'},
+  'Zurich':         {color:'#003399',bg:'#e6edf8',logo:'https://logo.clearbit.com/zurich.com.sg'},
+  'Sun Life':       {color:'#fdb813',bg:'#fef9e6',logo:'https://logo.clearbit.com/sunlife.com.sg'},
+  'Aviva/Singlife': {color:'#ffcc00',bg:'#fef9e6',logo:'https://logo.clearbit.com/singlife.com'},
+  'AXA':            {color:'#00008f',bg:'#e6e6f8',logo:'https://logo.clearbit.com/axa.com.sg'},
+  'Raffles Health':  {color:'#1a4480',bg:'#e6edf8',logo:'https://logo.clearbit.com/raffleshealth.com'},
+  'Swiss Life':     {color:'#e30613',bg:'#fde8ec',logo:'https://logo.clearbit.com/swisslife.com'},
+  // General insurers
+  'MSIG':           {color:'#004ea2',bg:'#e6edf8',logo:'https://logo.clearbit.com/msig.com.sg'},
+  'Sompo':          {color:'#003c71',bg:'#e6edf8',logo:'https://logo.clearbit.com/sompo.com.sg'},
+  'Chubb':          {color:'#a3080c',bg:'#fde8ec',logo:'https://logo.clearbit.com/chubb.com'},
+  'QBE':            {color:'#003087',bg:'#e6edf8',logo:'https://logo.clearbit.com/qbe.com'},
+  'Liberty':        {color:'#1e3a5f',bg:'#e6edf8',logo:'https://logo.clearbit.com/libertyinsurance.com.sg'},
+  // Brokerages / platforms
+  'iFAST':          {color:'#003366',bg:'#e6edf8',logo:'https://logo.clearbit.com/ifastfinancial.com'},
+  'Tiger Brokers':  {color:'#ff6600',bg:'#fff3e6',logo:'https://logo.clearbit.com/tigerbrokers.com.sg'},
+  'Phillip Securities': {color:'#003087',bg:'#e6edf8',logo:'https://logo.clearbit.com/poems.com.sg'},
+  'UOB Kay Hian':   {color:'#0033a1',bg:'#e6edf8',logo:'https://logo.clearbit.com/utrade.com.sg'},
+  'DBS':            {color:'#e21a22',bg:'#fde8ec',logo:'https://logo.clearbit.com/dbs.com.sg'},
+  'OCBC':           {color:'#ef3e23',bg:'#fde8ec',logo:'https://logo.clearbit.com/ocbc.com'},
+  'UOB':            {color:'#0033a1',bg:'#e6edf8',logo:'https://logo.clearbit.com/uob.com.sg'},
+  'Citibank':       {color:'#003b70',bg:'#e6edf8',logo:'https://logo.clearbit.com/citibank.com.sg'},
+  'StashAway':      {color:'#00c2a8',bg:'#e6f9f5',logo:'https://logo.clearbit.com/stashaway.sg'},
+  'Endowus':        {color:'#2d46b9',bg:'#e8ecf8',logo:'https://logo.clearbit.com/endowus.com'},
+  'Syfe':           {color:'#1a1a2e',bg:'#e8e8ec',logo:'https://logo.clearbit.com/syfe.com'},
+  'MoneyOwl':       {color:'#5b2c6f',bg:'#f0e8f5',logo:'https://logo.clearbit.com/moneyowl.com.sg'},
+  'FSMOne':         {color:'#003366',bg:'#e6edf8',logo:'https://logo.clearbit.com/fsmone.com'},
+  'Saxo':           {color:'#0b4f6c',bg:'#e6f0f5',logo:'https://logo.clearbit.com/home.saxo'},
+  'Interactive Brokers': {color:'#d81b26',bg:'#fde8ec',logo:'https://logo.clearbit.com/interactivebrokers.com'},
+  'moomoo':         {color:'#ff6600',bg:'#fff3e6',logo:'https://logo.clearbit.com/moomoo.com'},
+  'Webull':         {color:'#f6475d',bg:'#fde8ec',logo:'https://logo.clearbit.com/webull.com'},
+  // CPF / Gov
+};
+const INSURER_LIST = Object.keys(INSURERS).sort();
+const getInsurer = (name) => INSURERS[name] || {color:'#64748b',bg:'#f1f5f9',logo:null};
+
+// Insurer badge component
+const InsurerBadge = ({name, size='sm'}) => {
+  const ins = getInsurer(name);
+  const sz = size==='lg'?{h:24,f:13,p:'3px 10px',img:18}:{h:18,f:11,p:'2px 8px',img:14};
+  return React.createElement('span',{style:{display:'inline-flex',alignItems:'center',gap:4,background:ins.bg,color:ins.color,fontSize:sz.f,fontWeight:600,padding:sz.p,borderRadius:6,border:`1px solid ${ins.color}22`,whiteSpace:'nowrap'}},
+    ins.logo && React.createElement('img',{src:ins.logo,style:{width:sz.img,height:sz.img,borderRadius:3,objectFit:'contain'},onError:e=>{e.target.style.display='none'}}),
+    name||'Unknown'
+  );
+};
+
+// Insurer dropdown component
+const InsurerSelect = ({value,onChange,style}) => {
+  const [other,setOther] = React.useState(value && !INSURERS[value] && value!=='' ? value : '');
+  const isOther = value && !INSURERS[value] && value!=='';
+  return React.createElement('div',null,
+    React.createElement('select',{value:isOther?'__other':value||'',onChange:e=>{if(e.target.value==='__other'){onChange(other||'Other');setOther(other||'');}else{onChange(e.target.value);setOther('');}},style:{...style,color:getInsurer(value).color,fontWeight:600}},
+      React.createElement('option',{value:''},'Select insurer…'),
+      INSURER_LIST.map(n=>React.createElement('option',{key:n,value:n},n)),
+      React.createElement('option',{value:'__other'},'Other…')
+    ),
+    isOther && React.createElement('input',{value:other,onChange:e=>{setOther(e.target.value);onChange(e.target.value);},placeholder:'Type insurer name',style:{marginTop:4,width:'100%',fontSize:12}})
+  );
+};
+
+// Fuzzy autocomplete input — shows matching suggestions from a list as user types
+const FuzzyInput = ({value,onChange,suggestions,placeholder,style,onSelect}) => {
+  const [open,setOpen] = useState(false);
+  const [filtered,setFiltered] = useState([]);
+  const [typing,setTyping] = useState(false);
+  const inputRef = useRef(null);
+  const dropRef = useRef(null);
+  const [pos,setPos] = useState({top:0,left:0,width:0});
+
+  // Re-filter whenever value OR suggestions change
+  useEffect(() => {
+    if(!value || value.length < 1 || !suggestions || suggestions.length === 0) { setFiltered([]); if(typing) setOpen(false); return; }
+    const q = value.toLowerCase().trim();
+    if(!q) { setFiltered([]); setOpen(false); return; }
+    const scored = suggestions.map(s => {
+      const t = (s.label||s||'').toLowerCase();
+      let score = 0;
+      if(t === q) score = 100;
+      else if(t.startsWith(q)) score = 80;
+      else if(t.includes(q)) score = 60;
+      else { const chars = q.split(''); let idx = 0; for(const c of chars) { const fi = t.indexOf(c, idx); if(fi >= 0) { score += 3; idx = fi + 1; } } }
+      return {item:s, score};
+    }).filter(m => m.score > 5).sort((a,b) => b.score - a.score).slice(0, 10);
+    setFiltered(scored.map(m => m.item));
+    if(typing) setOpen(scored.length > 0);
+  }, [value, suggestions]);
+
+  useEffect(() => {
+    const handler = (e) => {
+      if(inputRef.current && !inputRef.current.contains(e.target) && dropRef.current && !dropRef.current.contains(e.target)) { setOpen(false); setTyping(false); }
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, []);
+
+  const updatePos = useCallback(() => {
+    if(!inputRef.current) return;
+    const rect = inputRef.current.getBoundingClientRect();
+    setPos({top:rect.bottom+2, left:rect.left, width:rect.width});
+  }, []);
+
+  return (
+    <>
+      <input ref={inputRef} value={value||''} onChange={e=>{setTyping(true);onChange(e.target.value);updatePos();}}
+        onFocus={()=>{setTyping(true);updatePos();if(filtered.length>0)setOpen(true);}} placeholder={placeholder} style={{...style,width:'100%'}} />
+      {open && filtered.length > 0 && ReactDOM.createPortal(
+        <div ref={dropRef} style={{position:'fixed',top:pos.top,left:pos.left,width:pos.width,background:'var(--bg3)',border:'1px solid var(--gold3)',borderRadius:8,maxHeight:240,overflowY:'auto',zIndex:10000,boxShadow:'0 8px 32px rgba(0,0,0,.5)'}}>
+          {filtered.map((item,i) => {
+            const label = item.label || item;
+            const sub = item.sub || '';
+            return (
+              <div key={i} style={{padding:'8px 12px',cursor:'pointer',borderBottom:'1px solid var(--border)',fontSize:12,transition:'background .1s'}}
+                onMouseEnter={e=>e.currentTarget.style.background='var(--bg4)'}
+                onMouseLeave={e=>e.currentTarget.style.background='transparent'}
+                onMouseDown={e=>{e.preventDefault();onChange(label);if(onSelect)onSelect(item);setOpen(false);setTyping(false);}}>
+                <div style={{fontWeight:600,color:'var(--gold)'}}>{label}</div>
+                {sub && <div style={{fontSize:10,color:'var(--text3)',marginTop:2}}>{sub}</div>}
+              </div>
+            );
+          })}
+        </div>,
+        document.body
+      )}
+    </>
+  );
+};
+
+
+const CURRENCIES = ['SGD','USD','GBP','EUR','HKD','AUD','JPY','CNY','MYR'];
+
+const PREMIUM_STRUCTURES = ['Single Premium','Regular Premium','Limited Pay','Flexible Premium'];
+
+// Gap analysis recommended coverage (SGD)
+const RECOMMENDED_COVERAGE = {
+  protection: {death:500000,ci:300000,tpd:500000},
+  health: {isp:true,hospitalCash:200},
+  savings: {targetFund:100000},
+  retirement: {monthlyIncome:3000},
+};
+
+// ═══════════════════════════════════════════════════════════════
+// SEED_REPOSITORY and FUND_DB loaded from separate <script> tag above (Babel 500KB limit)
+
 
 // ═══════════════════════════════════════════════════════════════
 // IndexedDB LAYER
@@ -3849,83 +3871,67 @@ async function callAI(systemPrompt, contentBlocks, maxTokens) {
   const forceAnthropic = contentBlocks.some(b=>b._forceAnthropic);
   const textParts = contentBlocks.filter(b=>b.type==='text').map(b=>b.text).join('\n');
   
-  // ── Text-only → Claude directly (cheapest) ──
+  // ── Text-only → Claude directly (cheapest), fallback to Gemini ──
   if(ck && !hasMedia) {
     console.log('[AI] Text-only → Claude direct');
-    return await claudeExtract(ck, systemPrompt, textParts, maxTokens);
+    try {
+      return await claudeExtract(ck, systemPrompt, textParts, maxTokens);
+    } catch(claudeErr) {
+      console.warn('[AI] Claude failed:', claudeErr.message);
+      if(gk && (claudeErr.message.includes('fetch') || claudeErr.message.includes('network') || claudeErr.message.includes('CONNECTION'))) {
+        console.log('[AI] Falling back to Gemini for text extraction');
+        return await geminiExtract(gk, systemPrompt, contentBlocks, maxTokens);
+      }
+      throw claudeErr;
+    }
   }
 
-  // ── Force Anthropic (e.g. docx files Gemini can't handle) ──
+  // ── Force Anthropic (e.g. docx files Gemini can't handle) — with fallback ──
   if(forceAnthropic && ck) {
     console.log('[AI] Forced Anthropic route (unsupported Gemini MIME)');
-    const claudeContent = contentBlocks.map(b => {
-      if(b.type === 'text') return {type:'text', text:b.text};
-      if(b.type === 'image') return {type:'image', source:b.source};
-      if(b.type === 'document') return {type:'document', source:b.source};
-      return null;
-    }).filter(Boolean);
-    const resp = await fetch('https://api.anthropic.com/v1/messages', {
-      method:'POST',
-      headers:{'Content-Type':'application/json','x-api-key':ck,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body:JSON.stringify({
-        model:'claude-sonnet-4-20250514', max_tokens:maxTokens||8000,
-        system:systemPrompt,
-        messages:[{role:'user', content:claudeContent}]
-      })
-    });
-    if(!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error('Claude: '+(e.error?.message||resp.status)); }
-    const data = await resp.json();
-    return data.content?.map(c=>c.text||'').join('') || '';
+    try {
+      const claudeContent = contentBlocks.map(b => {
+        if(b.type === 'text') return {type:'text', text:b.text};
+        if(b.type === 'image') return {type:'image', source:b.source};
+        if(b.type === 'document') return {type:'document', source:b.source};
+        return null;
+      }).filter(Boolean);
+      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+        method:'POST',
+        headers:{'Content-Type':'application/json','x-api-key':ck,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+        body:JSON.stringify({
+          model:'claude-sonnet-4-20250514', max_tokens:maxTokens||8000,
+          system:systemPrompt,
+          messages:[{role:'user', content:claudeContent}]
+        })
+      });
+      if(!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error('Claude: '+(e.error?.message||resp.status)); }
+      const data = await resp.json();
+      return data.content?.map(c=>c.text||'').join('') || '';
+    } catch(claudeErr) {
+      console.warn('[AI] Claude forceAnthropic failed:', claudeErr.message, '→ falling back to Gemini');
+      if(gk) return await geminiExtract(gk, systemPrompt, contentBlocks, maxTokens);
+      throw claudeErr;
+    }
   }
 
   // ── Dual pipeline: Gemini reads → Claude extracts (with fallback) ──
   if(ck && hasMedia) {
     console.log('[AI] Dual pipeline: Gemini read → Claude extract');
+    let geminiText = null;
     try {
-      const rawText = await geminiRead(gk, contentBlocks);
-      return await claudeExtract(ck, systemPrompt, rawText + '\n\n' + textParts, maxTokens);
+      geminiText = await geminiRead(gk, contentBlocks);
     } catch(geminiError) {
-      console.warn('[AI] Gemini failed:', geminiError.message, '→ sending media directly to Claude');
-      // Build Claude-native content: images + PDFs sent directly, skip unsupported MIME types
-      const claudeContent = [];
-      for(const block of contentBlocks) {
-        if(block.type === 'text') claudeContent.push(block);
-        else if(block.type === 'image') claudeContent.push(block);
-        else if(block.type === 'document') {
-          const mt = block.source?.media_type || '';
-          // Claude supports: PDF, images, docx, csv, txt, html
-          if(mt === 'application/pdf' || mt.startsWith('image/') || mt.includes('wordprocessing') || mt.includes('msword') ||
-             mt.startsWith('text/') || mt.includes('csv')) {
-            claudeContent.push(block);
-          } else {
-            console.warn('[AI] Skipping unsupported Claude MIME:', mt);
-          }
-        }
-      }
-      // If we have Claude-compatible content, send it directly
-      if(claudeContent.some(b => b.type === 'image' || b.type === 'document')) {
-        console.log('[AI] Sending', claudeContent.length, 'blocks directly to Claude');
-        const resp = await fetch('https://api.anthropic.com/v1/messages', {
-          method:'POST',
-          headers:{'Content-Type':'application/json','x-api-key':ck,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-          body:JSON.stringify({
-            model:'claude-sonnet-4-20250514', max_tokens:maxTokens||8000,
-            system:systemPrompt,
-            messages:[{role:'user', content:claudeContent.map(b => {
-              if(b.type === 'text') return {type:'text', text:b.text};
-              if(b.type === 'image') return {type:'image', source:b.source};
-              if(b.type === 'document') return {type:'document', source:b.source};
-              return {type:'text', text:''};
-            })}]
-          })
-        });
-        if(!resp.ok) { const e = await resp.json().catch(()=>({})); throw new Error('Claude: '+(e.error?.message||resp.status)); }
-        const data = await resp.json();
-        return data.content?.map(c=>c.text||'').join('') || '';
-      }
-      // Last resort: text-only to Claude
-      const fallbackText = textParts || 'Document could not be processed. Gemini error: ' + geminiError.message;
-      return await claudeExtract(ck, systemPrompt, fallbackText, maxTokens);
+      console.warn('[AI] Gemini read failed:', geminiError.message, '→ trying Gemini extract directly');
+      return await geminiExtract(gk, systemPrompt, contentBlocks, maxTokens);
+    }
+    // Gemini read succeeded — try Claude extract
+    try {
+      return await claudeExtract(ck, systemPrompt, geminiText + '\n\n' + textParts, maxTokens);
+    } catch(claudeError) {
+      console.warn('[AI] Claude extract failed:', claudeError.message, '→ falling back to Gemini extract');
+      // Claude unreachable — use Gemini for extraction too
+      return await geminiExtract(gk, systemPrompt, [{type:'text', text: geminiText + '\n\n' + textParts}], maxTokens);
     }
   }
   
@@ -4337,11 +4343,12 @@ function Dashboard() {
           const growth = (parseFloat(pol.ilpGrowth)||6)/100;
           const div = (parseFloat(pol.ilpDivYield)||0)/100;
           const fee = (parseFloat(pol.ilpMgmtFee)||1.5)/100;
-          const netRate = growth + div - fee;
+          // Reinvested: total yield compounds; Paid out: only growth-fee compounds, div is separate income
+          const fundRate = pol.divReinvest ? (growth + div - fee) : (growth - fee);
           const drawdownAge = parseInt(pol.ilpDivDrawdownAge)||retAge;
           const totalPremPaid = isSingle ? prem : prem * Math.min(premTerm, yearsInForce+1);
           let fv = parseFloat(pol.cashValue) > 0 && yearsInForce <= 1 ? parseFloat(pol.cashValue) :
-            (netRate>0 && !isSingle ? prem*(Math.pow(1+netRate,Math.min(premTerm,yearsInForce+1))-1)/netRate*Math.pow(1+netRate,Math.max(0,yearsInForce-premTerm)) : totalPremPaid*Math.pow(1+netRate,yearsInForce));
+            (fundRate>0 && !isSingle ? prem*(Math.pow(1+fundRate,Math.min(premTerm,yearsInForce+1))-1)/fundRate*Math.pow(1+fundRate,Math.max(0,yearsInForce-premTerm)) : totalPremPaid*Math.pow(1+Math.max(0,fundRate),yearsInForce));
           if(yr >= drawdownAge && div > 0 && !pol.divReinvest) { const divAmt = Math.round(fv * div); row.dividends += divAmt; row.income += divAmt; }
           row.totalCV += Math.round(fv); row.policies.push({name:pol.productName||pol.insurer,cv:Math.round(fv),type:'ilp'});
         }
@@ -4475,17 +4482,63 @@ function Dashboard() {
   const premRatio = annualIncome > 0 ? Math.round(totalPremium/annualIncome*100) : 0;
   const retRow = cvTimeline.find(r => r.age === retAge);
 
+  // ── TIER 1 DASHBOARD METRICS ──
+  const insurerBreakdown = useMemo(()=>{
+    const m = {};
+    policies.forEach(pol=>{
+      const ins = pol.insurer||'Unknown';
+      if(!m[ins]) m[ins]={count:0,premium:0,coverage:0,policies:[]};
+      m[ins].count++;
+      m[ins].premium += parseFloat(pol.annualPremium)||0;
+      m[ins].coverage += parseFloat(pol.sumAssured)||0;
+      m[ins].policies.push(pol);
+    });
+    return Object.entries(m).sort((a,b)=>b[1].premium-a[1].premium);
+  },[policies]);
+
+  // Estimated total AUM (current fund values)
+  const portfolioAUM = useMemo(()=>{
+    let aum=0;
+    policies.forEach(pol=>{
+      if(parseFloat(pol.cashValue)>0){ aum+=parseFloat(pol.cashValue); return; }
+      const prem=parseFloat(pol.annualPremium)||0; if(!prem) return;
+      const sa=parseInt(pol.premStartAge)||parseInt(pol.ageAtEntry)||age;
+      const yif=Math.max(0,age-sa);
+      if(yif<=0) return;
+      const pt=pol.premSingle?1:(parseInt(pol.premTerm)||10);
+      let r=0;
+      if(pol.category==='investment'){
+        const g=(parseFloat(pol.ilpGrowth)||6)/100, d=(parseFloat(pol.ilpDivYield)||0)/100, f=(parseFloat(pol.ilpMgmtFee)||1.5)/100;
+        r=pol.divReinvest?g+d-f:g-f;
+      } else r=(parseFloat(pol.cvGrowthRate)||3)/100;
+      if(r<=0) return;
+      const paid=Math.min(pt,yif);
+      const cv=pol.premSingle?prem*Math.pow(1+r,yif):prem*(Math.pow(1+r,paid)-1)/r*Math.pow(1+r,Math.max(0,yif-paid));
+      aum+=cv;
+    });
+    return Math.round(aum);
+  },[policies,age]);
+
+  // Category counts
+  const catCounts = useMemo(()=>{
+    const c={protection:0,savings:0,health:0,investment:0,retirement:0};
+    policies.forEach(p=>{if(c[p.category]!==undefined)c[p.category]++});
+    return c;
+  },[policies]);
+
   return (
     <div className="fade-in">
       <DropZone active={true} onFiles={handleDashDrop} label="📎 Drop or paste any document — client profile, policy contracts, benefit illustrations" />
       <OnboardingModal />
 
       {/* ═══ SUMMARY CARDS ═══ */}
-      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:10,marginBottom:16}}>
-        <div className="card card-sm"><div style={{color:'var(--text3)',fontSize:10,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Policies</div><div style={{fontSize:24,fontWeight:700,marginTop:2}}>{policies.length}</div></div>
-        <div className="card card-sm"><div style={{color:'var(--text3)',fontSize:10,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Annual Premium</div><div style={{fontSize:24,fontWeight:700,marginTop:2}}>{fmt(totalPremium)}</div>{premRatio>0 && <div style={{fontSize:10,color:premRatio>15?'var(--red)':'var(--text3)'}}>{premRatio}% of income</div>}</div>
-        <div className="card card-sm"><div style={{color:'var(--text3)',fontSize:10,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Total Coverage</div><div style={{fontSize:24,fontWeight:700,marginTop:2}}>{fmt(totalCoverage)}</div></div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:10,marginBottom:16}}>
+        <div className="card card-sm"><div style={{color:'var(--text3)',fontSize:10,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Policies</div><div style={{fontSize:24,fontWeight:700,marginTop:2}}>{policies.length}</div><div style={{fontSize:9,color:'var(--text3)'}}>{catCounts.protection}P · {catCounts.savings}S · {catCounts.health}H · {catCounts.investment}I · {catCounts.retirement}R</div></div>
+        <div className="card card-sm"><div style={{color:'var(--text3)',fontSize:10,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Annual Premium</div><div style={{fontSize:24,fontWeight:700,marginTop:2}}>{fmt(totalPremium)}</div><div style={{fontSize:9,color:'var(--text3)'}}>{fmt(Math.round(totalPremium/12))}/mth</div>{premRatio>0 && <div style={{fontSize:10,color:premRatio>15?'var(--red)':premRatio>10?'var(--orange)':'var(--green2)'}}>{premRatio}% of income {premRatio>15?'⚠':'✓'}</div>}</div>
+        <div className="card card-sm"><div style={{color:'var(--text3)',fontSize:10,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Total Coverage</div><div style={{fontSize:24,fontWeight:700,marginTop:2}}>{fmt(totalCoverage)}</div>{annualIncome>0 && <div style={{fontSize:9,color:'var(--text3)'}}>{(totalCoverage/annualIncome).toFixed(1)}× annual income</div>}</div>
+        <div className="card card-sm"><div style={{color:'var(--text3)',fontSize:10,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Portfolio AUM</div><div style={{fontSize:24,fontWeight:700,marginTop:2,color:'var(--gold)'}}>{fmt(portfolioAUM)}</div><div style={{fontSize:9,color:'var(--text3)'}}>est. current fund values</div></div>
         <div className="card card-sm"><div style={{color:'var(--text3)',fontSize:10,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Coverage Score</div><div style={{fontSize:24,fontWeight:700,marginTop:2,color:scoreColor}}>{overallScore}%</div><div style={{fontSize:10,color:scoreColor}}>{scoreLabel}</div></div>
+        <div className="card card-sm"><div style={{color:'var(--text3)',fontSize:10,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Insurers</div><div style={{fontSize:24,fontWeight:700,marginTop:2}}>{insurerBreakdown.length}</div><div style={{fontSize:9,color:'var(--text3)'}}>{insurerBreakdown.length>0?insurerBreakdown[0][0]:'-'} ({insurerBreakdown.length>0?Math.round(insurerBreakdown[0][1].premium/totalPremium*100):0}%)</div></div>
       </div>
 
       <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:16}}>
@@ -4527,6 +4580,32 @@ function Dashboard() {
           </div>
         </div>
       </div>
+
+      {/* ═══ INSURER CONCENTRATION ═══ */}
+      {insurerBreakdown.length > 1 && (
+        <div className="card" style={{marginBottom:16}}>
+          <h3 style={{fontSize:13,fontWeight:600,marginBottom:10}}>Insurer Concentration</h3>
+          <div style={{display:'grid',gap:6}}>
+            {insurerBreakdown.map(([ins,data],i)=>{
+              const pct = totalPremium>0 ? data.premium/totalPremium*100 : 0;
+              const barColors = ['var(--gold)','var(--blue2)','var(--green2)','var(--purple)','var(--orange)','var(--red)'];
+              return (
+                <div key={i} style={{display:'grid',gridTemplateColumns:'140px 1fr 80px 80px 50px',gap:8,alignItems:'center',fontSize:11}}>
+                  <div style={{fontWeight:600,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{ins}</div>
+                  <div style={{background:'var(--bg3)',borderRadius:4,height:18,position:'relative',overflow:'hidden'}}>
+                    <div style={{position:'absolute',left:0,top:0,bottom:0,width:pct+'%',background:barColors[i%barColors.length],borderRadius:4,opacity:.7,transition:'width .3s'}}></div>
+                    <span style={{position:'relative',fontSize:9,fontWeight:600,padding:'0 6px',lineHeight:'18px',color:'var(--text)'}}>{pct.toFixed(0)}%</span>
+                  </div>
+                  <div style={{textAlign:'right',color:'var(--text2)',fontSize:10}}>{fmt(data.premium)}/yr</div>
+                  <div style={{textAlign:'right',color:'var(--text3)',fontSize:10}}>{data.count} {data.count===1?'policy':'policies'}</div>
+                  <div style={{textAlign:'right',color:'var(--text3)',fontSize:10}}>{fmt(data.coverage)}</div>
+                </div>
+              );
+            })}
+          </div>
+          {insurerBreakdown.length===1 && <div style={{fontSize:10,color:'var(--orange)',marginTop:6}}>⚠ Single insurer concentration risk</div>}
+        </div>
+      )}
 
       {/* ═══ LIA SETTINGS + SA OVERRIDE ═══ */}
       <div className="card" style={{marginBottom:16}}>
@@ -4784,8 +4863,7 @@ function BulkVerifyModal({extracted, repo, onAccept, onClose}) {
   }));
   const applyRepo = (idx) => setItems(prev => prev.map(it => {
     if(it._idx!==idx || !it._repoMatch) return it;
-    const r = it._repoMatch;
-    return {...it, productName:r.productName, insurer:r.insurer, category:r.category, subType:r.subType, currency:r.currency||it.currency, _appliedRepo:true};
+    return {...applyRepoDefaults(it._repoMatch, it), _idx:it._idx, _selected:it._selected, _corrections:it._corrections, _repoMatch:it._repoMatch, _appliedRepo:true};
   }));
 
   const handleAccept = () => {
@@ -4953,7 +5031,7 @@ function Policies() {
 
 For EACH policy, return a JSON object with:
 
-CORE: insurer, productName, policyName, policyNumber, category (protection/savings/health/investment/retirement/maternity), subType (Term Life/Whole Life/Universal Life (UL)/Indexed UL (IUL)/Variable UL (VUL)/Critical Illness/Personal Accident/Disability Income/Long-term Care/Endowment/Lifetime Endowment/Education Plan/Short-term Endowment/Integrated Shield Plan/Hospital Income/Investment-Linked Policy (ILP)/Retirement/Annuity/Maternity Coverage), currency (default SGD), sumAssured (number), annualPremium (number), premFrequency (annual/monthly/single/unknown — if document does not clearly state frequency, use unknown), premiumStructure (Single Premium/Regular Premium/Limited Pay/Flexible Premium), paymentMethod (Cash/MediSave/SRS/MediSave+Cash/CPF OA)
+CORE: insurer, productName, policyName, policyNumber, category (protection/savings/health/investment/retirement/maternity), subType (Term Life/Whole Life/Universal Life (UL)/Indexed UL (IUL)/Variable UL (VUL)/Critical Illness/Personal Accident/Disability Income/Long-term Care/Endowment/Lifetime Endowment/Education Plan/Short-term Endowment/Integrated Shield Plan/Hospital Income/ILP (Protection)/ILP (Investment)/Retirement/Annuity/Maternity Coverage), currency (default SGD), sumAssured (number), annualPremium (number), premFrequency (annual/monthly/single/unknown — if document does not clearly state frequency, use unknown), premiumStructure (Single Premium/Regular Premium/Limited Pay/Flexible Premium), paymentMethod (Cash/MediSave/SRS/MediSave+Cash/CPF OA)
 
 CLIENT: policyOwner (string — name of policy owner/purchaser), lifeInsured (string — name of life assured/insured person, may differ from policyOwner), gender (Male/Female — of life insured), dob (YYYY-MM-DD — of life insured), ageAtEntry (number — of life insured at cover start), smoker (Non-smoker/Smoker), nationality (SC/PR/Foreigner), occupation
 
@@ -4989,27 +5067,40 @@ EXCEL/SPREADSHEET HANDLING: If the input is a spreadsheet or tabular data:
 - If a column mentions "rider" in its name or has separate rider premiums, those are SEPARATE riders (bundled=false, include riderName).
 - If the spreadsheet has rider columns like "CI Rider", "TPD Rider" with SA values, create rider entries for each.
 - Return an ARRAY of policy objects — one per row.
-- Infer category and subType from plan names (e.g. "term" → Term Life, "whole life" / "WL" → Whole Life, "ISP" / "shield" → Integrated Shield Plan, "ILP" → Investment-Linked Policy, "endowment" → Endowment, "annuity" / "income" → Retirement).
+- Infer category and subType from plan names (e.g. "term" → Term Life, "whole life" / "WL" → Whole Life, "ISP" / "shield" → Integrated Shield Plan, "ILP" → ILP (Investment), "endowment" → Endowment, "annuity" / "income" → Retirement).
 - If a plan has a separate rider premium column, set the rider's bundled=false and premium to that value.
 
 IMPORTANT PLAN IDENTIFICATION: When you see a plan name, use your knowledge of Singapore insurance products to correctly classify it:
 
-ISP RIDERS (NOT standalone plans — these attach to a parent Integrated Shield Plan):
-- AIA: "Max VitalCare", "Max VitalHealth", "Max Essential Care" → ISP Rider (parent: AIA HealthShield Gold Max)
-- Prudential: "PRUExtra", "PRUExtra Plus", "PRUExtra Premier", "PRUExtra Preferred CoPay" → ISP Rider (parent: PRUShield)
-- Great Eastern: "GREAT TotalCare", "TotalCare Elite", "TotalCare Classic" → ISP Rider (parent: GREAT SupremeHealth)
-- NTUC Income: "Enhanced IncomeCare", "Deluxe IncomeCare" → ISP Rider (parent: Enhanced IncomeShield)
-- Singlife: "Health Plus Plan 1/2/3" → ISP Rider (parent: Singlife Shield)
-- Raffles Health: "Rider" plans → ISP Rider (parent: Raffles Shield)
-When you detect an ISP Rider WITHOUT its parent ISP in the same document, you MUST return TWO policies:
-1. The parent ISP (category:"health", subType:"Integrated Shield Plan") with hasRider:true, and whatever details you can infer (insurer, estimated ward class from the rider tier)
-2. The ISP Rider (category:"health", subType:"ISP Rider") with its actual extracted details
-Mark the parent plan with _inferredParent:true so the system can flag it to the user.
+ISP RIDERS — MERGE INTO PARENT ISP (do NOT create as separate policy):
+When you detect an ISP Rider, set these fields on the PARENT Integrated Shield Plan policy:
+- hasRider: true
+- riderList: name of the rider product (e.g. "Max VitalCare", "PRUExtra Plus", "GREAT TotalCare")
+- riderPremium: the rider premium (number, annual — always cash, NOT MediSave payable)
+- ispDeductible: deductible AFTER rider (lower than without rider, e.g. $3,500 for panel, $5,000 non-panel)
+- ispCoinsurance: co-pay % AFTER rider (typically 5% for most riders, 0-10% range)
+- ispCoInsCap: co-insurance cap in $ (0 if unlimited/no cap)
+
+Common ISP + Rider pairs:
+- AIA: HealthShield Gold Max + Max VitalCare / Max VitalHealth / Max Essential Care
+- Prudential: PRUShield + PRUExtra / PRUExtra Plus / PRUExtra Premier / PRUExtra Preferred CoPay
+- Great Eastern: GREAT SupremeHealth + GREAT TotalCare / TotalCare Elite / TotalCare Classic
+- NTUC Income: Enhanced IncomeShield + Enhanced IncomeCare / Deluxe IncomeCare
+- Singlife: Singlife Shield + Health Plus Plan 1/2/3 (Private Lite/Classic/Premier)
+- Raffles Health: Raffles Shield + Rider plans
+
+If you see ONLY the rider (no parent ISP in the document), still create ONE policy:
+- productName: the PARENT ISP name (infer from insurer + rider tier)
+- subType: "Integrated Shield Plan" (NOT "ISP Rider")
+- hasRider: true, riderList: the rider name, riderPremium: the rider cost
+- _inferredParent: true (so the system flags it for user review)
+
+NEVER create a separate "ISP Rider" policy. The rider is always part of the parent ISP.
 
 OTHER PLANS:
 - "PRUShield" / "Shield" / "HealthShield" / "IncomeShield" / "SupremeHealth" → Integrated Shield Plan
 - "PruActive Saver" / "PruSave Max" → Endowment (savings category)
-- "GreatLink" / "PRULink" / "InvestReady" → Investment-Linked Policy
+- "GreatLink" / "PRULink" / "InvestReady" → ILP (Investment)
 - "Income" / "Payout" plans → check if monthly income (Annuity) or lump sum (Endowment)
 - "VitalCare" / "VitalHealth" without "Max" prefix → could be standalone, check context
 
@@ -5092,6 +5183,11 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         if(result.premStartAge && !result.ageAtEntry) result.ageAtEntry = result.premStartAge;
         if(result.highlights && typeof result.highlights === 'string') try { result.highlights = JSON.parse(result.highlights); } catch(e){}
         if(!Array.isArray(result.highlights)) result.highlights = [];
+        // Normalize subType from AI extraction
+        if(result.subType) result.subType = normalizeSubType(result.subType, result.category, result.notes);
+        // Apply subType defaults for ILP/UL/etc fields
+        const stDefaults = SUBTYPE_DEFAULTS[result.subType];
+        if(stDefaults) Object.entries(stDefaults).forEach(([k,v])=>{ if(result[k]===undefined||result[k]===''||result[k]===null) result[k]=typeof v==='object'&&!Array.isArray(v)?{...v}:Array.isArray(v)?[...v]:v; });
         return result;
       });
 
@@ -5293,6 +5389,9 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         let count = 0;
         for(const p of selected) {
           const result = {...p, id:genId()};
+          if(result.subType) result.subType = normalizeSubType(result.subType, result.category, result.notes);
+          const stD = SUBTYPE_DEFAULTS[result.subType];
+          if(stD) Object.entries(stD).forEach(([k,v])=>{ if(result[k]===undefined||result[k]===''||result[k]===null) result[k]=typeof v==='object'&&!Array.isArray(v)?{...v}:Array.isArray(v)?[...v]:v; });
           if(result.premStartAge && result.premTerm && !result.premEndAge) result.premEndAge = String(parseInt(result.premStartAge)+parseInt(result.premTerm));
           if(result.ageAtEntry && !result.premStartAge) result.premStartAge = result.ageAtEntry;
           await savePolicy(result);
@@ -5305,6 +5404,104 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       {showForm && <PolicyFormModal policy={editing||scanResult} onSave={handleFormSave} onClose={handleFormClose} repo={repo} onSaveRepo={saveRepo} onDraftChange={saveDraft} onDraftClear={clearDraft} />}
     </div>
   );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// SHARED TEMPLATE SYSTEM — single source of truth for defaults
+// ═══════════════════════════════════════════════════════════════
+
+// SubType-aware defaults that match blank form initial state
+const SUBTYPE_DEFAULTS = {
+  'ILP (Protection)':  { ilpSubtype:'protection', ilpGrowth:'6', ilpDivYield:'2', ilpMgmtFee:'1.5', ilpPaymentYrs:'10', ilpProtPct:'101', divReinvest:false, ilpDivDrawdownAge:'', cvGrowthRate:'3.0', fundAllocations:[] },
+  'ILP (Investment)':  { ilpSubtype:'investment', ilpGrowth:'6', ilpDivYield:'2', ilpMgmtFee:'1.5', ilpPaymentYrs:'10', ilpProtPct:'', divReinvest:false, ilpDivDrawdownAge:'', cvGrowthRate:'3.0', fundAllocations:[] },
+  'Universal Life (UL)': { creditingMechanism:'fixed', creditingRates:{current:'',guaranteed:''}, loyaltyBonus:{rate:'',startYear:'',endDesc:''}, loanRate:'', cvGrowthRate:'3.0' },
+  'Indexed UL (IUL)':   { creditingMechanism:'indexed', creditingRates:{current:'',guaranteed:''}, loyaltyBonus:{rate:'',startYear:'',endDesc:''}, loanRate:'', faAllocation:'', iaAllocation:'', indexSubAccounts:[], cvGrowthRate:'3.0' },
+  'Variable UL (VUL)':  { creditingMechanism:'client-directed', solvedPremium:'', assumedReturn:'', investmentRisk:'client', cvGrowthRate:'3.0' },
+  'Whole Life':        { cvGrowthRate:'3.0', saMultiplier:'1', multiplierEndAge:'70' },
+  'Term Life':         { saMultiplier:'1', multiplierEndAge:'70' },
+  'Endowment':         { endSubtype:'limited', endPayYrs:'', endWaitYrs:'', endPolicyTerm:'', endYield:'4', endGuaranteedCV:'', endNonGuarBonus:'' },
+  'Lifetime Endowment':{ endSubtype:'lifetime', endPayYrs:'', endWaitYrs:'', endPolicyTerm:'', endYield:'4', endGuaranteedCV:'', endNonGuarBonus:'', cvGrowthRate:'3.0' },
+  'Integrated Shield Plan': { ispClass:'', hasRider:false, riderList:'', riderPremium:'', ispDeductible:'3500', ispCoinsurance:'5', ispCoInsCap:'' },
+  'Disability Income': { diMonthlyBenefit:'', defermentMths:'3', diBenefitAge:'65' },
+  'CareShield Life / Supplement': { cslMonthlyBenefit:'600', cslEscalation:'0', cslPayoutAge:'67', cslLifetime:'yes' },
+  'CareShield Life Supplement': { cslMonthlyBenefit:'600', cslEscalation:'0', cslPayoutAge:'67', cslLifetime:'yes' },
+  'Personal Accident': { addSA:'', accMedical:'', tcmReimb:'' },
+  'Retirement':        { retAccumYield:'3.5', retPayoutMode:'payout', retDeathBenefit:'cv', annuityStartAge:'65', annuityEndAge:'85' },
+  'Annuity':           { retAccumYield:'3.5', retPayoutMode:'payout', retDeathBenefit:'cv', annuityStartAge:'65', annuityEndAge:'85' },
+};
+
+// Normalize repo subType to form subType (repos sometimes use different naming)
+function normalizeSubType(subType, category, notes) {
+  if(!subType) return '';
+  // ILP variants
+  if(subType === 'Investment-Linked Policy (ILP)' || subType === 'ILP') {
+    // Infer protection vs investment from notes or category
+    const n = (notes||'').toLowerCase();
+    if(category === 'protection' || n.includes('protection ilp') || n.includes('ilp with protection')) return 'ILP (Protection)';
+    return 'ILP (Investment)';
+  }
+  // Retirement variants
+  if(subType.toLowerCase().includes('retirement income') || subType.toLowerCase().includes('annuity')) return 'Retirement';
+  // CareShield
+  if(subType.toLowerCase().includes('careshield')) return 'CareShield Life Supplement';
+  return subType;
+}
+
+// Client-specific fields that should NEVER be overwritten by repo templates
+const CLIENT_FIELDS = ['id','policyNumber','policyOwner','lifeInsured','gender','dob','ageAtEntry','smoker','nationality','occupation',
+  'inceptionDate','maturityDate','status','sumAssured','annualPremium','premFrequency','premiumStructure','premStartAge','premTerm','premEndAge',
+  'premSingle','premWholeLife','cashValue','cvKnown','paymentMethod','riders','highlights','userRemarks',
+  'financed','finLoan','finRate','finTenure','breakEvenYear','surrenderPeriod'];
+
+// Apply repo template to a form, preserving client data and adding subType defaults
+function applyRepoDefaults(repoItem, currentForm) {
+  const result = {...currentForm};
+  // 1. Apply basic repo fields
+  if(repoItem.insurer) result.insurer = repoItem.insurer;
+  if(repoItem.productName) result.productName = repoItem.productName;
+  if(repoItem.productCode) result.productCode = repoItem.productCode;
+  if(repoItem.category) result.category = repoItem.category;
+  if(repoItem.subType) result.subType = normalizeSubType(repoItem.subType, repoItem.category, repoItem.notes);
+  if(repoItem.currency) result.currency = repoItem.currency;
+  if(repoItem.notes && !currentForm.notes) result.notes = repoItem.notes;
+
+  // 2. Apply subType-aware defaults (only for fields NOT already set by client)
+  const sub = result.subType;
+  const defaults = SUBTYPE_DEFAULTS[sub];
+  if(defaults) {
+    Object.entries(defaults).forEach(([k,v]) => {
+      const cur = currentForm[k];
+      if(cur === undefined || cur === '' || cur === null || (typeof cur === 'object' && !Array.isArray(cur) && Object.values(cur).every(x=>x===''))) {
+        result[k] = typeof v === 'object' && !Array.isArray(v) ? {...v} : Array.isArray(v) ? [...v] : v;
+      }
+    });
+  }
+
+  // 3. For ILPs, auto-set ilpSubtype from category if not set
+  if(sub === 'ILP (Protection)') result.ilpSubtype = 'protection';
+  if(sub === 'ILP (Investment)') result.ilpSubtype = 'investment';
+
+  // 4. Auto-populate default riders if subType changed and no riders exist yet
+  const TEMPLATE_RIDERS = {
+    'Term Life':       [{type:'death',sa:'',premium:'',expiryAge:'65',bundled:true}],
+    'Whole Life':      [{type:'death',sa:'',premium:'',expiryAge:'99',bundled:true},{type:'tpd',sa:'',premium:'',expiryAge:'70',bundled:true},{type:'ci',sa:'',premium:'',expiryAge:'85',bundled:true}],
+    'Universal Life (UL)': [{type:'death',sa:'',premium:'',expiryAge:'100',bundled:true}],
+    'Indexed UL (IUL)':    [{type:'death',sa:'',premium:'',expiryAge:'100',bundled:true}],
+    'Variable UL (VUL)':   [{type:'death',sa:'',premium:'',expiryAge:'100',bundled:true}],
+    'Critical Illness':    [{type:'death',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'tpd',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'ci',sa:'',premium:'',expiryAge:'65',bundled:true,multiClaim:false,totalClaimPct:300}],
+    'Personal Accident':   [{type:'accidental',sa:'',premium:'',expiryAge:'70',bundled:true}],
+    'Disability Income':   [{type:'di',sa:'',premium:'',expiryAge:'65',bundled:true}],
+    'ILP (Protection)': [{type:'death',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'tpd',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'ci',sa:'',premium:'',expiryAge:'65',bundled:true}],
+    'ILP (Investment)': [{type:'death',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'tpd',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'ci',sa:'',premium:'',expiryAge:'65',bundled:true}],
+  };
+  if(sub && sub !== currentForm.subType && (!result.riders || result.riders.length === 0) && TEMPLATE_RIDERS[sub]) {
+    result.riders = TEMPLATE_RIDERS[sub].map(r=>({...r,id:'r_'+Date.now()+Math.random().toString(36).slice(2,5)}));
+  }
+
+  // 5. Clean up — never carry over repo internal fields
+  delete result.score; delete result.editHistory; delete result.votes; delete result.features; delete result.charges;
+
+  return result;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -5340,7 +5537,8 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
     'Personal Accident':   [{type:'accidental',sa:'',premium:'',expiryAge:'70',bundled:true}],
     'Disability Income':   [{type:'di',sa:'',premium:'',expiryAge:'65',bundled:true}],
     'Long-term Care':      [],
-    'Investment-Linked Policy (ILP)': [{type:'death',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'tpd',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'ci',sa:'',premium:'',expiryAge:'65',bundled:true}],
+    'ILP (Protection)': [{type:'death',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'tpd',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'ci',sa:'',premium:'',expiryAge:'65',bundled:true}],
+    'ILP (Investment)': [{type:'death',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'tpd',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'ci',sa:'',premium:'',expiryAge:'65',bundled:true}],
   };
 
   const [form, setForm] = useState(policy || {
@@ -5384,6 +5582,15 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
     if(k==='subType' && DEFAULT_RIDERS[v] && (!f.riders || f.riders.length===0)){
       nf.riders = DEFAULT_RIDERS[v].map(r=>({...r,id:'r_'+Date.now()+Math.random().toString(36).slice(2,5)}));
     }
+    // Apply subType defaults when subType changes
+    if(k==='subType' && v && SUBTYPE_DEFAULTS[v]) {
+      const sd = SUBTYPE_DEFAULTS[v];
+      Object.entries(sd).forEach(([dk,dv])=>{
+        const cur = f[dk];
+        if(cur===undefined||cur===''||cur===null||(typeof cur==='object'&&!Array.isArray(cur)&&Object.values(cur).every(x=>x==='')))
+          nf[dk] = typeof dv==='object'&&!Array.isArray(dv)?{...dv}:Array.isArray(dv)?[...dv]:dv;
+      });
+    }
     // Auto-calc premium end age
     // Bidirectional premium sync
     if(!nf.premWholeLife && !nf.premSingle) {
@@ -5407,7 +5614,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
   const isIUL = form.subType==='Indexed UL (IUL)';
   const isVUL = form.subType==='Variable UL (VUL)';
   const isMaternity = form.category === 'maternity';
-  const isILP = form.subType==='Investment-Linked Policy (ILP)';
+  const isILP = form.subType==='ILP (Protection)' || form.subType==='ILP (Investment)';
   const isISP = form.subType==='Integrated Shield Plan';
   const isProtection = form.category==='protection';
   const isInvestment = form.category==='investment';
@@ -5487,6 +5694,11 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
       content.push({type:'text',text:'Extract all policy information from these documents/images.'});
       const rawText2 = await callAI(formExtractPrompt, content, 4000);
       const parsed = repairJSON(rawText2);
+      // Normalize subType from AI extraction
+      if(parsed.subType) parsed.subType = normalizeSubType(parsed.subType, parsed.category, parsed.notes);
+      // Apply subType defaults for fields AI didn't return
+      const stDef = SUBTYPE_DEFAULTS[parsed.subType];
+      if(stDef) Object.entries(stDef).forEach(([k,v])=>{ if(parsed[k]===undefined||parsed[k]===''||parsed[k]===null) parsed[k]=v; });
       const overwrites = [];
       const updates = {};
       Object.entries(parsed).forEach(([k,v])=>{
@@ -5534,7 +5746,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                   <span className="mono" style={{color:'var(--orange)',fontSize:11}}>{Math.round(m.score*100)}%</span>
                 </div>
                 <button className="btn-secondary btn-sm" style={{marginTop:4}} onClick={()=>{
-                  setForm(f=>({...f,...m,id:f.id,status:f.status}));setShowFuzzy(false);
+                  setForm(f=>applyRepoDefaults(m, f));setShowFuzzy(false);
                 }}>Use as template</button>
               </div>
             ))}
@@ -5555,7 +5767,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
           <div className="field"><label>Insurer</label><InsurerSelect value={form.insurer} onChange={v=>set('insurer',v)} /></div>
           <div className="field"><label>Product Name</label><FuzzyInput value={form.productName} onChange={v=>set('productName',v)} 
             suggestions={repo.filter(r=>!form.insurer||form.insurer===''||r.insurer===form.insurer).map(r=>({label:r.productName,sub:r.insurer+' · '+r.subType+(r.notes?' · '+r.notes.substring(0,60)+'…':''),item:r}))}
-            onSelect={item=>{if(item.item){set('insurer',item.item.insurer);set('subType',item.item.subType);set('category',item.item.category);if(item.item.currency)set('currency',item.item.currency);}}}
+            onSelect={item=>{if(item.item){setForm(f=>applyRepoDefaults(item.item, f));}}}
             placeholder="e.g. Heirloom VII — type to search repository" /></div>
         </div>
 
@@ -5964,14 +6176,25 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
               </select>
             </div>
             <div className="grid-3">
-              <div className="field"><label>Growth % p.a.</label><input type="number" step="0.5" value={form.ilpGrowth||'6'} onChange={e=>set('ilpGrowth',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Fund return before fees</div></div>
-              <div className="field"><label>Dividend % p.a.</label><input type="number" step="0.5" value={form.ilpDivYield||'2'} onChange={e=>set('ilpDivYield',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Distributed or reinvested</div></div>
-              <div className="field"><label>Reinvest Dividends?</label><select value={form.divReinvest?'yes':'no'} onChange={e=>set('divReinvest',e.target.value==='yes')}><option value="no">No — draw down</option><option value="yes">Yes — compound</option></select></div>
-              <div className="field"><label>Div. Drawdown Age</label><input type="number" value={form.ilpDivDrawdownAge||''} onChange={e=>set('ilpDivDrawdownAge',e.target.value)} placeholder="Default: retirement age" /><div style={{fontSize:10,color:'var(--text3)'}}>When to start drawing dividends as income</div></div>
-              <div className="field"><label>Mgmt Fee % p.a.</label><input type="number" step="0.1" value={form.ilpMgmtFee||'1.5'} onChange={e=>set('ilpMgmtFee',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)',color:'var(--red)'}}>Deducted from fund</div></div>
+              <div className="field"><label>Growth % p.a.</label><input type="number" step="0.5" value={form.ilpGrowth||'6'} onChange={e=>set('ilpGrowth',e.target.value)} style={{background:(form.fundAllocations||[]).some(a=>parseFloat(a.growth)>0)?'rgba(212,169,106,.1)':'inherit'}} /><div style={{fontSize:10,color:'var(--text3)'}}>Unit price growth{(form.fundAllocations||[]).some(a=>parseFloat(a.growth)>0)?' (from funds ↓)':''}</div></div>
+              <div className="field"><label>Dividend % p.a.</label><input type="number" step="0.5" value={form.ilpDivYield||'2'} onChange={e=>set('ilpDivYield',e.target.value)} style={{background:(form.fundAllocations||[]).some(a=>parseFloat(a.divYield)>0)?'rgba(212,169,106,.1)':'inherit'}} /><div style={{fontSize:10,color:'var(--text3)'}}>Dist. yield{(form.fundAllocations||[]).some(a=>parseFloat(a.divYield)>0)?' (from funds ↓)':''}</div></div>
+              <div className="field"><label>Reinvest Dividends?</label><select value={form.divReinvest?'yes':'no'} onChange={e=>set('divReinvest',e.target.value==='yes')}><option value="yes">Yes — compound into fund</option><option value="no">No — pay out as income</option></select><div style={{fontSize:10,color:form.divReinvest?'var(--green2)':'var(--gold)'}}>
+                {form.divReinvest ? 'Total yield compounds: growth + div − fees' : 'Growth compounds in fund; dividends paid separately'}
+              </div></div>
+              <div className="field"><label>Mgmt Fee % p.a.</label><input type="number" step="0.1" value={form.ilpMgmtFee||'1.5'} onChange={e=>set('ilpMgmtFee',e.target.value)} style={{background:(form.fundAllocations||[]).some(a=>parseFloat(a.mgmtFee)>0)?'rgba(212,169,106,.1)':'inherit'}} /><div style={{fontSize:10,color:'var(--red)'}}>Deducted from fund{(form.fundAllocations||[]).some(a=>parseFloat(a.mgmtFee)>0)?' (from funds ↓)':''}</div></div>
+              {!form.divReinvest && <div className="field"><label>Div. Drawdown Age</label><input type="number" value={form.ilpDivDrawdownAge||''} onChange={e=>set('ilpDivDrawdownAge',e.target.value)} placeholder="Default: retirement age" /><div style={{fontSize:10,color:'var(--text3)'}}>When to start drawing dividends as income</div></div>}
             </div>
-            <div style={{marginTop:8,padding:10,background:'var(--bg2)',borderRadius:8,display:'flex',gap:20}}>
-              <div><div style={{fontSize:10,color:'var(--text3)',textTransform:'uppercase'}}>Effective Rate</div><div style={{fontSize:16,fontWeight:700}}>{ilpEffRate.toFixed(1)}% p.a.</div><div style={{fontSize:10,color:'var(--text3)'}}>{form.ilpGrowth||6}% + {form.ilpDivYield||2}% − {form.ilpMgmtFee||1.5}%</div></div>
+            <div style={{marginTop:8,padding:10,background:'var(--bg2)',borderRadius:8,display:'flex',gap:20,flexWrap:'wrap'}}>
+              <div>
+                <div style={{fontSize:10,color:'var(--text3)',textTransform:'uppercase'}}>{form.divReinvest?'Total Compounding Yield':'Fund Growth (net)'}</div>
+                <div style={{fontSize:16,fontWeight:700}}>{form.divReinvest ? ilpEffRate.toFixed(1) : Math.max(0,parseFloat(form.ilpGrowth||6)-parseFloat(form.ilpMgmtFee||1.5)).toFixed(1)}% p.a.</div>
+                <div style={{fontSize:10,color:'var(--text3)'}}>{form.divReinvest ? `${form.ilpGrowth||6}% + ${form.ilpDivYield||2}% − ${form.ilpMgmtFee||1.5}%` : `${form.ilpGrowth||6}% − ${form.ilpMgmtFee||1.5}% (div ${form.ilpDivYield||2}% separate)`}</div>
+              </div>
+              {!form.divReinvest && parseFloat(form.ilpDivYield||0)>0 && <div>
+                <div style={{fontSize:10,color:'var(--text3)',textTransform:'uppercase'}}>Dividend Income p.a.</div>
+                <div style={{fontSize:16,fontWeight:700,color:'var(--green2)'}}>{form.ilpDivYield||2}%</div>
+                <div style={{fontSize:10,color:'var(--text3)'}}>Paid out from age {form.ilpDivDrawdownAge||'retirement'}</div>
+              </div>}
               {form.ilpSubtype==='protection' && <div><div style={{fontSize:10,color:'var(--text3)',textTransform:'uppercase'}}>Protection % of Fund</div><input type="number" value={form.ilpProtPct||'101'} onChange={e=>set('ilpProtPct',e.target.value)} style={{width:70,fontSize:14,fontWeight:600}} /><div style={{fontSize:10,color:'var(--text3)'}}>Typically 101% — amend as per policy</div></div>}
               <div><div style={{fontSize:10,color:'var(--text3)',textTransform:'uppercase'}}>Payment Years</div><input type="number" value={form.ilpPaymentYrs||'10'} onChange={e=>set('ilpPaymentYrs',e.target.value)} style={{width:60,fontSize:14,fontWeight:600}} /></div>
             </div>
@@ -6024,7 +6247,16 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         {isILP && (
           <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)'}}>
             <h4 style={{fontSize:13,fontWeight:600,marginBottom:10,color:'var(--purple)'}}>Fund Allocations</h4>
-            <FundAllocationEditor allocations={form.fundAllocations||[]} onChange={v=>set('fundAllocations',v)} />
+            <FundAllocationEditor allocations={form.fundAllocations||[]} onChange={v=>{
+              set('fundAllocations',v);
+              // Auto-populate ILP fields from weighted fund allocations
+              const totPct = v.reduce((s,a)=>s+(parseFloat(a.pct)||0),0);
+              if(totPct>0 && v.some(a=>parseFloat(a.growth)>0||parseFloat(a.divYield)>0)){
+                let wG=0,wD=0,wF=0;
+                v.forEach(a=>{const w=(parseFloat(a.pct)||0)/totPct;wG+=(parseFloat(a.growth)||0)*w;wD+=(parseFloat(a.divYield)||0)*w;wF+=(parseFloat(a.mgmtFee)||0)*w;});
+                set('ilpGrowth',wG.toFixed(1)); set('ilpDivYield',wD.toFixed(1)); set('ilpMgmtFee',wF.toFixed(2));
+              }
+            }} />
           </div>
         )}
 
@@ -6042,20 +6274,25 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                 {form.cvKnown!==false && <input type="number" value={form.cashValue||''} onChange={e=>set('cashValue',e.target.value)} placeholder="From latest statement" style={{marginTop:4}} />}
                 {form.cvKnown===false && <div style={{fontSize:10,color:'var(--gold)',marginTop:4}}>Auto-estimated from premiums × yield × time</div>}
               </div>
-              <div className="field"><label>Est. Yield (% p.a.)</label><input type="number" step="0.1" value={form.cvGrowthRate||'3.0'} onChange={e=>set('cvGrowthRate',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Used to project future values</div></div>
+              <div className="field"><label>Est. Yield (% p.a.)</label><input type="number" step="0.1" value={isILP ? (form.divReinvest ? ilpEffRate.toFixed(1) : Math.max(0,parseFloat(form.ilpGrowth||6)-parseFloat(form.ilpMgmtFee||1.5)).toFixed(1)) : (form.cvGrowthRate||'3.0')} onChange={e=>set('cvGrowthRate',e.target.value)} readOnly={isILP} style={{background:isILP?'rgba(212,169,106,.1)':'inherit'}} /><div style={{fontSize:10,color:isILP?'var(--gold)':'var(--text3)'}}>{isILP ? (form.divReinvest ? 'Auto: total yield (reinvested)' : 'Auto: fund growth net of fees') : 'Used to project future values'}</div></div>
               <div className="field"><label>Breakeven Year</label><input type="number" value={form.breakEvenYear||form.surrenderPeriod||''} onChange={e=>{set('breakEvenYear',e.target.value);set('surrenderPeriod',e.target.value)}} placeholder="Year SV ≥ premiums" /><div style={{fontSize:10,color:'var(--text3)'}}>Year where (income + SV) ≥ total premiums</div></div>
             </div>
-            {/* ── Auto-estimated CV and maturity projection ── */}
+            {/* ── Auto-estimated CV and milestone projections ── */}
             {(() => {
               const prem = parseFloat(form.annualPremium)||0;
               const startAge = parseInt(form.premStartAge)||0;
-              const premTerm = form.premSingle ? 1 : (parseInt(form.premTerm)||0);
-              const r = (parseFloat(form.cvGrowthRate)||3)/100;
-              const matAge = parseInt(form.endPolicyTerm) ? startAge + parseInt(form.endPolicyTerm) : (parseInt(form.premEndAge)||65);
+              const premTerm = form.premSingle ? 1 : (parseInt(form.premTerm)||(parseInt(form.ilpPaymentYrs)||0));
+              // For ILP: use the appropriate yield rate
+              const ilpR = isILP ? (form.divReinvest ? ilpEffRate : Math.max(0, parseFloat(form.ilpGrowth||6)-parseFloat(form.ilpMgmtFee||1.5))) : 0;
+              const r = (isILP ? ilpR : (parseFloat(form.cvGrowthRate)||3))/100;
+              const divRate = isILP && !form.divReinvest ? (parseFloat(form.ilpDivYield||0))/100 : 0;
+              const isLifetime = isILP || ['Whole Life','Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(form.subType) || (isSavings && form.endSubtype==='lifetime');
+              const matAge = isLifetime ? 100 : (parseInt(form.endPolicyTerm) ? startAge + parseInt(form.endPolicyTerm) : (parseInt(form.premEndAge)||65));
               const totalYrs = matAge - startAge;
               const age = clientAge;
               const yearsInForce = Math.max(0, age - startAge);
-              const totalPaid = form.premSingle ? prem : prem * Math.min(premTerm, totalYrs);
+              const totalPaid = form.premSingle ? prem : prem * Math.min(premTerm, Math.max(yearsInForce,totalYrs));
+              const retAge = parseInt(_cp?.retirementAge)||65;
 
               // Auto-estimate current CV if unknown
               let estCV;
@@ -6066,36 +6303,160 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                 estCV = form.premSingle ? prem * Math.pow(1+r, yearsInForce) : prem*(Math.pow(1+r,paid)-1)/r * Math.pow(1+r, Math.max(0,yearsInForce-paid));
               } else { estCV = 0; }
 
-              // Project to maturity
-              const yrsToMat = Math.max(0, totalYrs - yearsInForce);
-              const paidRemaining = Math.max(0, premTerm - yearsInForce);
-              let matCV;
-              if(estCV > 0) {
-                matCV = estCV * Math.pow(1+r, yrsToMat);
-                if(!form.premSingle && paidRemaining > 0 && r > 0) matCV += prem*(Math.pow(1+r,paidRemaining)-1)/r * Math.pow(1+r, Math.max(0,yrsToMat-paidRemaining));
-              } else if(prem > 0 && r > 0) {
-                const paid = Math.min(premTerm, totalYrs);
-                matCV = form.premSingle ? prem * Math.pow(1+r, totalYrs) : prem*(Math.pow(1+r,paid)-1)/r * Math.pow(1+r, Math.max(0,totalYrs-paid));
-              } else { matCV = 0; }
+              // Project to a given target age
+              const projectTo = (targetAge) => {
+                const yrsFromNow = Math.max(0, targetAge - age);
+                const paidRemaining = Math.max(0, premTerm - yearsInForce);
+                let cv;
+                if(estCV > 0) {
+                  cv = estCV * Math.pow(1+r, yrsFromNow);
+                  if(!form.premSingle && paidRemaining > 0 && r > 0) {
+                    const paidYrs = Math.min(paidRemaining, yrsFromNow);
+                    cv += prem*(Math.pow(1+r,paidYrs)-1)/r * Math.pow(1+r, Math.max(0,yrsFromNow-paidYrs));
+                  }
+                } else if(prem > 0 && r > 0) {
+                  const totalYrsToTarget = targetAge - startAge;
+                  const paid = Math.min(premTerm, totalYrsToTarget);
+                  cv = form.premSingle ? prem * Math.pow(1+r, totalYrsToTarget) : prem*(Math.pow(1+r,paid)-1)/r * Math.pow(1+r, Math.max(0,totalYrsToTarget-paid));
+                } else { cv = 0; }
+                // Cumulative dividend income (paid out, not reinvested)
+                let cumDiv = 0;
+                if(divRate > 0) {
+                  const drawdownAge = parseInt(form.ilpDivDrawdownAge)||retAge;
+                  for(let a2=Math.max(age,drawdownAge); a2<targetAge; a2++) {
+                    const yrsToA2 = a2 - age;
+                    const paidR = Math.max(0, premTerm - yearsInForce);
+                    let cvAtA2 = estCV > 0 ? estCV*Math.pow(1+r,yrsToA2) : 0;
+                    if(!form.premSingle && paidR > 0 && r > 0) {const py=Math.min(paidR,yrsToA2);cvAtA2+=prem*(Math.pow(1+r,py)-1)/r*Math.pow(1+r,Math.max(0,yrsToA2-py));}
+                    cumDiv += cvAtA2 * divRate;
+                  }
+                }
+                return {cv:Math.round(cv), cumDiv:Math.round(cumDiv), total:Math.round(cv+cumDiv)};
+              };
 
               if(prem === 0 && estCV === 0) return null;
+              const premEndAge = startAge + premTerm;
+              const totalPaidAtMat = form.premSingle ? prem : prem * premTerm;
+
+              // ── AUTO-COMPUTE BREAKEVEN YEAR ──
+              // Iterate year-by-year from inception to find when CV >= total premiums paid
+              let beAge = parseInt(form.breakEvenYear) ? startAge + parseInt(form.breakEvenYear) : 0;
+              if(!beAge && prem > 0 && r > 0) {
+                for(let testAge = startAge+1; testAge <= 100; testAge++) {
+                  const yrs = testAge - startAge;
+                  const paidSoFar = form.premSingle ? prem : prem * Math.min(premTerm, yrs);
+                  const paidYrs = Math.min(premTerm, yrs);
+                  const cv = form.premSingle ? prem*Math.pow(1+r,yrs) : (r>0 ? prem*(Math.pow(1+r,paidYrs)-1)/r*Math.pow(1+r,Math.max(0,yrs-paidYrs)) : prem*paidYrs);
+                  // Include cumulative dividends if paid out
+                  let cumDiv = 0;
+                  if(divRate > 0) {
+                    const ddAge = parseInt(form.ilpDivDrawdownAge)||retAge;
+                    for(let a2=Math.max(startAge,ddAge); a2<testAge; a2++){
+                      const y2=a2-startAge; const p2=Math.min(premTerm,y2);
+                      const cv2=form.premSingle?prem*Math.pow(1+r,y2):(r>0?prem*(Math.pow(1+r,p2)-1)/r*Math.pow(1+r,Math.max(0,y2-p2)):prem*p2);
+                      cumDiv+=cv2*divRate;
+                    }
+                  }
+                  if(cv + cumDiv >= paidSoFar) { beAge = testAge; break; }
+                }
+              }
+              const beYear = beAge > 0 ? beAge - startAge : 0;
+
+              // ── BUILD MILESTONE SET ──
+              // Breakeven, BE+10, BE+20, BE+30, plus fixed key ages 65, 75, 85
+              const KEY_AGES = [65, 75, 85];
+              let rawMilestones = [];
+              if(isLifetime) {
+                // Start with key ages
+                KEY_AGES.forEach(a => rawMilestones.push({age:a,label:a===retAge?`${a} ★`:`${a}`,isBE:false}));
+                // Add breakeven milestones
+                if(beAge > 0) {
+                  rawMilestones.push({age:beAge,label:`BE(${beYear})`,isBE:true});
+                  [10,20,30].forEach(offset => {
+                    const candidateAge = beAge + offset;
+                    if(candidateAge > 85) return; // don't exceed reasonable age
+                    // Snap to key age if within ±3 years
+                    const snap = KEY_AGES.find(ka => Math.abs(candidateAge - ka) <= 3);
+                    if(!snap) {
+                      rawMilestones.push({age:candidateAge,label:`BE+${offset}`,isBE:false});
+                    }
+                    // if snap found, the key age is already in the list
+                  });
+                }
+              } else {
+                // Non-lifetime: just show maturity age
+                rawMilestones.push({age:matAge,label:`Mat(${matAge})`,isBE:false});
+              }
+
+              // Deduplicate by age (keep the more descriptive label), sort, filter
+              const ageMap = {};
+              rawMilestones.forEach(m => {
+                if(!ageMap[m.age]) ageMap[m.age] = m;
+                else if(m.isBE) ageMap[m.age] = {...ageMap[m.age], label: ageMap[m.age].label + ' / ' + m.label, isBE:true};
+              });
+              const milestones = Object.values(ageMap)
+                .filter(m => m.age > age && m.age > premEndAge)
+                .sort((a,b) => a.age - b.age);
+
+              const milestonData = milestones.map(m=>({...m,...projectTo(m.age)}));
+
               return (
-                <div style={{marginTop:10,display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10}}>
-                  <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
-                    <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Auto-Estimated CV</div>
-                    <div style={{fontSize:16,fontWeight:700,color:'var(--gold)'}}>${Math.round(estCV).toLocaleString()}</div>
-                    <div style={{fontSize:9,color:'var(--text3)'}}>Auto: yield × premiums × {yearsInForce}yr in force</div>
+                <div style={{marginTop:10}}>
+                  {/* Current estimate KPIs */}
+                  <div style={{display:'grid',gridTemplateColumns:beAge>0?'1fr 1fr 1fr 1fr':'1fr 1fr 1fr',gap:10,marginBottom:isLifetime?10:0}}>
+                    <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
+                      <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Est. Current {isILP?'Fund':'Cash'} Value</div>
+                      <div style={{fontSize:16,fontWeight:700,color:'var(--gold)'}}>${Math.round(estCV).toLocaleString()}</div>
+                      <div style={{fontSize:9,color:'var(--text3)'}}>{yearsInForce}yr in force · {(r*100).toFixed(1)}% p.a.</div>
+                    </div>
+                    <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
+                      <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Total Premiums Paid</div>
+                      <div style={{fontSize:16,fontWeight:700,color:'var(--text2)'}}>${Math.round(form.premSingle?prem:prem*Math.min(premTerm,yearsInForce)).toLocaleString()}</div>
+                      <div style={{fontSize:9,color:'var(--text3)'}}>of ${Math.round(totalPaidAtMat).toLocaleString()} total</div>
+                    </div>
+                    <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
+                      <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Gain / (Loss)</div>
+                      <div style={{fontSize:16,fontWeight:700,color:estCV>=(form.premSingle?prem:prem*Math.min(premTerm,yearsInForce))?'var(--green2)':'var(--red)'}}>${Math.round(estCV-(form.premSingle?prem:prem*Math.min(premTerm,yearsInForce))).toLocaleString()}</div>
+                      <div style={{fontSize:9,color:'var(--text3)'}}>current vs premiums paid</div>
+                    </div>
+                    {beAge > 0 && (
+                      <div style={{background:'rgba(91,168,160,.08)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid rgba(91,168,160,.3)'}}>
+                        <div style={{fontSize:9,color:'var(--green2)',textTransform:'uppercase',fontWeight:600}}>Breakeven</div>
+                        <div style={{fontSize:16,fontWeight:700,color:'var(--green2)'}}>Year {beYear}</div>
+                        <div style={{fontSize:9,color:'var(--text3)'}}>Age {beAge} · SV ≥ premiums</div>
+                      </div>
+                    )}
                   </div>
-                  <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
-                    <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Projected CV at Age {matAge}</div>
-                    <div style={{fontSize:16,fontWeight:700,color:'var(--gold2)'}}>${Math.round(matCV).toLocaleString()}</div>
-                    <div style={{fontSize:9,color:'var(--text3)'}}>projected at current yield {form.cvGrowthRate||3}%</div>
-                  </div>
-                  <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
-                    <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>CV After Payouts (Age {matAge})</div>
-                    <div style={{fontSize:16,fontWeight:700,color:matCV>=totalPaid?'var(--green2)':'var(--red)'}}>${Math.round(matCV).toLocaleString()}</div>
-                    <div style={{fontSize:9,color:'var(--text3)'}}>total premiums: ${Math.round(totalPaid).toLocaleString()}</div>
-                  </div>
+
+                  {/* Milestone projections */}
+                  {milestonData.length > 0 && (
+                    <div>
+                      <div style={{fontSize:11,fontWeight:600,color:'var(--gold)',marginBottom:6}}>📈 {isLifetime?'Lifetime':'Projected'} Cash Value at Key Milestones</div>
+                      <div style={{overflowX:'auto'}}>
+                        <div style={{display:'flex',gap:6,minWidth:'max-content',paddingBottom:4}}>
+                          {milestonData.map((m,i)=>{
+                            const isRetAge = m.age===retAge;
+                            const isBECard = m.isBE;
+                            const bgColor = isBECard?'rgba(91,168,160,.1)':isRetAge?'rgba(212,169,106,.12)':'var(--bg2)';
+                            const borderColor = isBECard?'rgba(91,168,160,.4)':isRetAge?'var(--gold3)':'var(--border)';
+                            return (
+                              <div key={i} style={{background:bgColor,borderRadius:8,padding:'8px 12px',textAlign:'center',border:'1px solid '+borderColor,minWidth:95,flex:'0 0 auto'}}>
+                                <div style={{fontSize:9,color:isBECard?'var(--green2)':isRetAge?'var(--gold)':'var(--text3)',textTransform:'uppercase',fontWeight:700}}>{m.label}</div>
+                                <div style={{fontSize:9,color:'var(--text3)',marginBottom:2}}>Age {m.age}</div>
+                                <div style={{fontSize:14,fontWeight:700,color:m.total>=totalPaidAtMat?'var(--green2)':'var(--gold2)'}}>${m.cv>=1e6?(m.cv/1e6).toFixed(2)+'M':m.cv>=1e3?Math.round(m.cv/1e3).toLocaleString()+'K':m.cv.toLocaleString()}</div>
+                                {m.cumDiv > 0 && <div style={{fontSize:9,color:'var(--green2)'}}>+${m.cumDiv>=1e3?Math.round(m.cumDiv/1e3)+'K':m.cumDiv} div</div>}
+                                <div style={{fontSize:8,color:m.total>=totalPaidAtMat?'var(--green2)':'var(--red)'}}>{m.total>=totalPaidAtMat?'✓ breakeven':'below prem'}</div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      </div>
+                      <div style={{fontSize:9,color:'var(--text3)',marginTop:4}}>
+                        Projected at {(r*100).toFixed(1)}% p.a. net yield · Premiums {premEndAge>0?`paid to age ${premEndAge}`:''} · Total commitment ${Math.round(totalPaidAtMat).toLocaleString()}
+                        {divRate > 0 && ` · Div ${(divRate*100).toFixed(1)}% from age ${form.ilpDivDrawdownAge||retAge}`}
+                      </div>
+                    </div>
+                  )}
                 </div>
               );
             })()}
@@ -6188,11 +6549,10 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
   );
 }
 
-function FundAllocationEditor({allocations,onChange}) {
-  const add = () => onChange([...allocations, {fundName:'',pct:'',riskRating:''}]);
+function FundAllocationEditor({allocations,onChange,onWeightedChange}) {
+  const add = () => onChange([...allocations, {fundName:'',pct:'',riskRating:'',growth:'',divYield:'',mgmtFee:''}]);
   const update = (i,k,v) => {const n=[...allocations];n[i]={...n[i],[k]:v};onChange(n)};
   const remove = i => onChange(allocations.filter((_,idx)=>idx!==i));
-  // Lookup from fund DB — FUND_DB format: [name, type, region, sector, risk, date, isin]
   const lookup = (i,name) => {
     if(!name || name.length < 3) return;
     const q = name.toLowerCase();
@@ -6200,17 +6560,54 @@ function FundAllocationEditor({allocations,onChange}) {
     if(match) update(i,'riskRating',match[4]);
   };
 
+  const totalPct = allocations.reduce((s,a)=>s+(parseFloat(a.pct)||0),0);
+  const weighted = React.useMemo(()=>{
+    if(totalPct<=0) return {growth:0,divYield:0,mgmtFee:0,totalYield:0,riskRating:0};
+    let wG=0,wD=0,wF=0,wR=0;
+    allocations.forEach(a=>{
+      const w=(parseFloat(a.pct)||0)/totalPct;
+      wG+=(parseFloat(a.growth)||0)*w; wD+=(parseFloat(a.divYield)||0)*w;
+      wF+=(parseFloat(a.mgmtFee)||0)*w; wR+=(parseFloat(a.riskRating)||0)*w;
+    });
+    return {growth:wG,divYield:wD,mgmtFee:wF,totalYield:wG+wD-wF,riskRating:wR};
+  },[allocations,totalPct]);
+
+  React.useEffect(()=>{ if(onWeightedChange && totalPct>0) onWeightedChange(weighted); },[weighted,totalPct]);
+
+  const pctColor = totalPct===100?'var(--green2)':totalPct>100?'var(--red)':'var(--orange)';
+
   return (
     <div>
+      {allocations.length>0 && (
+        <div style={{display:'grid',gridTemplateColumns:'2fr 52px 52px 52px 52px 36px 26px',gap:5,marginBottom:4,fontSize:9,color:'var(--text3)',textTransform:'uppercase',fontWeight:600,padding:'0 2px'}}>
+          <span>Fund Name</span><span>Alloc%</span><span>Grw%</span><span>Div%</span><span>Fee%</span><span>Risk</span><span></span>
+        </div>
+      )}
       {allocations.map((a,i) => (
-        <div key={i} style={{display:'flex',gap:8,marginBottom:6,alignItems:'center'}}>
-          <input style={{flex:2}} value={a.fundName} onChange={e=>{update(i,'fundName',e.target.value);lookup(i,e.target.value)}} placeholder="Fund name" />
-          <input style={{width:70}} value={a.pct} onChange={e=>update(i,'pct',e.target.value)} placeholder="%" type="number" />
-          <span className="mono" style={{width:40,textAlign:'center',color:a.riskRating>=7?'var(--red2)':a.riskRating>=5?'var(--orange)':'var(--green2)'}}>{a.riskRating||'-'}</span>
-          <button className="btn-danger btn-sm" onClick={()=>remove(i)}>×</button>
+        <div key={i} style={{display:'grid',gridTemplateColumns:'2fr 52px 52px 52px 52px 36px 26px',gap:5,marginBottom:4,alignItems:'center'}}>
+          <input value={a.fundName} onChange={e=>{update(i,'fundName',e.target.value);lookup(i,e.target.value)}} placeholder="Fund name" style={{fontSize:11}} />
+          <input value={a.pct} onChange={e=>update(i,'pct',e.target.value)} placeholder="%" type="number" style={{fontSize:11,textAlign:'center'}} />
+          <input value={a.growth||''} onChange={e=>update(i,'growth',e.target.value)} placeholder="6" type="number" step="0.5" style={{fontSize:11,textAlign:'center'}} />
+          <input value={a.divYield||''} onChange={e=>update(i,'divYield',e.target.value)} placeholder="2" type="number" step="0.5" style={{fontSize:11,textAlign:'center'}} />
+          <input value={a.mgmtFee||''} onChange={e=>update(i,'mgmtFee',e.target.value)} placeholder="1.5" type="number" step="0.1" style={{fontSize:11,textAlign:'center',color:parseFloat(a.mgmtFee)>2?'var(--red)':'inherit'}} />
+          <span className="mono" style={{textAlign:'center',fontSize:11,color:a.riskRating>=7?'var(--red2)':a.riskRating>=5?'var(--orange)':'var(--green2)'}}>{a.riskRating||'-'}</span>
+          <button className="btn-danger btn-sm" onClick={()=>remove(i)} style={{padding:'2px 4px',fontSize:10}}>×</button>
         </div>
       ))}
-      <button className="btn-secondary btn-sm" onClick={add}>+ Add Fund</button>
+      <div style={{display:'flex',gap:8,alignItems:'center',marginTop:6}}>
+        <button className="btn-secondary btn-sm" onClick={add}>+ Add Fund</button>
+        <span style={{fontSize:10,fontWeight:600,color:pctColor}}>{totalPct.toFixed(0)}% allocated</span>
+        {totalPct>0 && totalPct!==100 && <span style={{fontSize:9,color:'var(--orange)'}}>({totalPct<100?'under':'over'})</span>}
+      </div>
+      {totalPct>0 && allocations.some(a=>parseFloat(a.growth)>0||parseFloat(a.divYield)>0) && (
+        <div style={{marginTop:8,padding:10,background:'var(--bg2)',borderRadius:8,display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:6,textAlign:'center'}}>
+          <div><div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Wtd Growth</div><div style={{fontSize:14,fontWeight:700,color:'var(--gold)'}}>{weighted.growth.toFixed(2)}%</div></div>
+          <div><div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Wtd Dividend</div><div style={{fontSize:14,fontWeight:700,color:'var(--green2)'}}>{weighted.divYield.toFixed(2)}%</div></div>
+          <div><div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Wtd Fee</div><div style={{fontSize:14,fontWeight:700,color:'var(--red)'}}>{weighted.mgmtFee.toFixed(2)}%</div></div>
+          <div><div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Net Yield</div><div style={{fontSize:14,fontWeight:700,color:weighted.totalYield>=0?'var(--gold2)':'var(--red)'}}>{weighted.totalYield.toFixed(2)}%</div></div>
+          <div><div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Wtd Risk</div><div style={{fontSize:14,fontWeight:700,color:weighted.riskRating>=7?'var(--red2)':weighted.riskRating>=5?'var(--orange)':'var(--green2)'}}>{weighted.riskRating.toFixed(1)}</div></div>
+        </div>
+      )}
       <div style={{fontSize:10,color:'var(--text3)',marginTop:4}}>Risk ratings auto-looked up from {FUND_DB.length.toLocaleString()} instruments (iFAST universe)</div>
     </div>
   );
