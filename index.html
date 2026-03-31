@@ -3566,20 +3566,24 @@ async function sbRepoLoad() {
 }
 
 async function sbRepoSave(item) {
-  const s = getSB();
-  if(!s) return false;
-  const email = window._user?.email || '';
-  const {error} = await s.from('repository').upsert({id:item.id, data:item, created_by:email});
-  if(error) console.warn('[Repo] Save error:', error.message);
-  return !error;
+  try {
+    const s = getSB();
+    if(!s) return false;
+    const email = window._user?.email || '';
+    const {error} = await s.from('repository').upsert({id:item.id, data:item, created_by:email});
+    if(error) console.warn('[Repo] Save error:', error.message);
+    return !error;
+  } catch(e) { console.warn('[Repo] Save failed:', e.message); return false; }
 }
 
 async function sbRepoDelete(id) {
-  const s = getSB();
-  if(!s) return false;
-  const {error} = await s.from('repository').delete().eq('id', id);
-  if(error) console.warn('[Repo] Delete error:', error.message);
-  return !error;
+  try {
+    const s = getSB();
+    if(!s) return false;
+    const {error} = await s.from('repository').delete().eq('id', id);
+    if(error) console.warn('[Repo] Delete error:', error.message);
+    return !error;
+  } catch(e) { console.warn('[Repo] Delete failed:', e.message); return false; }
 }
 
 
@@ -3753,6 +3757,7 @@ function CameraModal() {
 
 function OnboardingModal() {
   const [show, setShow] = useState(false);
+  const [showApiGuide, setShowApiGuide] = useState(false);
   useEffect(() => {
     if(window._showOnboarding) setShow(true);
     const handler = () => { if(window._showOnboarding) setShow(true); };
@@ -3766,6 +3771,7 @@ function OnboardingModal() {
 
   const dismiss = () => {
     setShow(false);
+    setShowApiGuide(false);
     if(window.completeOnboarding) completeOnboarding();
   };
 
@@ -3778,8 +3784,6 @@ function OnboardingModal() {
     {icon:'📄',name:'PDF Report',desc:'Generate a professional client review PDF with all policies, gaps, and projections.'},
     {icon:'⚙️',name:'Settings',desc:'API keys (Gemini + Anthropic), save/load portfolios, PDF unlock passwords.'},
   ];
-
-  const [showApiGuide, setShowApiGuide] = useState(false);
 
   return (
     <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,.85)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:100}} onClick={dismiss}>
@@ -4165,14 +4169,23 @@ async function geminiRead(geminiKey, contentBlocks) {
     else if(block.type==='document') parts.push({inlineData:{mimeType:block.source.media_type||'application/pdf',data:block.source.data}});
   }
   console.log('[Gemini Read] Sending:', parts.filter(p=>p.inlineData).length, 'files');
-  const resp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='+geminiKey,{
-    method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({
-      contents:[{parts}],
-      systemInstruction:{parts:[{text:'You are a document reader. Extract ALL text, numbers, tables, and data from these documents. Preserve table structures. Include every detail — policy numbers, dates, amounts, rider names, conditions, charges. Output as plain text, organized by section.'}]},
-      generationConfig:{maxOutputTokens:16000}
-    })
-  });
+  let resp;
+  try {
+    resp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='+geminiKey,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        contents:[{parts}],
+        systemInstruction:{parts:[{text:'You are a document reader. Extract ALL text, numbers, tables, and data from these documents. Preserve table structures. Include every detail — policy numbers, dates, amounts, rider names, conditions, charges. Output as plain text, organized by section.'}]},
+        generationConfig:{maxOutputTokens:16000}
+      })
+    });
+  } catch(fetchErr) {
+    throw new Error('Gemini: NetworkError when attempting to fetch resource.');
+  }
+  if(!resp.ok) {
+    const errData = await resp.json().catch(()=>({}));
+    throw new Error('Gemini read error ('+resp.status+'): '+(errData.error?.message||resp.statusText));
+  }
   const data = await resp.json();
   if(data.error) throw new Error('Gemini: '+data.error.message);
   const text = data.candidates?.[0]?.content?.parts?.[0]?.text||'';
@@ -4183,14 +4196,19 @@ async function geminiRead(geminiKey, contentBlocks) {
 // Step 2: Claude structures the extracted text → perfect JSON
 async function claudeExtract(anthropicKey, systemPrompt, rawText, maxTokens) {
   console.log('[Claude Extract] Sending:', rawText.length, 'chars to Claude');
-  const resp = await fetch('https://api.anthropic.com/v1/messages',{
-    method:'POST',
-    headers:{'Content-Type':'application/json','x-api-key':anthropicKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-    body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:maxTokens||4000,
-      system:systemPrompt+'\n\nRespond with ONLY valid JSON. Start with { end with }.',
-      messages:[{role:'user',content:rawText}]
-    })
-  });
+  let resp;
+  try {
+    resp = await fetch('https://api.anthropic.com/v1/messages',{
+      method:'POST',
+      headers:{'Content-Type':'application/json','x-api-key':anthropicKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+      body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:maxTokens||4000,
+        system:systemPrompt+'\n\nRespond with ONLY valid JSON. Start with { end with }.',
+        messages:[{role:'user',content:rawText}]
+      })
+    });
+  } catch(fetchErr) {
+    throw new Error('Claude: NetworkError when attempting to fetch resource.');
+  }
   const data = await resp.json();
   if(data.error) throw new Error('Claude: '+data.error.message);
   const raw = data.content?.[0]?.text||'';
@@ -4207,14 +4225,19 @@ async function geminiExtract(geminiKey, systemPrompt, contentBlocks, maxTokens) 
     else if(block.type==='document') parts.push({inlineData:{mimeType:block.source.media_type||'application/pdf',data:block.source.data}});
   }
   if(parts.length === 0) throw new Error('No content to extract from');
-  const resp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='+geminiKey,{
-    method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({
-      contents:[{parts}],
-      systemInstruction:{parts:[{text:systemPrompt+'\n\nYou MUST respond with ONLY valid JSON. Start with { or [. End with } or ]. No markdown, no backticks, no explanation.'}]},
-      generationConfig:{maxOutputTokens:maxTokens||8000,responseMimeType:'application/json'}
-    })
-  });
+  let resp;
+  try {
+    resp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='+geminiKey,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        contents:[{parts}],
+        systemInstruction:{parts:[{text:systemPrompt+'\n\nYou MUST respond with ONLY valid JSON. Start with { or [. End with } or ]. No markdown, no backticks, no explanation.'}]},
+        generationConfig:{maxOutputTokens:maxTokens||8000,responseMimeType:'application/json'}
+      })
+    });
+  } catch(fetchErr) {
+    throw new Error('Gemini: NetworkError when attempting to fetch resource.');
+  }
   if(!resp.ok) {
     const errData = await resp.json().catch(()=>({}));
     throw new Error('Gemini API error ('+resp.status+'): '+(errData.error?.message||resp.statusText));
@@ -6569,7 +6592,7 @@ SA MULTIPLIER: saMultiplier (number), multiplierEndAge (number)
 ISP: ispClass (A/B1/B2+), hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance
 CASH VALUE: cashValue (number), cvGrowthRate (% p.a.), surrenderPeriod (years)
 UL/IUL/VUL: creditingMechanism, creditingRates {current, guaranteed}, loyaltyBonus {rate, startYear}
-ILP: ilpSubtype (protection/investment), ilpGrowth, ilpDivYield, ilpMgmtFee
+ILP: ilpGrowth, ilpDivYield, ilpMgmtFee
 
 RETIREMENT/ANNUITY/INCOME PLANS: annuityPayout (annual payout amount, number), annuityMonthly (monthly payout, number), annuityStartAge (number), annuityEndAge (number), retMaturitySum (maturity/terminal value at end)
 
@@ -6902,10 +6925,22 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       console.error('[Extract] Error:', e);
       const hasAnthropicKey = !!(await dbGet('settings','anthropicKey').catch(()=>null))?.value;
       let msg = 'Extraction error: ' + e.message;
-      if(e.message.includes('parse') || e.message.includes('JSON')) {
+      const errMsg = (e.message||'').toLowerCase();
+      if(errMsg.includes('networkerror') || errMsg.includes('failed to fetch') || errMsg.includes('network') || e instanceof TypeError) {
+        msg = '🚫 Network Error — API calls are being blocked.\n\nThis is usually caused by:\n\n';
+        msg += '1. Ad blocker (Adblock Plus, uBlock, etc.) — disable it for this site\n';
+        msg += '2. Browser privacy extensions blocking API requests\n';
+        msg += '3. Corporate firewall/proxy blocking external API calls\n\n';
+        msg += 'Fix: Open your ad blocker → whitelist fundlens-sg.github.io\n';
+        msg += 'Or try: Incognito/Private window (extensions are disabled by default)';
+      } else if(errMsg.includes('cors') || errMsg.includes('origin')) {
+        msg = '🚫 CORS Error — Browser is blocking API requests.\n\nDisable ad blocker or try Incognito mode.';
+      } else if(errMsg.includes('parse') || errMsg.includes('json')) {
         msg += '\n\nThe AI could not extract structured data from this document.';
-        if(!hasAnthropicKey) msg += '\n\nTip: Add an Anthropic (Claude) API key in Settings for much more reliable extraction. The dual-AI pipeline (Gemini + Claude) handles complex documents better than Gemini alone.';
+        if(!hasAnthropicKey) msg += '\n\nTip: Add an Anthropic (Claude) API key in Settings for much more reliable extraction.';
         else msg += '\n\nTry uploading a clearer image or fewer documents at once.';
+      } else if(errMsg.includes('api key') || errMsg.includes('key')) {
+        msg += '\n\nCheck your API keys in Settings.';
       }
       alert(msg);
       setScanning(false);
@@ -7187,7 +7222,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
     // Cash value
     cashValue:'', cvGrowthRate:'3.0', cvKnown:true, surrenderPeriod:'',
     // ILP (RetireWell)
-    ilpSubtype:'protection', ilpGrowth:'6', ilpDivYield:'2', ilpMgmtFee:'1.5', ilpPaymentYrs:'10', ilpProtPct:'101',
+    ilpGrowth:'6', ilpDivYield:'2', ilpMgmtFee:'1.5', ilpPaymentYrs:'10', ilpProtPct:'101',
     divReinvest:false, ilpDivDrawdownAge:'',
     // UL fields
     ulSubType:'', creditingMechanism:'', creditingRates:{current:'',guaranteed:''},
@@ -7333,7 +7368,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         const blocks = await processFile(file);
         content.push(...blocks);
       }
-      const formExtractPrompt = 'Extract insurance policy details. Return a JSON object with ALL fields: insurer, productName, policyNumber, category (protection/savings/health/investment/retirement/maternity), subType, currency, sumAssured (number), annualPremium (number), premFrequency (annual/monthly/single/unknown — if document does not clearly state frequency, use unknown), premiumStructure, paymentMethod, policyOwner, lifeInsured, gender, dob, ageAtEntry, smoker, nationality, occupation, inceptionDate, maturityDate, status, premStartAge, premTerm, premEndAge. Riders: riders (array of {type:death/tpd/ci/eci/di/accidental/premium_waiver, riderName:string (product name if separate rider e.g. Early CompleteCare Rider III), sa:number, premium:number (0 if part of main plan), expiryAge:number, bundled:boolean (true if part of main plan, false if separate rider product), multiClaim:boolean, totalClaimPct:number}). IMPORTANT: distinguish between benefits that are PART OF the main plan (bundled=true, no riderName) vs separate RIDER products (bundled=false, include riderName and rider premium). SA: saMultiplier, multiplierEndAge. ISP: ispClass, hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance. ILP: ilpSubtype, ilpGrowth, ilpDivYield, ilpMgmtFee. Cash: cashValue, cvGrowthRate, surrenderPeriod. Notes: notes (FC review headline). Return ONLY valid JSON starting with { ending with }.';
+      const formExtractPrompt = 'Extract insurance policy details. Return a JSON object with ALL fields: insurer, productName, policyNumber, category (protection/savings/health/investment/retirement/maternity), subType, currency, sumAssured (number), annualPremium (number), premFrequency (annual/monthly/single/unknown — if document does not clearly state frequency, use unknown), premiumStructure, paymentMethod, policyOwner, lifeInsured, gender, dob, ageAtEntry, smoker, nationality, occupation, inceptionDate, maturityDate, status, premStartAge, premTerm, premEndAge. Riders: riders (array of {type:death/tpd/ci/eci/di/accidental/premium_waiver, riderName:string (product name if separate rider e.g. Early CompleteCare Rider III), sa:number, premium:number (0 if part of main plan), expiryAge:number, bundled:boolean (true if part of main plan, false if separate rider product), multiClaim:boolean, totalClaimPct:number}). IMPORTANT: distinguish between benefits that are PART OF the main plan (bundled=true, no riderName) vs separate RIDER products (bundled=false, include riderName and rider premium). SA: saMultiplier, multiplierEndAge. ISP: ispClass, hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance. ILP: ilpGrowth, ilpDivYield, ilpMgmtFee. Cash: cashValue, cvGrowthRate, surrenderPeriod. Notes: notes (FC review headline). Return ONLY valid JSON starting with { ending with }.';
       content.push({type:'text',text:'Extract all policy information from these documents/images.'});
       const rawText2 = await callAI(formExtractPrompt, content, 4000);
       const parsed = repairJSON(rawText2);
@@ -7999,12 +8034,8 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         {/* ═══ ILP DETAILS (RetireWell-style) ═══ */}
         {isILP && (
           <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)'}}>
-            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
-              <h4 style={{fontSize:13,fontWeight:600,color:'var(--orange)',margin:0}}>{form.ilpSubtype==='investment'?'📊 Investment ILP':'🛡 Protection ILP'}</h4>
-              <select value={form.ilpSubtype||'protection'} onChange={e=>set('ilpSubtype',e.target.value)} style={{fontSize:11,padding:'4px 8px'}}>
-                <option value="protection">Protection ILP (riders + growth)</option>
-                <option value="investment">Investment ILP (capital growth)</option>
-              </select>
+            <div style={{marginBottom:10}}>
+              <h4 style={{fontSize:13,fontWeight:600,color:'var(--orange)',margin:0}}>{form.subType==='ILP (Investment)'?'📊 Investment-Linked Policy':'🛡 Protection ILP'}</h4>
             </div>
             <div className="grid-3">
               <div className="field"><label>Growth % p.a.{(form.fundAllocations||[]).length>0?' ⚡':''}  </label><input type="number" step="0.5" value={form.ilpGrowth||'6'} onChange={e=>set('ilpGrowth',e.target.value)} style={(form.fundAllocations||[]).length>0?{borderColor:'var(--purple)',background:'rgba(157,138,191,.06)'}:{}} /><div style={{fontSize:10,color:(form.fundAllocations||[]).length>0?'var(--purple)':'var(--text3)'}}>{(form.fundAllocations||[]).length>0?'Weighted from fund allocations':'Fund return before fees'}</div></div>
@@ -8033,7 +8064,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                   <div style={{fontSize:10,color:'var(--text3)'}}>Growth + Dividend − Fee</div>
                 </div>
               )}
-              {form.ilpSubtype==='protection' && <div><div style={{fontSize:10,color:'var(--text3)',textTransform:'uppercase'}}>Protection % of Fund</div><input type="number" value={form.ilpProtPct||'101'} onChange={e=>set('ilpProtPct',e.target.value)} style={{width:70,fontSize:14,fontWeight:600}} /><div style={{fontSize:10,color:'var(--text3)'}}>Typically 101% — amend as per policy</div></div>}
+              {form.subType==='ILP (Protection)' && <div><div style={{fontSize:10,color:'var(--text3)',textTransform:'uppercase'}}>Protection % of Fund</div><input type="number" value={form.ilpProtPct||'101'} onChange={e=>set('ilpProtPct',e.target.value)} style={{width:70,fontSize:14,fontWeight:600}} /><div style={{fontSize:10,color:'var(--text3)'}}>Typically 101% — amend as per policy</div></div>}
               <div><div style={{fontSize:10,color:'var(--text3)',textTransform:'uppercase'}}>Payment Years</div><input type="number" value={form.ilpPaymentYrs||'10'} onChange={e=>set('ilpPaymentYrs',e.target.value)} style={{width:60,fontSize:14,fontWeight:600}} /></div>
             </div>
           </div>
