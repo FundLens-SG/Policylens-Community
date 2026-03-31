@@ -520,6 +520,50 @@ function calcISPBreakdown(totalPrem, age) {
 }
 const CARESHIELD_MEDISAVE_CAP = 600;
 
+// ═══ CPF LIFE INFRASTRUCTURE (CPF Board 2025/2026) ═══
+const CPF_CONSTANTS = {
+  // 2025 cohort amounts — updated annually ~3.5%
+  BRS_2025: 106500, FRS_2025: 213000, ERS_2025: 426000,
+  BRS_2026: 110200, FRS_2026: 220400, ERS_2026: 440800,
+  // OA/SA interest
+  OA_RATE: 0.025, SA_RATE: 0.04, RA_RATE: 0.04,
+  // Extra 1% on first $60k, extra 1% on first $30k (55+)
+  EXTRA_1PCT_CAP: 60000, EXTRA_1PCT_55_CAP: 30000,
+  // CPF LIFE estimated monthly payouts at age 65 (2025 cohort, Standard Plan)
+  // Source: CPF LIFE Estimator midpoint ranges
+  LIFE_PAYOUTS: {
+    BRS: { standard: {low:870,mid:970,high:1060}, basic: {low:770,mid:860,high:950}, escalating: {low:720,mid:810,high:900} },
+    FRS: { standard: {low:1590,mid:1770,high:1950}, basic: {low:1420,mid:1600,high:1780}, escalating: {low:1320,mid:1480,high:1640} },
+    ERS: { standard: {low:2350,mid:2620,high:2890}, basic: {low:2130,mid:2400,high:2660}, escalating: {low:1950,mid:2200,high:2450} },
+  },
+  // Payout increases by ~7% per year of deferment (65-70)
+  DEFER_BONUS_PER_YEAR: 0.07,
+};
+
+function getCPFLifePayout(scheme='FRS', plan='standard', startAge=65) {
+  const base = CPF_CONSTANTS.LIFE_PAYOUTS[scheme]?.[plan] || CPF_CONSTANTS.LIFE_PAYOUTS.FRS.standard;
+  const deferYears = Math.max(0, Math.min(5, startAge - 65));
+  const multiplier = 1 + deferYears * CPF_CONSTANTS.DEFER_BONUS_PER_YEAR;
+  return { low: Math.round(base.low * multiplier), mid: Math.round(base.mid * multiplier), high: Math.round(base.high * multiplier) };
+}
+
+function getCPFSchemeAmount(scheme='FRS', year=2026) {
+  const key = scheme + '_' + year;
+  return CPF_CONSTANTS[key] || CPF_CONSTANTS[scheme + '_2025'] || 213000;
+}
+
+// ═══ FX RATE HELPER ═══
+async function fetchFXRate(from='USD', to='SGD') {
+  try {
+    // Try free API first
+    const r = await fetch('https://api.exchangerate-api.com/v4/latest/' + from);
+    if(r.ok) { const d = await r.json(); return d.rates?.[to] || null; }
+  } catch(e) {}
+  // Fallback defaults
+  const defaults = {USDSGD:1.34, GBPSGD:1.70, EURSGD:1.45, HKDSGD:0.17, AUDSGD:0.88, JPYSGD:0.009, CNYSGD:0.185, MYRSGD:0.30};
+  return defaults[from+to] || null;
+}
+
 // ═══ PDF UNLOCK — tries preset passwords to decrypt locked PDFs ═══
 async function getPresetPasswords() {
   const stored = await dbGet('settings','pdfPasswords').catch(()=>null);
@@ -561,16 +605,21 @@ async function getPresetPasswords() {
 }
 
 async function tryUnlockPDF(arrayBuffer) {
+  const data = new Uint8Array(arrayBuffer);
   // Try without password first
   try {
-    const doc = await pdfjsLib.getDocument({data: new Uint8Array(arrayBuffer)}).promise;
+    const doc = await pdfjsLib.getDocument({data}).promise;
     return {doc, password: null, wasLocked: false};
   } catch(e) {
     if(e.name !== 'PasswordException') throw e;
+    console.log('[PDF] Password-protected, trying preset passwords...');
   }
   // Try preset passwords
   const passwords = await getPresetPasswords();
-  for(const pw of passwords) {
+  // Also add common SG insurance PDF patterns
+  const commonPW = ['123456','12345678','password','1234','abcd1234'];
+  const allPW = [...new Set([...passwords, ...commonPW])];
+  for(const pw of allPW) {
     try {
       const doc = await pdfjsLib.getDocument({data: new Uint8Array(arrayBuffer), password: pw}).promise;
       console.log('[PDF] Unlocked with password:', pw.slice(0,3)+'***');
@@ -579,8 +628,9 @@ async function tryUnlockPDF(arrayBuffer) {
       if(e.name !== 'PasswordException') throw e;
     }
   }
+  console.log('[PDF] All', allPW.length, 'passwords failed');
   // Prompt user as last resort
-  const manual = prompt('This PDF is password-protected.\nCommon passwords: NRIC, DOB (DDMMYYYY)\n\nEnter password:');
+  const manual = prompt('This PDF is password-protected.\n\nTried ' + allPW.length + ' passwords (including NRIC/DOB from profile).\nCommon passwords: NRIC, DOB (DDMMYYYY), policy number\n\nEnter password:');
   if(!manual) throw new Error('PDF is locked and no password provided');
   try {
     const doc = await pdfjsLib.getDocument({data: new Uint8Array(arrayBuffer), password: manual}).promise;
@@ -663,16 +713,27 @@ async function processFile(file) {
   if(isPDF) {
     const arrayBuffer = await file.arrayBuffer();
     try {
+      if(typeof pdfjsLib === 'undefined') throw new Error('pdf.js not loaded');
       const {doc, wasLocked} = await tryUnlockPDF(arrayBuffer);
       if(wasLocked) {
+        console.log('[PDF] Locked PDF unlocked, rendering to images...');
         const images = await pdfToImages(doc);
         return images.map(b64 => ({type:'image', source:{type:'base64', media_type:'image/jpeg', data:b64}}));
       } else {
+        // Check if PDF has pages before sending to Gemini
+        if(doc.numPages === 0) throw new Error('PDF has no pages');
         const b64 = await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file)});
         return [{type:'document', source:{type:'base64', media_type:'application/pdf', data:b64}}];
       }
     } catch(e) {
-      if(e.message.includes('locked') || e.message.includes('password')) { alert(e.message); return []; }
+      console.warn('[PDF] Error:', e.name, e.message);
+      // If it's a password/lock issue, alert and stop — don't send locked PDF to Gemini
+      if(e.name === 'PasswordException' || e.message?.includes('locked') || e.message?.includes('password') || e.message?.includes('Password')) {
+        alert('PDF is password-protected and could not be unlocked.\n\nTry adding the password in Settings → PDF Unlock Passwords.\nCommon passwords: NRIC number, DOB (DDMMYYYY).');
+        return [];
+      }
+      // For other errors (pdf.js not loaded, corrupt file), try sending raw to Gemini
+      console.warn('[PDF] Falling back to raw PDF send');
       const b64 = await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file)});
       return [{type:'document', source:{type:'base64', media_type:'application/pdf', data:b64}}];
     }
@@ -3463,7 +3524,7 @@ function OnboardingModal() {
   };
 
   const menuItems = [
-    {icon:'👤',name:'My Client',desc:'Client profile — name, NRIC, DOB, income, expenses, dependants. All gap analysis auto-calculates from here.'},
+    {icon:'👤',name:'My Profile',desc:'Client profile — name, NRIC, DOB, income, expenses, dependants. All gap analysis auto-calculates from here.'},
     {icon:'📊',name:'Dashboard',desc:'Portfolio overview — premium allocation, protection gap scoring (LIA standards), cash value timeline.'},
     {icon:'📋',name:'Policies',desc:'Your client\'s policies. Scan documents with AI, upload files, or add manually. Supports all plan types.'},
     {icon:'🗄️',name:'Policy Repository',desc:'Shared cloud database of products & riders. Auto-fills when you type product names.'},
@@ -3489,7 +3550,7 @@ function OnboardingModal() {
             <strong>1.</strong> Go to <strong>⚙️ Settings</strong> and add your Gemini API key (free tier works)<br/>
             <strong>2.</strong> Hit <strong>📷 Camera</strong> or <strong>📄 Upload</strong> on any policy document<br/>
             <strong>3.</strong> AI extracts everything — insurer, plan, coverage, riders, premiums<br/>
-            <strong>4.</strong> Fill in <strong>👤 My Client</strong> for automatic gap analysis & PDF reports
+            <strong>4.</strong> Fill in <strong>👤 My Profile</strong> for automatic gap analysis & PDF reports
           </div>
         </div>
 
@@ -3637,6 +3698,7 @@ function App() {
   return (
     <AppCtx.Provider value={ctx}>
       <CameraModal />
+      <OnboardingModal />
       <Header />
       <div style={{flex:1,overflow:'auto',padding:'16px 20px 40px'}}>
         {tab==='profile' && <ProfileTab />}
@@ -3658,7 +3720,7 @@ function App() {
 function Header() {
   const {tab,setTab,policies,clientName} = useContext(AppCtx);
   const tabs = [
-    {id:'profile',label:'My Client',icon:'👤'},
+    {id:'profile',label:'My Profile',icon:'👤'},
     {id:'dashboard',label:'Dashboard',icon:'📊'},
     {id:'policies',label:'Policies',icon:'📋'},
     {id:'repository',label:'Repository',icon:'🗄️'},
@@ -4067,7 +4129,7 @@ function ProfileTab() {
     <div className="fade-in">
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
         <div>
-          <h2 style={{fontSize:18,fontWeight:600}}>My Client</h2>
+          <h2 style={{fontSize:18,fontWeight:600}}>My Profile</h2>
           <p style={{fontSize:12,color:'var(--text3)'}}>Client details used across all policies — fill once, use everywhere</p>
         </div>
         <div style={{display:'flex',gap:6}}>
@@ -4111,6 +4173,7 @@ function ProfileTab() {
             <div style={{fontSize:10,fontWeight:700,color:'var(--gold)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8}}>Income & Retirement</div>
             <div className="field"><label>Gross Annual Income ($)</label><input type="number" value={p.annualIncome||''} onChange={e=>set('annualIncome',e.target.value)} placeholder="e.g. 120000" /><div style={{fontSize:10,color:'var(--text3)'}}>{p.annualIncome ? '$'+(Math.round(p.annualIncome/12)).toLocaleString()+'/mth' : ''}</div></div>
             <div className="field"><label>Target Retirement Age</label><input type="number" value={p.retirementAge||65} onChange={e=>set('retirementAge',e.target.value)} /></div>
+            <div className="field"><label>Desired Monthly Income in Retirement</label><input type="number" value={p.desiredRetIncome||''} onChange={e=>set('desiredRetIncome',e.target.value)} placeholder="e.g. 5000" /><div style={{fontSize:10,color:'var(--text3)'}}>Target lifestyle expense in today's dollars</div></div>
           </div>
           <div style={{background:'var(--bg3)',borderRadius:8,padding:12,border:'1px solid var(--border)'}}>
             <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8}}>Monthly Outgoings</div>
@@ -4122,6 +4185,61 @@ function ProfileTab() {
               <div className="field"><label>Dependant Support ($/mth)</label><input type="number" value={p.dependantSupport||''} onChange={e=>set('dependantSupport',e.target.value)} placeholder="0" /></div>
               <div className="field"><label>Medical ($/mth)</label><input type="number" value={p.medicalBudget||300} onChange={e=>set('medicalBudget',e.target.value)} /></div>
             </div>
+          </div>
+        </div>
+
+        {/* CPF LIFE & Retirement Income */}
+        <div style={{marginTop:12,display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
+          <div style={{background:'var(--bg3)',borderRadius:8,padding:12,border:'1px solid rgba(91,168,160,.2)'}}>
+            <div style={{fontSize:10,fontWeight:700,color:'var(--green2)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8}}>CPF LIFE</div>
+            <div className="grid-2">
+              <div className="field"><label>CPF LIFE Scheme</label>
+                <select value={p.cpfScheme||'FRS'} onChange={e=>set('cpfScheme',e.target.value)}>
+                  <option value="none">No CPF LIFE</option>
+                  <option value="BRS">Basic (BRS) — ${getCPFSchemeAmount('BRS').toLocaleString()}</option>
+                  <option value="FRS">Full (FRS) — ${getCPFSchemeAmount('FRS').toLocaleString()}</option>
+                  <option value="ERS">Enhanced (ERS) — ${getCPFSchemeAmount('ERS').toLocaleString()}</option>
+                </select>
+              </div>
+              <div className="field"><label>CPF LIFE Plan</label>
+                <select value={p.cpfPlan||'standard'} onChange={e=>set('cpfPlan',e.target.value)}>
+                  <option value="standard">Standard (higher, level)</option>
+                  <option value="basic">Basic (lower, more bequest)</option>
+                  <option value="escalating">Escalating (starts lower, +2%/yr)</option>
+                </select>
+              </div>
+            </div>
+            <div className="grid-2">
+              <div className="field"><label>Payout Start Age</label><input type="number" value={p.cpfStartAge||65} onChange={e=>set('cpfStartAge',e.target.value)} min="65" max="70" /><div style={{fontSize:9,color:'var(--text3)'}}>65–70 (↑7%/yr deferred)</div></div>
+              <div className="field"><label>SA Top-up ($)</label><input type="number" value={p.cpfTopUp||''} onChange={e=>set('cpfTopUp',e.target.value)} placeholder="0" /><div style={{fontSize:9,color:'var(--text3)'}}>Voluntary top-up to RA</div></div>
+            </div>
+            {p.cpfScheme && p.cpfScheme !== 'none' && (() => {
+              const est = getCPFLifePayout(p.cpfScheme, p.cpfPlan||'standard', parseInt(p.cpfStartAge)||65);
+              return (
+                <div style={{marginTop:6,padding:'6px 10px',background:'rgba(91,168,160,.08)',borderRadius:6,fontSize:11}}>
+                  <span style={{fontWeight:700,color:'var(--green2)'}}>${est.mid.toLocaleString()}/mth</span>
+                  <span style={{color:'var(--text3)',marginLeft:6}}>(range ${est.low.toLocaleString()}–${est.high.toLocaleString()})</span>
+                  <span style={{color:'var(--text3)',fontSize:9,marginLeft:4}}>from age {p.cpfStartAge||65} for life</span>
+                </div>
+              );
+            })()}
+          </div>
+          <div style={{background:'var(--bg3)',borderRadius:8,padding:12,border:'1px solid rgba(157,138,191,.2)'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
+              <div style={{fontSize:10,fontWeight:700,color:'#9d8abf',textTransform:'uppercase',letterSpacing:'.5px'}}>Other Retirement Income</div>
+              <button className="btn-secondary btn-sm" onClick={()=>set('otherRetIncome',[...(p.otherRetIncome||[]),{id:'ori_'+Date.now(),source:'',amount:'',appreciation:'2',fromAge:'65',toAge:'85'}])} style={{fontSize:9,padding:'2px 8px'}}>+ Add</button>
+            </div>
+            {(p.otherRetIncome||[]).length === 0 && <div style={{fontSize:10,color:'var(--text3)',textAlign:'center',padding:8}}>Rental, dividends, part-time work, spousal support…</div>}
+            {(p.otherRetIncome||[]).map((inc,i) => (
+              <div key={inc.id||i} style={{display:'grid',gridTemplateColumns:'1fr 70px 50px 45px 45px 24px',gap:4,marginBottom:4,alignItems:'end'}}>
+                <div className="field" style={{marginBottom:0}}>{i===0 && <label style={{fontSize:8}}>Source</label>}<input value={inc.source} onChange={e=>{const a=[...(p.otherRetIncome||[])];a[i]={...a[i],source:e.target.value};set('otherRetIncome',a);}} placeholder="Rental" style={{fontSize:11}} /></div>
+                <div className="field" style={{marginBottom:0}}>{i===0 && <label style={{fontSize:8}}>$/mth</label>}<input type="number" value={inc.amount} onChange={e=>{const a=[...(p.otherRetIncome||[])];a[i]={...a[i],amount:e.target.value};set('otherRetIncome',a);}} placeholder="2000" style={{fontSize:11}} /></div>
+                <div className="field" style={{marginBottom:0}}>{i===0 && <label style={{fontSize:8}}>↑%/yr</label>}<input type="number" value={inc.appreciation} onChange={e=>{const a=[...(p.otherRetIncome||[])];a[i]={...a[i],appreciation:e.target.value};set('otherRetIncome',a);}} style={{fontSize:11}} /></div>
+                <div className="field" style={{marginBottom:0}}>{i===0 && <label style={{fontSize:8}}>From</label>}<input type="number" value={inc.fromAge} onChange={e=>{const a=[...(p.otherRetIncome||[])];a[i]={...a[i],fromAge:e.target.value};set('otherRetIncome',a);}} style={{fontSize:11}} /></div>
+                <div className="field" style={{marginBottom:0}}>{i===0 && <label style={{fontSize:8}}>To</label>}<input type="number" value={inc.toAge} onChange={e=>{const a=[...(p.otherRetIncome||[])];a[i]={...a[i],toAge:e.target.value};set('otherRetIncome',a);}} style={{fontSize:11}} /></div>
+                <button className="btn-danger" onClick={()=>{const a=[...(p.otherRetIncome||[])];a.splice(i,1);set('otherRetIncome',a);}} style={{padding:'2px 4px',fontSize:10,marginBottom:0,height:28}}>×</button>
+              </div>
+            ))}
           </div>
         </div>
       </div>
@@ -4161,6 +4279,285 @@ function ProfileTab() {
           </div>
         ))}
       </div>
+
+      {/* Delete Profile */}
+      <div style={{marginTop:16,padding:14,border:'1px solid rgba(239,83,80,.2)',borderRadius:12,background:'rgba(239,83,80,.03)'}}>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+          <div>
+            <div style={{fontSize:12,fontWeight:600,color:'var(--red2)'}}>Delete My Profile</div>
+            <div style={{fontSize:10,color:'var(--text3)'}}>Clears name, NRIC, DOB, financial data, dependants. Policies are not affected.</div>
+          </div>
+          <button className="btn-danger btn-sm" onClick={()=>{
+            if(!confirm('Delete all client profile data?\n\nThis clears name, NRIC, DOB, income, expenses, CPF settings, dependants, and other retirement income sources.\n\nPolicies will NOT be deleted.')) return;
+            const blank = {name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[],annualIncome:'',retirementAge:'65',monthlyExpenses:'',mortgagePayment:'',dependantSupport:'',medicalBudget:'',desiredRetIncome:'',cpfScheme:'FRS',cpfPlan:'standard',cpfStartAge:'65',cpfTopUp:'',otherRetIncome:[]};
+            setP(blank); saveProfile(blank);
+            alert('Profile cleared.');
+          }}>Delete Profile</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// RETIREMENT LITE DASHBOARD — Condensed RetireLens
+// ═══════════════════════════════════════════════════════════════
+
+function RetirementLiteDashboard({data,age,retAge,p,policies,cvTimeline,toSGD,fxRates}) {
+  const chartRef = useRef(null);
+  const chartInst = useRef(null);
+  const [shareMode,setShareMode] = useState(false);
+
+  const {desiredMonthly,cpfPayout,policyMonthlyIncome,policyDividends,lumpSum,otherMonthly,otherSources,timeline,cpfScheme,cpfStartAge} = data;
+
+  const totalAtRet = (cpfScheme!=='none'?cpfPayout.mid:0) + policyMonthlyIncome + policyDividends + otherMonthly;
+  const gap = Math.max(0, desiredMonthly - totalAtRet);
+  const coveragePct = desiredMonthly > 0 ? Math.min(100, Math.round(totalAtRet/desiredMonthly*100)) : 0;
+  const yearsFromLump = gap > 0 && lumpSum > 0 ? Math.round(lumpSum / (gap * 12)) : 0;
+
+  // Chart
+  useEffect(() => {
+    if(!chartRef.current || timeline.length === 0) return;
+    if(chartInst.current) chartInst.current.destroy();
+    const filtered = timeline.filter(r => r.age >= Math.max(55, retAge-5) && r.age <= 90);
+    chartInst.current = new Chart(chartRef.current, {
+      type:'bar',
+      data:{
+        labels:filtered.map(r=>r.age),
+        datasets:[
+          {label:'CPF LIFE',data:filtered.map(r=>r.cpf),backgroundColor:'rgba(91,168,160,.7)',borderRadius:2,stack:'income'},
+          {label:'Policy Income',data:filtered.map(r=>r.policy),backgroundColor:'rgba(212,169,106,.7)',borderRadius:2,stack:'income'},
+          {label:'Dividends',data:filtered.map(r=>r.dividends),backgroundColor:'rgba(157,138,191,.7)',borderRadius:2,stack:'income'},
+          {label:'Other Income',data:filtered.map(r=>r.other),backgroundColor:'rgba(91,143,217,.5)',borderRadius:2,stack:'income'},
+          {label:'Desired',data:filtered.map(r=>r.desired),type:'line',borderColor:'rgba(239,83,80,.6)',borderWidth:2,borderDash:[6,3],pointRadius:0,fill:false},
+        ]
+      },
+      options:{
+        responsive:true,maintainAspectRatio:false,
+        scales:{
+          x:{stacked:true,grid:{color:'rgba(212,169,106,.06)'},ticks:{color:'#6b6050',font:{size:9}}},
+          y:{stacked:true,grid:{color:'rgba(212,169,106,.06)'},ticks:{color:'#6b6050',callback:v=>'$'+v.toLocaleString()},beginAtZero:true}
+        },
+        plugins:{legend:{labels:{color:'#a39580',font:{size:9},boxWidth:12}},tooltip:{callbacks:{footer:items=>{const total=items.filter(i=>i.dataset.stack==='income').reduce((s,i)=>s+i.raw,0);return'Total: $'+total.toLocaleString()+'/mth';}}}}
+      }
+    });
+    return ()=>{if(chartInst.current)chartInst.current.destroy()};
+  },[timeline,retAge]);
+
+  // ── SHARE VIEW GENERATOR ──
+  const generateShareView = () => {
+    const clientName = p.name || 'Client';
+    const retRow = cvTimeline.find(r => r.age === retAge);
+    const totalPrem = policies.reduce((s,pol)=>s+(parseFloat(pol.annualPremium)||0),0);
+    const catCounts = {};
+    policies.forEach(pol => { const c = pol.category||'other'; catCounts[c] = (catCounts[c]||0)+1; });
+
+    // Build income waterfall data for the share page chart
+    const waterfallData = timeline.filter(r => r.age >= retAge && r.age <= 90);
+
+    const html = `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${clientName} — Portfolio Summary | PolicyLens</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"><\/script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0b0f1a;color:#e8e0d0;min-height:100vh;padding:20px}
+.container{max-width:720px;margin:0 auto}
+.header{text-align:center;padding:24px 0 20px;border-bottom:1px solid rgba(212,169,106,.2);margin-bottom:20px}
+.header h1{font-size:22px;font-weight:700;margin-bottom:4px}
+.header p{font-size:12px;color:#a39580}
+.logo{font-size:11px;color:#d4a96a;font-weight:600;letter-spacing:1px;text-transform:uppercase;margin-bottom:8px}
+.grid{display:grid;gap:10px;margin-bottom:16px}
+.grid-4{grid-template-columns:repeat(4,1fr)}
+.grid-2{grid-template-columns:1fr 1fr}
+.card{background:#141926;border:1px solid rgba(212,169,106,.12);border-radius:12px;padding:14px}
+.kpi-label{font-size:9px;color:#a39580;text-transform:uppercase;font-weight:600;letter-spacing:.5px}
+.kpi-value{font-size:22px;font-weight:700;margin-top:2px}
+.green{color:#5ba8a0}.gold{color:#d4a96a}.red{color:#ef5350}.purple{color:#9d8abf}.blue{color:#5b8fd9}
+.bar{height:6px;border-radius:3px;margin-top:4px}
+.section-title{font-size:13px;font-weight:600;margin-bottom:10px}
+.income-row{display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid rgba(212,169,106,.06);font-size:12px}
+.income-row .label{display:flex;align-items:center;gap:6px}
+.dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.footer{text-align:center;padding:20px 0;font-size:10px;color:#6b6050;border-top:1px solid rgba(212,169,106,.1);margin-top:20px}
+@media(max-width:600px){.grid-4{grid-template-columns:repeat(2,1fr)}}
+</style></head><body>
+<div class="container">
+<div class="header">
+<div class="logo">PolicyLens</div>
+<h1>${clientName}'s Portfolio Summary</h1>
+<p>Prepared ${new Date().toLocaleDateString('en-SG',{day:'numeric',month:'long',year:'numeric'})} · Age ${age} · Retirement at ${retAge}</p>
+</div>
+
+<div class="grid grid-4">
+<div class="card"><div class="kpi-label">Policies</div><div class="kpi-value">${policies.length}</div></div>
+<div class="card"><div class="kpi-label">Annual Premium</div><div class="kpi-value gold">$${Math.round(totalPrem).toLocaleString()}</div></div>
+<div class="card"><div class="kpi-label">Retirement Income</div><div class="kpi-value green">$${totalAtRet.toLocaleString()}/m</div></div>
+<div class="card"><div class="kpi-label">Income vs Target</div><div class="kpi-value ${coveragePct>=80?'green':coveragePct>=50?'gold':'red'}">${coveragePct}%</div></div>
+</div>
+
+<div class="card" style="margin-bottom:16px">
+<div class="section-title">Monthly Retirement Income at Age ${retAge}</div>
+<div style="font-size:11px;color:#a39580;margin-bottom:10px">Target: $${desiredMonthly.toLocaleString()}/mth</div>
+${cpfScheme!=='none'?`<div class="income-row"><div class="label"><span class="dot" style="background:#5ba8a0"></span>CPF LIFE (${cpfScheme}, ${p.cpfPlan||'standard'})</div><div class="green" style="font-weight:600">$${cpfPayout.mid.toLocaleString()}</div></div>`:''}
+${policyMonthlyIncome>0?`<div class="income-row"><div class="label"><span class="dot" style="background:#d4a96a"></span>Policy Income (annuities, endowments)</div><div class="gold" style="font-weight:600">$${policyMonthlyIncome.toLocaleString()}</div></div>`:''}
+${policyDividends>0?`<div class="income-row"><div class="label"><span class="dot" style="background:#9d8abf"></span>Investment Dividends</div><div class="purple" style="font-weight:600">$${policyDividends.toLocaleString()}</div></div>`:''}
+${otherSources.filter(s=>s.active).map(s=>`<div class="income-row"><div class="label"><span class="dot" style="background:#5b8fd9"></span>${s.source||'Other income'}</div><div class="blue" style="font-weight:600">$${s.adjustedAmt.toLocaleString()}</div></div>`).join('')}
+<div class="income-row" style="border-top:2px solid rgba(212,169,106,.2);padding-top:8px;font-weight:700"><div>Total Monthly Income</div><div class="${totalAtRet>=desiredMonthly?'green':'red'}">$${totalAtRet.toLocaleString()}</div></div>
+${gap>0?`<div style="margin-top:8px;padding:6px 10px;background:rgba(239,83,80,.06);border-radius:6px;font-size:11px;color:#ef5350">Monthly shortfall of $${gap.toLocaleString()} — ${lumpSum>0?'lump sum of $'+Math.round(lumpSum).toLocaleString()+' can sustain ~'+yearsFromLump+' years':'consider additional income planning'}</div>`:''}
+</div>
+
+<div class="card" style="margin-bottom:16px">
+<div class="section-title">Retirement Income Projection</div>
+<div style="height:240px"><canvas id="retChart"></canvas></div>
+</div>
+
+<div class="card" style="margin-bottom:16px">
+<div class="section-title">Lump Sum at Retirement</div>
+<div class="grid grid-2" style="margin-top:8px">
+<div><div class="kpi-label">Cash / Surrender Values</div><div class="kpi-value gold" style="font-size:18px">$${Math.round(retRow?.totalCV||0).toLocaleString()}</div></div>
+<div><div class="kpi-label">Maturities</div><div class="kpi-value gold" style="font-size:18px">$${Math.round(retRow?.maturities||0).toLocaleString()}</div></div>
+</div>
+</div>
+
+<div class="footer">
+Generated by PolicyLens · For discussion purposes only · Not financial advice<br/>
+${p.name?'Prepared for '+p.name+' by their financial consultant':''}
+</div>
+</div>
+<script>
+new Chart(document.getElementById('retChart'),{type:'bar',data:{labels:${JSON.stringify(waterfallData.map(r=>r.age))},datasets:[
+{label:'CPF LIFE',data:${JSON.stringify(waterfallData.map(r=>r.cpf))},backgroundColor:'rgba(91,168,160,.7)',stack:'s'},
+{label:'Policy',data:${JSON.stringify(waterfallData.map(r=>r.policy))},backgroundColor:'rgba(212,169,106,.7)',stack:'s'},
+{label:'Dividends',data:${JSON.stringify(waterfallData.map(r=>r.dividends))},backgroundColor:'rgba(157,138,191,.7)',stack:'s'},
+{label:'Other',data:${JSON.stringify(waterfallData.map(r=>r.other))},backgroundColor:'rgba(91,143,217,.5)',stack:'s'},
+{label:'Target',data:${JSON.stringify(waterfallData.map(r=>r.desired))},type:'line',borderColor:'rgba(239,83,80,.6)',borderWidth:2,borderDash:[6,3],pointRadius:0,fill:false}
+]},options:{responsive:true,maintainAspectRatio:false,scales:{x:{stacked:true,ticks:{color:'#6b6050',font:{size:9}}},y:{stacked:true,ticks:{color:'#6b6050',callback:v=>'$'+v}}},plugins:{legend:{labels:{color:'#a39580',font:{size:9}}}}}});
+<\/script></body></html>`;
+    return html;
+  };
+
+  const handleShare = () => {
+    const html = generateShareView();
+    const blob = new Blob([html], {type:'text/html'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = (p.name||'Client').replace(/[^a-zA-Z0-9]/g,'_') + '_Portfolio_Summary.html';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  return (
+    <div className="card" style={{marginBottom:16,background:'linear-gradient(135deg,var(--bg2),rgba(212,169,106,.03))',border:'1px solid rgba(212,169,106,.15)'}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+        <div>
+          <h3 style={{fontSize:14,fontWeight:600}}>Retirement Income Dashboard</h3>
+          <p style={{fontSize:10,color:'var(--text3)'}}>CPF LIFE + policy income + other sources vs desired lifestyle</p>
+        </div>
+        <div style={{display:'flex',gap:6}}>
+          <button className="btn-secondary btn-sm" onClick={()=>setShareMode(!shareMode)} style={{fontSize:10}}>{shareMode?'Hide Preview':'👁 Preview'}</button>
+          <button className="btn-primary btn-sm" onClick={handleShare} style={{fontSize:10}}>📤 Share Summary</button>
+        </div>
+      </div>
+
+      {/* ── KPI ROW ── */}
+      <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:8,marginBottom:14}}>
+        <div style={{background:'var(--bg3)',borderRadius:8,padding:10,textAlign:'center'}}>
+          <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',fontWeight:600}}>Desired</div>
+          <div style={{fontSize:18,fontWeight:700}}>${desiredMonthly.toLocaleString()}</div>
+          <div style={{fontSize:9,color:'var(--text3)'}}>per month</div>
+        </div>
+        <div style={{background:'var(--bg3)',borderRadius:8,padding:10,textAlign:'center'}}>
+          <div style={{fontSize:9,color:'var(--green2)',textTransform:'uppercase',fontWeight:600}}>CPF LIFE</div>
+          <div style={{fontSize:18,fontWeight:700,color:'var(--green2)'}}>${cpfScheme!=='none'?cpfPayout.mid.toLocaleString():'—'}</div>
+          <div style={{fontSize:9,color:'var(--text3)'}}>{cpfScheme!=='none'?cpfScheme+' from '+cpfStartAge:'Not set'}</div>
+        </div>
+        <div style={{background:'var(--bg3)',borderRadius:8,padding:10,textAlign:'center'}}>
+          <div style={{fontSize:9,color:'var(--gold)',textTransform:'uppercase',fontWeight:600}}>Policy Income</div>
+          <div style={{fontSize:18,fontWeight:700,color:'var(--gold)'}}>${(policyMonthlyIncome+policyDividends).toLocaleString()}</div>
+          <div style={{fontSize:9,color:'var(--text3)'}}>annuity + div</div>
+        </div>
+        <div style={{background:'var(--bg3)',borderRadius:8,padding:10,textAlign:'center'}}>
+          <div style={{fontSize:9,color:'#5b8fd9',textTransform:'uppercase',fontWeight:600}}>Other</div>
+          <div style={{fontSize:18,fontWeight:700,color:'#5b8fd9'}}>${otherMonthly.toLocaleString()}</div>
+          <div style={{fontSize:9,color:'var(--text3)'}}>{otherSources.filter(s=>s.active).length} source{otherSources.filter(s=>s.active).length!==1?'s':''}</div>
+        </div>
+        <div style={{background:'var(--bg3)',borderRadius:8,padding:10,textAlign:'center',borderLeft:gap>0?'3px solid var(--red)':'3px solid var(--green2)'}}>
+          <div style={{fontSize:9,color:gap>0?'var(--red)':'var(--green2)',textTransform:'uppercase',fontWeight:600}}>{gap>0?'Shortfall':'Surplus'}</div>
+          <div style={{fontSize:18,fontWeight:700,color:gap>0?'var(--red)':'var(--green2)'}}>${gap>0?gap.toLocaleString():(totalAtRet-desiredMonthly).toLocaleString()}</div>
+          <div style={{fontSize:9,color:'var(--text3)'}}>{coveragePct}% covered</div>
+        </div>
+      </div>
+
+      {/* ── INCOME WATERFALL (stacked bar) ── */}
+      <div style={{display:'grid',gridTemplateColumns:'1fr 260px',gap:12}}>
+        <div>
+          <div style={{fontSize:11,fontWeight:600,marginBottom:6}}>Income Projection — Age {Math.max(55,retAge-5)} to 90</div>
+          <div style={{height:220}}><canvas ref={chartRef} /></div>
+        </div>
+
+        {/* ── INCOME BREAKDOWN ── */}
+        <div style={{background:'var(--bg3)',borderRadius:8,padding:12}}>
+          <div style={{fontSize:11,fontWeight:600,marginBottom:8}}>At Age {retAge}</div>
+          {cpfScheme!=='none' && (
+            <div style={{display:'flex',justifyContent:'space-between',padding:'5px 0',borderBottom:'1px solid var(--border)',fontSize:11}}>
+              <span style={{display:'flex',alignItems:'center',gap:4}}><span style={{width:8,height:8,borderRadius:'50%',background:'#5ba8a0'}}></span> CPF LIFE</span>
+              <span style={{fontWeight:600,color:'var(--green2)'}}>${cpfPayout.mid.toLocaleString()}</span>
+            </div>
+          )}
+          {policyMonthlyIncome > 0 && (
+            <div style={{display:'flex',justifyContent:'space-between',padding:'5px 0',borderBottom:'1px solid var(--border)',fontSize:11}}>
+              <span style={{display:'flex',alignItems:'center',gap:4}}><span style={{width:8,height:8,borderRadius:'50%',background:'#d4a96a'}}></span> Annuity/Income</span>
+              <span style={{fontWeight:600,color:'var(--gold)'}}>${policyMonthlyIncome.toLocaleString()}</span>
+            </div>
+          )}
+          {policyDividends > 0 && (
+            <div style={{display:'flex',justifyContent:'space-between',padding:'5px 0',borderBottom:'1px solid var(--border)',fontSize:11}}>
+              <span style={{display:'flex',alignItems:'center',gap:4}}><span style={{width:8,height:8,borderRadius:'50%',background:'#9d8abf'}}></span> Dividends</span>
+              <span style={{fontWeight:600,color:'#9d8abf'}}>${policyDividends.toLocaleString()}</span>
+            </div>
+          )}
+          {otherSources.filter(s=>s.active).map((s,i) => (
+            <div key={i} style={{display:'flex',justifyContent:'space-between',padding:'5px 0',borderBottom:'1px solid var(--border)',fontSize:11}}>
+              <span style={{display:'flex',alignItems:'center',gap:4}}><span style={{width:8,height:8,borderRadius:'50%',background:'#5b8fd9'}}></span> {s.source||'Other'}</span>
+              <span style={{fontWeight:600,color:'#5b8fd9'}}>${s.adjustedAmt.toLocaleString()}</span>
+            </div>
+          ))}
+          <div style={{display:'flex',justifyContent:'space-between',padding:'8px 0 4px',fontSize:12,fontWeight:700,borderTop:'2px solid var(--border)'}}>
+            <span>Total</span>
+            <span style={{color:totalAtRet>=desiredMonthly?'var(--green2)':'var(--red)'}}>${totalAtRet.toLocaleString()}/mth</span>
+          </div>
+
+          {/* Lump sum */}
+          {lumpSum > 0 && (
+            <div style={{marginTop:8,padding:'6px 8px',background:'var(--bg2)',borderRadius:6}}>
+              <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',fontWeight:600}}>Lump Sum at {retAge}</div>
+              <div style={{fontSize:14,fontWeight:700,color:'var(--gold)'}}>${Math.round(lumpSum).toLocaleString()}</div>
+              {gap > 0 && <div style={{fontSize:9,color:'var(--text3)'}}>Covers ~{yearsFromLump} yrs shortfall</div>}
+            </div>
+          )}
+
+          {gap > 0 && lumpSum > 0 && (
+            <div style={{marginTop:6,fontSize:10,color:'var(--text3)'}}>
+              Total runway: <span style={{fontWeight:600,color:'var(--gold)'}}>{Math.round(lumpSum/(gap*12) + (totalAtRet>0?(90-retAge):0))} years</span> with income + drawdown
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* ── SHARE PREVIEW ── */}
+      {shareMode && (
+        <div style={{marginTop:12,border:'1px solid var(--border)',borderRadius:8,overflow:'hidden'}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'8px 12px',background:'var(--bg3)'}}>
+            <span style={{fontSize:11,fontWeight:600}}>Client-Facing Summary Preview</span>
+            <button className="btn-primary btn-sm" onClick={handleShare} style={{fontSize:10}}>📤 Download HTML</button>
+          </div>
+          <div style={{padding:12,fontSize:10,color:'var(--text3)'}}>
+            Downloads a clean, standalone HTML file with your client's name, 4 KPIs (policies, premium, retirement income, coverage %), income breakdown, and the projection chart. No API keys, no edit buttons — safe to email or WhatsApp to clients.
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -4292,6 +4689,51 @@ function Dashboard() {
   const [ciIncMort,setCiIncMort] = useState(true);
   const [ciIncDep,setCiIncDep] = useState(false);
 
+  // ── FX RATE STATE ──
+  const [fxRates, setFxRates] = useState({USDSGD:1.34, GBPSGD:1.70, EURSGD:1.45});
+  const [fxManual, setFxManual] = useState(false);
+  const [fxLoading, setFxLoading] = useState(false);
+  useEffect(() => {
+    (async () => {
+      setFxLoading(true);
+      try {
+        const r = await fetchFXRate('USD','SGD');
+        if(r) setFxRates(prev => ({...prev, USDSGD:r}));
+        const g = await fetchFXRate('GBP','SGD');
+        if(g) setFxRates(prev => ({...prev, GBPSGD:g}));
+        const e = await fetchFXRate('EUR','SGD');
+        if(e) setFxRates(prev => ({...prev, EURSGD:e}));
+      } catch(err) { setFxManual(true); }
+      setFxLoading(false);
+    })();
+  }, []);
+
+  const toSGD = (amount, currency) => {
+    if(!currency || currency === 'SGD') return amount;
+    const key = currency + 'SGD';
+    return amount * (fxRates[key] || 1);
+  };
+
+  // ── CURRENCY CONSOLIDATION ──
+  const currencyBreakdown = useMemo(() => {
+    const byCcy = {};
+    policies.forEach(pol => {
+      const ccy = pol.currency || 'SGD';
+      if(!byCcy[ccy]) byCcy[ccy] = {premium:0,coverage:0,cv:0,count:0,policies:[]};
+      byCcy[ccy].premium += parseFloat(pol.annualPremium)||0;
+      byCcy[ccy].coverage += parseFloat(pol.sumAssured)||0;
+      byCcy[ccy].count += 1;
+      byCcy[ccy].policies.push(pol);
+      // Estimate CV
+      const yr = age - (parseInt(pol.premStartAge)||parseInt(pol.ageAtEntry)||age);
+      if(yr > 0 && parseFloat(pol.cashValue)>0) byCcy[ccy].cv += parseFloat(pol.cashValue);
+    });
+    return byCcy;
+  }, [policies, age]);
+
+  const hasForeignCurrency = Object.keys(currencyBreakdown).some(c => c !== 'SGD');
+
+  // ── RETIREMENT LITE COMPUTATION ──
   // Dashboard drop handler
   const handleDashDrop = async (files) => {
     const gk = ((await dbGet('settings','geminiKey').catch(()=>null))?.value || '').trim();
@@ -4445,6 +4887,47 @@ function Dashboard() {
     return rows;
   },[policies,age,retAge]);
 
+  // ── RETIREMENT LITE COMPUTATION ──
+  const retirementLite = useMemo(() => {
+    const desiredMonthly = parseFloat(p.desiredRetIncome) || parseFloat(p.monthlyExpenses) || monthlyIncome * 0.7 || 5000;
+    const cpfScheme = p.cpfScheme || 'FRS';
+    const cpfPlan = p.cpfPlan || 'standard';
+    const cpfStartAge = parseInt(p.cpfStartAge) || 65;
+    const cpfPayout = cpfScheme !== 'none' ? getCPFLifePayout(cpfScheme, cpfPlan, cpfStartAge) : {low:0,mid:0,high:0};
+    const retRow = cvTimeline.find(r => r.age === retAge);
+    const policyMonthlyIncome = retRow ? Math.round(retRow.income/12) : 0;
+    const policyDividends = retRow ? Math.round(retRow.dividends/12) : 0;
+    const lumpSum = retRow ? retRow.totalCV + retRow.maturities : 0;
+    const otherSources = (p.otherRetIncome || []).map(src => {
+      const fromAge = parseInt(src.fromAge)||65;
+      const toAge = parseInt(src.toAge)||85;
+      const base = parseFloat(src.amount)||0;
+      const appr = (parseFloat(src.appreciation)||0)/100;
+      const yearsToRet = Math.max(0, retAge - (age || 35));
+      const adjustedAmt = appr > 0 ? Math.round(base * Math.pow(1+appr, yearsToRet)) : base;
+      return { ...src, adjustedAmt, fromAge, toAge, active: retAge >= fromAge && retAge <= toAge };
+    });
+    const otherMonthly = otherSources.filter(s=>s.active).reduce((sum,s) => sum + s.adjustedAmt, 0);
+    const timeline = [];
+    for(let yr=Math.max(55,age); yr<=95; yr++) {
+      const row = {age:yr, cpf:0, policy:0, dividends:0, other:0, total:0, desired:desiredMonthly};
+      if(yr >= cpfStartAge && cpfScheme !== 'none') {
+        row.cpf = cpfPlan === 'escalating' ? Math.round(cpfPayout.mid * Math.pow(1.02, yr - cpfStartAge)) : cpfPayout.mid;
+      }
+      const cvRow = cvTimeline.find(r => r.age === yr);
+      if(cvRow) { row.policy = Math.round(cvRow.income/12); row.dividends = Math.round(cvRow.dividends/12); }
+      otherSources.forEach(s => {
+        if(yr >= s.fromAge && yr <= s.toAge) {
+          const appr = (parseFloat(s.appreciation)||0)/100;
+          row.other += Math.round((parseFloat(s.amount)||0) * Math.pow(1+appr, yr - (age||35)));
+        }
+      });
+      row.total = row.cpf + row.policy + row.dividends + row.other;
+      timeline.push(row);
+    }
+    return { desiredMonthly, cpfPayout, policyMonthlyIncome, policyDividends, lumpSum, otherMonthly, otherSources, timeline, cpfScheme, cpfStartAge };
+  }, [p, cvTimeline, retAge, age, monthlyIncome]);
+
   // CV timeline chart
   const chartRef2 = useRef(null);
   const chartInst2 = useRef(null);
@@ -4582,8 +5065,63 @@ function Dashboard() {
         <div className="card card-sm"><div style={{color:'var(--text3)',fontSize:10,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Coverage Score</div><div style={{fontSize:24,fontWeight:700,marginTop:2,color:scoreColor}}>{overallScore}%</div><div style={{fontSize:10,color:scoreColor}}>{scoreLabel}</div></div>
       </div>
 
+      {/* ═══ CURRENCY CONSOLIDATION ═══ */}
+      {hasForeignCurrency && (
+        <div className="card" style={{marginBottom:16,background:'linear-gradient(135deg,var(--bg2),rgba(91,143,217,.03))',border:'1px solid rgba(91,143,217,.15)'}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+            <h3 style={{fontSize:13,fontWeight:600}}>Currency Exposure</h3>
+            <div style={{display:'flex',gap:8,alignItems:'center',fontSize:10}}>
+              {fxLoading && <span style={{color:'var(--text3)'}}>Loading FX…</span>}
+              {!fxLoading && <span style={{color:'var(--text3)'}}>USD/SGD {fxRates.USDSGD?.toFixed(4)}</span>}
+              <button className="btn-secondary btn-sm" style={{fontSize:9,padding:'2px 8px'}} onClick={async()=>{
+                setFxLoading(true);
+                try{const r=await fetchFXRate('USD','SGD');if(r)setFxRates(prev=>({...prev,USDSGD:r}));
+                const g=await fetchFXRate('GBP','SGD');if(g)setFxRates(prev=>({...prev,GBPSGD:g}));
+                const e=await fetchFXRate('EUR','SGD');if(e)setFxRates(prev=>({...prev,EURSGD:e}));}catch(err){}
+                setFxLoading(false);
+              }}>↻ Refresh</button>
+            </div>
+          </div>
+          {(() => {
+            const ccys = Object.entries(currencyBreakdown);
+            const totalSGDPrem = ccys.reduce((s,[ccy,d]) => s + toSGD(d.premium,ccy), 0);
+            const totalSGDCov = ccys.reduce((s,[ccy,d]) => s + toSGD(d.coverage,ccy), 0);
+            const usdPct = currencyBreakdown.USD ? Math.round(toSGD(currencyBreakdown.USD.premium,'USD')/totalSGDPrem*100) : 0;
+            const earnsCcy = 'SGD'; // Assumption: SG-based client earns in SGD
+            return (
+              <div>
+                <div style={{display:'grid',gridTemplateColumns:`repeat(${ccys.length},1fr)`,gap:8,marginBottom:10}}>
+                  {ccys.map(([ccy,d]) => {
+                    const premPct = totalSGDPrem > 0 ? Math.round(toSGD(d.premium,ccy)/totalSGDPrem*100) : 0;
+                    const ccyColor = ccy==='SGD'?'#5ba8a0':ccy==='USD'?'#5b8fd9':ccy==='GBP'?'#9d8abf':'#d4a96a';
+                    return (
+                      <div key={ccy} style={{background:'var(--bg3)',borderRadius:8,padding:10,borderTop:`3px solid ${ccyColor}`}}>
+                        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4}}>
+                          <span style={{fontSize:14,fontWeight:700,color:ccyColor}}>{ccy}</span>
+                          <span style={{fontSize:11,fontWeight:600,color:ccyColor}}>{premPct}%</span>
+                        </div>
+                        <div style={{fontSize:11,marginBottom:2}}><span style={{color:'var(--text3)'}}>Premium:</span> <span style={{fontWeight:600}}>{ccy} {d.premium.toLocaleString()}/yr</span></div>
+                        <div style={{fontSize:11,marginBottom:2}}><span style={{color:'var(--text3)'}}>Coverage:</span> <span style={{fontWeight:600}}>{ccy} {d.coverage.toLocaleString()}</span></div>
+                        {ccy !== 'SGD' && <div style={{fontSize:10,color:'var(--text3)',marginTop:4}}>≈ SGD {Math.round(toSGD(d.premium,ccy)).toLocaleString()}/yr prem · SGD {Math.round(toSGD(d.coverage,ccy)).toLocaleString()} cover</div>}
+                        <div style={{fontSize:10,color:'var(--text3)',marginTop:2}}>{d.count} polic{d.count===1?'y':'ies'}</div>
+                      </div>
+                    );
+                  })}
+                </div>
+                {/* SGD-equivalent totals */}
+                <div style={{display:'flex',gap:16,padding:'8px 12px',background:'var(--bg3)',borderRadius:8}}>
+                  <div style={{flex:1}}><div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',fontWeight:600}}>Total Premium (SGD equiv.)</div><div style={{fontSize:16,fontWeight:700}}>{fmt(Math.round(totalSGDPrem))}/yr</div></div>
+                  <div style={{flex:1}}><div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',fontWeight:600}}>Total Coverage (SGD equiv.)</div><div style={{fontSize:16,fontWeight:700}}>{fmt(Math.round(totalSGDCov))}</div></div>
+                  <div style={{flex:1}}><div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',fontWeight:600}}>FX Exposure</div><div style={{fontSize:16,fontWeight:700,color:usdPct>50?'var(--orange)':'var(--green2)'}}>{100-(currencyBreakdown.SGD?Math.round(toSGD(currencyBreakdown.SGD.premium,'SGD')/totalSGDPrem*100):0)}% foreign</div></div>
+                </div>
+                {usdPct > 60 && <div style={{marginTop:8,padding:'6px 10px',background:'rgba(212,169,106,.06)',borderRadius:6,fontSize:10,color:'var(--gold)'}}>⚠ {usdPct}% of premiums are USD-denominated but income is earned in SGD — consider FX hedging or rebalancing</div>}
+              </div>
+            );
+          })()}
+        </div>
+      )}
+
       <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:16}}>
-        {/* Premium allocation */}
         <div className="card"><h3 style={{fontSize:13,fontWeight:600,marginBottom:10}}>Premium Allocation</h3><div style={{height:200}}><canvas ref={chartRef} /></div></div>
 
         {/* ═══ PROTECTION GAP ANALYSIS ═══ */}
@@ -4596,7 +5134,7 @@ function Dashboard() {
               </div>
             </div>
           </div>
-          {!annualIncome && <div style={{fontSize:10,color:'var(--gold)',marginBottom:6}}>Using default coverage targets. Set income in My Client for LIA-based analysis.</div>}
+          {!annualIncome && <div style={{fontSize:10,color:'var(--gold)',marginBottom:6}}>Using default coverage targets. Set income in My Profile for LIA-based analysis.</div>}
           {gaps.map((g,i) => {
             const pct = g.isFlag ? (g.cur>=g.need?100:(g.cur>0?50:0)) : (g.need===0?100:Math.min(100,g.cur/g.need*100));
             const gap = g.isFlag ? 0 : Math.max(0, g.need - g.cur);
@@ -4839,6 +5377,11 @@ function Dashboard() {
             </div>
           </div>
         </div>
+      )}
+
+      {/* ═══ RETIREMENT INCOME DASHBOARD (Lite RetireLens) ═══ */}
+      {(retirementLite.desiredMonthly > 0 || retirementLite.cpfPayout.mid > 0 || retirementLite.policyMonthlyIncome > 0) && (
+        <RetirementLiteDashboard data={retirementLite} age={age} retAge={retAge} p={p} policies={policies} cvTimeline={cvTimeline} toSGD={toSGD} fxRates={fxRates} />
       )}
 
       {/* ═══ TIER 1: RIDER COVERAGE MATRIX ═══ */}
@@ -5533,6 +6076,12 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
           </button>
           <button className="btn-primary btn-sm" onClick={()=>{setEditing(null);setScanResult(null);setShowForm(true)}}>+ Add</button>
           {selected.size > 0 && <button className="btn-danger btn-sm" onClick={deleteSelected}>🗑 Delete ({selected.size})</button>}
+          {policies.length > 0 && selected.size === 0 && <button className="btn-danger btn-sm" style={{opacity:.7}} onClick={async()=>{
+            if(!confirm('⚠️ Delete ALL '+policies.length+' policies?\n\nThis cannot be undone. Client profile will not be affected.')) return;
+            if(!confirm('Final confirmation — permanently delete all policies?')) return;
+            for(const pol of policies) await deletePolicy(pol.id);
+            alert('All policies deleted.');
+          }}>🗑 Delete All</button>}
         </div>
       </div>
 
@@ -7643,7 +8192,7 @@ function PdfPasswordEditor() {
         <span style={{fontSize:11,color:'var(--text3)'}}>{passwords.split('\n').filter(s=>s.trim()).length} passwords stored</span>
       </div>
       <div style={{marginTop:8,fontSize:10,color:'var(--text3)',lineHeight:1.5}}>
-        <strong>Auto-generated from My Client:</strong> NRIC (full + digits + last 4), DOB (DDMMYYYY, YYYYMMDD, DD/MM/YYYY), plus all dependant NRICs and DOBs. These are tried automatically — you only need to add custom passwords here.
+        <strong>Auto-generated from My Profile:</strong> NRIC (full + digits + last 4), DOB (DDMMYYYY, YYYYMMDD, DD/MM/YYYY), plus all dependant NRICs and DOBs. These are tried automatically — you only need to add custom passwords here.
       </div>
     </div>
   );
@@ -7656,6 +8205,9 @@ function Settings() {
   const [name, setName] = useState(clientName);
   const loadRef = useRef(null);
 
+  const [advisorName, setAdvisorName] = useState('');
+  const [advisorCompany, setAdvisorCompany] = useState('');
+
   // Load both keys from IndexedDB on mount
   useEffect(() => {
     (async () => {
@@ -7665,6 +8217,11 @@ function Settings() {
       const ck = await dbGet('settings','anthropicKey_'+uid).catch(()=>null) || await dbGet('settings','anthropicKey').catch(()=>null);
       if(gk?.value) setGeminiKey(gk.value);
       if(ck?.value) setAnthropicKey(ck.value);
+      // Load advisor details
+      const an = await dbGet('settings','advisorName').catch(()=>null);
+      const ac = await dbGet('settings','advisorCompany').catch(()=>null);
+      if(an?.value) setAdvisorName(an.value);
+      if(ac?.value) setAdvisorCompany(ac.value);
     })();
   }, []);
 
@@ -7722,13 +8279,21 @@ function Settings() {
     <div className="fade-in" style={{maxWidth:500}}>
       <h2 style={{fontSize:18,fontWeight:600,marginBottom:16}}>Settings</h2>
 
-      {/* Save / Load Portfolio */}
+      {/* ═══ ADVISOR DETAILS (TOP) ═══ */}
       <div className="card" style={{marginBottom:16}}>
-        <h3 style={{fontSize:14,fontWeight:600,marginBottom:8}}>Portfolio File</h3>
-        <p style={{fontSize:12,color:'var(--text3)',marginBottom:12}}>
-          Save your portfolio to a file for backup, or load a file from another advisor. Data auto-saves to your browser between sessions.
-        </p>
-        <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+        <h3 style={{fontSize:14,fontWeight:600,marginBottom:4}}>Advisor Details</h3>
+        <p style={{fontSize:11,color:'var(--text3)',marginBottom:8}}>Appears on PDF report headers, footers, and client share view</p>
+        <div className="grid-2">
+          <div className="field"><label>Advisor Name</label><input value={advisorName} onChange={e=>{setAdvisorName(e.target.value);dbPut('settings',{key:'advisorName',value:e.target.value});}} placeholder="e.g. John Tan" /></div>
+          <div className="field"><label>Company</label><input value={advisorCompany} onChange={e=>{setAdvisorCompany(e.target.value);dbPut('settings',{key:'advisorCompany',value:e.target.value});}} placeholder="e.g. ABC Advisory" /></div>
+        </div>
+      </div>
+
+      {/* ═══ DATA MANAGEMENT ═══ */}
+      <div className="card" style={{marginBottom:16}}>
+        <h3 style={{fontSize:14,fontWeight:600,marginBottom:8}}>Data Management</h3>
+        <p style={{fontSize:12,color:'var(--text3)',marginBottom:12}}>Save, load, or reset your portfolio. Data auto-saves to your browser between sessions.</p>
+        <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:12}}>
           <button className="btn-primary btn-sm" onClick={handleSave} disabled={policies.length===0}>
             💾 Save Portfolio ({policies.length})
           </button>
@@ -7736,28 +8301,28 @@ function Settings() {
           <button className="btn-secondary btn-sm" onClick={()=>loadRef.current?.click()}>
             📂 Load Portfolio
           </button>
+        </div>
+        <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+          <button className="btn-danger btn-sm" onClick={handleReset}>
+            ⚠️ Reset Entire Portfolio
+          </button>
           <button className="btn-danger btn-sm" onClick={async()=>{
             if(!window._isAdmin){alert('Only admin can reset the repository.');return;}
             const pw = prompt('Enter admin password to reset repository:');
             if(pw !== 'bprawn0011'){alert('Incorrect password.');return;}
             if(!confirm('This removes ALL repository entries and re-seeds with verified products. Proceed?')) return;
-            // Clear Supabase repo
             const s = getSB();
             if(s) {
               const {data} = await s.from('repository').select('id');
               if(data) for(const r of data) await s.from('repository').delete().eq('id', r.id);
               for(const seed of SEED_REPOSITORY) await sbRepoSave(seed);
             }
-            // Also clear local fallback
             try { const tx = (await openDB()).transaction('repository','readwrite'); tx.objectStore('repository').clear(); } catch(e){}
             window.location.reload();
           }}>🗑️ Reset Repository</button>
         </div>
       </div>
 
-      <div className="card" style={{marginBottom:16}}>
-        <div style={{fontSize:13,color:'var(--text2)'}}>Client details are now managed in the <strong>👤 My Client</strong> tab — name, NRIC, DOB, dependants, and more.</div>
-      </div>
       {/* ═══ AI KEYS ═══ */}
       <div className="card" style={{marginBottom:16}}>
         <h3 style={{fontSize:14,fontWeight:600,marginBottom:4}}>AI Document Extraction</h3>
@@ -7824,18 +8389,8 @@ function Settings() {
       {/* ═══ PDF PASSWORDS ═══ */}
       <div className="card" style={{marginBottom:16}}>
         <h3 style={{fontSize:14,fontWeight:600,marginBottom:4}}>🔓 PDF Unlock Passwords</h3>
-        <p style={{fontSize:11,color:'var(--text3)',marginBottom:10}}>Preset passwords to auto-unlock protected policy documents. Common: NRIC number, DOB (DDMMYYYY). Client NRIC and DOB from My Client are tried automatically.</p>
+        <p style={{fontSize:11,color:'var(--text3)',marginBottom:10}}>Preset passwords to auto-unlock protected policy documents. Common: NRIC number, DOB (DDMMYYYY). Client NRIC and DOB from My Profile are tried automatically.</p>
         <PdfPasswordEditor />
-      </div>
-
-      {/* ═══ ADVISOR NAME ═══ */}
-      <div className="card" style={{marginBottom:16}}>
-        <h3 style={{fontSize:14,fontWeight:600,marginBottom:4}}>Advisor Details</h3>
-        <p style={{fontSize:11,color:'var(--text3)',marginBottom:8}}>Appears on PDF report headers and footers</p>
-        <div className="grid-2">
-          <div className="field"><label>Advisor Name</label><input id="advisorName" defaultValue="" placeholder="e.g. John Tan" onBlur={e=>dbPut('settings',{key:'advisorName',value:e.target.value})} /></div>
-          <div className="field"><label>Company</label><input id="advisorCompany" defaultValue="" placeholder="e.g. ABC Advisory" onBlur={e=>dbPut('settings',{key:'advisorCompany',value:e.target.value})} /></div>
-        </div>
       </div>
 
       <div className="card">
@@ -7846,12 +8401,6 @@ function Settings() {
           <p style={{marginTop:6}}>Fund risk lookup covers {FUND_DB.length.toLocaleString()} instruments from the iFAST/FundLens universe.</p>
           <p style={{marginTop:6}}>Single-file HTML | React 18 | Chart.js | IndexedDB | jsPDF | Supabase Auth</p>
         </div>
-      </div>
-
-      <div className="card" style={{borderColor:'var(--red)',borderWidth:2,marginTop:16}}>
-        <h3 style={{fontSize:14,fontWeight:600,color:'var(--red2)',marginBottom:8}}>Danger Zone</h3>
-        <p style={{fontSize:12,color:'var(--text3)',marginBottom:12}}>Reset all client data - policies, profile, dependants. Cannot be undone.</p>
-        <button className="btn-danger" onClick={handleReset}>Reset Entire Portfolio</button>
       </div>
     </div>
   );
