@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>PolicyLens V1.0</title>
+<script>window.onerror=function(m,s){if(!s||m==='Script error.')return true;return false};window.onunhandledrejection=function(e){if(!e||!e.reason)return;var r=String(e.reason);if(r.includes('Script error')||r.includes('Failed to fetch')||r.includes('NetworkError'))e.preventDefault();};</script>
 <link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#0b0f1a">
 <meta name="apple-mobile-web-app-capable" content="yes">
@@ -11,10 +12,6 @@
 <meta name="apple-mobile-web-app-title" content="PolicyLens">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <script>
-// Suppress generic cross-origin "Script error." from CDN race conditions
-window.addEventListener('error', function(e) {
-  if(e.message === 'Script error.' && !e.filename) { e.preventDefault(); return; }
-}, true);
 if('serviceWorker' in navigator && location.hostname.includes('github.io')){window.addEventListener('load',()=>{navigator.serviceWorker.register('sw.js').then(r=>console.log('[SW] Registered:',r.scope)).catch(e=>console.warn('[SW] Failed:',e));});}
 </script>
 <script crossorigin="anonymous" src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
