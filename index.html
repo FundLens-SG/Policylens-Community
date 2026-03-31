@@ -488,7 +488,7 @@ const CATEGORIES = {
 const SUB_TYPES = {
   protection: ['Term Life','Whole Life','Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)','Critical Illness','Personal Accident','Disability Income','Long-term Care','Maternity','Rider'],
   savings: ['Endowment','Lifetime Endowment','Education Plan','Short-term Endowment'],
-  health: ['Integrated Shield Plan','Hospital Income'],
+  health: ['Integrated Shield Plan','ISP Rider','Hospital Income','CareShield Life Supplement'],
   investment: ['Investment-Linked Policy (Investment)','Unit Trust','Single Premium Investment'],
   retirement: ['Retirement','Annuity'],
   maternity: ['Maternity Coverage'],
@@ -4865,6 +4865,15 @@ function Policies() {
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState(null);
   const [filter, setFilter] = useState('all');
+  const [selected, setSelected] = useState(new Set());
+  const toggleSelect = (id) => setSelected(prev => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const selectAll = () => { if(selected.size === filtered.length) setSelected(new Set()); else setSelected(new Set(filtered.map(p=>p.id))); };
+  const deleteSelected = async () => {
+    if(!selected.size) return;
+    if(!confirm('Delete ' + selected.size + ' selected policies? This cannot be undone.')) return;
+    for(const id of selected) await deletePolicy(id);
+    setSelected(new Set());
+  };
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState(null);
   const [staged, setStaged] = useState([]);
@@ -4964,6 +4973,14 @@ EXCEL/SPREADSHEET HANDLING: If the input is a spreadsheet or tabular data:
 - Return an ARRAY of policy objects — one per row.
 - Infer category and subType from plan names (e.g. "term" → Term Life, "whole life" / "WL" → Whole Life, "ISP" / "shield" → Integrated Shield Plan, "ILP" → Investment-Linked Policy, "endowment" → Endowment, "annuity" / "income" → Retirement).
 - If a plan has a separate rider premium column, set the rider's bundled=false and premium to that value.
+
+IMPORTANT PLAN IDENTIFICATION: When you see a plan name, use your knowledge of Singapore insurance products to correctly classify it. Examples:
+- "Singlife Health Plus Plan 1" → ISP Rider (rider that attaches to an ISP, NOT Hospital Income)
+- "PRUShield" / "Shield" plans → Integrated Shield Plan
+- "PruActive Saver" / "PruSave Max" → Endowment (savings category)
+- "GreatLink" / "PRULink" / "InvestReady" → Investment-Linked Policy
+- "Income" / "Payout" plans → check if monthly income (Annuity) or lump sum (Endowment)
+If the plan name contains "Rider" or is clearly an add-on to an ISP, set subType to "ISP Rider" and category to "health".
 
 Return ONLY valid JSON. Start with { end with }. No markdown.`;
 
@@ -5084,6 +5101,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
             {scanning?'Extracting…':'📄 Upload'}
           </button>
           <button className="btn-primary btn-sm" onClick={()=>{setEditing(null);setScanResult(null);setShowForm(true)}}>+ Add</button>
+          {selected.size > 0 && <button className="btn-danger btn-sm" onClick={deleteSelected}>🗑 Delete ({selected.size})</button>}
         </div>
       </div>
 
@@ -5160,7 +5178,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         <div style={{overflowX:'auto'}}>
           <table>
             <thead><tr>
-              <th>Policy</th><th>Category</th><th>Sub-type</th><th>Insurer</th><th>Currency</th><th>Sum Assured</th><th>Premium</th><th>Actions</th>
+              <th style={{width:30}}><input type='checkbox' checked={selected.size===filtered.length&&filtered.length>0} onChange={selectAll} style={{accentColor:'var(--gold)'}} /></th><th>Policy</th><th>Category</th><th>Sub-type</th><th>Insurer</th><th>Currency</th><th>Sum Assured</th><th>Premium</th><th>Actions</th>
             </tr></thead>
             <tbody>
               {filtered.map(p => {
@@ -5180,7 +5198,8 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
                 if(hasDI) bens.push({l:'DI',c:'#5ba8a0',t:'Disability'});
                 if(hasCV) bens.push({l:'CV',c:'#d4a96a',t:'Cash Value'});
                 return (
-                <tr key={p.id}>
+                <tr key={p.id} style={{background:selected.has(p.id)?'rgba(212,169,106,.06)':'transparent'}}>
+                  <td><input type='checkbox' checked={selected.has(p.id)} onChange={()=>toggleSelect(p.id)} style={{accentColor:'var(--gold)'}} /></td>
                   <td>
                     <div style={{fontWeight:500}}>{p.policyName || p.productName || 'Unnamed'}</div>
                     <div style={{fontSize:11,color:'var(--text3)'}}>{p.policyNumber || ''}</div>
@@ -5189,14 +5208,14 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
                     </div>
                   </td>
                   <td><span className="badge" style={{background:`${catColor(p.category)}22`,color:catColor(p.category)}}>{CATEGORIES[p.category]?.label||p.category}</span></td>
-                  <td style={{fontSize:12,color:'var(--text2)'}}>{p.subType||'-'}</td>
+                  <td style={{fontSize:12,color:'var(--text2)'}}>{p.subType==='Integrated Shield Plan' && p.hasRider ? 'ISP + Rider' : p.subType||'-'}</td>
                   <td>{p.insurer?<InsurerBadge name={p.insurer} />:'-'}</td>
                   <td className="mono">{p.currency||'SGD'}</td>
                   <td className="mono">{fmt(p.sumAssured,p.currency||'SGD')}</td>
                   <td className="mono">{fmt(p.annualPremium,p.currency||'SGD')}</td>
                   <td>
                     <div style={{display:'flex',gap:4}}>
-                      <button className="btn-secondary btn-sm" onClick={()=>{setEditing(p);setShowForm(true)}}>Edit</button>
+                      <button className="btn-secondary btn-sm" onClick={()=>{setEditing(p);setTimeout(()=>setShowForm(true),50)}}>Edit</button>
                       <button className="btn-danger btn-sm" onClick={()=>{if(confirm('Delete this policy?'))deletePolicy(p.id)}}>×</button>
                     </div>
                   </td>
@@ -6694,7 +6713,7 @@ function ReportTab() {
           doc.setFillColor(...NAVY);doc.rect(0,285,W,12,'F');
           doc.setFontSize(7);doc.setTextColor(140,140,140);
           doc.text('PolicyLens v4 — For Financial Consultant Use Only',M,291);
-          if(advisorName) doc.text('Prepared by '+advisorName+(advisorCompany?' · '+advisorCompany:''),W/2,291,{align:'center'});
+          if(advisorName) doc.text('Prepared by '+advisorName+(advisorCompany?' | '+advisorCompany:''),W/2,291,{align:'center'});
           doc.text('Page '+i+' / '+pageCount,W-M,291,{align:'right'});
         }
       };
@@ -6720,7 +6739,7 @@ function ReportTab() {
       if(annualIncome>0) metaItems.push('Income: '+fmt(annualIncome)+'/yr');
       if(advisorName) metaItems.push('Advisor: '+advisorName);
       metaItems.push(today);
-      doc.text(metaItems.join('  ·  '),M+6,56);
+      doc.text(metaItems.join('  |  '),M+6,56);
 
       y=78;
 
@@ -6778,15 +6797,15 @@ function ReportTab() {
           const isFlag=g[0]==='Hospitalisation';
           const cur=isFlag?(g[1]?'Yes':'No'):fmt(g[1]);
           const need=isFlag?'Yes':fmt(g[2]);
-          const gap=isFlag?'':(g[2]-g[1]>0?fmt(g[2]-g[1]):'—');
-          const status=isFlag?(g[1]?'✓ Covered':'⚠ No ISP'):(g[1]>=g[2]?'✓ Adequate':'⚠ Shortfall');
+          const gap=isFlag?'':(g[2]-g[1]>0?fmt(g[2]-g[1]):'-');
+          const status=isFlag?(g[1]?'COVERED':'NO ISP'):(g[1]>=g[2]?'ADEQUATE':'SHORTFALL');
           return [g[0],cur,need,gap,status];
         }),
         styles:{fontSize:8,cellPadding:3},
         headStyles:{fillColor:NAVY,textColor:CREAM,fontStyle:'bold'},
         didParseCell:(data)=>{
           if(data.section==='body'&&data.column.index===4){
-            data.cell.styles.textColor=data.cell.raw.startsWith('✓')?[52,211,153]:[239,83,80];
+            data.cell.styles.textColor=data.cell.raw==='COVERED'||data.cell.raw==='ADEQUATE'?[52,211,153]:[239,83,80];
             data.cell.styles.fontStyle='bold';
           }
         }
@@ -6811,7 +6830,7 @@ function ReportTab() {
         head:[['Benefit','Total SA','Policies Contributing']],
         body:riderTypes.map(t=>{
           const labels={death:'Death & TI',tpd:'TPD',ci:'Critical Illness',eci:'Early CI',di:'Disability/mth',accidental:'Accidental',premium_waiver:'Premium Waiver'};
-          return [labels[t]||t, riderMatrix[t].total>0?fmt(riderMatrix[t].total):'—', riderMatrix[t].policies.join(', ')||'None'];
+          return [labels[t]||t, riderMatrix[t].total>0?fmt(riderMatrix[t].total):'-', riderMatrix[t].policies.join(', ')||'None'];
         }),
         styles:{fontSize:7.5,cellPadding:2.5},
         headStyles:{fillColor:DARK,textColor:CREAM,fontStyle:'bold',fontSize:7.5},
@@ -6826,12 +6845,12 @@ function ReportTab() {
         startY:y,margin:{left:M,right:M},
         head:[['Policy','Insurer','Premium/yr','Method','Term','Paid-up Age']],
         body:policies.map(pol=>[
-          pol.productName||pol.policyName||'—',
-          pol.insurer||'—',
+          pol.productName||pol.policyName||'-',
+          pol.insurer||'-',
           (pol.currency||'SGD')+' '+(parseFloat(pol.annualPremium)||0).toLocaleString(),
           pol.paymentMethod||'Cash',
-          pol.premSingle?'Single':(pol.premTerm||'—')+' yrs',
-          pol.premWholeLife?'Whole Life':pol.premEndAge||'—',
+          pol.premSingle?'Single':(pol.premTerm||'-')+' yrs',
+          pol.premWholeLife?'Whole Life':pol.premEndAge||'-',
         ]),
         styles:{fontSize:7.5,cellPadding:2.5},
         headStyles:{fillColor:DARK,textColor:CREAM,fontStyle:'bold',fontSize:7.5},
@@ -6860,7 +6879,7 @@ function ReportTab() {
           doc.setFont('helvetica','bold');doc.setFontSize(10);doc.setTextColor(...DARK);
           doc.text((pol.productName||pol.policyName||'Policy'),M+6,y+5);
           doc.setFont('helvetica','normal');doc.setFontSize(8);doc.setTextColor(...GRAY);
-          doc.text((pol.insurer||'')+'  ·  '+(pol.subType||'')+'  ·  '+(pol.policyNumber||''),M+6,y+11);
+          doc.text((pol.insurer||'')+'  |  '+(pol.subType||'')+'  |  '+(pol.policyNumber||''),M+6,y+11);
           // Right side: SA + premium
           doc.setFont('helvetica','bold');doc.setFontSize(9);doc.setTextColor(...DARK);
           doc.text('SA '+(pol.currency||'SGD')+' '+(parseFloat(pol.sumAssured)||0).toLocaleString(),W-M,y+5,{align:'right'});
@@ -6870,13 +6889,13 @@ function ReportTab() {
 
           // Key metrics row
           const metrics = [];
-          metrics.push(['Entry Age',pol.premStartAge||pol.ageAtEntry||'—']);
-          metrics.push(['Prem Term',pol.premSingle?'Single':(pol.premTerm||'—')+' yrs']);
-          metrics.push(['Prem End',pol.premWholeLife?'WL':pol.premEndAge||'—']);
+          metrics.push(['Entry Age',pol.premStartAge||pol.ageAtEntry||'-']);
+          metrics.push(['Prem Term',pol.premSingle?'Single':(pol.premTerm||'-')+' yrs']);
+          metrics.push(['Prem End',pol.premWholeLife?'WL':pol.premEndAge||'-']);
           if(pol.cashValue) metrics.push(['Cash Value',fmt(parseFloat(pol.cashValue))]);
           if(pol.cvGrowthRate) metrics.push(['CV Yield',pol.cvGrowthRate+'%']);
           if(pol.category==='retirement') { metrics.push(['Payout',fmt(parseFloat(pol.annuityMonthly)||parseFloat(pol.monthlyBenefit)||0)+'/mth']); metrics.push(['Age',pol.annuityStartAge+'→'+pol.annuityEndAge]); }
-          if(pol.category==='savings') { metrics.push(['Yield',pol.endYield||'—']); if(pol.endPolicyTerm) metrics.push(['Mat Age',String((parseInt(pol.premStartAge)||30)+parseInt(pol.endPolicyTerm))]); }
+          if(pol.category==='savings') { metrics.push(['Yield',pol.endYield||'-']); if(pol.endPolicyTerm) metrics.push(['Mat Age',String((parseInt(pol.premStartAge)||30)+parseInt(pol.endPolicyTerm))]); }
 
           doc.autoTable({
             startY:y,margin:{left:M,right:M},
@@ -6893,10 +6912,10 @@ function ReportTab() {
               head:[['Benefit','SA','Part of Plan','Rider Name','Expiry']],
               body:(pol.riders||[]).map(rd=>[
                 {death:'Death & TI',tpd:'TPD',ci:'CI',eci:'ECI',di:'DI/mth',accidental:'ADD',premium_waiver:'Waiver'}[rd.type]||rd.type,
-                rd.sa?(parseFloat(rd.sa)||0).toLocaleString():'—',
+                rd.sa?(parseFloat(rd.sa)||0).toLocaleString():'-',
                 rd.bundled===false?'No':'Yes',
-                rd.riderName||'—',
-                rd.expiryAge||'—',
+                rd.riderName||'-',
+                rd.expiryAge||'-',
               ]),
               styles:{fontSize:7,cellPadding:2},
               headStyles:{fillColor:[35,45,60],textColor:CREAM,fontSize:7},
@@ -7072,6 +7091,16 @@ function Settings() {
   }, []);
 
   // ── Save portfolio as JSON file ──
+  const handleReset = async () => {
+    if(!confirm('⚠️ RESET EVERYTHING?\n\nThis will permanently delete:\n• All policies\n• Client profile (name, NRIC, dependants)\n• All local settings\n\nThis CANNOT be undone. Are you sure?')) return;
+    if(!confirm('Final confirmation: Type "RESET" mentally and click OK to proceed.')) return;
+    for(const p of policies) await deletePolicy(p.id);
+    saveClientName('');
+    saveProfile({name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[]});
+    alert('Portfolio reset complete. All data cleared.');
+    window.location.reload();
+  };
+
   const handleSave = () => {
     const data = {
       version:'PolicyLens_v4',
@@ -7235,6 +7264,13 @@ function Settings() {
         <h3 style={{fontSize:14,fontWeight:600,marginBottom:8}}>About PolicyLens v4</h3>
         <div style={{fontSize:12,color:'var(--text2)',lineHeight:1.6}}>
           <p>Institutional-grade policy review toolkit for Singapore Financial Consultants. AI-powered document capture with rider-level extraction, shared cloud repository with role-based editing, and comprehensive portfolio analysis.</p>
+        </div>
+
+        {/* ═══ DANGER ZONE ═══ */}
+        <div className="card" style={{borderColor:'var(--red)',borderWidth:2,marginTop:16}}>
+          <h3 style={{fontSize:14,fontWeight:600,color:'var(--red2)',marginBottom:8}}>⚠️ Danger Zone</h3>
+          <p style={{fontSize:12,color:'var(--text3)',marginBottom:12}}>Reset all client data — policies, profile, dependants. Cannot be undone.</p>
+          <button className="btn-danger" onClick={handleReset}>Reset Entire Portfolio</button>
           <p style={{marginTop:8}}>Coverage & Riders system with SA multipliers, multi-claim CI, ISP premium breakdown, ILP fund projections, and UL crediting structures. Gap analysis against LIA recommended coverage levels.</p>
           <p style={{marginTop:8}}>Fund risk lookup covers 2,200+ instruments from the iFAST/FundLens universe.</p>
           <p style={{marginTop:6}}>Fuzzy matching informs on variations without auto-merging. Gap analysis against recommended coverage levels. Fund risk lookup covers {FUND_DB.length.toLocaleString()} instruments from the iFAST/FundLens universe — unit trusts, ETFs, REITs, stocks, bonds, and money market funds with risk ratings 1–10.</p>
