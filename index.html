@@ -3193,6 +3193,9 @@ function CameraModal() {
     return () => window.removeEventListener('policylens-open-camera', handler);
   }, []);
 
+  // Detect mobile
+  const isMobile = /Android|iPhone|iPad|iPod|Mobile/i.test(navigator.userAgent);
+
   // Create a FRESH input element each time — forces browser to open camera, not gallery
   const triggerCamera = () => {
     if (!containerRef.current) return;
@@ -3200,7 +3203,12 @@ function CameraModal() {
     const inp = document.createElement('input');
     inp.type = 'file';
     inp.accept = 'image/*';
-    inp.setAttribute('capture', 'environment');
+    if (isMobile) {
+      inp.setAttribute('capture', 'environment');
+    } else {
+      // Desktop: allow multi-select from file picker
+      inp.setAttribute('multiple', 'true');
+    }
     inp.style.display = 'none';
     inp.addEventListener('change', (e) => {
       const files = e.target.files;
@@ -3214,8 +3222,8 @@ function CameraModal() {
       setShots(prev => { const updated = [...prev, ...newShots].slice(0, 20); shotCountRef.current = updated.length; return updated; });
       // Destroy this input immediately
       if (containerRef.current) containerRef.current.innerHTML = '';
-      // BURST: flash then create a brand new input
-      if (mode === 'burst' && autoReopenRef.current) {
+      // BURST: only on mobile — flash then create a brand new input
+      if (isMobile && mode === 'burst' && autoReopenRef.current) {
         setFlash(shotCountRef.current);
         setTimeout(() => {
           setFlash(null);
@@ -3289,8 +3297,8 @@ function CameraModal() {
           <div style={{fontSize:14,fontWeight:600,color:'var(--text)'}}>
             📷 {shots.length} photo{shots.length !== 1 ? 's' : ''}
           </div>
-          {/* Mode toggle pills */}
-          <div style={{display:'flex',borderRadius:6,overflow:'hidden',border:'1px solid var(--border2)'}}>
+          {/* Mode toggle pills — mobile only */}
+          {isMobile && <div style={{display:'flex',borderRadius:6,overflow:'hidden',border:'1px solid var(--border2)'}}>
             <button onClick={()=>switchMode('standard')}
               style={{padding:'3px 8px',fontSize:10,fontWeight:600,border:'none',cursor:'pointer',
                 background:mode==='standard'?'var(--gold)':'var(--bg3)',
@@ -3299,7 +3307,7 @@ function CameraModal() {
               style={{padding:'3px 8px',fontSize:10,fontWeight:600,border:'none',cursor:'pointer',
                 background:mode==='burst'?'var(--gold)':'var(--bg3)',
                 color:mode==='burst'?'#0b0f1a':'var(--text3)'}}>BURST ⚡</button>
-          </div>
+          </div>}
         </div>
         <button onClick={() => finish()}
           style={{background:shots.length > 0 ? 'var(--gold)' : 'var(--bg3)',
@@ -3309,11 +3317,18 @@ function CameraModal() {
         </button>
       </div>
 
-      {/* ── Burst mode explainer ── */}
-      {mode === 'burst' && shots.length === 0 && !flash && (
+      {/* ── Burst mode explainer — mobile only ── */}
+      {isMobile && mode === 'burst' && shots.length === 0 && !flash && (
         <div style={{padding:'8px 16px',background:'var(--gold-dim)',borderBottom:'1px solid rgba(212,169,106,.2)',
           fontSize:11,color:'var(--gold)',textAlign:'center'}}>
           ⚡ Burst Mode — camera auto-reopens after each shot. Press Back in camera to stop.
+        </div>
+      )}
+      {/* ── Desktop tip ── */}
+      {!isMobile && shots.length === 0 && !flash && (
+        <div style={{padding:'8px 16px',background:'var(--gold-dim)',borderBottom:'1px solid rgba(212,169,106,.2)',
+          fontSize:11,color:'var(--gold)',textAlign:'center'}}>
+          💡 Select multiple images at once — hold Ctrl/Cmd to pick several files
         </div>
       )}
 
@@ -3322,8 +3337,8 @@ function CameraModal() {
         {shots.length === 0 && !flash ? (
           <div style={{textAlign:'center',padding:'60px 20px',color:'var(--text3)'}}>
             <div style={{fontSize:48,marginBottom:12}}>📷</div>
-            <div style={{fontSize:14}}>Opening camera...</div>
-            <div style={{fontSize:12,marginTop:8}}>If camera didn't open, tap below</div>
+            <div style={{fontSize:14}}>{isMobile ? 'Opening camera...' : 'Opening file picker...'}</div>
+            <div style={{fontSize:12,marginTop:8}}>{isMobile ? 'If camera didn\'t open, tap below' : 'Select images to scan'}</div>
           </div>
         ) : (
           <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(90px,1fr))',gap:8}}>
@@ -3352,7 +3367,7 @@ function CameraModal() {
             padding:'14px',cursor:'pointer',textAlign:'center'}}>
           <span style={{fontSize:24}}>📷</span>
           <div style={{fontSize:13,fontWeight:600,color:'var(--gold2)',marginTop:4}}>
-            {mode==='burst' ? 'Resume Burst' : 'Take Another Photo'}
+            {isMobile && mode==='burst' ? 'Resume Burst' : isMobile ? 'Take Another Photo' : 'Add More Files'}
           </div>
         </button>
         {shots.length > 0 && (
