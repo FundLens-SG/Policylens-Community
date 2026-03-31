@@ -74,6 +74,29 @@ label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;lett
 .desktop-only{display:none!important}
 }
 
+/* ══════ RESPONSIVE UTILITIES ══════ */
+.resp-2col{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.resp-5col{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
+.resp-side{display:grid;grid-template-columns:1fr 260px;gap:12px}
+
+/* ══════ MOBILE OPTIMISATION ══════ */
+@media(max-width:640px){
+  .card{padding:12px;border-radius:10px}
+  .card-sm{padding:10px}
+  table th,table td{padding:6px 8px;font-size:11px}
+  h2{font-size:16px!important}
+  h3{font-size:13px!important}
+  input,select,textarea{font-size:14px!important;padding:8px 10px!important}
+  .btn-sm{padding:6px 10px;font-size:11px}
+  .field{margin-bottom:10px}
+  label{font-size:10px!important}
+  .resp-2col,.resp-5col,.resp-side{grid-template-columns:1fr!important}
+}
+@media(max-width:480px){
+  .grid-2,.grid-3{grid-template-columns:1fr!important;gap:8px!important}
+  .resp-2col,.resp-5col,.resp-side{grid-template-columns:1fr!important}
+}
+
 /* ══════ AUTH GATE ══════ */
 #auth-gate{position:fixed;inset:0;z-index:10000;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:20px}
 #auth-gate .auth-card{background:var(--bg2);border:1px solid var(--border2);border-radius:16px;max-width:400px;width:100%;padding:32px;box-shadow:0 24px 64px rgba(0,0,0,.4)}
@@ -429,8 +452,8 @@ async function adminAct(id,approve,email,name){
       'Use the email and password you created during sign-up.\n\n' +
       'Quick start:\n' +
       '1. Sign in with your credentials\n' +
-      '2. Go to Settings and add your Gemini API key\n' +
-      '3. Use the Camera or Upload button to scan your first policy\n\n' +
+      '2. Go to Settings and add your Gemini API key (free) and optionally Anthropic key ($5 top-up for better accuracy)\n' +
+      '3. Use Camera, Photos, or Files to scan your first policy\n\n' +
       'Welcome aboard!\n' +
       '— PolicyLens Admin'
     );
@@ -3533,9 +3556,11 @@ function OnboardingModal() {
     {icon:'⚙️',name:'Settings',desc:'API keys (Gemini + Anthropic), save/load portfolios, PDF unlock passwords.'},
   ];
 
+  const [showApiGuide, setShowApiGuide] = useState(false);
+
   return (
     <div className="modal-overlay" onClick={dismiss}>
-      <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:540,padding:28}}>
+      <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:560,padding:28}}>
         <div style={{textAlign:'center',marginBottom:20}}>
           <div style={{fontSize:40,marginBottom:8}}>✨</div>
           <h2 style={{fontSize:20,fontWeight:700,marginBottom:6}}>Welcome to PolicyLens</h2>
@@ -3546,13 +3571,55 @@ function OnboardingModal() {
 
         <div className="card" style={{padding:16,marginBottom:16,background:'var(--bg3)',borderColor:'var(--gold3)'}}>
           <div style={{fontSize:13,fontWeight:600,color:'var(--gold2)',marginBottom:8}}>⚡ Quick Start</div>
-          <div style={{fontSize:12,color:'var(--text)',lineHeight:1.6}}>
-            <strong>1.</strong> Go to <strong>⚙️ Settings</strong> and add your Gemini API key (free tier works)<br/>
-            <strong>2.</strong> Hit <strong>📷 Camera</strong> or <strong>📄 Upload</strong> on any policy document<br/>
+          <div style={{fontSize:12,color:'var(--text)',lineHeight:1.8}}>
+            <strong>1.</strong> Go to <strong>⚙️ Settings</strong> and add your API keys:<br/>
+            <span style={{marginLeft:16,display:'inline-block'}}>
+              <strong style={{color:'#4285f4'}}>🔵 Gemini</strong> — free, handles document reading (<span style={{cursor:'pointer',color:'var(--gold)',textDecoration:'underline'}} onClick={e=>{e.stopPropagation();setShowApiGuide(!showApiGuide);}}>setup guide</span>)
+            </span><br/>
+            <span style={{marginLeft:16,display:'inline-block'}}>
+              <strong style={{color:'#d97706'}}>🟡 Anthropic</strong> — $5 top-up to start, much better extraction accuracy
+            </span><br/>
+            <strong>2.</strong> Use <strong>Camera</strong>, <strong>Photos</strong>, or <strong>Files</strong> to scan any policy document<br/>
             <strong>3.</strong> AI extracts everything — insurer, plan, coverage, riders, premiums<br/>
             <strong>4.</strong> Fill in <strong>👤 My Profile</strong> for automatic gap analysis & PDF reports
           </div>
         </div>
+
+        {/* ── API KEY SETUP GUIDE ── */}
+        {showApiGuide && (
+          <div className="card" style={{padding:16,marginBottom:16,background:'var(--bg3)',border:'1px solid rgba(66,133,244,.2)',maxHeight:360,overflowY:'auto'}}>
+            <div style={{fontSize:13,fontWeight:700,color:'#4285f4',marginBottom:10}}>🔵 Gemini API Key (Free)</div>
+            <div style={{fontSize:11,color:'var(--text)',lineHeight:1.8,marginBottom:14}}>
+              <strong>Step 1:</strong> Open <a href="https://aistudio.google.com/apikey" target="_blank" rel="noopener" style={{color:'#4285f4',textDecoration:'underline'}} onClick={e=>e.stopPropagation()}>aistudio.google.com/apikey</a><br/>
+              <strong>Step 2:</strong> Sign in with any Google account<br/>
+              <strong>Step 3:</strong> Click <strong>"Create API Key"</strong><br/>
+              <strong>Step 4:</strong> Select <strong>"Create API key in new project"</strong><br/>
+              <strong>Step 5:</strong> Copy the key (starts with <code style={{background:'var(--bg4)',padding:'1px 4px',borderRadius:3,fontSize:10}}>AIza...</code>)<br/>
+              <strong>Step 6:</strong> Paste into <strong>Settings → Gemini Key</strong> and click <strong>Save</strong><br/>
+              <div style={{marginTop:6,padding:'6px 10px',background:'rgba(66,133,244,.06)',borderRadius:6,fontSize:10,color:'#4285f4'}}>
+                ✅ 1,500 free requests/day · No credit card needed · Gemini 2.5 Flash
+              </div>
+            </div>
+
+            <div style={{fontSize:13,fontWeight:700,color:'#d97706',marginBottom:10}}>🟡 Anthropic API Key (Recommended)</div>
+            <div style={{fontSize:11,color:'var(--text)',lineHeight:1.8}}>
+              <strong>Step 1:</strong> Open <a href="https://console.anthropic.com" target="_blank" rel="noopener" style={{color:'#d97706',textDecoration:'underline'}} onClick={e=>e.stopPropagation()}>console.anthropic.com</a><br/>
+              <strong>Step 2:</strong> Sign up or log in<br/>
+              <strong>Step 3:</strong> Go to <strong>Settings → Billing</strong> and add <strong>$5 credit</strong> (prepaid, no subscription)<br/>
+              <strong>Step 4:</strong> Go to <strong>Settings → API Keys</strong><br/>
+              <strong>Step 5:</strong> Click <strong>"Create Key"</strong>, give it a name (e.g. "PolicyLens")<br/>
+              <strong>Step 6:</strong> <span style={{color:'var(--red)',fontWeight:600}}>IMPORTANT:</span> Copy the <strong>FULL key</strong> immediately — it starts with <code style={{background:'var(--bg4)',padding:'1px 4px',borderRadius:3,fontSize:10}}>sk-ant-api03-...</code> and is ~130 characters long. You won't see it again.<br/>
+              <strong>Step 7:</strong> Paste into <strong>Settings → Anthropic Key</strong> and click <strong>Save</strong><br/>
+              <div style={{marginTop:6,padding:'6px 10px',background:'rgba(217,119,6,.06)',borderRadius:6,fontSize:10,color:'#d97706'}}>
+                ✅ ~$0.003 per scan · Claude Sonnet 4 · Much better at rider extraction & classification
+              </div>
+            </div>
+
+            <div style={{marginTop:10,padding:'8px 10px',background:'var(--bg2)',borderRadius:6,fontSize:10,color:'var(--text2)',lineHeight:1.6}}>
+              <strong>How the dual pipeline works:</strong> Gemini reads the document (it handles PDFs natively with 1M token context). Then Claude extracts structured data (insurer, plan type, riders, amounts) with much higher accuracy. If you only have Gemini, it does both — still works, just slightly less precise on complex policies.
+            </div>
+          </div>
+        )}
 
         <div style={{fontSize:12,fontWeight:600,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8}}>Menu Guide</div>
         <div style={{display:'flex',flexDirection:'column',gap:6,marginBottom:20,maxHeight:240,overflowY:'auto'}}>
@@ -3700,7 +3767,7 @@ function App() {
       <CameraModal />
       <OnboardingModal />
       <Header />
-      <div style={{flex:1,overflow:'auto',padding:'16px 20px 40px'}}>
+      <div style={{flex:1,overflow:'auto',padding:'12px clamp(10px, 3vw, 20px) 40px'}}>
         {tab==='profile' && <ProfileTab />}
         {tab==='dashboard' && <Dashboard />}
         {tab==='policies' && <Policies />}
@@ -4127,16 +4194,21 @@ function ProfileTab() {
 
   return (
     <div className="fade-in">
-      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12,flexWrap:'wrap',gap:8}}>
         <div>
           <h2 style={{fontSize:18,fontWeight:600}}>My Profile</h2>
           <p style={{fontSize:12,color:'var(--text3)'}}>Client details used across all policies — fill once, use everywhere</p>
         </div>
-        <div style={{display:'flex',gap:6}}>
+        <div style={{display:'flex',gap:6,alignItems:'center'}}>
           <input ref={camRef} type="file" accept="image/*" capture="environment" multiple style={{display:'none'}} onChange={e=>{scanProfile(e.target.files);e.target.value='';}} />
           <input ref={uploadRef} type="file" accept="image/*,.pdf,.xlsx,.xls,.doc,.docx" multiple style={{display:'none'}} onChange={e=>{scanProfile(e.target.files);e.target.value='';}} />
           <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length) scanProfile(files);}} disabled={scanning}>{scanning?'Scanning…':'📷 Scan'}</button>
           <button className="btn-secondary btn-sm" onClick={()=>uploadRef.current?.click()} disabled={scanning}>{scanning?'…':'📄 Upload'}</button>
+          <button className="btn-sm" style={{background:'rgba(239,83,80,.08)',color:'var(--red)',border:'1px solid rgba(239,83,80,.15)',fontSize:10,padding:'5px 10px',borderRadius:8,cursor:'pointer'}} onClick={()=>{
+            if(!confirm('Delete all client profile data?\n\nClears name, NRIC, DOB, income, expenses, CPF settings, dependants.\n\nPolicies will NOT be deleted.')) return;
+            const blank = {name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[],annualIncome:'',retirementAge:'65',monthlyExpenses:'',mortgagePayment:'',dependantSupport:'',medicalBudget:'',desiredRetIncome:'',cpfScheme:'FRS',cpfPlan:'standard',cpfStartAge:'65',cpfTopUp:'',otherRetIncome:[]};
+            setP(blank); saveProfile(blank); alert('Profile cleared.');
+          }}>🗑 Clear Profile</button>
         </div>
       </div>
 
@@ -4168,7 +4240,7 @@ function ProfileTab() {
       <div className="card" style={{marginBottom:16}}>
         <h3 style={{fontSize:14,fontWeight:600,marginBottom:12}}>Financial Profile</h3>
         <div style={{fontSize:11,color:'var(--text3)',marginBottom:10}}>Used for protection gap analysis, retirement projections, and cashflow timeline</div>
-        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
+        <div className="resp-2col" style={{gap:16}}>
           <div style={{background:'var(--bg3)',borderRadius:8,padding:12,border:'1px solid var(--border)'}}>
             <div style={{fontSize:10,fontWeight:700,color:'var(--gold)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8}}>Income & Retirement</div>
             <div className="field"><label>Gross Annual Income ($)</label><input type="number" value={p.annualIncome||''} onChange={e=>set('annualIncome',e.target.value)} placeholder="e.g. 120000" /><div style={{fontSize:10,color:'var(--text3)'}}>{p.annualIncome ? '$'+(Math.round(p.annualIncome/12)).toLocaleString()+'/mth' : ''}</div></div>
@@ -4189,7 +4261,7 @@ function ProfileTab() {
         </div>
 
         {/* CPF LIFE & Retirement Income */}
-        <div style={{marginTop:12,display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
+        <div className="resp-2col" style={{marginTop:12,gap:16}}>
           <div style={{background:'var(--bg3)',borderRadius:8,padding:12,border:'1px solid rgba(91,168,160,.2)'}}>
             <div style={{fontSize:10,fontWeight:700,color:'var(--green2)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8}}>CPF LIFE</div>
             <div className="grid-2">
@@ -4278,22 +4350,6 @@ function ProfileTab() {
             </div>
           </div>
         ))}
-      </div>
-
-      {/* Delete Profile */}
-      <div style={{marginTop:16,padding:14,border:'1px solid rgba(239,83,80,.2)',borderRadius:12,background:'rgba(239,83,80,.03)'}}>
-        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-          <div>
-            <div style={{fontSize:12,fontWeight:600,color:'var(--red2)'}}>Delete My Profile</div>
-            <div style={{fontSize:10,color:'var(--text3)'}}>Clears name, NRIC, DOB, financial data, dependants. Policies are not affected.</div>
-          </div>
-          <button className="btn-danger btn-sm" onClick={()=>{
-            if(!confirm('Delete all client profile data?\n\nThis clears name, NRIC, DOB, income, expenses, CPF settings, dependants, and other retirement income sources.\n\nPolicies will NOT be deleted.')) return;
-            const blank = {name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[],annualIncome:'',retirementAge:'65',monthlyExpenses:'',mortgagePayment:'',dependantSupport:'',medicalBudget:'',desiredRetIncome:'',cpfScheme:'FRS',cpfPlan:'standard',cpfStartAge:'65',cpfTopUp:'',otherRetIncome:[]};
-            setP(blank); saveProfile(blank);
-            alert('Profile cleared.');
-          }}>Delete Profile</button>
-        </div>
       </div>
     </div>
   );
@@ -4462,7 +4518,7 @@ new Chart(document.getElementById('retChart'),{type:'bar',data:{labels:${JSON.st
       </div>
 
       {/* ── KPI ROW ── */}
-      <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:8,marginBottom:14}}>
+      <div className="resp-5col" style={{marginBottom:14}}>
         <div style={{background:'var(--bg3)',borderRadius:8,padding:10,textAlign:'center'}}>
           <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',fontWeight:600}}>Desired</div>
           <div style={{fontSize:18,fontWeight:700}}>${desiredMonthly.toLocaleString()}</div>
@@ -4491,7 +4547,7 @@ new Chart(document.getElementById('retChart'),{type:'bar',data:{labels:${JSON.st
       </div>
 
       {/* ── INCOME WATERFALL (stacked bar) ── */}
-      <div style={{display:'grid',gridTemplateColumns:'1fr 260px',gap:12}}>
+      <div className="resp-side" style={{gap:12}}>
         <div>
           <div style={{fontSize:11,fontWeight:600,marginBottom:6}}>Income Projection — Age {Math.max(55,retAge-5)} to 90</div>
           <div style={{height:220}}><canvas ref={chartRef} /></div>
@@ -5057,6 +5113,47 @@ function Dashboard() {
       <DropZone active={true} onFiles={handleDashDrop} label="📎 Drop or paste any document — client profile, policy contracts, benefit illustrations" />
       <OnboardingModal />
 
+      {/* ═══ PORTFOLIO ACTIONS BAR ═══ */}
+      {(() => {
+        const loadRef2 = React.createRef();
+        const doSave = () => {
+          const data = {version:'PolicyLens_v4',exportedAt:new Date().toISOString(),clientName:p.name||'',clientProfile:p,policies};
+          const blob = new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a'); a.href=url; a.download=`PolicyLens_${(p.name||'Portfolio').replace(/\s+/g,'_')}_${new Date().toISOString().slice(0,10)}.json`; a.click(); URL.revokeObjectURL(url);
+        };
+        const doLoad = async(file) => {
+          if(!file)return;
+          try{
+            const text=await file.text(); const data=JSON.parse(text);
+            const arr=data.policies||(Array.isArray(data)?data:[]);
+            if(!arr.length){alert('No policies found in file');return;}
+            const mode=confirm(`Found ${arr.length} policies${data.clientName?' for '+data.clientName:''}.\n\nOK = Replace current portfolio\nCancel = Add to existing`);
+            if(mode){for(const pol of policies) await deletePolicy(pol.id);}
+            let count=0;
+            for(const pol of arr){await savePolicy({...pol,id:mode?pol.id:('p_'+Date.now()+'_'+Math.random().toString(36).slice(2,5))});count++;}
+            if(data.clientProfile && mode) saveProfile(data.clientProfile);
+            else if(data.clientName && mode) saveProfile({...clientProfile,name:data.clientName});
+            alert(`Loaded ${count} policies`+(mode?' (replaced)':' (added)'));
+          }catch(e){alert('Error: '+e.message);}
+        };
+        const doReset = async() => {
+          if(!confirm('⚠️ RESET EVERYTHING?\n\nThis will permanently delete:\n• All '+policies.length+' policies\n• Client profile\n\nThis CANNOT be undone.')) return;
+          if(!confirm('Final confirmation — delete all data?')) return;
+          for(const pol of policies) await deletePolicy(pol.id);
+          saveProfile({name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[]});
+          alert('Portfolio reset complete.'); window.location.reload();
+        };
+        return (
+          <div style={{display:'flex',gap:6,marginBottom:14,flexWrap:'wrap',alignItems:'center'}}>
+            <button className="btn-sm" style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.2)',fontSize:11,padding:'5px 12px',borderRadius:8,cursor:'pointer'}} onClick={doSave} disabled={policies.length===0}>💾 Save</button>
+            <input ref={loadRef2} type="file" accept=".json" style={{display:'none'}} onChange={e=>{if(e.target.files[0])doLoad(e.target.files[0]);e.target.value='';}} />
+            <button className="btn-secondary btn-sm" style={{fontSize:11}} onClick={()=>loadRef2.current?.click()}>📂 Load</button>
+            <button className="btn-sm" style={{background:'rgba(239,83,80,.08)',color:'var(--red)',border:'1px solid rgba(239,83,80,.15)',fontSize:11,padding:'5px 12px',borderRadius:8,cursor:'pointer',marginLeft:'auto'}} onClick={doReset}>⚠️ Reset All</button>
+          </div>
+        );
+      })()}
+
       {/* ═══ SUMMARY CARDS ═══ */}
       <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(150px,1fr))',gap:10,marginBottom:16}}>
         <div className="card card-sm"><div style={{color:'var(--text3)',fontSize:10,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Policies</div><div style={{fontSize:24,fontWeight:700,marginTop:2}}>{policies.length}</div></div>
@@ -5090,7 +5187,7 @@ function Dashboard() {
             const earnsCcy = 'SGD'; // Assumption: SG-based client earns in SGD
             return (
               <div>
-                <div style={{display:'grid',gridTemplateColumns:`repeat(${ccys.length},1fr)`,gap:8,marginBottom:10}}>
+                <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(140px,1fr))',gap:8,marginBottom:10}}>
                   {ccys.map(([ccy,d]) => {
                     const premPct = totalSGDPrem > 0 ? Math.round(toSGD(d.premium,ccy)/totalSGDPrem*100) : 0;
                     const ccyColor = ccy==='SGD'?'#5ba8a0':ccy==='USD'?'#5b8fd9':ccy==='GBP'?'#9d8abf':'#d4a96a';
@@ -5121,7 +5218,7 @@ function Dashboard() {
         </div>
       )}
 
-      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:16}}>
+      <div className="resp-2col" style={{gap:12,marginBottom:16}}>
         <div className="card"><h3 style={{fontSize:13,fontWeight:600,marginBottom:10}}>Premium Allocation</h3><div style={{height:200}}><canvas ref={chartRef} /></div></div>
 
         {/* ═══ PROTECTION GAP ANALYSIS ═══ */}
@@ -5178,7 +5275,7 @@ function Dashboard() {
             <label style={{display:'flex',alignItems:'center',gap:3,cursor:'pointer'}}><input type="checkbox" checked={ciIncDep} onChange={e=>setCiIncDep(e.target.checked)} style={{accentColor:'var(--gold)'}} /> Dependant Support</label>
           </div>
         )}
-        <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:8,marginBottom:8}}>
+        <div className="resp-5col" style={{marginBottom:8}}>
           <div className="field"><label>Death (yrs)</label><input type="number" value={deathYrs} onChange={e=>setDeathYrs(+e.target.value||10)} /><div style={{fontSize:9,color:'var(--text3)'}}>LIA: 9–10× {ciMethod==='income'?'income':'expenses'}</div></div>
           <div className="field"><label>TPD (yrs)</label><input type="number" value={tpdYrs} onChange={e=>setTpdYrs(+e.target.value||10)} /><div style={{fontSize:9,color:'var(--text3)'}}>LIA: 9–10× {ciMethod==='income'?'income':'expenses'}</div></div>
           <div className="field"><label>CI (yrs)</label><input type="number" value={ciYrs} onChange={e=>setCiYrs(+e.target.value||5)} /><div style={{fontSize:9,color:'var(--text3)'}}>LIA: 3.5–5× {ciMethod==='income'?'income':'expenses'}</div></div>
@@ -5187,7 +5284,7 @@ function Dashboard() {
         </div>
         <details>
           <summary style={{fontSize:10,color:'var(--gold)',cursor:'pointer',fontWeight:600}}>SA Override (retired clients / manual targets)</summary>
-          <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:8,marginTop:6}}>
+          <div className="resp-5col" style={{marginTop:6}}>
             <div className="field"><label>Death SA</label><input type="number" value={deathOverride} onChange={e=>setDeathOverride(e.target.value)} placeholder="Auto" /></div>
             <div className="field"><label>TPD SA</label><input type="number" value={tpdOverride} onChange={e=>setTpdOverride(e.target.value)} placeholder="Auto" /></div>
             <div className="field"><label>CI SA</label><input type="number" value={ciOverride} onChange={e=>setCiOverride(e.target.value)} placeholder="Auto" /></div>
@@ -5206,7 +5303,7 @@ function Dashboard() {
 
           {/* At Retirement KPIs */}
           {retRow && (
-            <div style={{display:'grid',gridTemplateColumns:'repeat(4,1fr)',gap:8,marginBottom:12}}>
+            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(120px,1fr))',gap:8,marginBottom:12}}>
               <div style={{background:'var(--bg3)',borderRadius:8,padding:10,textAlign:'center'}}>
                 <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>CV at {retAge}</div>
                 <div style={{fontSize:18,fontWeight:700,color:'var(--gold)'}}>{fmt(retRow.totalCV)}</div>
@@ -5308,7 +5405,7 @@ function Dashboard() {
       {retRow && (annualIncome > 0 || retRow.totalCV > 0 || retRow.income > 0) && (
         <div className="card" style={{marginBottom:16,background:'linear-gradient(135deg,var(--bg2),rgba(212,169,106,.04))',border:'1px solid rgba(212,169,106,.2)'}}>
           <h3 style={{fontSize:13,fontWeight:600,marginBottom:12}}>Retirement Readiness</h3>
-          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:16}}>
+          <div className="resp-2col" style={{gap:16}}>
             {/* Left: Meter */}
             <div style={{textAlign:'center'}}>
               {(() => {
@@ -7234,7 +7331,7 @@ function FundAllocationEditor({allocations,onChange,reinvest,onSyncWeighted}) {
       {/* ── Weighted Summary Panel ── */}
       {allocations.length > 0 && totalPct > 0 && (
         <div style={{marginTop:10,padding:10,background:'var(--bg2)',borderRadius:8,border:'1px solid var(--border)'}}>
-          <div style={{display:'grid',gridTemplateColumns:'repeat(5,1fr)',gap:8,textAlign:'center'}}>
+          <div className="resp-5col" style={{textAlign:'center'}}>
             <div>
               <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',fontWeight:600}}>Wtd Growth</div>
               <div style={{fontSize:15,fontWeight:700,color:'var(--green2)'}}>{wGrowth.toFixed(2)}%</div>
@@ -8276,7 +8373,7 @@ function Settings() {
   };
 
   return (
-    <div className="fade-in" style={{maxWidth:500}}>
+    <div className="fade-in" style={{maxWidth:600}}>
       <h2 style={{fontSize:18,fontWeight:600,marginBottom:16}}>Settings</h2>
 
       {/* ═══ ADVISOR DETAILS (TOP) ═══ */}
@@ -8289,25 +8386,12 @@ function Settings() {
         </div>
       </div>
 
-      {/* ═══ DATA MANAGEMENT ═══ */}
-      <div className="card" style={{marginBottom:16}}>
-        <h3 style={{fontSize:14,fontWeight:600,marginBottom:8}}>Data Management</h3>
-        <p style={{fontSize:12,color:'var(--text3)',marginBottom:12}}>Save, load, or reset your portfolio. Data auto-saves to your browser between sessions.</p>
-        <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:12}}>
-          <button className="btn-primary btn-sm" onClick={handleSave} disabled={policies.length===0}>
-            💾 Save Portfolio ({policies.length})
-          </button>
-          <input ref={loadRef} type="file" accept=".json" style={{display:'none'}} onChange={e=>{if(e.target.files[0])handleLoad(e.target.files[0]);e.target.value=''}} />
-          <button className="btn-secondary btn-sm" onClick={()=>loadRef.current?.click()}>
-            📂 Load Portfolio
-          </button>
-        </div>
-        <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
-          <button className="btn-danger btn-sm" onClick={handleReset}>
-            ⚠️ Reset Entire Portfolio
-          </button>
+      {/* ═══ ADMIN: REPOSITORY RESET ═══ */}
+      {window._isAdmin && (
+        <div className="card" style={{marginBottom:16,borderColor:'rgba(239,83,80,.2)'}}>
+          <h3 style={{fontSize:14,fontWeight:600,marginBottom:4}}>Admin Tools</h3>
+          <p style={{fontSize:11,color:'var(--text3)',marginBottom:8}}>Portfolio save/load/reset is on the Dashboard. Repository reset is admin-only.</p>
           <button className="btn-danger btn-sm" onClick={async()=>{
-            if(!window._isAdmin){alert('Only admin can reset the repository.');return;}
             const pw = prompt('Enter admin password to reset repository:');
             if(pw !== 'bprawn0011'){alert('Incorrect password.');return;}
             if(!confirm('This removes ALL repository entries and re-seeds with verified products. Proceed?')) return;
@@ -8321,7 +8405,7 @@ function Settings() {
             window.location.reload();
           }}>🗑️ Reset Repository</button>
         </div>
-      </div>
+      )}
 
       {/* ═══ AI KEYS ═══ */}
       <div className="card" style={{marginBottom:16}}>
