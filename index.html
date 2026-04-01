@@ -5355,6 +5355,322 @@ function PremiumCashflowChart({policies,age,retAge}) {
 // DASHBOARD
 // ═══════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════
+// REVIEW SESSION MODE — Guided client review walkthrough
+// ═══════════════════════════════════════════════════════════════
+function ReviewSession({onClose}) {
+  const {policies, clientProfile, clientName} = useContext(AppCtx);
+  const [step, setStep] = useState(0);
+  const p = clientProfile || {};
+  const age = p.dob ? Math.floor((Date.now()-new Date(p.dob).getTime())/31557600000) : 35;
+  const retAge = parseInt(p.retirementAge)||65;
+  const income = parseFloat(p.annualIncome)||0;
+  const active = policies.filter(pol=>pol.status!=='matured'&&pol.status!=='surrendered'&&pol.status!=='lapsed');
+
+  // Coverage analysis
+  let cDeath=0,cTPD=0,cCI=0,cECI=0,cDI=0,hasISP=false;
+  active.forEach(pol=>{
+    (pol.riders||[]).forEach(rd=>{const sa=parseFloat(rd.sa)||0;if(rd.type==='death')cDeath+=sa;if(rd.type==='tpd')cTPD+=sa;if(rd.type==='ci')cCI+=sa;if(rd.type==='eci')cECI+=sa;if(rd.type==='di')cDI+=sa;});
+    if(pol.category==='protection'&&!['Personal Accident','Critical Illness'].includes(pol.subType)){cDeath+=parseFloat(pol.sumAssured)||0;cTPD+=parseFloat(pol.sumAssured)||0;}
+    if(pol.subType==='Critical Illness') cCI+=parseFloat(pol.sumAssured)||0;
+    if(pol.subType==='Integrated Shield Plan') hasISP=true;
+    if(pol.subType==='Disability Income') cDI+=parseFloat(pol.diMonthlyBenefit)||0;
+  });
+  const rDeath=income>0?income*10:500000; const rCI=income>0?income*5:300000;
+  const rDI=income>0?Math.round(income/12*0.75):3000;
+
+  // Premium analysis
+  const totalAnnual = active.filter(pol=>!pol.premSingle&&pol.premFrequency!=='single'&&pol.category!=='cash_investments').reduce((s,pol)=>s+(pol.premFrequency==='monthly'?(parseFloat(pol.annualPremium)||0)*12:(parseFloat(pol.annualPremium)||0)),0);
+  const premRatio = income > 0 ? Math.round(totalAnnual/income*100) : 0;
+  const highPremPolicies = active.filter(pol=>(parseFloat(pol.annualPremium)||0)>5000 && pol.category!=='cash_investments').sort((a,b)=>(parseFloat(b.annualPremium)||0)-(parseFloat(a.annualPremium)||0));
+
+  // Cash value
+  const cvPolicies = active.filter(pol=>parseFloat(pol.cashValue)>0).sort((a,b)=>(parseFloat(b.cashValue)||0)-(parseFloat(a.cashValue)||0));
+  const totalCV = cvPolicies.reduce((s,p)=>s+(parseFloat(p.cashValue)||0),0);
+
+  // Retirement
+  const retPolicies = active.filter(pol=>pol.category==='retirement');
+  const retIncome = retPolicies.reduce((s,pol)=>s+(parseFloat(pol.annuityMonthly)||parseFloat(pol.monthlyBenefit)||0),0);
+
+  const steps = [
+    {title:'Coverage Gaps',icon:'🛡',color:'#5b8fd9'},
+    {title:'Premium Efficiency',icon:'💰',color:'var(--gold)'},
+    {title:'Cash Value Check',icon:'📊',color:'var(--green2)'},
+    {title:'Retirement Readiness',icon:'🏦',color:'#9d8abf'},
+    {title:'Recommendations',icon:'✅',color:'var(--teal)'},
+  ];
+
+  return (
+    <div className="modal-overlay" onClick={e=>{if(e.target===e.currentTarget)onClose()}}>
+      <div className="modal" style={{maxWidth:700,maxHeight:'90vh',padding:0,overflow:'hidden'}}>
+        {/* Header */}
+        <div style={{background:'var(--bg2)',padding:'16px 20px',borderBottom:'1px solid var(--border)'}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+            <div><h3 style={{fontSize:16,fontWeight:700,margin:0}}>📋 Policy Review Session</h3>
+              <div style={{fontSize:11,color:'var(--text3)'}}>Client: {clientName||'Unknown'} · Age {age} · {active.length} active policies</div></div>
+            <button onClick={onClose} style={{background:'none',color:'var(--text3)',fontSize:20}}>×</button>
+          </div>
+          {/* Step indicator */}
+          <div style={{display:'flex',gap:2,marginTop:12}}>
+            {steps.map((s,i) => (
+              <button key={i} onClick={()=>setStep(i)} style={{flex:1,padding:'6px 4px',borderRadius:6,fontSize:9,fontWeight:step===i?700:400,
+                background:step===i?s.color+'22':'transparent',color:step===i?s.color:'var(--text3)',border:'1px solid '+(step===i?s.color+'44':'transparent'),
+                cursor:'pointer',textAlign:'center',transition:'all .2s'}}>
+                <div style={{fontSize:14}}>{s.icon}</div>{s.title}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Content */}
+        <div style={{padding:20,overflowY:'auto',maxHeight:'65vh'}}>
+
+          {/* Step 0: Coverage Gaps */}
+          {step===0 && (<div className="fade-in">
+            <h4 style={{fontSize:14,fontWeight:700,marginBottom:12}}>🛡 Protection Coverage vs LIA Benchmarks</h4>
+            <div style={{fontSize:11,color:'var(--text3)',marginBottom:12}}>Industry benchmarks: Death 10× income · CI 5× expenses · DI 75% monthly · ISP required</div>
+            {[
+              {label:'Death & Total Invalidity',have:cDeath,need:rDeath,icon:'💀'},
+              {label:'Total Permanent Disability',have:cTPD,need:rDeath,icon:'🦽'},
+              {label:'Critical Illness',have:cCI,need:rCI,icon:'🏥'},
+              {label:'Early Critical Illness',have:cECI,need:rCI*0.4,icon:'⚕️'},
+              {label:'Disability Income/mth',have:cDI,need:rDI,icon:'📉'},
+              {label:'Hospitalisation (ISP)',have:hasISP?1:0,need:1,icon:'🏨',flag:true},
+            ].map(g => {
+              const pct = g.flag ? (g.have>=g.need?100:0) : Math.min(100,Math.round(g.have/Math.max(1,g.need)*100));
+              const ok = pct >= 80;
+              return (
+                <div key={g.label} style={{marginBottom:10,padding:10,background:ok?'rgba(91,168,160,.04)':'rgba(239,83,80,.04)',borderRadius:8,border:'1px solid '+(ok?'rgba(91,168,160,.15)':'rgba(239,83,80,.15)')}}>
+                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4}}>
+                    <span style={{fontSize:12,fontWeight:600}}>{g.icon} {g.label}</span>
+                    <span style={{fontSize:12,fontWeight:700,color:ok?'var(--green2)':'var(--red)'}}>{g.flag?(g.have?'✅ Covered':'❌ Not covered'):pct+'%'}</span>
+                  </div>
+                  {!g.flag && <div className="gap-bar"><div style={{width:pct+'%',height:'100%',background:ok?'var(--green2)':'var(--red)',borderRadius:4}} /></div>}
+                  {!g.flag && <div style={{display:'flex',justifyContent:'space-between',fontSize:10,color:'var(--text3)',marginTop:3}}>
+                    <span>Have: {fmt(g.have)}</span><span>Need: {fmt(g.need)}</span>{g.have<g.need && <span style={{color:'var(--red)',fontWeight:600}}>Gap: {fmt(g.need-g.have)}</span>}
+                  </div>}
+                  {!ok && <div style={{fontSize:10,color:'var(--red)',marginTop:4,fontWeight:500}}>
+                    💡 {g.flag?'Client needs an Integrated Shield Plan with rider':g.label.includes('Disability')?'Consider a DI plan covering 75% of monthly income':'Consider increasing coverage by '+fmt(g.need-g.have)}
+                  </div>}
+                </div>
+              );
+            })}
+          </div>)}
+
+          {/* Step 1: Premium Efficiency */}
+          {step===1 && (<div className="fade-in">
+            <h4 style={{fontSize:14,fontWeight:700,marginBottom:12}}>💰 Premium Efficiency Analysis</h4>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:12}}>
+              <div style={{background:'var(--bg3)',borderRadius:8,padding:10,textAlign:'center'}}>
+                <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Annual Premiums</div>
+                <div style={{fontSize:20,fontWeight:700,color:'var(--gold)'}}>{fmt(totalAnnual)}</div>
+              </div>
+              <div style={{background:'var(--bg3)',borderRadius:8,padding:10,textAlign:'center'}}>
+                <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>% of Income</div>
+                <div style={{fontSize:20,fontWeight:700,color:premRatio>20?'var(--red)':premRatio>15?'var(--gold)':'var(--green2)'}}>{premRatio||'—'}%</div>
+                <div style={{fontSize:9,color:'var(--text3)'}}>{premRatio>20?'⚠️ High — review needed':premRatio>15?'Moderate':'✅ Healthy range'}</div>
+              </div>
+            </div>
+            <div style={{fontSize:11,fontWeight:600,marginBottom:6}}>Top Premium Policies</div>
+            {highPremPolicies.slice(0,8).map(pol => (
+              <div key={pol.id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'6px 8px',borderBottom:'1px solid var(--border)',fontSize:11}}>
+                <div><span style={{fontWeight:500}}>{pol.productName||pol.policyName}</span> <span style={{color:'var(--text3)',fontSize:10}}>{pol.insurer}</span></div>
+                <div style={{fontWeight:600,color:'var(--gold)'}}>{fmt(parseFloat(pol.annualPremium)||0)}/yr</div>
+              </div>
+            ))}
+            {premRatio > 15 && <div style={{marginTop:10,padding:10,background:'rgba(212,169,106,.06)',borderRadius:8,fontSize:11,color:'var(--gold)'}}>
+              💡 <strong>Talking point:</strong> Premiums are {premRatio}% of income. Industry guideline is 10-15%. Review if any endowment/ILP premiums can be redirected to protection.
+            </div>}
+          </div>)}
+
+          {/* Step 2: Cash Value */}
+          {step===2 && (<div className="fade-in">
+            <h4 style={{fontSize:14,fontWeight:700,marginBottom:12}}>📊 Cash Value & Surrender Value Check</h4>
+            <div style={{background:'var(--bg3)',borderRadius:8,padding:12,marginBottom:12,textAlign:'center'}}>
+              <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Total Portfolio Surrender Value</div>
+              <div style={{fontSize:24,fontWeight:700,color:'var(--gold)'}}>{fmt(totalCV)}</div>
+              <div style={{fontSize:10,color:'var(--text3)'}}>{cvPolicies.length} policies with cash value</div>
+            </div>
+            {cvPolicies.slice(0,10).map(pol => {
+              const cv = parseFloat(pol.cashValue)||0;
+              const prem = parseFloat(pol.annualPremium)||0;
+              const yrs = parseInt(pol.premStartAge) ? age - parseInt(pol.premStartAge) : 5;
+              const totalPaid = pol.premSingle ? prem : prem * yrs;
+              const gain = cv - totalPaid;
+              return (
+                <div key={pol.id} style={{padding:'8px',borderBottom:'1px solid var(--border)',fontSize:11}}>
+                  <div style={{display:'flex',justifyContent:'space-between'}}>
+                    <span style={{fontWeight:500}}>{pol.productName||pol.policyName} <span style={{color:'var(--text3)',fontSize:9}}>{pol.insurer}</span></span>
+                    <span style={{fontWeight:600,color:'var(--gold)'}}>{fmt(cv)}</span>
+                  </div>
+                  {totalPaid > 0 && <div style={{fontSize:9,color:gain>=0?'var(--green2)':'var(--red)'}}>
+                    Paid: {fmt(totalPaid)} · {gain>=0?'Gain':'Loss'}: {fmt(Math.abs(gain))} ({totalPaid>0?Math.round(gain/totalPaid*100):0}%)
+                  </div>}
+                </div>
+              );
+            })}
+          </div>)}
+
+          {/* Step 3: Retirement */}
+          {step===3 && (<div className="fade-in">
+            <h4 style={{fontSize:14,fontWeight:700,marginBottom:12}}>🏦 Retirement Readiness</h4>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:8,marginBottom:12}}>
+              <div style={{background:'var(--bg3)',borderRadius:8,padding:10,textAlign:'center'}}>
+                <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Years to Retirement</div>
+                <div style={{fontSize:20,fontWeight:700}}>{Math.max(0,retAge-age)}</div>
+              </div>
+              <div style={{background:'var(--bg3)',borderRadius:8,padding:10,textAlign:'center'}}>
+                <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Policy Income</div>
+                <div style={{fontSize:20,fontWeight:700,color:'var(--gold)'}}>{fmt(retIncome)}/m</div>
+              </div>
+              <div style={{background:'var(--bg3)',borderRadius:8,padding:10,textAlign:'center'}}>
+                <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Lump Sum (CV)</div>
+                <div style={{fontSize:20,fontWeight:700,color:'var(--green2)'}}>{fmt(totalCV)}</div>
+              </div>
+            </div>
+            {retPolicies.length > 0 && (<div style={{marginBottom:10}}>
+              <div style={{fontSize:11,fontWeight:600,marginBottom:4}}>Income-Producing Policies</div>
+              {retPolicies.map(pol => (
+                <div key={pol.id} style={{padding:'6px 8px',borderBottom:'1px solid var(--border)',fontSize:11,display:'flex',justifyContent:'space-between'}}>
+                  <span>{pol.productName} <span style={{color:'var(--text3)',fontSize:9}}>{pol.insurer}</span></span>
+                  <span style={{color:'var(--green2)',fontWeight:600}}>{fmt(parseFloat(pol.annuityMonthly)||parseFloat(pol.monthlyBenefit)||0)}/m</span>
+                </div>
+              ))}
+            </div>)}
+            <div style={{padding:10,background:'rgba(157,138,191,.06)',borderRadius:8,fontSize:11}}>
+              💡 <strong>Talking point:</strong> {retAge-age<=10?'Retirement is close — focus on income certainty and capital preservation.':retAge-age<=20?'Good time horizon. Balance growth investments with guaranteed income streams.':'Long runway to retirement. Maximise growth potential while building protection base.'}
+            </div>
+          </div>)}
+
+          {/* Step 4: Recommendations */}
+          {step===4 && (<div className="fade-in">
+            <h4 style={{fontSize:14,fontWeight:700,marginBottom:12}}>✅ Key Recommendations</h4>
+            <div style={{fontSize:11,color:'var(--text3)',marginBottom:8}}>Auto-generated based on portfolio analysis. Customise before presenting to client.</div>
+            {[
+              cDeath<rDeath && {pri:'high',text:'Increase life cover by '+fmt(rDeath-cDeath)+' to meet 10× income benchmark',cat:'Protection'},
+              cCI<rCI && {pri:'high',text:'Critical Illness cover gap of '+fmt(rCI-cCI)+'. Consider standalone CI or multi-pay CI plan',cat:'Protection'},
+              !hasISP && {pri:'high',text:'No Integrated Shield Plan detected. Essential for hospitalisation coverage',cat:'Health'},
+              cDI<rDI && {pri:'medium',text:'Disability income shortfall. Consider DI plan covering '+fmt(rDI)+'/month',cat:'Protection'},
+              premRatio>20 && {pri:'medium',text:'Premium-to-income ratio at '+premRatio+'%. Review ILP/endowment premiums for potential restructuring',cat:'Efficiency'},
+              retIncome===0 && retAge-age<20 && {pri:'medium',text:'No retirement income policies. Consider annuity or income plan',cat:'Retirement'},
+              totalCV>100000 && {pri:'low',text:'Portfolio has '+fmt(totalCV)+' in surrender value. Review if any underperforming policies should be restructured',cat:'Value'},
+            ].filter(Boolean).map((rec,i) => (
+              <div key={i} style={{padding:10,marginBottom:6,borderRadius:8,borderLeft:'3px solid '+(rec.pri==='high'?'var(--red)':rec.pri==='medium'?'var(--gold)':'var(--teal)'),background:rec.pri==='high'?'rgba(239,83,80,.04)':rec.pri==='medium'?'rgba(212,169,106,.04)':'rgba(91,168,160,.04)'}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                  <span style={{fontSize:12,fontWeight:500}}>{rec.text}</span>
+                  <span style={{fontSize:8,padding:'1px 6px',borderRadius:4,background:rec.pri==='high'?'rgba(239,83,80,.15)':'rgba(212,169,106,.1)',color:rec.pri==='high'?'var(--red)':'var(--gold)',fontWeight:600,flexShrink:0,marginLeft:8}}>{rec.cat}</span>
+                </div>
+              </div>
+            ))}
+            {cDeath>=rDeath && cCI>=rCI && hasISP && <div style={{padding:12,background:'rgba(91,168,160,.06)',borderRadius:8,textAlign:'center'}}>
+              <div style={{fontSize:16}}>🎉</div>
+              <div style={{fontSize:13,fontWeight:600,color:'var(--green2)'}}>Portfolio is well-balanced!</div>
+              <div style={{fontSize:11,color:'var(--text3)'}}>Core protection adequately covered. Focus review on premium efficiency and retirement planning.</div>
+            </div>}
+          </div>)}
+        </div>
+
+        {/* Footer nav */}
+        <div style={{padding:'12px 20px',borderTop:'1px solid var(--border)',display:'flex',justifyContent:'space-between',alignItems:'center',background:'var(--bg2)'}}>
+          <button className="btn-secondary btn-sm" onClick={()=>setStep(Math.max(0,step-1))} disabled={step===0}>← Previous</button>
+          <span style={{fontSize:10,color:'var(--text3)'}}>Step {step+1} of {steps.length}</span>
+          {step<steps.length-1 ? <button className="btn-primary btn-sm" onClick={()=>setStep(step+1)}>Next →</button>
+            : <button className="btn-primary btn-sm" onClick={onClose}>Done ✓</button>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// CLIENT UPLOAD PORTAL — Shareable link for client document collection
+// ═══════════════════════════════════════════════════════════════
+function ClientUploadPortal({code, onClose, onFilesReceived}) {
+  const [link, setLink] = useState('');
+  const [uploading, setUploading] = useState(false);
+  const [received, setReceived] = useState([]);
+
+  useEffect(() => {
+    if(code) { setLink(window.location.origin + window.location.pathname + '?clientUpload=' + code); return; }
+    // Generate new code
+    const newCode = Math.random().toString(36).substring(2,8).toUpperCase();
+    const fullLink = window.location.origin + window.location.pathname + '?clientUpload=' + newCode;
+    setLink(fullLink);
+    // Save to Supabase
+    (async()=>{
+      try {
+        const s = getSB(); if(!s||!window._user) return;
+        await s.from('client_uploads').upsert({user_id:window._user.id, code:newCode, created_at:new Date().toISOString(), files:[], status:'pending'},{onConflict:'user_id,code'});
+      } catch(e){ console.warn('[Upload Portal] Save error:', e); }
+    })();
+  }, []);
+
+  const copyLink = async () => {
+    try { await navigator.clipboard.writeText(link); alert('Link copied! Send this to your client via WhatsApp/Telegram.'); }
+    catch(e) { prompt('Copy this link:', link); }
+  };
+
+  // Poll for uploads
+  useEffect(() => {
+    if(!link) return;
+    const codeVal = link.split('clientUpload=')[1];
+    if(!codeVal) return;
+    const interval = setInterval(async()=>{
+      try {
+        const s = getSB(); if(!s) return;
+        const {data} = await s.from('client_uploads').select('files,status').eq('code',codeVal).maybeSingle();
+        if(data?.files?.length > 0 && data.files.length !== received.length) {
+          setReceived(data.files);
+        }
+      } catch(e){}
+    }, 5000);
+    return ()=>clearInterval(interval);
+  }, [link, received.length]);
+
+  return (
+    <div className="modal-overlay" onClick={e=>{if(e.target===e.currentTarget)onClose()}}>
+      <div className="modal" style={{maxWidth:500}}>
+        <h3 style={{fontSize:16,fontWeight:700,marginBottom:4}}>📤 Client Upload Link</h3>
+        <p style={{fontSize:11,color:'var(--text3)',marginBottom:16}}>Generate a link for your client to upload their policy documents from their phone.</p>
+
+        <div style={{background:'var(--bg3)',borderRadius:8,padding:12,marginBottom:12}}>
+          <div style={{fontSize:10,color:'var(--text3)',textTransform:'uppercase',fontWeight:600,marginBottom:6}}>Share this link with your client</div>
+          <div style={{display:'flex',gap:6}}>
+            <input value={link} readOnly style={{flex:1,fontSize:11,padding:'8px 10px',background:'var(--bg)',border:'1px solid var(--border2)',borderRadius:6,color:'var(--text)'}} />
+            <button className="btn-primary btn-sm" onClick={copyLink}>📋 Copy</button>
+          </div>
+          <div style={{display:'flex',gap:6,marginTop:8}}>
+            <button className="btn-secondary btn-sm" onClick={()=>window.open('https://wa.me/?text='+encodeURIComponent('Please upload your policy documents here:\n'+link),'_blank')} style={{fontSize:10}}>WhatsApp</button>
+            <button className="btn-secondary btn-sm" onClick={()=>window.open('tg://msg?text='+encodeURIComponent('Please upload your policy documents here:\n'+link),'_blank')} style={{fontSize:10}}>Telegram</button>
+            <button className="btn-secondary btn-sm" onClick={()=>window.open('mailto:?subject=Policy%20Document%20Upload&body='+encodeURIComponent('Hi,\n\nPlease upload your policy documents here:\n'+link+'\n\nThank you!'),'_blank')} style={{fontSize:10}}>Email</button>
+          </div>
+        </div>
+
+        {received.length > 0 && (
+          <div style={{background:'rgba(91,168,160,.06)',borderRadius:8,padding:10,marginBottom:12}}>
+            <div style={{fontSize:11,fontWeight:600,color:'var(--green2)'}}>✅ {received.length} file{received.length>1?'s':''} received from client!</div>
+            <button className="btn-primary btn-sm" style={{marginTop:6}} onClick={()=>{onFilesReceived(received);onClose();}}>Extract Policies from Uploaded Files</button>
+          </div>
+        )}
+
+        <div style={{fontSize:10,color:'var(--text3)',lineHeight:1.5}}>
+          <strong>How it works:</strong><br/>
+          1. Client opens the link on their phone<br/>
+          2. They take photos or upload PDFs of their policies<br/>
+          3. You'll see a notification here when files arrive<br/>
+          4. Click "Extract" to process them into PolicyLens<br/>
+          <br/>
+          <em>Note: Requires Supabase `client_uploads` table. Link expires after 24 hours.</em>
+        </div>
+
+        <div style={{display:'flex',justifyContent:'flex-end',marginTop:12}}>
+          <button className="btn-secondary" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Dashboard() {
   const {policies,setTab,apiKey,clientProfile,saveProfile} = useContext(AppCtx);
   const p = clientProfile || {};
@@ -5811,10 +6127,21 @@ function Dashboard() {
 
   const premRatio = annualIncome > 0 ? Math.round(totalPremium.annual/annualIncome*100) : 0;
   const retRow = cvTimeline.find(r => r.age === retAge);
+  const [showReview, setShowReview] = useState(false);
+  const [showUploadPortal, setShowUploadPortal] = useState(false);
 
   return (
     <div className="fade-in">
       <DropZone active={true} onFiles={handleDashDrop} label="📎 Drop or paste any document — client profile, policy contracts, benefit illustrations" />
+
+      {showReview && <ReviewSession onClose={()=>setShowReview(false)} />}
+      {showUploadPortal && <ClientUploadPortal onClose={()=>setShowUploadPortal(false)} onFilesReceived={(files)=>{console.log('Client files received:',files);}} />}
+
+      {/* Action bar */}
+      <div style={{display:'flex',gap:6,marginBottom:12,flexWrap:'wrap'}}>
+        {policies.length >= 2 && <button className="btn-primary btn-sm" onClick={()=>setShowReview(true)} style={{fontSize:11}}>📋 Start Review Session</button>}
+        <button className="btn-secondary btn-sm" onClick={()=>setShowUploadPortal(true)} style={{fontSize:11}}>📤 Client Upload Link</button>
+      </div>
 
       {/* ═══ PORTFOLIO ACTIONS BAR ═══ */}
       {(() => {
@@ -6535,10 +6862,34 @@ function mergeToProfile(extracted, currentProfile, saveProfile) {
 // BULK VERIFICATION MODAL — shows extracted policies + corrections
 // ═══════════════════════════════════════════════════════════════
 function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePolicy, onAccept, onClose}) {
-  const [items, setItems] = useState(extracted.map((p,i) => ({
-    ...p, _idx:i, _selected:true, _corrections:[], _repoMatch:null,
-    _destination: 'standalone', // 'standalone' | 'cpfoa' | 'cpfsa' | 'ilp_POLICYID'
-  })));
+  const [items, setItems] = useState(() => {
+    const mapped = extracted.map((p,i) => ({
+      ...p, _idx:i, _selected:true, _corrections:[], _repoMatch:null,
+      _destination: (p._destination||'standalone'), _batch: (p._batch||1),
+    }));
+    // Persist to sessionStorage for refresh survival
+    try { sessionStorage.setItem('policylens_pendingExtract', JSON.stringify(mapped.map(m => {const c={...m};delete c._repoMatch;return c;}))); } catch(e){}
+    return mapped;
+  });
+  const [activeTab, setActiveTab] = useState('all');
+  const batches = [...new Set(items.map(it => it._batch))].sort((a,b)=>a-b);
+  const filtered = activeTab === 'all' ? items : items.filter(it => it._batch === activeTab);
+
+  // Sync when new batches arrive (extracted prop updates progressively)
+  useEffect(() => {
+    if(!extracted || extracted.length === 0) return;
+    setItems(prev => {
+      const existingIds = new Set(prev.map(it => it.id || it._idx));
+      const newItems = extracted.filter(p => !existingIds.has(p.id)).map((p,i) => ({
+        ...p, _idx: prev.length + i, _selected:true, _corrections:[], _repoMatch:null,
+        _destination: p._destination||'standalone', _batch: p._batch || Math.max(...prev.map(it=>it._batch||1), 0) + 1,
+      }));
+      if(newItems.length === 0) return prev;
+      const merged = [...prev, ...newItems];
+      try { sessionStorage.setItem('policylens_pendingExtract', JSON.stringify(merged.map(m => {const c={...m};delete c._repoMatch;return c;}))); } catch(e){}
+      return merged;
+    });
+  }, [extracted?.length]);
 
   // Detect fund-like items
   const isFundLike = (item) => {
@@ -6586,7 +6937,8 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
 
     items.filter(it => it._selected).forEach(it => {
       const p = {...it};
-      delete p._idx; delete p._selected; delete p._corrections; delete p._repoMatch; delete p._appliedRepo; delete p._destination;
+      const provider = p._provider;
+      delete p._idx; delete p._selected; delete p._corrections; delete p._repoMatch; delete p._appliedRepo; delete p._destination; delete p._provider;
       if(p.riders) p.riders = p.riders.filter(r => r._selected !== false).map(r => { const c={...r}; delete c._selected; return c; });
 
       if(it._destination && it._destination.startsWith('ilp_')) {
@@ -6595,11 +6947,20 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
         ilpMerges[ilpId].push({fundName: p.productName||p.policyName||'Unknown Fund', allocation: 0, riskRating: ''});
       } else if(it._destination === 'cpfoa') {
         p.category = 'investment'; p.subType = 'Unit Trust'; p.paymentMethod = 'CPF OA';
+        if(provider) p.insurer = provider;
         standalone.push(p);
       } else if(it._destination === 'cpfsa') {
         p.category = 'investment'; p.subType = 'Unit Trust'; p.paymentMethod = 'CPF SA';
+        if(provider) p.insurer = provider;
+        standalone.push(p);
+      } else if(it._destination === 'later') {
+        // Keep as-is, mark for review
+        p.userRemarks = (p.userRemarks ? p.userRemarks + ' · ' : '') + '⏳ Fund assignment pending';
+        if(provider) p.insurer = provider;
         standalone.push(p);
       } else {
+        // Standalone
+        if(provider) p.insurer = provider;
         standalone.push(p);
       }
     });
@@ -6626,6 +6987,7 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
       alert(`Linked ${fundCount} fund${fundCount>1?'s':''} to ${ilpCount} ILP polic${ilpCount>1?'ies':'y'}. Review fund allocations in the policy form.`);
     }
 
+    try { sessionStorage.removeItem('policylens_pendingExtract'); } catch(e){}
     onAccept(standalone);
   };
 
@@ -6640,93 +7002,142 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
           <button onClick={onClose} style={{background:'none',color:'var(--text3)',fontSize:20,padding:4}}>×</button>
         </div>
 
-        <div style={{maxHeight:'70vh',overflowY:'auto'}}>
-          {items.map((item,i) => (
-            <div key={i} style={{background:item._selected?'var(--bg3)':'var(--bg)',borderRadius:10,padding:14,marginBottom:10,border:'1px solid '+(item._selected?'var(--gold3)':'var(--border)'),opacity:item._selected?1:0.5}}>
-              {/* Header with checkbox */}
-              <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:8}}>
-                <input type="checkbox" checked={item._selected} onChange={()=>toggleSelect(item._idx)} style={{width:18,height:18,accentColor:'var(--gold)'}} />
-                <div style={{flex:1}}>
-                  <div style={{display:'flex',gap:8,alignItems:'center'}}>
-                    <input value={item.productName||''} onChange={e=>updateField(item._idx,'productName',e.target.value)} style={{fontWeight:700,fontSize:14,background:'transparent',border:'1px solid var(--border)',borderRadius:4,padding:'2px 6px',flex:1}} />
-                    <input value={item.insurer||''} onChange={e=>updateField(item._idx,'insurer',e.target.value)} style={{fontSize:12,background:'transparent',border:'1px solid var(--border)',borderRadius:4,padding:'2px 6px',width:120}} />
-                  </div>
-                  <div style={{display:'flex',gap:6,marginTop:4,fontSize:11,color:'var(--text3)'}}>
-                    <span>{item.category||'—'}</span> · <span>{item.subType||'—'}</span> · <span>SA: {item.sumAssured?'$'+(+item.sumAssured).toLocaleString():'—'}</span> · <span>Prem: {item.annualPremium?'$'+(+item.annualPremium).toLocaleString()+'/yr':'—'}</span>
-                  </div>
+        {/* Batch tabs */}
+        {batches.length > 1 && (
+          <div style={{display:'flex',gap:3,marginBottom:10,overflowX:'auto',paddingBottom:4}}>
+            <button onClick={()=>setActiveTab('all')}
+              style={{padding:'4px 10px',fontSize:10,borderRadius:6,border:'1px solid '+(activeTab==='all'?'var(--gold)':'var(--border)'),
+                background:activeTab==='all'?'rgba(212,169,106,.12)':'var(--bg2)',color:activeTab==='all'?'var(--gold)':'var(--text3)',cursor:'pointer',fontWeight:activeTab==='all'?700:400,whiteSpace:'nowrap'}}>
+              All ({items.length})
+            </button>
+            {batches.map(b => {
+              const batchItems = items.filter(it=>it._batch===b);
+              const accepted = batchItems.filter(it=>it._selected).length;
+              return (
+                <button key={b} onClick={()=>setActiveTab(b)}
+                  style={{padding:'4px 10px',fontSize:10,borderRadius:6,border:'1px solid '+(activeTab===b?'var(--teal)':'var(--border)'),
+                    background:activeTab===b?'rgba(91,168,160,.1)':'var(--bg2)',color:activeTab===b?'var(--teal)':'var(--text3)',cursor:'pointer',fontWeight:activeTab===b?700:400,whiteSpace:'nowrap'}}>
+                  Batch {b} ({accepted}/{batchItems.length})
+                </button>
+              );
+            })}
+          </div>
+        )}
+
+        <div style={{maxHeight:'65vh',overflowY:'auto'}}>
+
+          {/* ── WHAT'S MISSING CHECKLIST ── */}
+          {items.length > 0 && (() => {
+            const cats = {life:false, ci:false, isp:false, di:false, savings:false, retirement:false};
+            items.filter(it=>it._selected).forEach(it => {
+              if(it.category==='protection') cats.life=true;
+              if(it.subType==='Critical Illness'||(it.riders||[]).some(r=>r.type==='ci')) cats.ci=true;
+              if(it.subType==='Integrated Shield Plan') cats.isp=true;
+              if(it.subType==='Disability Income'||(it.riders||[]).some(r=>r.type==='di')) cats.di=true;
+              if(it.category==='savings') cats.savings=true;
+              if(it.category==='retirement') cats.retirement=true;
+            });
+            const missing = [];
+            if(!cats.life) missing.push('Life / Term cover');
+            if(!cats.ci) missing.push('Critical Illness');
+            if(!cats.isp) missing.push('Hospitalisation (ISP)');
+            if(!cats.di) missing.push('Disability Income');
+            return missing.length > 0 ? (
+              <div style={{background:'rgba(239,83,80,.06)',border:'1px solid rgba(239,83,80,.15)',borderRadius:8,padding:10,marginBottom:10}}>
+                <div style={{fontSize:10,fontWeight:700,color:'var(--red)'}}>⚠️ Not detected in uploaded documents:</div>
+                <div style={{display:'flex',gap:6,flexWrap:'wrap',marginTop:4}}>
+                  {missing.map(m => <span key={m} style={{fontSize:9,padding:'2px 8px',borderRadius:4,background:'rgba(239,83,80,.08)',color:'var(--red)',fontWeight:500}}>❌ {m}</span>)}
                 </div>
+                <div style={{fontSize:9,color:'var(--text3)',marginTop:4}}>Ask client if they have these — may not have been uploaded</div>
               </div>
+            ) : (
+              <div style={{background:'rgba(91,168,160,.06)',border:'1px solid rgba(91,168,160,.15)',borderRadius:8,padding:8,marginBottom:10}}>
+                <span style={{fontSize:10,color:'var(--green2)',fontWeight:600}}>✅ Core coverage types detected: Life, CI, ISP, DI</span>
+              </div>
+            );
+          })()}
 
-              {/* Repo match suggestion */}
-              {item._repoMatch && !item._appliedRepo && (
-                <div style={{background:'var(--gold-dim)',borderRadius:6,padding:8,marginBottom:8,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
-                  <div style={{fontSize:11}}>
-                    <span style={{color:'var(--gold)',fontWeight:600}}>📋 Repository match:</span> {item._repoMatch.insurer} — {item._repoMatch.productName} ({item._repoMatch.subType})
-                  </div>
-                  <button className="btn-primary btn-sm" onClick={()=>applyRepo(item._idx)} style={{fontSize:10}}>Apply Repo Data</button>
-                </div>
-              )}
-              {item._appliedRepo && <div style={{fontSize:10,color:'var(--green2)',marginBottom:6}}>✓ Repository data applied</div>}
-
-              {/* Fund destination selector — shown for fund-like items */}
-              {isFundLike(item) && (
-                <div style={{background:'rgba(91,168,160,.06)',border:'1px solid rgba(91,168,160,.2)',borderRadius:8,padding:10,marginBottom:8}}>
-                  <div style={{fontSize:10,fontWeight:700,color:'var(--teal)',marginBottom:6}}>📌 Where does this fund belong?</div>
-                  <div style={{display:'flex',gap:4,flexWrap:'wrap'}}>
-                    {[
-                      {val:'standalone',label:'Standalone Unit Trust',icon:'📊'},
-                      {val:'cpfoa',label:'CPF-IS (OA)',icon:'🏦'},
-                      {val:'cpfsa',label:'CPF-IS (SA)',icon:'🏦'},
-                    ].map(opt => (
-                      <button key={opt.val} onClick={()=>updateField(item._idx,'_destination',opt.val)}
-                        style={{padding:'5px 10px',fontSize:10,borderRadius:6,border:'1px solid '+(item._destination===opt.val?'var(--teal)':'var(--border)'),
-                          background:item._destination===opt.val?'rgba(91,168,160,.15)':'var(--bg2)',
-                          color:item._destination===opt.val?'var(--teal)':'var(--text2)',cursor:'pointer',fontWeight:item._destination===opt.val?600:400}}>
-                        {opt.icon} {opt.label}
-                      </button>
-                    ))}
-                    {ilpPolicies.length > 0 && (<>
-                      <div style={{width:'100%',fontSize:9,color:'var(--text3)',marginTop:4,marginBottom:2}}>Or link to an existing ILP:</div>
-                      {ilpPolicies.map(ilp => (
-                        <button key={ilp.id} onClick={()=>updateField(item._idx,'_destination','ilp_'+ilp.id)}
-                          style={{padding:'5px 10px',fontSize:10,borderRadius:6,border:'1px solid '+(item._destination==='ilp_'+ilp.id?'var(--gold)':'var(--border)'),
-                            background:item._destination==='ilp_'+ilp.id?'rgba(212,169,106,.12)':'var(--bg2)',
-                            color:item._destination==='ilp_'+ilp.id?'var(--gold)':'var(--text2)',cursor:'pointer',fontWeight:item._destination==='ilp_'+ilp.id?600:400}}>
-                          🔗 {ilp.insurer?ilp.insurer+' — ':''}{ilp.productName||ilp.policyName||'ILP'}
-                        </button>
-                      ))}
-                    </>)}
-                  </div>
-                  {item._destination && item._destination.startsWith('ilp_') && (
-                    <div style={{fontSize:10,color:'var(--gold)',marginTop:6}}>
-                      ✓ Will be added to this ILP's fund allocations (review % in policy form after import)
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Riders */}
-              {(item.riders||[]).length > 0 && (
-                <div style={{marginTop:6}}>
-                  <div style={{fontSize:10,fontWeight:600,color:'var(--text3)',marginBottom:4}}>RIDERS / BENEFITS</div>
-                  {(item.riders||[]).map((rd,ri) => (
-                    <div key={ri} style={{display:'flex',alignItems:'center',gap:8,padding:'3px 0',borderTop:ri>0?'1px solid var(--border)':'none',fontSize:11}}>
-                      <input type="checkbox" checked={rd._selected!==false} onChange={()=>toggleRider(item._idx,ri)} style={{width:14,height:14,accentColor:'var(--gold)'}} />
-                      <select value={rd.type||'death'} onChange={e=>{const riders=[...(item.riders||[])];riders[ri]={...riders[ri],type:e.target.value};updateField(item._idx,'riders',riders);}} style={{fontSize:10,padding:'2px 4px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:4}}>
-                        <option value="death">Death & TI</option><option value="tpd">TPD</option><option value="ci">CI</option><option value="eci">ECI</option><option value="di">DI</option><option value="accidental">ADD</option><option value="premium_waiver">Waiver</option>
-                      </select>
-                      <input value={rd.riderName||''} onChange={e=>{const riders=[...(item.riders||[])];riders[ri]={...riders[ri],riderName:e.target.value};updateField(item._idx,'riders',riders);}} placeholder="Rider name" style={{flex:1,fontSize:10,padding:'2px 6px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:4}} />
-                      <span style={{fontSize:10,color:'var(--text3)'}}>SA: ${(+rd.sa||0).toLocaleString()}</span>
-                      <span style={{fontSize:10,color:rd.bundled===false?'var(--gold)':'var(--green2)'}}>{rd.bundled===false?'Separate rider':'Part of plan'}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* Notes */}
-              {item.notes && <div style={{fontSize:10,color:'var(--text3)',marginTop:6,fontStyle:'italic'}}>📝 {item.notes}</div>}
+          {/* ── DUPLICATE WARNINGS ── */}
+          {items.filter(it=>it._dupOf).length > 0 && (
+            <div style={{background:'rgba(212,169,106,.06)',border:'1px solid rgba(212,169,106,.15)',borderRadius:8,padding:8,marginBottom:10}}>
+              <div style={{fontSize:10,fontWeight:700,color:'var(--gold)'}}>🔄 Possible duplicates detected — deselected automatically. Re-check to import if needed.</div>
             </div>
-          ))}
+          )}
+
+          {/* ── VIEW: QUICK GRID ── */}
+          <div style={{overflowX:'auto',marginBottom:8}}>
+            <table style={{width:'100%',fontSize:10,borderCollapse:'collapse',minWidth:700}}>
+              <thead><tr style={{background:'var(--bg2)',fontSize:9,textTransform:'uppercase',letterSpacing:'.3px'}}>
+                <th style={{width:28,padding:'5px 4px'}}></th>
+                <th style={{padding:'5px 6px',textAlign:'left',minWidth:140}}>Policy</th>
+                <th style={{padding:'5px 4px',minWidth:90}}>Insurer</th>
+                <th style={{padding:'5px 4px',minWidth:80}}>Category</th>
+                <th style={{padding:'5px 4px',minWidth:80}}>Sub-type</th>
+                <th style={{padding:'5px 4px',textAlign:'right',minWidth:70}}>Premium</th>
+                <th style={{padding:'5px 4px',minWidth:60}}>Freq</th>
+                <th style={{padding:'5px 4px',minWidth:60}}>Method</th>
+                <th style={{padding:'5px 4px',textAlign:'right',minWidth:80}}>Sum Assured</th>
+              </tr></thead>
+              <tbody>
+                {filtered.map((item,i) => (
+                  <tr key={item._idx} style={{borderTop:'1px solid var(--border)',background:item._selected?(item._dupOf?'rgba(212,169,106,.04)':'transparent'):'rgba(0,0,0,.1)',opacity:item._selected?1:.45}}>
+                    <td style={{padding:'4px'}}><input type="checkbox" checked={item._selected} onChange={()=>toggleSelect(item._idx)} style={{width:14,height:14,accentColor:'var(--gold)'}} /></td>
+                    <td style={{padding:'4px 6px'}}>
+                      <input value={item.productName||''} onChange={e=>updateField(item._idx,'productName',e.target.value)} style={{width:'100%',fontSize:10,padding:'2px 4px',background:'transparent',border:'1px solid var(--border)',borderRadius:3,fontWeight:500}} />
+                      {item._dupOf && <div style={{fontSize:8,color:'var(--gold)'}}>🔄 Possible duplicate</div>}
+                      {item._batch > 1 && <div style={{fontSize:7,color:'var(--teal)'}}>Batch {item._batch}</div>}
+                    </td>
+                    <td style={{padding:'4px'}}><select value={item.insurer||''} onChange={e=>updateField(item._idx,'insurer',e.target.value)} style={{width:'100%',fontSize:9,padding:'2px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:3}}>
+                      <option value="">—</option>{INSURER_LIST.map(n=><option key={n} value={n}>{n}</option>)}
+                    </select></td>
+                    <td style={{padding:'4px'}}><select value={item.category||''} onChange={e=>updateField(item._idx,'category',e.target.value)} style={{width:'100%',fontSize:9,padding:'2px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:3}}>
+                      {Object.entries(CATEGORIES).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}
+                    </select></td>
+                    <td style={{padding:'4px'}}><select value={item.subType||''} onChange={e=>updateField(item._idx,'subType',e.target.value)} style={{width:'100%',fontSize:9,padding:'2px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:3}}>
+                      <option value="">—</option>{(SUB_TYPES[item.category]||[]).map(s=><option key={s} value={s}>{s}</option>)}
+                    </select></td>
+                    <td style={{padding:'4px'}}><input type="number" value={item.annualPremium||''} onChange={e=>updateField(item._idx,'annualPremium',parseFloat(e.target.value)||0)} style={{width:'100%',fontSize:10,padding:'2px 4px',background:'transparent',border:'1px solid var(--border)',borderRadius:3,textAlign:'right'}} /></td>
+                    <td style={{padding:'4px'}}><select value={item.premFrequency||'annual'} onChange={e=>updateField(item._idx,'premFrequency',e.target.value)} style={{width:'100%',fontSize:9,padding:'2px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:3}}>
+                      <option value="annual">Annual</option><option value="monthly">Monthly</option><option value="single">Single</option><option value="unknown">?</option>
+                    </select></td>
+                    <td style={{padding:'4px'}}><select value={item.paymentMethod||'Cash'} onChange={e=>updateField(item._idx,'paymentMethod',e.target.value)} style={{width:'100%',fontSize:9,padding:'2px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:3}}>
+                      <option>Cash</option><option>MediSave</option><option>SRS</option><option>CPF OA</option><option>CPF SA</option><option>MediSave+Cash</option>
+                    </select></td>
+                    <td style={{padding:'4px'}}><input type="number" value={item.sumAssured||''} onChange={e=>updateField(item._idx,'sumAssured',parseFloat(e.target.value)||0)} style={{width:'100%',fontSize:10,padding:'2px 4px',background:'transparent',border:'1px solid var(--border)',borderRadius:3,textAlign:'right'}} /></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Expandable detail cards for riders/notes/fund assignment */}
+          {filtered.filter(it => (it.riders||[]).length > 0 || isFundLike(it) || it.notes).length > 0 && (
+            <details style={{marginBottom:8}}>
+              <summary style={{fontSize:10,color:'var(--gold)',cursor:'pointer',fontWeight:600,marginBottom:6}}>📋 Riders, Fund Assignments & Notes ({filtered.filter(it=>(it.riders||[]).length>0||isFundLike(it)||it.notes).length} items)</summary>
+          {filtered.map((item,i) => {
+            if(!(item.riders||[]).length && !isFundLike(item) && !item.notes) return null;
+            return (
+            <div key={item._idx} style={{background:'var(--bg3)',borderRadius:8,padding:10,marginBottom:6,borderLeft:'3px solid '+(isFundLike(item)?'var(--teal)':'var(--gold3)')}}>
+              <div style={{fontSize:11,fontWeight:600,marginBottom:4}}>{item.productName||'Policy'} <span style={{fontSize:9,color:'var(--text3)',fontWeight:400}}>{item.insurer}</span></div>
+
+              {/* Fund classification compact */}
+              {isFundLike(item) && (() => {
+                const dest = item._destination||'standalone';
+                return (<div style={{display:'flex',gap:3,flexWrap:'wrap',marginTop:3}}>
+                  {['standalone','cpfoa','cpfsa','later'].map(o=>{const l={standalone:'📊 UT',cpfoa:'🏦 OA',cpfsa:'🏦 SA',later:'🏷 Later'};return <button key={o} onClick={()=>updateField(item._idx,'_destination',o)} style={{padding:'1px 5px',fontSize:8,borderRadius:3,border:'1px solid '+(dest===o?'var(--teal)':'var(--border)'),background:dest===o?'rgba(91,168,160,.1)':'transparent',color:dest===o?'var(--teal)':'var(--text3)',cursor:'pointer'}}>{l[o]}</button>;})}
+                  {ilpPolicies.map(ilp=><button key={ilp.id} onClick={()=>updateField(item._idx,'_destination','ilp_'+ilp.id)} style={{padding:'1px 5px',fontSize:8,borderRadius:3,border:'1px solid '+(dest==='ilp_'+ilp.id?'var(--gold)':'var(--border)'),background:dest==='ilp_'+ilp.id?'rgba(212,169,106,.1)':'transparent',color:dest==='ilp_'+ilp.id?'var(--gold)':'var(--text3)',cursor:'pointer'}}>🔗 {(ilp.productName||'ILP').substring(0,12)}</button>)}
+                </div>);
+              })()}
+              {/* Riders compact */}
+              {(item.riders||[]).length > 0 && <div style={{display:'flex',gap:3,flexWrap:'wrap',marginTop:3}}>
+                {(item.riders||[]).map((rd,ri)=><span key={ri} onClick={()=>toggleRider(item._idx,ri)} style={{fontSize:7,padding:'1px 4px',borderRadius:3,cursor:'pointer',background:rd._selected!==false?({death:'#5b8fd922',ci:'#c97b9a22',tpd:'#9d8abf22',di:'#5ba8a022'}[rd.type]||'var(--bg2)'):'var(--bg)',color:rd._selected!==false?({death:'#5b8fd9',ci:'#c97b9a',tpd:'#9d8abf',di:'#5ba8a0'}[rd.type]||'var(--text3)'):'var(--text3)',textDecoration:rd._selected===false?'line-through':'none'}}>{{death:'Death',tpd:'TPD',ci:'CI',eci:'ECI',di:'DI',accidental:'ADD',premium_waiver:'Waiver'}[rd.type]||rd.type} ${'+'+(+rd.sa||0).toLocaleString()}</span>)}
+              </div>}
+              {item.notes && <div style={{fontSize:8,color:'var(--text3)',marginTop:2,fontStyle:'italic'}}>{typeof item.notes==='string'?item.notes.substring(0,60)+'…':''}</div>}
+            </div>
+            );
+          })}
+            </details>
+          )}
         </div>
 
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:16,paddingTop:12,borderTop:'1px solid var(--border)'}}>
@@ -6760,6 +7171,7 @@ function Policies() {
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState(null);
   const [staged, setStaged] = useState([]);
+  const [scanProgress, setScanProgress] = useState(null); // {batch, totalBatches, totalFiles, status, pctComplete}
   const [draftBanner, setDraftBanner] = useState(false);
   const [bulkExtracted, setBulkExtracted] = useState(null); // for verification modal
 
@@ -6992,6 +7404,20 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
   };
   const clearStaged = () => { staged.forEach(s=>URL.revokeObjectURL(s.preview)); setStaged([]); };
 
+  // Restore pending extracted policies from sessionStorage (survives refresh)
+  useEffect(() => {
+    try {
+      const saved = sessionStorage.getItem('policylens_pendingExtract');
+      if(saved && !bulkExtracted) {
+        const parsed = JSON.parse(saved);
+        if(Array.isArray(parsed) && parsed.length > 0) {
+          console.log('[Extract] Restored', parsed.length, 'pending policies from session');
+          setBulkExtracted(parsed);
+        }
+      }
+    } catch(e){}
+  }, []);
+
   // Listen for pending scans from welcome screen
   useEffect(() => {
     const handler = () => {
@@ -7005,45 +7431,56 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
     return () => window.removeEventListener('policylens-pending-scan', handler);
   }, []);
 
-  // ── Extract from any files ──
+  // ── Extract from any files — BATCHED PIPELINE ──
+  const BATCH_SIZE = 25; // photos per batch
+
+  // Single-batch extraction (returns processed array)
+  const extractBatch = async (batchFiles) => {
+    const content = [];
+    for(const file of batchFiles){
+      const blocks = await processFile(file);
+      content.push(...blocks);
+    }
+    content.push({type:'text',text:'Extract ALL insurance policies AND financial instruments from these documents. CRITICAL RULES:\n1. Multiple photos may show DIFFERENT PAGES of the SAME policy — correlate them by policy number, insurer+product name, or context clues. Merge information from multiple pages into ONE policy entry.\n2. Multiple photos may also show DIFFERENT policies — extract each as a separate entry.\n3. NEVER skip or merge genuinely different policies. Two policies from the same insurer with different product names = 2 entries.\n4. If the same fund (e.g. "Allianz Global High Payout") appears under DIFFERENT accounts (CPFIS-OA vs Cash), these are SEPARATE entries — differentiate by appending the account type in policyName.\n5. Look across ALL images for related data — page 1 might have the policy name while page 3 has the premium details.\nReturn ONLY valid JSON array or object.'});
+    const text = await callAI(EXTRACT_PROMPT, content, 16000);
+    console.log('[Extract] Raw response:', text.slice(0,500));
+    const parsed = repairJSON(text);
+    let arr;
+    if (Array.isArray(parsed)) arr = parsed;
+    else if (parsed && typeof parsed === 'object') {
+      const wrapperKeys = ['policies','data','results','items','extracted','records'];
+      const found = wrapperKeys.find(k => Array.isArray(parsed[k]));
+      if (found) { arr = parsed[found]; } else { arr = [parsed]; }
+    } else { arr = [parsed]; }
+    arr = arr.filter(p => p && typeof p === 'object' && (p.productName || p.insurer || p.category || p.fdPrincipal));
+    return arr;
+  };
+
   const handleExtract = async (files) => {
     if(!files||!files.length) return;
-    // Keys read internally by callAI()
     setScanning(true);
+    const allFiles = Array.from(files).slice(0,300);
+    const batches = [];
+    for(let i=0; i<allFiles.length; i+=BATCH_SIZE) batches.push(allFiles.slice(i, i+BATCH_SIZE));
+    const totalBatches = batches.length;
+    let allExtracted = [];
+    let firstBatchShown = false;
+
+    setScanProgress({batch:0, totalBatches, totalFiles:allFiles.length, status:'Preparing...', pctComplete:0});
+
     try {
-      const content = [];
-      for(const file of Array.from(files).slice(0,100)){
-        const blocks = await processFile(file);
-        content.push(...blocks);
-      }
-      content.push({type:'text',text:'Extract all insurance policies AND financial instruments (fixed deposits, T-bills, endowments, investments) from these documents. Follow the system instructions for output format. Return ONLY valid JSON array or object.'});
-      const text = await callAI(EXTRACT_PROMPT, content, 16000);
-      console.log('[Extract] Raw response:', text.slice(0,500));
-      const parsed = repairJSON(text);
-      console.log('[Extract] Parsed:', JSON.stringify(parsed).slice(0,500));
-      
-      // Unwrap common AI response shapes: {policies:[...]}, {data:[...]}, or bare array
-      let arr;
-      if (Array.isArray(parsed)) {
-        arr = parsed;
-      } else if (parsed && typeof parsed === 'object') {
-        const wrapperKeys = ['policies','data','results','items','extracted','records'];
-        const found = wrapperKeys.find(k => Array.isArray(parsed[k]));
-        if (found) { arr = parsed[found]; console.log('[Extract] Unwrapped from key:', found); }
-        else { arr = [parsed]; }
-      } else { arr = [parsed]; }
-      // Filter out empty entries
-      arr = arr.filter(p => p && typeof p === 'object' && (p.productName || p.insurer || p.category || p.fdPrincipal));
-      console.log('[Extract] Policy count:', arr.length, arr.length>0 ? 'Fields in first: '+Object.keys(arr[0]||{}).join(',') : '(empty)');
-      
-      if (arr.length === 0) {
-        alert('Could not extract any policy information. Try clearer images or a different document.');
-        clearStaged(); setScanning(false); return;
-      }
+      for(let b=0; b<batches.length; b++) {
+        setScanProgress({batch:b+1, totalBatches, totalFiles:allFiles.length, status:`Extracting batch ${b+1} of ${totalBatches} (${batches[b].length} files)...`, pctComplete:Math.round(b/totalBatches*100)});
+
+        const arr = await extractBatch(batches[b]);
+        if(arr.length === 0 && b === 0 && batches.length === 1) {
+          alert('Could not extract any policy information. Try clearer images or a different document.');
+          clearStaged(); setScanning(false); setScanProgress(null); return;
+        }
 
       // Process all policies uniformly
       const processed = arr.map(p => {
-        const result = {...p, id:genId(), status:p.status||'inforce',
+        const result = {...p, id:genId(), _batch:b+1, status:p.status||'inforce',
           sumAssured:parseFloat(p.sumAssured||p.faceAmount)||0,
           annualPremium:parseFloat(p.annualPremium)||0,
           monthlyBenefit:parseFloat(p.monthlyBenefit)||0,
@@ -7276,7 +7713,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       });
 
       // Merge client info from first policy
-      if(arr[0]) mergeToProfile(arr[0], clientProfile, saveProfile);
+      if(b === 0 && arr[0]) mergeToProfile(arr[0], clientProfile, saveProfile);
 
       // Check for inferred parent plans (ISP detected from rider only)
       const inferredParents = processed.filter(p => p._inferredParent);
@@ -7285,14 +7722,46 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         setTimeout(() => alert('Note: We detected ISP rider(s) without the parent Integrated Shield Plan in your documents.\n\nAuto-created parent plan(s): ' + names + '\n\nPlease review and fill in the missing details (ward class, premium, policy number) for the parent ISP.'), 100);
       }
 
-      if (processed.length === 1) {
-        // Single policy — show preview card, user clicks "Review & Save" to open form
-        setScanResult(processed[0]);
+      allExtracted = [...allExtracted, ...processed];
+
+      // ── DUPLICATE DETECTION ──
+      // Mark items that match existing policies or earlier extractions
+      const existingKeys = new Set(policies.map(p => ((p.insurer||'')+'|'+(p.productName||p.policyName||'')+'|'+Math.round(parseFloat(p.annualPremium)||0)).toLowerCase()));
+      const seenKeys = new Set();
+      allExtracted.forEach(item => {
+        const key = ((item.insurer||'')+'|'+(item.productName||item.policyName||'')+'|'+Math.round(parseFloat(item.annualPremium)||0)).toLowerCase();
+        if(existingKeys.has(key)) {
+          item._dupOf = 'existing'; item._selected = false;
+          console.log('[Extract] Duplicate of existing:', item.productName);
+        } else if(seenKeys.has(key)) {
+          item._dupOf = 'batch'; item._selected = false;
+          console.log('[Extract] Duplicate within batch:', item.productName);
+        }
+        seenKeys.add(key);
+      });
+
+      console.log('[Extract] Batch', b+1, 'done:', processed.length, 'policies. Total so far:', allExtracted.length);
+
+      // Show first batch results immediately so user can start reviewing
+      if(!firstBatchShown) {
+        firstBatchShown = true;
+        if(processed.length === 1 && totalBatches === 1) {
+          setScanResult(processed[0]);
+        } else {
+          setBulkExtracted([...allExtracted]);
+        }
       } else {
-        // Multiple policies — show verification modal
-        setBulkExtracted(processed);
+        // Subsequent batches — append to existing bulk modal
+        setBulkExtracted([...allExtracted]);
       }
-      clearStaged(); setScanning(false);
+
+      setScanProgress({batch:b+1, totalBatches, totalFiles:allFiles.length, status:b+1<totalBatches?`Batch ${b+1} done (${allExtracted.length} policies). Extracting next...`:`All ${totalBatches} batches complete! ${allExtracted.length} policies extracted.`, pctComplete:Math.round((b+1)/totalBatches*100)});
+      }
+
+      // All batches done
+      clearStaged();
+      setScanning(false);
+      setTimeout(()=>setScanProgress(null), 3000);
     } catch(e){
       console.error('[Extract] Error:', e);
       const hasAnthropicKey = !!(await dbGet('settings','anthropicKey').catch(()=>null))?.value;
@@ -7316,7 +7785,12 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         msg += '\n\nCheck your API keys in Settings.';
       }
       alert(msg);
-      setScanning(false);
+      // If some batches succeeded, show partial results
+      if(allExtracted.length > 0) {
+        setBulkExtracted([...allExtracted]);
+        alert('⚠️ Partial extraction: ' + allExtracted.length + ' policies extracted before error. You can review these now.');
+      }
+      setScanning(false); setScanProgress(null);
     }
   };
 
@@ -7345,6 +7819,21 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
           <button className="btn-secondary btn-sm" onClick={()=>uploadRef.current?.click()} disabled={scanning}>
             {scanning?'Extracting…':'📄 Upload'}
           </button>
+          <button className="btn-secondary btn-sm" onClick={async()=>{
+            try {
+              const items = await navigator.clipboard.read();
+              const files = [];
+              for(const item of items) {
+                for(const type of item.types) {
+                  if(type.startsWith('image/')) { const blob = await item.getType(type); files.push(new File([blob],'paste_'+Date.now()+'.'+type.split('/')[1],{type})); }
+                }
+              }
+              if(files.length > 0) { handleExtract(files); }
+              else { const text = await navigator.clipboard.readText(); if(text && text.length > 20) { handleExtract([new File([text],'paste.txt',{type:'text/plain'})]); } else { alert('No images or text found in clipboard. Copy a screenshot or policy text first.'); } }
+            } catch(e) { alert('Clipboard access denied. Try Ctrl+V / Cmd+V on the drop zone instead.'); }
+          }} disabled={scanning} title="Paste from clipboard">
+            📋 Paste
+          </button>
           <button className="btn-primary btn-sm" onClick={()=>{setEditing(null);setScanResult(null);setShowForm(true)}}>+ Add</button>
           {selected.size > 0 && <button className="btn-danger btn-sm" onClick={deleteSelected}>🗑 Delete ({selected.size})</button>}
           {policies.length > 0 && selected.size === 0 && <button className="btn-danger btn-sm" style={{opacity:.7}} onClick={async()=>{
@@ -7372,6 +7861,23 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
               <button className="btn-danger btn-sm" onClick={dismissDraft}>Discard</button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Batch extraction progress bar */}
+      {scanProgress && (
+        <div className="card" style={{marginBottom:12,padding:14,borderLeft:'3px solid var(--gold)'}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
+            <div style={{fontSize:12,fontWeight:600,color:'var(--gold)'}}>✨ AI Extraction</div>
+            <div style={{fontSize:11,color:'var(--text3)'}}>{scanProgress.batch}/{scanProgress.totalBatches} batches · {scanProgress.totalFiles} files</div>
+          </div>
+          <div style={{height:6,background:'var(--bg4)',borderRadius:3,overflow:'hidden',marginBottom:6}}>
+            <div style={{height:'100%',width:scanProgress.pctComplete+'%',background:'linear-gradient(90deg,var(--gold),var(--green2))',borderRadius:3,transition:'width .5s ease'}} />
+          </div>
+          <div style={{fontSize:10,color:'var(--text2)'}}>{scanProgress.status}</div>
+          {scanProgress.pctComplete > 0 && scanProgress.pctComplete < 100 && (
+            <div style={{fontSize:9,color:'var(--text3)',marginTop:4}}>You can review extracted policies below while remaining batches process</div>
+          )}
         </div>
       )}
 
@@ -7622,7 +8128,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       </>)}
 
       {/* Bulk Verification Modal */}
-      {bulkExtracted && <BulkVerifyModal extracted={bulkExtracted} repo={repo} policies={policies} onSavePolicy={savePolicy} onClose={()=>setBulkExtracted(null)} onAccept={async(selected) => {
+      {bulkExtracted && <BulkVerifyModal extracted={bulkExtracted} repo={repo} policies={policies} onSavePolicy={savePolicy} onClose={()=>{try{sessionStorage.removeItem('policylens_pendingExtract')}catch(e){}setBulkExtracted(null)}} onAccept={async(selected) => {
         let count = 0;
         for(const p of selected) {
           const result = {...p, id:genId()};
