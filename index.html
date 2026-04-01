@@ -2,9 +2,14 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<meta name="screen-orientation" content="portrait">
+<meta name="x5-orientation" content="portrait">
+<meta name="browsermode" content="application">
 <title>PolicyLens V1.0</title>
 <script>window.onerror=function(m,s){if(!s||m==='Script error.')return true;return false};window.onunhandledrejection=function(e){if(!e||!e.reason)return;var r=String(e.reason);if(r==='Script error.')e.preventDefault();};
+// Lock to portrait
+try{if(screen.orientation&&screen.orientation.lock)screen.orientation.lock('portrait').catch(function(){});}catch(e){}
 // Suppress noisy library warnings
 (function(){var _warn=console.warn,_error=console.error;
 console.warn=function(){var m=arguments[0]||'';if(typeof m==='string'&&(m.includes('gotrue-js')||m.includes('lock:')||m.includes('not released within')||m.includes('this.lock')))return;_warn.apply(console,arguments)};
@@ -40,6 +45,9 @@ if(!navigator.locks){navigator.locks={request:function(name,opts,cb){if(typeof o
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{overflow-x:hidden;width:100%}
+@media screen and (orientation:landscape) and (max-height:500px) {
+  body::after{content:'Please rotate to portrait';position:fixed;inset:0;z-index:99999;background:#0b0f1a;color:#d4a96a;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:600}
+}
 :root{
 --bg:#0b0f1a;--bg2:#111827;--bg3:#171f2e;--bg4:#1f2a3d;
 --text:#e8dcc8;--text2:#a39580;--text3:#6b6050;
