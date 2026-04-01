@@ -39,6 +39,7 @@ if(!navigator.locks){navigator.locks={request:function(name,opts,cb){if(typeof o
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
+html,body{overflow-x:hidden;width:100%}
 :root{
 --bg:#0b0f1a;--bg2:#111827;--bg3:#171f2e;--bg4:#1f2a3d;
 --text:#e8dcc8;--text2:#a39580;--text3:#6b6050;
@@ -4040,18 +4041,18 @@ function Header() {
   ];
   return (
     <div style={{background:'var(--bg2)',borderBottom:'1px solid var(--border)',flexShrink:0}}>
-      {/* ── Row 1: Logo + client + help + sign out ── */}
-      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'8px 12px 4px'}}>
-        <div style={{display:'flex',alignItems:'center',gap:6}}>
-          <LogoMark size={22} />
-          <span style={{fontWeight:700,fontSize:15,letterSpacing:'-0.3px',color:'#d4a96a'}}>PolicyLens</span>
-          <span style={{fontSize:9,color:'var(--gold3)',fontWeight:600,background:'var(--gold-dim)',padding:'1px 5px',borderRadius:4}}>V1.0</span>
-          {clientName && <span style={{fontSize:11,color:'var(--text3)',marginLeft:4,maxWidth:120,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>— {clientName}</span>}
+      {/* ── Row 1: Logo + client + actions ── */}
+      <div style={{display:'flex',alignItems:'center',padding:'8px 8px 4px',gap:4,overflow:'hidden'}}>
+        <div style={{display:'flex',alignItems:'center',gap:4,minWidth:0,flex:'1 1 auto',overflow:'hidden'}}>
+          <LogoMark size={20} />
+          <span style={{fontWeight:700,fontSize:14,letterSpacing:'-0.3px',color:'#d4a96a',flexShrink:0}}>PolicyLens</span>
+          <span style={{fontSize:8,color:'var(--gold3)',fontWeight:600,background:'var(--gold-dim)',padding:'1px 4px',borderRadius:3,flexShrink:0}}>V1.0</span>
+          {clientName && <span style={{fontSize:10,color:'var(--text3)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',minWidth:0}}>— {clientName}</span>}
         </div>
-        <div style={{display:'flex',alignItems:'center',gap:6}}>
+        <div style={{display:'flex',alignItems:'center',gap:4,flexShrink:0}}>
           <button onClick={()=>window.dispatchEvent(new Event('policylens-open-guide'))}
             title="Guide"
-            style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.2)',width:30,height:30,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:14,fontWeight:700,flexShrink:0}}>
+            style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.2)',width:28,height:28,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:13,fontWeight:700,flexShrink:0}}>
             ?
           </button>
           <button onClick={async()=>{
@@ -4066,11 +4067,12 @@ function Header() {
             window.location.reload();
           }}
             title="Wipe All Data"
-            style={{background:'rgba(239,83,80,.08)',color:'var(--red)',border:'1px solid rgba(239,83,80,.15)',width:30,height:30,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:12,fontWeight:700,flexShrink:0}}>
+            style={{background:'rgba(239,83,80,.08)',color:'var(--red)',border:'1px solid rgba(239,83,80,.15)',width:28,height:28,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:11,fontWeight:700,flexShrink:0}}>
             🗑
           </button>
           <button onClick={()=>window.authLogout&&authLogout()}
-            style={{background:'transparent',color:'var(--text3)',border:'1px solid var(--border2)',padding:'5px 10px',borderRadius:8,fontSize:11,fontWeight:400,cursor:'pointer',whiteSpace:'nowrap'}}>
+            title="Sign Out"
+            style={{background:'transparent',color:'var(--text3)',border:'1px solid var(--border2)',padding:'4px 8px',borderRadius:6,fontSize:10,cursor:'pointer',whiteSpace:'nowrap',flexShrink:0}}>
             Sign Out
           </button>
         </div>
@@ -9125,7 +9127,7 @@ function FundLookup() {
           <h2 style={{fontSize:18,fontWeight:600}}>Fund & Instrument Risk Lookup</h2>
           <p style={{fontSize:12,color:'var(--text3)'}}>iFAST universe — {FUND_DB.length.toLocaleString()} instruments • Risk scale 1–10</p>
         </div>
-        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search by name or ISIN…" style={{width:260}} />
+        <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search by name or ISIN…" style={{flex:'1 1 200px',maxWidth:300}} />
       </div>
 
       {/* Asset Composition chips — matches FundLens donut */}
@@ -9176,7 +9178,7 @@ function FundLookup() {
       <div style={{display:'flex',gap:8,marginBottom:12,flexWrap:'wrap',alignItems:'center'}}>
         <div>
           <div style={{fontSize:10,fontWeight:600,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:3}}>Sector</div>
-          <select value={sectorFilter} onChange={e=>setSectorFilter(e.target.value)} style={{fontSize:12,minWidth:220}}>
+          <select value={sectorFilter} onChange={e=>setSectorFilter(e.target.value)} style={{fontSize:12,minWidth:160,maxWidth:'100%'}}>
             <option value="all">All Sectors</option>
             {sectors.map(s=><option key={s} value={s}>{SECTOR_LABELS[s]||s}</option>)}
           </select>
@@ -9206,16 +9208,15 @@ function FundLookup() {
       </div>
 
       <div className="card" style={{padding:0,overflow:'hidden',overflowX:'auto'}}>
-        <table>
+        <table style={{minWidth:0}}>
           <thead><tr>
-            <th>Name</th>
-            <th>Asset Composition</th>
-            <th>Country</th>
-            <th>Sector</th>
+            <th style={{minWidth:140}}>Name</th>
+            <th>Type</th>
+            <th>Region</th>
+            <th className="desktop-only">Sector</th>
             <th style={{textAlign:'center'}}>Risk</th>
-            <th>Level</th>
-            <th>Inception</th>
-            <th>ISIN</th>
+            <th className="desktop-only">Inception</th>
+            <th className="desktop-only">ISIN</th>
           </tr></thead>
           <tbody>
             {paged.map((f,i) => {
@@ -9225,25 +9226,24 @@ function FundLookup() {
               const rCol = riskColor(risk);
               return (
                 <tr key={page*PAGE_SIZE+i}>
-                  <td style={{fontWeight:500,maxWidth:320,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{name}</td>
+                  <td style={{fontWeight:500,maxWidth:240,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{name}</td>
                   <td>
-                    <span className="badge" style={{background:acCol+'22',color:acCol,fontSize:10}}>
+                    <span className="badge" style={{background:acCol+'22',color:acCol,fontSize:9,padding:'1px 5px'}}>
                       {ASSET_LABELS[ac]||ac}
                     </span>
                   </td>
                   <td>
-                    <span style={{fontSize:12,display:'inline-flex',alignItems:'center',gap:4}}>
+                    <span style={{fontSize:11,display:'inline-flex',alignItems:'center',gap:3}}>
                       <span style={{width:6,height:6,borderRadius:'50%',background:geoCol,flexShrink:0}} />
                       {REGION_LABELS[region]||region}
                     </span>
                   </td>
-                  <td style={{fontSize:11,color:'var(--text2)'}}>{SECTOR_LABELS[sector]||sector}</td>
+                  <td className="desktop-only" style={{fontSize:11,color:'var(--text2)'}}>{SECTOR_LABELS[sector]||sector}</td>
                   <td style={{textAlign:'center'}}>
-                    <div style={{display:'inline-flex',alignItems:'center',justifyContent:'center',width:28,height:28,borderRadius:'50%',background:rCol+'22',color:rCol,fontWeight:700,fontSize:12}}>{risk}</div>
+                    <div style={{display:'inline-flex',alignItems:'center',justifyContent:'center',width:26,height:26,borderRadius:'50%',background:rCol+'22',color:rCol,fontWeight:700,fontSize:11}}>{risk}</div>
                   </td>
-                  <td><span className="badge" style={{background:rCol+'22',color:rCol}}>{riskLabel(risk)}</span></td>
-                  <td style={{fontSize:11,color:'var(--text3)'}}>{inception||'—'}</td>
-                  <td className="mono" style={{fontSize:10,color:'var(--text3)'}}>{isin||'—'}</td>
+                  <td className="desktop-only" style={{fontSize:10,color:'var(--text3)'}}>{inception||'—'}</td>
+                  <td className="desktop-only mono" style={{fontSize:9,color:'var(--text3)'}}>{isin||'—'}</td>
                 </tr>
               );
             })}
