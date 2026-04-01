@@ -3998,6 +3998,35 @@ function App() {
     setClientName(p.name||'');
     await dbPut('settings',{key:'clientProfile',value:p});
     await dbPut('settings',{key:'clientName',value:p.name||''});
+    // ── GLOBAL SYNC: Recalculate ageAtEntry for all policies when DOB changes ──
+    if(p.dob) {
+      const dob = new Date(p.dob);
+      if(!isNaN(dob.getTime())) {
+        let updated = 0;
+        for(const pol of policies) {
+          if(!pol.inceptionDate) continue;
+          const inception = new Date(pol.inceptionDate);
+          if(isNaN(inception.getTime())) continue;
+          const entryAge = Math.floor((inception.getTime()-dob.getTime())/31557600000);
+          if(entryAge <= 0 || entryAge >= 100) continue;
+          const needsUpdate = !pol.ageAtEntry || !pol.premStartAge || 
+            (pol.inceptionDate && Math.abs(parseInt(pol.ageAtEntry||0)-entryAge) > 1);
+          if(needsUpdate) {
+            const upd = {...pol, ageAtEntry:String(entryAge), premStartAge:String(entryAge)};
+            if(parseInt(pol.premTerm)>0 && !pol.premEndAge) upd.premEndAge = String(entryAge+parseInt(pol.premTerm));
+            else if(parseInt(pol.premTerm)>0) upd.premEndAge = String(entryAge+parseInt(pol.premTerm));
+            await dbPut('policies',upd);
+            updated++;
+          }
+        }
+        if(updated > 0) {
+          console.log('[Sync] Updated ageAtEntry for '+updated+' policies from DOB');
+          // Reload policies
+          const all = await dbGetAll('policies');
+          setPolicies(all);
+        }
+      }
+    }
   };
 
   const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,deletePolicy,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,tab,setTab};
@@ -6919,6 +6948,14 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         if(result.ageAtEntry && result.premTerm && !result.premEndAge) result.premEndAge = String(parseInt(result.ageAtEntry)+parseInt(result.premTerm));
         if(result.ageAtEntry && !result.premStartAge) result.premStartAge = result.ageAtEntry;
         if(result.premStartAge && !result.ageAtEntry) result.ageAtEntry = result.premStartAge;
+        // ── AUTO-CALC ageAtEntry from inceptionDate + client DOB ──
+        if(!result.ageAtEntry && result.inceptionDate && clientProfile?.dob) {
+          const entryAge = Math.floor((new Date(result.inceptionDate).getTime()-new Date(clientProfile.dob).getTime())/31557600000);
+          if(entryAge > 0 && entryAge < 100) { result.ageAtEntry = String(entryAge); result.premStartAge = String(entryAge); 
+            if(parseInt(result.premTerm)>0) result.premEndAge = String(entryAge+parseInt(result.premTerm));
+            console.log('[Extract] Auto-calc ageAtEntry from DOB:', result.productName, '→ age', entryAge);
+          }
+        }
         if(result.highlights && typeof result.highlights === 'string') try { result.highlights = JSON.parse(result.highlights); } catch(e){}
         if(!Array.isArray(result.highlights)) result.highlights = [];
 
@@ -7544,11 +7581,38 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
     // Sync premSingle from premiumStructure on load
     if(init.premiumStructure==='Single Premium' || init.premFrequency==='single') { init.premSingle = true; init.premFrequency = 'single'; }
     if(!init.premFrequency) init.premFrequency = init.premSingle ? 'single' : 'annual';
+    // ── AUTO-CALC ageAtEntry from inceptionDate + profile DOB on load ──
+    if(!init.ageAtEntry && !init.premStartAge && init.inceptionDate && _cp?.dob) {
+      const entryAge = Math.floor((new Date(init.inceptionDate).getTime()-new Date(_cp.dob).getTime())/31557600000);
+      if(entryAge > 0 && entryAge < 100) { init.ageAtEntry = String(entryAge); init.premStartAge = String(entryAge); }
+    }
+    // ── SYNC premStartAge ↔ ageAtEntry on load ──
+    if(init.ageAtEntry && !init.premStartAge) init.premStartAge = init.ageAtEntry;
+    if(init.premStartAge && !init.ageAtEntry) init.ageAtEntry = init.premStartAge;
+    // ── AUTO-CALC premEndAge from premStartAge + premTerm on load ──
+    if(init.premStartAge && init.premTerm && !init.premEndAge) init.premEndAge = String(parseInt(init.premStartAge)+parseInt(init.premTerm));
     return init;
   });
 
   const set = (k,v) => setForm(f=>{
     const nf={...f,[k]:v};
+    // ── AUTO-CALC ageAtEntry from inceptionDate + profile DOB ──
+    if((k==='inceptionDate' || k==='dob') && _cp?.dob) {
+      const inception = k==='inceptionDate' ? v : nf.inceptionDate;
+      const dob = _cp.dob;
+      if(inception && dob) {
+        const entryAge = Math.floor((new Date(inception).getTime()-new Date(dob).getTime())/31557600000);
+        if(entryAge > 0 && entryAge < 100) {
+          nf.ageAtEntry = String(entryAge);
+          nf.premStartAge = String(entryAge);
+          // Recalc premEndAge if premTerm exists
+          if(parseInt(nf.premTerm) > 0) nf.premEndAge = String(entryAge + parseInt(nf.premTerm));
+        }
+      }
+    }
+    // ── SYNC ageAtEntry ↔ premStartAge bidirectionally ──
+    if(k==='ageAtEntry' && v) { nf.premStartAge = v; if(parseInt(nf.premTerm)>0) nf.premEndAge = String(parseInt(v)+parseInt(nf.premTerm)); }
+    if(k==='premStartAge' && v) { nf.ageAtEntry = v; }
     // Auto-populate riders when subType changes
     if(k==='subType' && DEFAULT_RIDERS[v] && (!f.riders || f.riders.length===0)){
       nf.riders = DEFAULT_RIDERS[v].map(r=>({...r,id:'r_'+Date.now()+Math.random().toString(36).slice(2,5)}));
