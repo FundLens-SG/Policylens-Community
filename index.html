@@ -6526,10 +6526,24 @@ function mergeToProfile(extracted, currentProfile, saveProfile) {
 // ═══════════════════════════════════════════════════════════════
 // BULK VERIFICATION MODAL — shows extracted policies + corrections
 // ═══════════════════════════════════════════════════════════════
-function BulkVerifyModal({extracted, repo, onAccept, onClose}) {
+function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePolicy, onAccept, onClose}) {
   const [items, setItems] = useState(extracted.map((p,i) => ({
     ...p, _idx:i, _selected:true, _corrections:[], _repoMatch:null,
+    _destination: 'standalone', // 'standalone' | 'cpfoa' | 'cpfsa' | 'ilp_POLICYID'
   })));
+
+  // Detect fund-like items
+  const isFundLike = (item) => {
+    const name = (item.productName||item.policyName||'').toLowerCase();
+    const sub = (item.subType||'').toLowerCase();
+    return sub === 'unit trust' || sub === 'other' || 
+      (!item.category || item.category === 'investment') && 
+      !sub.includes('ilp') && !sub.includes('whole') && !sub.includes('term') &&
+      ['fund','dis','acc','payout','income','growth','equity','bond','bridge','global'].some(kw => name.includes(kw));
+  };
+
+  // Get existing ILP policies
+  const ilpPolicies = (existingPolicies||[]).filter(p => p.subType==='ILP (Investment)' || p.subType==='ILP (Protection)');
 
   // Find repo matches for each item
   useEffect(() => {
@@ -6558,16 +6572,53 @@ function BulkVerifyModal({extracted, repo, onAccept, onClose}) {
     return {...it, productName:r.productName, insurer:r.insurer, category:r.category, subType:r.subType, currency:r.currency||it.currency, _appliedRepo:true};
   }));
 
-  const handleAccept = () => {
-    const selected = items.filter(it => it._selected).map(it => {
+  const handleAccept = async () => {
+    const standalone = [];
+    const ilpMerges = {}; // {policyId: [fund1, fund2, ...]}
+
+    items.filter(it => it._selected).forEach(it => {
       const p = {...it};
-      // Clean up internal fields
-      delete p._idx; delete p._selected; delete p._corrections; delete p._repoMatch; delete p._appliedRepo;
-      // Filter out deselected riders
+      delete p._idx; delete p._selected; delete p._corrections; delete p._repoMatch; delete p._appliedRepo; delete p._destination;
       if(p.riders) p.riders = p.riders.filter(r => r._selected !== false).map(r => { const c={...r}; delete c._selected; return c; });
-      return p;
+
+      if(it._destination && it._destination.startsWith('ilp_')) {
+        const ilpId = it._destination.replace('ilp_','');
+        if(!ilpMerges[ilpId]) ilpMerges[ilpId] = [];
+        ilpMerges[ilpId].push({fundName: p.productName||p.policyName||'Unknown Fund', allocation: 0, riskRating: ''});
+      } else if(it._destination === 'cpfoa') {
+        p.category = 'investment'; p.subType = 'Unit Trust'; p.paymentMethod = 'CPF OA';
+        standalone.push(p);
+      } else if(it._destination === 'cpfsa') {
+        p.category = 'investment'; p.subType = 'Unit Trust'; p.paymentMethod = 'CPF SA';
+        standalone.push(p);
+      } else {
+        standalone.push(p);
+      }
     });
-    onAccept(selected);
+
+    // Merge funds into existing ILPs
+    for(const [ilpId, funds] of Object.entries(ilpMerges)) {
+      const ilp = (existingPolicies||[]).find(p => p.id === ilpId);
+      if(ilp && onSavePolicy) {
+        const existing = ilp.fundAllocations || [];
+        const merged = [...existing];
+        funds.forEach(f => {
+          if(!merged.some(e => e.fundName === f.fundName)) {
+            // Auto-allocate: divide 100% equally if no existing, else add with 0%
+            merged.push({...f, allocation: existing.length===0 ? Math.round(100/funds.length) : 0});
+          }
+        });
+        await onSavePolicy({...ilp, fundAllocations: merged});
+      }
+    }
+
+    if(Object.keys(ilpMerges).length > 0) {
+      const fundCount = Object.values(ilpMerges).flat().length;
+      const ilpCount = Object.keys(ilpMerges).length;
+      alert(`Linked ${fundCount} fund${fundCount>1?'s':''} to ${ilpCount} ILP polic${ilpCount>1?'ies':'y'}. Review fund allocations in the policy form.`);
+    }
+
+    onAccept(standalone);
   };
 
   return (
@@ -6608,6 +6659,43 @@ function BulkVerifyModal({extracted, repo, onAccept, onClose}) {
                 </div>
               )}
               {item._appliedRepo && <div style={{fontSize:10,color:'var(--green2)',marginBottom:6}}>✓ Repository data applied</div>}
+
+              {/* Fund destination selector — shown for fund-like items */}
+              {isFundLike(item) && (
+                <div style={{background:'rgba(91,168,160,.06)',border:'1px solid rgba(91,168,160,.2)',borderRadius:8,padding:10,marginBottom:8}}>
+                  <div style={{fontSize:10,fontWeight:700,color:'var(--teal)',marginBottom:6}}>📌 Where does this fund belong?</div>
+                  <div style={{display:'flex',gap:4,flexWrap:'wrap'}}>
+                    {[
+                      {val:'standalone',label:'Standalone Unit Trust',icon:'📊'},
+                      {val:'cpfoa',label:'CPF-IS (OA)',icon:'🏦'},
+                      {val:'cpfsa',label:'CPF-IS (SA)',icon:'🏦'},
+                    ].map(opt => (
+                      <button key={opt.val} onClick={()=>updateField(item._idx,'_destination',opt.val)}
+                        style={{padding:'5px 10px',fontSize:10,borderRadius:6,border:'1px solid '+(item._destination===opt.val?'var(--teal)':'var(--border)'),
+                          background:item._destination===opt.val?'rgba(91,168,160,.15)':'var(--bg2)',
+                          color:item._destination===opt.val?'var(--teal)':'var(--text2)',cursor:'pointer',fontWeight:item._destination===opt.val?600:400}}>
+                        {opt.icon} {opt.label}
+                      </button>
+                    ))}
+                    {ilpPolicies.length > 0 && (<>
+                      <div style={{width:'100%',fontSize:9,color:'var(--text3)',marginTop:4,marginBottom:2}}>Or link to an existing ILP:</div>
+                      {ilpPolicies.map(ilp => (
+                        <button key={ilp.id} onClick={()=>updateField(item._idx,'_destination','ilp_'+ilp.id)}
+                          style={{padding:'5px 10px',fontSize:10,borderRadius:6,border:'1px solid '+(item._destination==='ilp_'+ilp.id?'var(--gold)':'var(--border)'),
+                            background:item._destination==='ilp_'+ilp.id?'rgba(212,169,106,.12)':'var(--bg2)',
+                            color:item._destination==='ilp_'+ilp.id?'var(--gold)':'var(--text2)',cursor:'pointer',fontWeight:item._destination==='ilp_'+ilp.id?600:400}}>
+                          🔗 {ilp.insurer?ilp.insurer+' — ':''}{ilp.productName||ilp.policyName||'ILP'}
+                        </button>
+                      ))}
+                    </>)}
+                  </div>
+                  {item._destination && item._destination.startsWith('ilp_') && (
+                    <div style={{fontSize:10,color:'var(--gold)',marginTop:6}}>
+                      ✓ Will be added to this ILP's fund allocations (review % in policy form after import)
+                    </div>
+                  )}
+                </div>
+              )}
 
               {/* Riders */}
               {(item.riders||[]).length > 0 && (
@@ -6735,7 +6823,8 @@ function Policies() {
 
 For EACH policy or instrument, return a JSON object with:
 
-CORE: insurer, productName, policyName, policyNumber, category (protection/savings/health/investment/retirement/maternity/cash_investments/other_assets), subType (Term Life/Whole Life/Universal Life (UL)/Indexed UL (IUL)/Variable UL (VUL)/Critical Illness/Personal Accident/Disability Income/Long-term Care/Endowment/Lifetime Endowment/Education Plan/Short-term Endowment/Integrated Shield Plan/Hospital Income/ILP (Protection)/ILP (Investment)/Retirement/Annuity/Maternity Coverage/Fixed Deposit/T-bill/Singapore Savings Bond/Corporate Bond/Money Market/Property/Stocks\/Equities/Gold\/Precious Metals/Fixed Coupon Note (FCN)/Equity Linked Note (ELN)/Options\/Futures/Cryptocurrency/Other), currency (default SGD), sumAssured (number), annualPremium (number), premFrequency (annual/monthly/single/unknown — if document does not clearly state frequency, use unknown), premiumStructure (Single Premium/Regular Premium/Limited Pay/Flexible Premium), paymentMethod (Cash/MediSave/SRS/MediSave+Cash/CPF OA)
+CORE: insurer, productName, policyName, policyNumber, category (protection/savings/health/investment/retirement/maternity/cash_investments/other_assets), subType (Term Life/Whole Life/Universal Life (UL)/Indexed UL (IUL)/Variable UL (VUL)/Critical Illness/Personal Accident/Disability Income/Long-term Care/Endowment/Lifetime Endowment/Education Plan/Short-term Endowment/Integrated Shield Plan/Hospital Income/ILP (Protection)/ILP (Investment)/Unit Trust/Retirement/Annuity/Maternity Coverage/Fixed Deposit/T-bill/Singapore Savings Bond/Corporate Bond/Money Market/Property/Stocks\/Equities/Gold\/Precious Metals/Fixed Coupon Note (FCN)/Equity Linked Note (ELN)/Options\/Futures/Cryptocurrency/Other), currency (default SGD), sumAssured (number), annualPremium (number), premFrequency (annual/monthly/single/unknown — if document does not clearly state frequency, use unknown), premiumStructure (Single Premium/Regular Premium/Limited Pay/Flexible Premium), paymentMethod (Cash/MediSave/SRS/MediSave+Cash/CPF OA/CPF SA)
+IMPORTANT: If document mentions CPFIS-OA, CPF-IS or CPF Investment Scheme, set paymentMethod to "CPF OA" or "CPF SA" accordingly. Standalone fund holdings (e.g. "Allianz Global High Payout", "First Sentier Bridge") without an insurance wrapper are category:investment, subType:"Unit Trust". If it mentions CPFIS, still category:investment subType:"Unit Trust".
 
 FIXED DEPOSITS / T-BILLS / SSB (category: cash_investments):
 - insurer = bank name (e.g. "DBS", "OCBC", "ICBC", "BOC", "Standard Chartered")
@@ -7079,6 +7168,26 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
           else if(parseInt(result.premTerm) > 1) result.premFrequency = 'annual';
           else if(result.category === 'retirement' || result.category === 'savings') result.premFrequency = 'annual';
           else result.premFrequency = result.premFrequency || 'unknown';
+        }
+
+        // ── AUTO-DETECT standalone fund entries ──
+        // Fund names with no insurance category → classify as Unit Trust
+        if(result.subType === 'Other' || (!result.category && !result.subType)) {
+          const name = (result.productName||result.policyName||'').toLowerCase();
+          const fundKeywords = ['fund','dis','acc','sgd','usd','payout','income','growth','equity','bond','bridge','global','asia','dividend','balanced'];
+          const isFundName = fundKeywords.filter(kw => name.includes(kw)).length >= 2;
+          const hasCPFIS = name.includes('cpfis') || name.includes('cpf-is') || (result.paymentMethod||'').toLowerCase().includes('cpf');
+          if(isFundName || hasCPFIS) {
+            result.category = 'investment';
+            result.subType = 'Unit Trust';
+            if(hasCPFIS && !result.paymentMethod) result.paymentMethod = name.includes('cpfis-sa')||name.includes('cpf sa')?'CPF SA':'CPF OA';
+            // Use fund manager as insurer if no insurer detected
+            const fundManagers = ['Allianz','First Sentier','Aberdeen','BlackRock','Fidelity','Franklin','JPMorgan','Manulife','Neuberger','PIMCO','Schroder','Vanguard','Dimensional','Lion Global','Eastspring','Fullerton','Nikko'];
+            if(!result.insurer) {
+              for(const fm of fundManagers) { if(name.includes(fm.toLowerCase())) { result.insurer = fm; break; } }
+            }
+            console.log('[Extract] Auto-classified as Unit Trust:', result.productName);
+          }
         }
 
         // ── MAP "Fully Paid" to appropriate status ──
@@ -7505,7 +7614,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       </>)}
 
       {/* Bulk Verification Modal */}
-      {bulkExtracted && <BulkVerifyModal extracted={bulkExtracted} repo={repo} onClose={()=>setBulkExtracted(null)} onAccept={async(selected) => {
+      {bulkExtracted && <BulkVerifyModal extracted={bulkExtracted} repo={repo} policies={policies} onSavePolicy={savePolicy} onClose={()=>setBulkExtracted(null)} onAccept={async(selected) => {
         let count = 0;
         for(const p of selected) {
           const result = {...p, id:genId()};
@@ -8241,13 +8350,13 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                 </div>
 
                 {/* Premium Breakdown Table */}
-                <div style={{borderRadius:8,border:'1px solid var(--border)',overflow:'hidden',marginBottom:10}}>
-                  <table style={{width:'100%',fontSize:12,borderCollapse:'collapse'}}>
+                <div style={{borderRadius:8,border:'1px solid var(--border)',overflow:'hidden',marginBottom:10,overflowX:'auto'}}>
+                  <table style={{width:'100%',fontSize:11,borderCollapse:'collapse',minWidth:360}}>
                     <thead><tr style={{background:'var(--bg2)'}}>
-                      <th style={{textAlign:'left',padding:'8px 10px'}}>Component</th>
-                      <th style={{textAlign:'right',padding:'8px 10px'}}>Annual ($)</th>
-                      <th style={{textAlign:'right',padding:'8px 10px'}}>MediSave</th>
-                      <th style={{textAlign:'right',padding:'8px 10px'}}>Cash</th>
+                      <th style={{textAlign:'left',padding:'6px 8px',minWidth:120}}>Component</th>
+                      <th style={{textAlign:'right',padding:'6px 8px',whiteSpace:'nowrap'}}>Annual ($)</th>
+                      <th style={{textAlign:'right',padding:'6px 8px',whiteSpace:'nowrap'}}>MediSave</th>
+                      <th style={{textAlign:'right',padding:'6px 8px',whiteSpace:'nowrap'}}>Cash</th>
                     </tr></thead>
                     <tbody>
                       <tr style={{borderTop:'1px solid var(--border)'}}>
