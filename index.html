@@ -94,9 +94,9 @@ label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;lett
 
 /* ══════ MOBILE OPTIMISATION ══════ */
 @media(max-width:640px){
-  .card{padding:12px;border-radius:10px}
-  .card-sm{padding:10px}
-  table th,table td{padding:6px 8px;font-size:11px}
+  .card{padding:10px;border-radius:10px}
+  .card-sm{padding:8px}
+  table th,table td{padding:5px 6px;font-size:11px}
   h2{font-size:16px!important}
   h3{font-size:13px!important}
   input,select,textarea{font-size:14px!important;padding:8px 10px!important}
@@ -104,6 +104,7 @@ label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;lett
   .field{margin-bottom:10px}
   label{font-size:10px!important}
   .resp-2col,.resp-5col,.resp-side{grid-template-columns:1fr!important}
+  canvas{max-width:100%!important}
 }
 @media(max-width:480px){
   .grid-2,.grid-3{grid-template-columns:1fr!important;gap:8px!important}
@@ -5087,43 +5088,43 @@ new Chart(document.getElementById('retChart'),{type:'bar',data:{labels:${JSON.st
 
   return (
     <div className="card" style={{marginBottom:16,background:'linear-gradient(135deg,var(--bg2),rgba(212,169,106,.03))',border:'1px solid rgba(212,169,106,.15)'}}>
-      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:12,flexWrap:'wrap',gap:6}}>
         <div>
           <h3 style={{fontSize:14,fontWeight:600}}>Retirement Income Dashboard</h3>
           <p style={{fontSize:10,color:'var(--text3)'}}>CPF LIFE + policy income + other sources vs desired lifestyle</p>
         </div>
-        <div style={{display:'flex',gap:6}}>
-          <button className="btn-secondary btn-sm" onClick={()=>setShareMode(!shareMode)} style={{fontSize:10}}>{shareMode?'Hide Preview':'👁 Preview'}</button>
-          <button className="btn-primary btn-sm" onClick={handleShare} style={{fontSize:10}}>📤 Share Summary</button>
+        <div style={{display:'flex',gap:6,flexShrink:0}}>
+          <button className="btn-secondary btn-sm" onClick={()=>setShareMode(!shareMode)} style={{fontSize:10}}>{shareMode?'Hide':'👁 Preview'}</button>
+          <button className="btn-primary btn-sm" onClick={handleShare} style={{fontSize:10}}>📤 Share</button>
         </div>
       </div>
 
       {/* ── KPI ROW ── */}
-      <div className="resp-5col" style={{marginBottom:14}}>
-        <div style={{background:'var(--bg3)',borderRadius:8,padding:10,textAlign:'center'}}>
-          <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',fontWeight:600}}>Desired</div>
-          <div style={{fontSize:18,fontWeight:700}}>${desiredMonthly.toLocaleString()}</div>
-          <div style={{fontSize:9,color:'var(--text3)'}}>per month</div>
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(130px,1fr))',gap:6,marginBottom:14}}>
+        <div style={{background:'var(--bg3)',borderRadius:8,padding:'8px 10px',textAlign:'center'}}>
+          <div style={{fontSize:8,color:'var(--text3)',textTransform:'uppercase',fontWeight:600}}>Desired</div>
+          <div style={{fontSize:16,fontWeight:700}}>${desiredMonthly.toLocaleString()}</div>
+          <div style={{fontSize:8,color:'var(--text3)'}}>per month</div>
         </div>
-        <div style={{background:'var(--bg3)',borderRadius:8,padding:10,textAlign:'center'}}>
-          <div style={{fontSize:9,color:'var(--green2)',textTransform:'uppercase',fontWeight:600}}>CPF LIFE</div>
-          <div style={{fontSize:18,fontWeight:700,color:'var(--green2)'}}>${cpfScheme!=='none'?cpfPayout.mid.toLocaleString():'—'}</div>
-          <div style={{fontSize:9,color:'var(--text3)'}}>{cpfScheme!=='none'?cpfScheme+' from '+cpfStartAge:'Not set'}</div>
+        <div style={{background:'var(--bg3)',borderRadius:8,padding:'8px 10px',textAlign:'center'}}>
+          <div style={{fontSize:8,color:'var(--green2)',textTransform:'uppercase',fontWeight:600}}>CPF LIFE</div>
+          <div style={{fontSize:16,fontWeight:700,color:'var(--green2)'}}>${cpfScheme!=='none'?cpfPayout.mid.toLocaleString():'—'}</div>
+          <div style={{fontSize:8,color:'var(--text3)'}}>{cpfScheme!=='none'?cpfScheme+' from '+cpfStartAge:'Not set'}</div>
         </div>
-        <div style={{background:'var(--bg3)',borderRadius:8,padding:10,textAlign:'center'}}>
-          <div style={{fontSize:9,color:'var(--gold)',textTransform:'uppercase',fontWeight:600}}>Policy Income</div>
-          <div style={{fontSize:18,fontWeight:700,color:'var(--gold)'}}>${(policyMonthlyIncome+policyDividends).toLocaleString()}</div>
-          <div style={{fontSize:9,color:'var(--text3)'}}>annuity + div</div>
+        <div style={{background:'var(--bg3)',borderRadius:8,padding:'8px 10px',textAlign:'center'}}>
+          <div style={{fontSize:8,color:'var(--gold)',textTransform:'uppercase',fontWeight:600}}>Policy Income</div>
+          <div style={{fontSize:16,fontWeight:700,color:'var(--gold)'}}>${(policyMonthlyIncome+policyDividends).toLocaleString()}</div>
+          <div style={{fontSize:8,color:'var(--text3)'}}>annuity + div</div>
         </div>
-        <div style={{background:'var(--bg3)',borderRadius:8,padding:10,textAlign:'center'}}>
-          <div style={{fontSize:9,color:'#5b8fd9',textTransform:'uppercase',fontWeight:600}}>Other</div>
-          <div style={{fontSize:18,fontWeight:700,color:'#5b8fd9'}}>${otherMonthly.toLocaleString()}</div>
-          <div style={{fontSize:9,color:'var(--text3)'}}>{otherSources.filter(s=>s.active).length} source{otherSources.filter(s=>s.active).length!==1?'s':''}</div>
+        <div style={{background:'var(--bg3)',borderRadius:8,padding:'8px 10px',textAlign:'center'}}>
+          <div style={{fontSize:8,color:'#5b8fd9',textTransform:'uppercase',fontWeight:600}}>Other</div>
+          <div style={{fontSize:16,fontWeight:700,color:'#5b8fd9'}}>${otherMonthly.toLocaleString()}</div>
+          <div style={{fontSize:8,color:'var(--text3)'}}>{otherSources.filter(s=>s.active).length} source{otherSources.filter(s=>s.active).length!==1?'s':''}</div>
         </div>
-        <div style={{background:'var(--bg3)',borderRadius:8,padding:10,textAlign:'center',borderLeft:gap>0?'3px solid var(--red)':'3px solid var(--green2)'}}>
-          <div style={{fontSize:9,color:gap>0?'var(--red)':'var(--green2)',textTransform:'uppercase',fontWeight:600}}>{gap>0?'Shortfall':'Surplus'}</div>
-          <div style={{fontSize:18,fontWeight:700,color:gap>0?'var(--red)':'var(--green2)'}}>${gap>0?gap.toLocaleString():(totalAtRet-desiredMonthly).toLocaleString()}</div>
-          <div style={{fontSize:9,color:'var(--text3)'}}>{coveragePct}% covered</div>
+        <div style={{background:'var(--bg3)',borderRadius:8,padding:'8px 10px',textAlign:'center',borderLeft:gap>0?'3px solid var(--red)':'3px solid var(--green2)'}}>
+          <div style={{fontSize:8,color:gap>0?'var(--red)':'var(--green2)',textTransform:'uppercase',fontWeight:600}}>{gap>0?'Shortfall':'Surplus'}</div>
+          <div style={{fontSize:16,fontWeight:700,color:gap>0?'var(--red)':'var(--green2)'}}>${gap>0?gap.toLocaleString():(totalAtRet-desiredMonthly).toLocaleString()}</div>
+          <div style={{fontSize:8,color:'var(--text3)'}}>{coveragePct}% covered</div>
         </div>
       </div>
 
@@ -5822,28 +5823,30 @@ function Dashboard() {
           <h3 style={{fontSize:13,fontWeight:700,margin:0}}>Premium Summary</h3>
           {premRatio>0 && <span style={{fontSize:10,color:premRatio>15?'var(--red)':'var(--text3)',fontWeight:600}}>{premRatio}% of income</span>}
         </div>
-        <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(120px,1fr))',gap:8}}>
-          <div style={{background:'var(--bg3)',borderRadius:8,padding:12}}>
-            <div style={{fontSize:9,color:'var(--gold)',textTransform:'uppercase',fontWeight:700,letterSpacing:'.5px'}}>Annual Recurring</div>
-            <div style={{fontSize:20,fontWeight:700,color:'var(--gold)',marginTop:4}}>{fmt(premiumBreakdown.totalAnnual)}</div>
-            <div style={{fontSize:10,color:'var(--text3)',marginTop:2}}>{fmt(Math.round(premiumBreakdown.totalAnnual/12))}/mth</div>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6}}>
+          <div style={{background:'var(--bg3)',borderRadius:8,padding:'10px 10px',gridColumn:'1/-1'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline'}}>
+              <div><div style={{fontSize:9,color:'var(--gold)',textTransform:'uppercase',fontWeight:700,letterSpacing:'.5px'}}>Annual Recurring</div>
+              <div style={{fontSize:20,fontWeight:700,color:'var(--gold)',marginTop:2}}>{fmt(premiumBreakdown.totalAnnual)}<span style={{fontSize:11,color:'var(--text3)',fontWeight:400}}>/yr</span></div></div>
+              <div style={{fontSize:12,color:'var(--text3)',textAlign:'right'}}>{fmt(Math.round(premiumBreakdown.totalAnnual/12))}/mth</div>
+            </div>
           </div>
-          {premiumBreakdown.modes.medisave.annual > 0 && <div style={{background:'var(--bg3)',borderRadius:8,padding:12}}>
-            <div style={{fontSize:9,color:'var(--teal)',textTransform:'uppercase',fontWeight:700}}>MediSave</div>
-            <div style={{fontSize:18,fontWeight:600,color:'var(--teal)',marginTop:4}}>{fmt(premiumBreakdown.modes.medisave.annual)}<span style={{fontSize:9,color:'var(--text3)'}}>/yr</span></div>
+          {premiumBreakdown.modes.medisave.annual > 0 && <div style={{background:'var(--bg3)',borderRadius:8,padding:'8px 10px'}}>
+            <div style={{fontSize:8,color:'var(--teal)',textTransform:'uppercase',fontWeight:700}}>MediSave</div>
+            <div style={{fontSize:15,fontWeight:600,color:'var(--teal)',marginTop:2}}>{fmt(premiumBreakdown.modes.medisave.annual)}<span style={{fontSize:9,color:'var(--text3)'}}>/yr</span></div>
           </div>}
-          {premiumBreakdown.modes.srs.annual > 0 && <div style={{background:'var(--bg3)',borderRadius:8,padding:12}}>
-            <div style={{fontSize:9,color:'#9d8abf',textTransform:'uppercase',fontWeight:700}}>SRS</div>
-            <div style={{fontSize:18,fontWeight:600,color:'#9d8abf',marginTop:4}}>{fmt(premiumBreakdown.modes.srs.annual)}<span style={{fontSize:9,color:'var(--text3)'}}>/yr</span></div>
+          {premiumBreakdown.modes.srs.annual > 0 && <div style={{background:'var(--bg3)',borderRadius:8,padding:'8px 10px'}}>
+            <div style={{fontSize:8,color:'#9d8abf',textTransform:'uppercase',fontWeight:700}}>SRS</div>
+            <div style={{fontSize:15,fontWeight:600,color:'#9d8abf',marginTop:2}}>{fmt(premiumBreakdown.modes.srs.annual)}<span style={{fontSize:9,color:'var(--text3)'}}>/yr</span></div>
           </div>}
-          {premiumBreakdown.modes.cpfoa.annual > 0 && <div style={{background:'var(--bg3)',borderRadius:8,padding:12}}>
-            <div style={{fontSize:9,color:'var(--blue2)',textTransform:'uppercase',fontWeight:700}}>CPF OA</div>
-            <div style={{fontSize:18,fontWeight:600,color:'var(--blue2)',marginTop:4}}>{fmt(premiumBreakdown.modes.cpfoa.annual)}<span style={{fontSize:9,color:'var(--text3)'}}>/yr</span></div>
+          {premiumBreakdown.modes.cpfoa.annual > 0 && <div style={{background:'var(--bg3)',borderRadius:8,padding:'8px 10px'}}>
+            <div style={{fontSize:8,color:'var(--blue2)',textTransform:'uppercase',fontWeight:700}}>CPF OA</div>
+            <div style={{fontSize:15,fontWeight:600,color:'var(--blue2)',marginTop:2}}>{fmt(premiumBreakdown.modes.cpfoa.annual)}<span style={{fontSize:9,color:'var(--text3)'}}>/yr</span></div>
           </div>}
-          {premiumBreakdown.totalSingle > 0 && <div style={{background:'var(--bg3)',borderRadius:8,padding:12,borderLeft:'3px solid var(--gold)'}}>
-            <div style={{fontSize:9,color:'var(--gold)',textTransform:'uppercase',fontWeight:700}}>Single Premiums</div>
-            <div style={{fontSize:18,fontWeight:600,color:'var(--gold)',marginTop:4}}>{fmt(premiumBreakdown.totalSingle)}</div>
-            <div style={{fontSize:9,color:'var(--text3)'}}>One-time (not recurring)</div>
+          {premiumBreakdown.totalSingle > 0 && <div style={{background:'var(--bg3)',borderRadius:8,padding:'8px 10px',borderLeft:'3px solid var(--gold)',gridColumn:premiumBreakdown.modes.medisave.annual>0||premiumBreakdown.modes.srs.annual>0?'auto':'1/-1'}}>
+            <div style={{fontSize:8,color:'var(--gold)',textTransform:'uppercase',fontWeight:700}}>Single Premiums</div>
+            <div style={{fontSize:15,fontWeight:600,color:'var(--gold)',marginTop:2}}>{fmt(premiumBreakdown.totalSingle)}</div>
+            <div style={{fontSize:8,color:'var(--text3)'}}>One-time</div>
           </div>}
         </div>
       </div>
@@ -5982,30 +5985,29 @@ function Dashboard() {
 
       {/* ═══ SURRENDER VALUE vs PREMIUMS PAID ═══ */}
       {cvTimeline.some(r=>r.totalCV>0) && (
-        <div className="card" style={{marginBottom:16}}>
-          <h3 style={{fontSize:13,fontWeight:600,marginBottom:4}}>Surrender Value vs Premiums Paid</h3>
-          <p style={{fontSize:10,color:'var(--text3)',marginBottom:10}}>Cumulative premiums paid versus total portfolio surrender value — age {age} to {Math.max(retAge+20,90)}</p>
-          <div style={{height:260,marginBottom:12}}><canvas ref={chartRef2} /></div>
+        <div className="card" style={{marginBottom:16,padding:'12px 10px'}}>
+          <h3 style={{fontSize:13,fontWeight:600,marginBottom:2}}>Surrender Value vs Premiums Paid</h3>
+          <p style={{fontSize:10,color:'var(--text3)',marginBottom:8}}>Cumulative premiums vs surrender value — age {age} to {Math.max(retAge+20,90)}</p>
+          <div style={{height:220,marginBottom:10,marginLeft:-4,marginRight:-4}}><canvas ref={chartRef2} /></div>
 
-          {/* At Retirement KPIs — only CV and premiums */}
+          {/* At Retirement KPIs */}
           {retRow && (
-            <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:8,marginBottom:8}}>
-              <div style={{background:'var(--bg3)',borderRadius:8,padding:10,textAlign:'center'}}>
-                <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Surrender Value at {retAge}</div>
-                <div style={{fontSize:18,fontWeight:700,color:'var(--gold)'}}>{fmt(retRow.totalCV)}</div>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:6,marginBottom:6}}>
+              <div style={{background:'var(--bg3)',borderRadius:8,padding:'8px 10px',textAlign:'center'}}>
+                <div style={{fontSize:8,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.3px'}}>SV at {retAge}</div>
+                <div style={{fontSize:16,fontWeight:700,color:'var(--gold)'}}>{fmt(retRow.totalCV)}</div>
               </div>
-              <div style={{background:'var(--bg3)',borderRadius:8,padding:10,textAlign:'center'}}>
-                <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Total Premiums Paid</div>
-                <div style={{fontSize:18,fontWeight:700,color:'var(--red)'}}>
-                  {fmt((() => {let t=0;policies.forEach(pol=>{if(pol.status==='matured'||pol.category==='cash_investments'||pol.category==='other_assets')return;const sa=parseInt(pol.premStartAge)||parseInt(pol.ageAtEntry)||age;const pt=pol.premSingle?1:(parseInt(pol.premTerm)||10);const ann=pol.premFrequency==='monthly'?(parseFloat(pol.annualPremium)||0)*12:(parseFloat(pol.annualPremium)||0);t+=pol.premSingle?ann:ann*pt;});return t;})())}
+              <div style={{background:'var(--bg3)',borderRadius:8,padding:'8px 10px',textAlign:'center'}}>
+                <div style={{fontSize:8,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.3px'}}>Total Premiums</div>
+                <div style={{fontSize:16,fontWeight:700,color:'var(--red)'}}>
+                  {fmt((() => {let t=0;policies.forEach(pol=>{if(pol.status==='matured'||pol.category==='cash_investments'||pol.category==='other_assets')return;const pt=pol.premSingle?1:(parseInt(pol.premTerm)||10);const ann=pol.premFrequency==='monthly'?(parseFloat(pol.annualPremium)||0)*12:(parseFloat(pol.annualPremium)||0);t+=pol.premSingle?ann:ann*pt;});return t;})())}
                 </div>
               </div>
-              <div style={{background:'var(--bg3)',borderRadius:8,padding:10,textAlign:'center'}}>
-                <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Net Gain / (Loss)</div>
+              <div style={{gridColumn:'1/-1',background:'var(--bg3)',borderRadius:8,padding:'6px 10px',textAlign:'center'}}>
                 {(() => {
                   let totalPaid=0;policies.forEach(pol=>{if(pol.status==='matured'||pol.category==='cash_investments'||pol.category==='other_assets')return;const pt=pol.premSingle?1:(parseInt(pol.premTerm)||10);const ann=pol.premFrequency==='monthly'?(parseFloat(pol.annualPremium)||0)*12:(parseFloat(pol.annualPremium)||0);totalPaid+=pol.premSingle?ann:ann*pt;});
                   const net = retRow.totalCV - totalPaid;
-                  return <div style={{fontSize:18,fontWeight:700,color:net>=0?'var(--green2)':'var(--red)'}}>{net>=0?'+':''}{fmt(net)}</div>;
+                  return <div style={{display:'flex',justifyContent:'center',alignItems:'baseline',gap:6}}><span style={{fontSize:8,color:'var(--text3)',textTransform:'uppercase'}}>Net Gain/(Loss)</span><span style={{fontSize:16,fontWeight:700,color:net>=0?'var(--green2)':'var(--red)'}}>{net>=0?'+':''}{fmt(net)}</span></div>;
                 })()}
               </div>
             </div>
