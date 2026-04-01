@@ -4440,7 +4440,7 @@ function DropZone({onFiles, label, active}) {
       for(const item of items) {
         if(item.kind==='file') files.push(item.getAsFile());
       }
-      if(files.length) { e.preventDefault(); setStaged(prev=>[...prev,...files.map(f=>({file:f,preview:f.type.startsWith('image/')?URL.createObjectURL(f):null}))].slice(0,100)); }
+      if(files.length) { e.preventDefault(); setStaged(prev=>[...prev,...files.map(f=>({file:f,preview:f.type.startsWith('image/')?URL.createObjectURL(f):null}))].slice(0,200)); }
     };
     window.addEventListener('paste', handler);
     return () => window.removeEventListener('paste', handler);
@@ -4449,7 +4449,7 @@ function DropZone({onFiles, label, active}) {
   const onDrop = (e) => {
     e.preventDefault(); setDragOver(false);
     const files = Array.from(e.dataTransfer.files);
-    if(files.length) setStaged(prev=>[...prev,...files.map(f=>({file:f,preview:f.type.startsWith('image/')?URL.createObjectURL(f):null}))].slice(0,100));
+    if(files.length) setStaged(prev=>[...prev,...files.map(f=>({file:f,preview:f.type.startsWith('image/')?URL.createObjectURL(f):null}))].slice(0,200));
   };
   const removeStaged = (i) => { setStaged(prev=>{const n=[...prev];if(n[i].preview)URL.revokeObjectURL(n[i].preview);n.splice(i,1);return n;}); };
   const clearStaged = () => { staged.forEach(s=>{if(s.preview)URL.revokeObjectURL(s.preview)}); setStaged([]); };
@@ -4468,7 +4468,7 @@ function DropZone({onFiles, label, active}) {
         {staged.map((s,i) => (
           <div key={i} style={{position:'relative',flexShrink:0}}>
             {s.preview ? <img src={s.preview} style={{width:72,height:72,objectFit:'cover',borderRadius:8,border:'1px solid var(--border)'}} />
-              : <div style={{width:72,height:72,borderRadius:8,border:'1px solid var(--border)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,color:'var(--text3)',background:'var(--bg3)',padding:4,textAlign:'center',wordBreak:'break-all'}}>{s.file.name.slice(0,100)}</div>}
+              : <div style={{width:72,height:72,borderRadius:8,border:'1px solid var(--border)',display:'flex',alignItems:'center',justifyContent:'center',fontSize:10,color:'var(--text3)',background:'var(--bg3)',padding:4,textAlign:'center',wordBreak:'break-all'}}>{s.file.name.slice(0,200)}</div>}
             <button onClick={()=>removeStaged(i)} style={{position:'absolute',top:-4,right:-4,width:18,height:18,borderRadius:'50%',background:'var(--red)',color:'#fff',border:'none',fontSize:10,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}>×</button>
           </div>
         ))}
@@ -5593,92 +5593,6 @@ function ReviewSession({onClose}) {
 // ═══════════════════════════════════════════════════════════════
 // CLIENT UPLOAD PORTAL — Shareable link for client document collection
 // ═══════════════════════════════════════════════════════════════
-function ClientUploadPortal({code, onClose, onFilesReceived}) {
-  const [link, setLink] = useState('');
-  const [uploading, setUploading] = useState(false);
-  const [received, setReceived] = useState([]);
-
-  useEffect(() => {
-    if(code) { setLink(window.location.origin + window.location.pathname + '?clientUpload=' + code); return; }
-    // Generate new code
-    const newCode = Math.random().toString(36).substring(2,8).toUpperCase();
-    const fullLink = window.location.origin + window.location.pathname + '?clientUpload=' + newCode;
-    setLink(fullLink);
-    // Save to Supabase
-    (async()=>{
-      try {
-        const s = getSB(); if(!s||!window._user) return;
-        await s.from('client_uploads').upsert({user_id:window._user.id, code:newCode, created_at:new Date().toISOString(), files:[], status:'pending'},{onConflict:'user_id,code'});
-      } catch(e){ console.warn('[Upload Portal] Save error:', e); }
-    })();
-  }, []);
-
-  const copyLink = async () => {
-    try { await navigator.clipboard.writeText(link); alert('Link copied! Send this to your client via WhatsApp/Telegram.'); }
-    catch(e) { prompt('Copy this link:', link); }
-  };
-
-  // Poll for uploads
-  useEffect(() => {
-    if(!link) return;
-    const codeVal = link.split('clientUpload=')[1];
-    if(!codeVal) return;
-    const interval = setInterval(async()=>{
-      try {
-        const s = getSB(); if(!s) return;
-        const {data} = await s.from('client_uploads').select('files,status').eq('code',codeVal).maybeSingle();
-        if(data?.files?.length > 0 && data.files.length !== received.length) {
-          setReceived(data.files);
-        }
-      } catch(e){}
-    }, 5000);
-    return ()=>clearInterval(interval);
-  }, [link, received.length]);
-
-  return (
-    <div className="modal-overlay" onClick={e=>{if(e.target===e.currentTarget)onClose()}}>
-      <div className="modal" style={{maxWidth:500}}>
-        <h3 style={{fontSize:16,fontWeight:700,marginBottom:4}}>📤 Client Upload Link</h3>
-        <p style={{fontSize:11,color:'var(--text3)',marginBottom:16}}>Generate a link for your client to upload their policy documents from their phone.</p>
-
-        <div style={{background:'var(--bg3)',borderRadius:8,padding:12,marginBottom:12}}>
-          <div style={{fontSize:10,color:'var(--text3)',textTransform:'uppercase',fontWeight:600,marginBottom:6}}>Share this link with your client</div>
-          <div style={{display:'flex',gap:6}}>
-            <input value={link} readOnly style={{flex:1,fontSize:11,padding:'8px 10px',background:'var(--bg)',border:'1px solid var(--border2)',borderRadius:6,color:'var(--text)'}} />
-            <button className="btn-primary btn-sm" onClick={copyLink}>📋 Copy</button>
-          </div>
-          <div style={{display:'flex',gap:6,marginTop:8}}>
-            <button className="btn-secondary btn-sm" onClick={()=>window.open('https://wa.me/?text='+encodeURIComponent('Please upload your policy documents here:\n'+link),'_blank')} style={{fontSize:10}}>WhatsApp</button>
-            <button className="btn-secondary btn-sm" onClick={()=>window.open('tg://msg?text='+encodeURIComponent('Please upload your policy documents here:\n'+link),'_blank')} style={{fontSize:10}}>Telegram</button>
-            <button className="btn-secondary btn-sm" onClick={()=>window.open('mailto:?subject=Policy%20Document%20Upload&body='+encodeURIComponent('Hi,\n\nPlease upload your policy documents here:\n'+link+'\n\nThank you!'),'_blank')} style={{fontSize:10}}>Email</button>
-          </div>
-        </div>
-
-        {received.length > 0 && (
-          <div style={{background:'rgba(91,168,160,.06)',borderRadius:8,padding:10,marginBottom:12}}>
-            <div style={{fontSize:11,fontWeight:600,color:'var(--green2)'}}>✅ {received.length} file{received.length>1?'s':''} received from client!</div>
-            <button className="btn-primary btn-sm" style={{marginTop:6}} onClick={()=>{onFilesReceived(received);onClose();}}>Extract Policies from Uploaded Files</button>
-          </div>
-        )}
-
-        <div style={{fontSize:10,color:'var(--text3)',lineHeight:1.5}}>
-          <strong>How it works:</strong><br/>
-          1. Client opens the link on their phone<br/>
-          2. They take photos or upload PDFs of their policies<br/>
-          3. You'll see a notification here when files arrive<br/>
-          4. Click "Extract" to process them into PolicyLens<br/>
-          <br/>
-          <em>Note: Requires Supabase `client_uploads` table. Link expires after 24 hours.</em>
-        </div>
-
-        <div style={{display:'flex',justifyContent:'flex-end',marginTop:12}}>
-          <button className="btn-secondary" onClick={onClose}>Close</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 function Dashboard() {
   const {policies,setTab,apiKey,clientProfile,saveProfile} = useContext(AppCtx);
   const p = clientProfile || {};
@@ -6055,7 +5969,7 @@ function Dashboard() {
     if(!files||!files.length) return;
     const newStaged = [];
     for(const f of Array.from(files)) newStaged.push({file:f, preview:URL.createObjectURL(f)});
-    setWelcomeStaged(prev => [...prev, ...newStaged].slice(0,100));
+    setWelcomeStaged(prev => [...prev, ...newStaged].slice(0,200));
   };
 
   const handleWelcomeExtract = async () => {
@@ -6085,14 +5999,14 @@ function Dashboard() {
 
       {/* ── Camera CTA ── */}
       <div style={{maxWidth:420,margin:'0 auto 20px'}}>
-        <button onClick={async()=>{const files=await openCameraModal();if(files&&files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setWelcomeStaged(prev=>[...prev,...newStaged].slice(0,100));}}}
+        <button onClick={async()=>{const files=await openCameraModal();if(files&&files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setWelcomeStaged(prev=>[...prev,...newStaged].slice(0,200));}}}
           style={{width:'100%',background:'linear-gradient(135deg,rgba(212,169,106,.15),rgba(212,169,106,.05))',border:'2px dashed var(--gold3)',borderRadius:16,padding:'24px 20px',cursor:'pointer',transition:'all .2s'}}>
           <div style={{fontSize:40,marginBottom:6}}>📷</div>
           <div style={{fontSize:15,fontWeight:600,color:'var(--gold2)',marginBottom:4}}>Scan a Policy Document</div>
           <div style={{fontSize:11,color:'var(--text2)'}}>Snap a photo of any policy contract, benefit illustration, or CRM screen</div>
         </button>
         <div style={{display:'flex',gap:8,marginTop:8}}>
-          <button onClick={()=>{const inp=document.createElement('input');inp.type='file';inp.accept='image/*';inp.multiple=true;inp.onchange=e=>{const files=Array.from(e.target.files);if(files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setWelcomeStaged(prev=>[...prev,...newStaged].slice(0,100));}};inp.click();}}
+          <button onClick={()=>{const inp=document.createElement('input');inp.type='file';inp.accept='image/*';inp.multiple=true;inp.onchange=e=>{const files=Array.from(e.target.files);if(files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setWelcomeStaged(prev=>[...prev,...newStaged].slice(0,200));}};inp.click();}}
             style={{flex:1,background:'var(--bg3)',border:'1px solid var(--border2)',borderRadius:10,padding:'12px 8px',cursor:'pointer',textAlign:'center'}}>
             <div style={{fontSize:20}}>🖼</div><div style={{fontSize:10,color:'var(--text2)',marginTop:2}}>Gallery</div>
           </button>
@@ -6113,7 +6027,7 @@ function Dashboard() {
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
             <div style={{fontSize:13,fontWeight:600}}>📷 {welcomeStaged.length} photo{welcomeStaged.length>1?'s':''} staged</div>
             <div style={{display:'flex',gap:6}}>
-              <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setWelcomeStaged(prev=>[...prev,...newStaged].slice(0,100));}}}>+ More</button>
+              <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setWelcomeStaged(prev=>[...prev,...newStaged].slice(0,200));}}}>+ More</button>
               <button className="btn-primary btn-sm" onClick={handleWelcomeExtract}>✨ Extract All</button>
               <button className="btn-danger btn-sm" onClick={()=>{welcomeStaged.forEach(s=>URL.revokeObjectURL(s.preview));setWelcomeStaged([]);}}>Clear</button>
             </div>
@@ -6136,19 +6050,16 @@ function Dashboard() {
   const premRatio = annualIncome > 0 ? Math.round(totalPremium.annual/annualIncome*100) : 0;
   const retRow = cvTimeline.find(r => r.age === retAge);
   const [showReview, setShowReview] = useState(false);
-  const [showUploadPortal, setShowUploadPortal] = useState(false);
 
   return (
     <div className="fade-in">
       <DropZone active={true} onFiles={handleDashDrop} label="📎 Drop or paste any document — client profile, policy contracts, benefit illustrations" />
 
       {showReview && <ReviewSession onClose={()=>setShowReview(false)} />}
-      {showUploadPortal && <ClientUploadPortal onClose={()=>setShowUploadPortal(false)} onFilesReceived={(files)=>{console.log('Client files received:',files);}} />}
 
       {/* Action bar */}
       <div style={{display:'flex',gap:6,marginBottom:12,flexWrap:'wrap'}}>
         {policies.length >= 2 && <button className="btn-primary btn-sm" onClick={()=>setShowReview(true)} style={{fontSize:11}}>📋 Start Review Session</button>}
-        <button className="btn-secondary btn-sm" onClick={()=>setShowUploadPortal(true)} style={{fontSize:11}}>📤 Client Upload Link</button>
       </div>
 
       {/* ═══ PORTFOLIO ACTIONS BAR ═══ */}
@@ -7405,7 +7316,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
     for(const f of Array.from(files)){
       newStaged.push({file:f, preview:URL.createObjectURL(f)});
     }
-    setStaged(prev => [...prev, ...newStaged].slice(0,100));
+    setStaged(prev => [...prev, ...newStaged].slice(0,200));
   };
   const removeStaged = (idx) => {
     setStaged(prev => { const n=[...prev]; URL.revokeObjectURL(n[idx].preview); n.splice(idx,1); return n; });
@@ -7730,7 +7641,48 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         setTimeout(() => alert('Note: We detected ISP rider(s) without the parent Integrated Shield Plan in your documents.\n\nAuto-created parent plan(s): ' + names + '\n\nPlease review and fill in the missing details (ward class, premium, policy number) for the parent ISP.'), 100);
       }
 
-      allExtracted = [...allExtracted, ...processed];
+      // ── CROSS-BATCH CORRELATION ──
+      // Merge partial policies across batches (e.g. page 1 in batch 1, page 3 in batch 2)
+      if(allExtracted.length > 0 && processed.length > 0) {
+        const merged = [];
+        for(const newItem of processed) {
+          const newIns = (newItem.insurer||'').toLowerCase().trim();
+          const newName = (newItem.productName||newItem.policyName||'').toLowerCase().trim();
+          const newPol = (newItem.policyNumber||'').toLowerCase().trim();
+          // Find match in previous batches by policyNumber OR insurer+productName
+          let match = null;
+          if(newPol && newPol.length > 3) {
+            match = allExtracted.find(ex => (ex.policyNumber||'').toLowerCase().trim() === newPol);
+          }
+          if(!match && newIns && newName && newName.length > 3) {
+            match = allExtracted.find(ex => {
+              const exIns = (ex.insurer||'').toLowerCase().trim();
+              const exName = (ex.productName||ex.policyName||'').toLowerCase().trim();
+              return exIns === newIns && (exName === newName || exName.includes(newName) || newName.includes(exName));
+            });
+          }
+          if(match) {
+            // Merge: fill missing fields from newItem into match
+            let fills = 0;
+            for(const [k,v] of Object.entries(newItem)) {
+              if(k.startsWith('_') || k === 'id') continue;
+              if(v && v !== 0 && v !== '' && (!match[k] || match[k] === '' || match[k] === 0)) {
+                match[k] = v; fills++;
+              }
+            }
+            // Merge riders
+            if(newItem.riders?.length && (!match.riders?.length || newItem.riders.length > match.riders.length)) {
+              match.riders = newItem.riders; fills++;
+            }
+            if(fills > 0) console.log('[Correlate] Merged', fills, 'fields into', match.productName, 'from batch', b+1);
+          } else {
+            merged.push(newItem);
+          }
+        }
+        allExtracted = [...allExtracted, ...merged];
+      } else {
+        allExtracted = [...allExtracted, ...processed];
+      }
 
       // ── DUPLICATE DETECTION ──
       // Mark items that match existing policies or earlier extractions
@@ -7818,10 +7770,10 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
           <input ref={cameraRef} type="file" accept="image/*" capture="environment" style={{display:'none'}} onChange={e=>{stagePhotos(e.target.files);e.target.value='';}} />
           <input ref={uploadRef} type="file" accept="image/*,.pdf,.xlsx,.xls,.csv,.doc,.docx,.html,.htm,.txt,.rtf" multiple style={{display:'none'}} onChange={e=>{handleExtract(Array.from(e.target.files));e.target.value='';}} />
-          <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setStaged(prev=>[...prev,...newStaged].slice(0,100));}}} disabled={scanning}>
+          <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setStaged(prev=>[...prev,...newStaged].slice(0,200));}}} disabled={scanning}>
             📷 Camera
           </button>
-          <button className="btn-secondary btn-sm" onClick={()=>{const inp=document.createElement('input');inp.type='file';inp.accept='image/*';inp.multiple=true;inp.onchange=e=>{const files=Array.from(e.target.files);if(files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setStaged(prev=>[...prev,...newStaged].slice(0,100));}};inp.click();}} disabled={scanning}>
+          <button className="btn-secondary btn-sm" onClick={()=>{const inp=document.createElement('input');inp.type='file';inp.accept='image/*';inp.multiple=true;inp.onchange=e=>{const files=Array.from(e.target.files);if(files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setStaged(prev=>[...prev,...newStaged].slice(0,200));}};inp.click();}} disabled={scanning}>
             🖼 Gallery
           </button>
           <button className="btn-secondary btn-sm" onClick={()=>uploadRef.current?.click()} disabled={scanning}>
@@ -7895,7 +7847,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
             <div style={{fontSize:13,fontWeight:600}}>"📷" {staged.length} photo{staged.length>1?'s':''} staged</div>
             <div style={{display:'flex',gap:6}}>
-              <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setStaged(prev=>[...prev,...newStaged].slice(0,100));}}}>+ Take More</button>
+              <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setStaged(prev=>[...prev,...newStaged].slice(0,200));}}}>+ Take More</button>
               <button className="btn-primary btn-sm" onClick={()=>handleExtract(staged.map(s=>s.file))} disabled={scanning}>{scanning?'Extracting…':'✨ Extract All'}</button>
               <button className="btn-danger btn-sm" onClick={clearStaged}>Clear</button>
             </div>
