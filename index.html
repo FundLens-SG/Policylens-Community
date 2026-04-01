@@ -4535,8 +4535,9 @@ function ProfileTab() {
         <div style={{display:'flex',gap:6,alignItems:'center'}}>
           <input ref={camRef} type="file" accept="image/*" capture="environment" multiple style={{display:'none'}} onChange={e=>{scanProfile(e.target.files);e.target.value='';}} />
           <input ref={uploadRef} type="file" accept="image/*,.pdf,.xlsx,.xls,.doc,.docx" multiple style={{display:'none'}} onChange={e=>{scanProfile(e.target.files);e.target.value='';}} />
-          <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length) scanProfile(files);}} disabled={scanning}>{scanning?'Scanning…':'📷 Scan'}</button>
-          <button className="btn-secondary btn-sm" onClick={()=>uploadRef.current?.click()} disabled={scanning}>{scanning?'…':'📄 Upload'}</button>
+          <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length) scanProfile(files);}} disabled={scanning}>{scanning?'Scanning…':'📷'}</button>
+          <button className="btn-secondary btn-sm" onClick={()=>{const inp=document.createElement('input');inp.type='file';inp.accept='image/*';inp.multiple=true;inp.onchange=e=>{if(e.target.files.length) scanProfile(e.target.files);};inp.click();}} disabled={scanning}>🖼</button>
+          <button className="btn-secondary btn-sm" onClick={()=>uploadRef.current?.click()} disabled={scanning}>{scanning?'…':'📄'}</button>
           <button className="btn-sm" style={{background:'rgba(239,83,80,.08)',color:'var(--red)',border:'1px solid rgba(239,83,80,.15)',fontSize:10,padding:'5px 10px',borderRadius:8,cursor:'pointer'}} onClick={()=>{
             if(!confirm('Delete all client profile data?\n\nClears name, NRIC, DOB, income, expenses, CPF settings, dependants.\n\nPolicies will NOT be deleted.')) return;
             const blank = {name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[],annualIncome:'',retirementAge:'65',monthlyExpenses:'',mortgagePayment:'',dependantSupport:'',medicalBudget:'',desiredRetIncome:'',inflationRate:'2.8',cpfScheme:'FRS',cpfPlan:'standard',cpfStartAge:'65',cpfTopUp:'',otherRetIncome:[]};
@@ -5251,7 +5252,7 @@ function PremiumCashflowChart({policies,age,retAge}) {
         // FDs don't have ongoing premiums — skip from cashflow chart
         if(pol.category==='cash_investments') return;
         const startAge = parseInt(pol.premStartAge)||parseInt(pol.ageAtEntry)||age;
-        const premTerm = pol.premSingle ? 1 : (parseInt(pol.premTerm)||10);
+        const premTerm = pol.premSingle ? 1 : (pol.premWholeLife ? Math.max(65-startAge,30) : (parseInt(pol.premTerm)||(parseInt(pol.premEndAge)>0?parseInt(pol.premEndAge)-startAge:25)));
         const prem = parseFloat(pol.annualPremium)||0;
         if(yr >= startAge && yr < startAge + premTerm && prem > 0) {
           const name = (pol.insurer?pol.insurer.split(' ')[0]+' ':'')+(pol.productName||pol.subType||'Policy');
@@ -5525,7 +5526,7 @@ function Dashboard() {
         if(yearsInForce < 0) return;
         const prem = parseFloat(pol.annualPremium)||0;
         const isSingle = pol.premSingle;
-        const premTerm = isSingle ? 1 : (parseInt(pol.premTerm)||10);
+        const premTerm = isSingle ? 1 : (pol.premWholeLife ? Math.max(65-startAge, 30) : (parseInt(pol.premTerm)||(parseInt(pol.premEndAge)>0?parseInt(pol.premEndAge)-startAge:25)));
 
         if(pol.category==='savings') {
           const sub = pol.endSubtype||'limited';
@@ -5664,9 +5665,11 @@ function Dashboard() {
           let cumPrem=0;
           policies.forEach(pol=>{
             if(pol.status==='matured'||pol.status==='surrendered'||pol.category==='cash_investments'||pol.category==='other_assets') return;
+            if(pol.premFrequency==='unknown') return; // Skip unconfirmed
             const sa=parseInt(pol.premStartAge)||parseInt(pol.ageAtEntry)||age;
-            const pt=pol.premSingle?1:(parseInt(pol.premTerm)||10);
+            const pt=pol.premSingle?1:(pol.premWholeLife?Math.max(65-sa,30):(parseInt(pol.premTerm)||(parseInt(pol.premEndAge)>0?parseInt(pol.premEndAge)-sa:25)));
             const annPrem=pol.premFrequency==='monthly'?(parseFloat(pol.annualPremium)||0)*12:(parseFloat(pol.annualPremium)||0);
+            if(!annPrem) return;
             const yrsInForce=Math.max(0, Math.min(r.age-sa, pt));
             cumPrem += pol.premSingle ? annPrem : annPrem * yrsInForce;
           });
@@ -5742,11 +5745,25 @@ function Dashboard() {
       {/* ── Camera CTA ── */}
       <div style={{maxWidth:420,margin:'0 auto 20px'}}>
         <button onClick={async()=>{const files=await openCameraModal();if(files&&files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setWelcomeStaged(prev=>[...prev,...newStaged].slice(0,20));}}}
-          style={{width:'100%',background:'linear-gradient(135deg,rgba(212,169,106,.15),rgba(212,169,106,.05))',border:'2px dashed var(--gold3)',borderRadius:16,padding:'28px 20px',cursor:'pointer',transition:'all .2s'}}>
-          <div style={{fontSize:48,marginBottom:8}}>📷</div>
-          <div style={{fontSize:16,fontWeight:600,color:'var(--gold2)',marginBottom:4}}>Scan a Policy Document</div>
-          <div style={{fontSize:12,color:'var(--text2)'}}>Not sure what to do? Snap a photo of any policy contract, benefit illustration, or your client's CRM screen — AI does the rest</div>
+          style={{width:'100%',background:'linear-gradient(135deg,rgba(212,169,106,.15),rgba(212,169,106,.05))',border:'2px dashed var(--gold3)',borderRadius:16,padding:'24px 20px',cursor:'pointer',transition:'all .2s'}}>
+          <div style={{fontSize:40,marginBottom:6}}>📷</div>
+          <div style={{fontSize:15,fontWeight:600,color:'var(--gold2)',marginBottom:4}}>Scan a Policy Document</div>
+          <div style={{fontSize:11,color:'var(--text2)'}}>Snap a photo of any policy contract, benefit illustration, or CRM screen</div>
         </button>
+        <div style={{display:'flex',gap:8,marginTop:8}}>
+          <button onClick={()=>{const inp=document.createElement('input');inp.type='file';inp.accept='image/*';inp.multiple=true;inp.onchange=e=>{const files=Array.from(e.target.files);if(files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setWelcomeStaged(prev=>[...prev,...newStaged].slice(0,20));}};inp.click();}}
+            style={{flex:1,background:'var(--bg3)',border:'1px solid var(--border2)',borderRadius:10,padding:'12px 8px',cursor:'pointer',textAlign:'center'}}>
+            <div style={{fontSize:20}}>🖼</div><div style={{fontSize:10,color:'var(--text2)',marginTop:2}}>Gallery</div>
+          </button>
+          <button onClick={()=>welcomeUploadRef.current?.click()}
+            style={{flex:1,background:'var(--bg3)',border:'1px solid var(--border2)',borderRadius:10,padding:'12px 8px',cursor:'pointer',textAlign:'center'}}>
+            <div style={{fontSize:20}}>📄</div><div style={{fontSize:10,color:'var(--text2)',marginTop:2}}>Upload Files</div>
+          </button>
+          <button onClick={()=>{setTab('policies');setTimeout(()=>{setEditing(null);setShowForm(true)},100)}}
+            style={{flex:1,background:'var(--bg3)',border:'1px solid var(--border2)',borderRadius:10,padding:'12px 8px',cursor:'pointer',textAlign:'center'}}>
+            <div style={{fontSize:20}}>✏️</div><div style={{fontSize:10,color:'var(--text2)',marginTop:2}}>Manual</div>
+          </button>
+        </div>
       </div>
 
       {/* ── Staged photos from welcome ── */}
@@ -6031,12 +6048,12 @@ function Dashboard() {
               <div style={{background:'var(--bg3)',borderRadius:8,padding:'8px 10px',textAlign:'center'}}>
                 <div style={{fontSize:8,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.3px'}}>Total Premiums</div>
                 <div style={{fontSize:16,fontWeight:700,color:'var(--red)'}}>
-                  {fmt((() => {let t=0;policies.forEach(pol=>{if(pol.status==='matured'||pol.category==='cash_investments'||pol.category==='other_assets')return;const pt=pol.premSingle?1:(parseInt(pol.premTerm)||10);const ann=pol.premFrequency==='monthly'?(parseFloat(pol.annualPremium)||0)*12:(parseFloat(pol.annualPremium)||0);t+=pol.premSingle?ann:ann*pt;});return t;})())}
+                  {fmt((() => {let t=0;policies.forEach(pol=>{if(pol.status==='matured'||pol.category==='cash_investments'||pol.category==='other_assets')return;const pt=pol.premSingle?1:(pol.premWholeLife?Math.max(65-(parseInt(pol.premStartAge)||parseInt(pol.ageAtEntry)||35),30):(parseInt(pol.premTerm)||(parseInt(pol.premEndAge)>0?parseInt(pol.premEndAge)-(parseInt(pol.premStartAge)||35):25)));const ann=pol.premFrequency==='monthly'?(parseFloat(pol.annualPremium)||0)*12:(parseFloat(pol.annualPremium)||0);t+=pol.premSingle?ann:ann*pt;});return t;})())}
                 </div>
               </div>
               <div style={{gridColumn:'1/-1',background:'var(--bg3)',borderRadius:8,padding:'6px 10px',textAlign:'center'}}>
                 {(() => {
-                  let totalPaid=0;policies.forEach(pol=>{if(pol.status==='matured'||pol.category==='cash_investments'||pol.category==='other_assets')return;const pt=pol.premSingle?1:(parseInt(pol.premTerm)||10);const ann=pol.premFrequency==='monthly'?(parseFloat(pol.annualPremium)||0)*12:(parseFloat(pol.annualPremium)||0);totalPaid+=pol.premSingle?ann:ann*pt;});
+                  let totalPaid=0;policies.forEach(pol=>{if(pol.status==='matured'||pol.category==='cash_investments'||pol.category==='other_assets')return;const pt=pol.premSingle?1:(pol.premWholeLife?Math.max(65-(parseInt(pol.premStartAge)||parseInt(pol.ageAtEntry)||35),30):(parseInt(pol.premTerm)||(parseInt(pol.premEndAge)>0?parseInt(pol.premEndAge)-(parseInt(pol.premStartAge)||35):25)));const ann=pol.premFrequency==='monthly'?(parseFloat(pol.annualPremium)||0)*12:(parseFloat(pol.annualPremium)||0);totalPaid+=pol.premSingle?ann:ann*pt;});
                   const net = retRow.totalCV - totalPaid;
                   return <div style={{display:'flex',justifyContent:'center',alignItems:'baseline',gap:6}}><span style={{fontSize:8,color:'var(--text3)',textTransform:'uppercase'}}>Net Gain/(Loss)</span><span style={{fontSize:16,fontWeight:700,color:net>=0?'var(--green2)':'var(--red)'}}>{net>=0?'+':''}{fmt(net)}</span></div>;
                 })()}
@@ -6338,7 +6355,7 @@ function Dashboard() {
                   {/* Policy bars */}
                   {policies.map((pol,i) => {
                     const startAge = parseInt(pol.premStartAge)||parseInt(pol.ageAtEntry)||age;
-                    const premTerm = pol.premSingle?1:(parseInt(pol.premTerm)||10);
+                    const premTerm = pol.premSingle?1:(pol.premWholeLife?Math.max(65-(parseInt(pol.premStartAge)||parseInt(pol.ageAtEntry)||35),30):(parseInt(pol.premTerm)||(parseInt(pol.premEndAge)>0?parseInt(pol.premEndAge)-(parseInt(pol.premStartAge)||35):25)));
                     const policyEnd = pol.category==='savings' ? startAge+(parseInt(pol.endPolicyTerm)||(premTerm+(parseInt(pol.endWaitYrs)||0))) :
                       pol.category==='retirement' ? (parseInt(pol.annuityEndAge)||85) :
                       pol.premWholeLife ? maxAge : startAge + Math.max(premTerm, parseInt(pol.endPolicyTerm)||premTerm);
@@ -7203,7 +7220,10 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
           <input ref={cameraRef} type="file" accept="image/*" capture="environment" style={{display:'none'}} onChange={e=>{stagePhotos(e.target.files);e.target.value='';}} />
           <input ref={uploadRef} type="file" accept="image/*,.pdf,.xlsx,.xls,.csv,.doc,.docx,.html,.htm,.txt,.rtf" multiple style={{display:'none'}} onChange={e=>{handleExtract(Array.from(e.target.files));e.target.value='';}} />
           <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setStaged(prev=>[...prev,...newStaged].slice(0,20));}}} disabled={scanning}>
-            📷 {staged.length>0?'('+staged.length+') Take More':'Camera'}
+            📷 Camera
+          </button>
+          <button className="btn-secondary btn-sm" onClick={()=>{const inp=document.createElement('input');inp.type='file';inp.accept='image/*';inp.multiple=true;inp.onchange=e=>{const files=Array.from(e.target.files);if(files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setStaged(prev=>[...prev,...newStaged].slice(0,20));}};inp.click();}} disabled={scanning}>
+            🖼 Gallery
           </button>
           <button className="btn-secondary btn-sm" onClick={()=>uploadRef.current?.click()} disabled={scanning}>
             {scanning?'Extracting…':'📄 Upload'}
@@ -7761,6 +7781,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
             <input ref={formCamRef} type="file" accept="image/*" capture="environment" multiple style={{display:'none'}} onChange={e=>{scanIntoForm(e.target.files);e.target.value='';}} />
             <input ref={formUploadRef} type="file" accept="image/*,.pdf,.xlsx,.xls,.csv,.doc,.docx" multiple style={{display:'none'}} onChange={e=>{scanIntoForm(e.target.files);e.target.value='';}} />
             <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length) scanIntoForm(files);}} disabled={formScanning}>{formScanning?'Scanning…':'📷'}</button>
+            <button className="btn-secondary btn-sm" onClick={()=>{const inp=document.createElement('input');inp.type='file';inp.accept='image/*';inp.multiple=true;inp.onchange=e=>{if(e.target.files.length) scanIntoForm(e.target.files);};inp.click();}} disabled={formScanning}>🖼</button>
             <button className="btn-secondary btn-sm" onClick={()=>formUploadRef.current?.click()} disabled={formScanning}>{formScanning?'…':'📄'}</button>
             <button onClick={onClose} style={{background:'none',color:'var(--text3)',fontSize:20,marginLeft:4}}>×</button>
           </div>
@@ -7851,7 +7872,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
             </div>
             <div className="field"><label>Payment Method</label><select value={form.paymentMethod||''} onChange={e=>set('paymentMethod',e.target.value)}>
               <option value="">—</option>
-              <option value="Cash">Cash / GIRO</option>
+              <option value="Cash">Cash</option>
               {(isISP||isCSL) && <option value="MediSave">MediSave</option>}
               {(isRetirement||isSavings) && <option value="SRS">SRS</option>}
               {isRetirement && <option value="CPF OA">CPF OA</option>}
@@ -7886,7 +7907,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
           <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid rgba(45,106,79,.25)'}}>
             <div style={{fontSize:10,fontWeight:700,color:'var(--green2)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:12}}>Retirement / Annuity Plan</div>
             {(() => {
-              const payYrs = form.premSingle ? 1 : (parseInt(form.premTerm)||10);
+              const payYrs = form.premSingle ? 1 : (form.premWholeLife ? Math.max(65-(parseInt(form.premStartAge)||35),30) : (parseInt(form.premTerm)||25));
               const startAge = parseInt(form.premStartAge)||30;
               const payoutStart = parseInt(form.annuityStartAge)||65;
               const payoutEnd = parseInt(form.annuityEndAge)||85;
@@ -9784,7 +9805,7 @@ function ReportTab() {
         const startAge=parseInt(pol.premStartAge)||age;
         const yif=retAge-startAge;if(yif<0)return;
         const prem=parseFloat(pol.annualPremium)||0;
-        const pt=pol.premSingle?1:(parseInt(pol.premTerm)||10);
+        const pt=pol.premSingle?1:(pol.premWholeLife?Math.max(65-(parseInt(pol.premStartAge)||parseInt(pol.ageAtEntry)||35),30):(parseInt(pol.premTerm)||(parseInt(pol.premEndAge)>0?parseInt(pol.premEndAge)-(parseInt(pol.premStartAge)||35):25)));
         const r=(parseFloat(pol.cvGrowthRate)||parseFloat(pol.endYield)||parseFloat(pol.retAccumYield)||3)/100;
         if(pol.category==='savings'){
           const policyTerm=parseInt(pol.endPolicyTerm)||(pt+(parseInt(pol.endWaitYrs)||0));
