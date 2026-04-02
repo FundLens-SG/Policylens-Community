@@ -16,7 +16,7 @@ console.warn=function(){var m=arguments[0]||'';if(typeof m==='string'&&(m.includ
 console.error=function(){var m=arguments[0]||'';if(typeof m==='string'&&m.includes('deoptimised'))return;_error.apply(console,arguments)};
 })();
 </script>
-<link rel="manifest" href="manifest.json">
+<link rel="manifest" href="data:application/json,%7B%22name%22%3A%22PolicyLens%22%2C%22short_name%22%3A%22PolicyLens%22%2C%22start_url%22%3A%22.%22%2C%22display%22%3A%22standalone%22%2C%22orientation%22%3A%22portrait%22%2C%22background_color%22%3A%22%230b0f1a%22%2C%22theme_color%22%3A%22%23d4a96a%22%7D">
 <meta name="theme-color" content="#0b0f1a">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -46,7 +46,9 @@ if(!navigator.locks){navigator.locks={request:function(name,opts,cb){if(typeof o
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{overflow-x:hidden;width:100%}
 @media screen and (orientation:landscape) and (max-height:500px) {
-  body::after{content:'Please rotate to portrait';position:fixed;inset:0;z-index:99999;background:#0b0f1a;color:#d4a96a;display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:600}
+  html,body{width:100vh!important;height:100vw!important}
+  body{transform:rotate(-90deg) translateX(-100%);transform-origin:top left;overflow-y:auto;overflow-x:hidden}
+  .modal-overlay{width:100vh!important;height:100vw!important}
 }
 :root{
 --bg:#0b0f1a;--bg2:#111827;--bg3:#171f2e;--bg4:#1f2a3d;
@@ -86,7 +88,22 @@ label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;lett
 .field{margin-bottom:12px}
 .tag{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:500;background:var(--gold-dim);color:var(--gold)}
 @keyframes fadeIn{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
-.fade-in{animation:fadeIn .3s ease}
+.fade-in{animation:fadeIn .25s ease-out}
+
+/* ══════ TOAST NOTIFICATIONS ══════ */
+@keyframes toastIn{from{opacity:0;transform:translateY(16px) scale(.95)}to{opacity:1;transform:translateY(0) scale(1)}}
+@keyframes toastOut{from{opacity:1;transform:translateY(0) scale(1)}to{opacity:0;transform:translateY(-8px) scale(.95)}}
+.toast-container{position:fixed;bottom:72px;left:50%;transform:translateX(-50%);z-index:9999;display:flex;flex-direction:column-reverse;gap:8px;pointer-events:none;max-width:min(420px,90vw)}
+.toast{pointer-events:auto;padding:10px 16px;border-radius:10px;font-size:12px;font-weight:500;line-height:1.4;box-shadow:0 8px 24px rgba(0,0,0,.35);animation:toastIn .25s ease-out;display:flex;align-items:center;gap:8px;backdrop-filter:blur(12px)}
+.toast.exiting{animation:toastOut .2s ease-in forwards}
+.toast-success{background:rgba(91,168,160,.15);border:1px solid rgba(91,168,160,.3);color:var(--green2)}
+.toast-error{background:rgba(239,83,80,.12);border:1px solid rgba(239,83,80,.25);color:var(--red)}
+.toast-info{background:rgba(91,143,217,.12);border:1px solid rgba(91,143,217,.25);color:var(--blue2)}
+.toast-warning{background:rgba(212,169,106,.12);border:1px solid rgba(212,169,106,.25);color:var(--gold)}
+
+/* ══════ SKELETON SHIMMER ══════ */
+@keyframes shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
+.skeleton{border-radius:6px;background:linear-gradient(90deg,var(--bg3) 25%,var(--bg4) 50%,var(--bg3) 75%);background-size:200% 100%;animation:shimmer 1.5s infinite ease-in-out}
 .fuzzy-alert{background:var(--gold-dim);border:1px solid rgba(212,169,106,.25);border-radius:10px;padding:14px;margin:12px 0}
 .fuzzy-alert h4{color:var(--gold);font-size:13px;margin-bottom:6px}
 .gap-bar{height:8px;border-radius:4px;background:var(--bg4);overflow:hidden;position:relative}
@@ -505,7 +522,100 @@ document.addEventListener('DOMContentLoaded',function(){
 
 <div id="root"></div>
 <script type="text/babel">
-const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext} = React;
+const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
+
+// ╔═══════════════════════════════════════════════════════════════╗
+// ║  POLICYLENS — TABLE OF CONTENTS                              ║
+// ║  Search "MODULE:" + name to jump to any section              ║
+// ╠═══════════════════════════════════════════════════════════════╣
+// ║  INFRA          ~525   React imports, hooks, toast, Chart.js ║
+// ║  AUTH           ~237   Supabase auth gate                    ║
+// ║  CONSTANTS      ~609   Categories, SUB_TYPES, SG constants   ║
+// ║  SG_INSURANCE   ~636   MediShield premiums, CPF Life, AWL    ║
+// ║  INSURERS       ~1105  Brand registry (41 insurers)          ║
+// ║  SEED_REPO      ~1275  Repository seed data                  ║
+// ║  FUND_DB        ~1358  2,200+ fund instruments               ║
+// ║  INDEXEDDB      ~3587  Database layer + batch ops            ║
+// ║  FUZZY          ~3638  Fuzzy matching engine                 ║
+// ║  HELPERS        ~3671  Utility functions                     ║
+// ║  AI_PIPELINE    ~4336  Gemini read → Claude extract          ║
+// ║  APP            ~4011  Main App component + state            ║
+// ║  HEADER         ~4187  Navigation tabs                       ║
+// ║  PROFILE        ~4599  My Client tab                         ║
+// ║  DASHBOARD      ~5477  Portfolio overview + gap analysis     ║
+// ║  RETIREMENT     ~4981  Retirement Lite (condensed RetireLens)║
+// ║  CASHFLOW       ~5368  Premium cashflow chart                ║
+// ║  REVIEW         ~5481  Review Session guided walkthrough     ║
+// ║  UPLOAD_PORTAL  ~5708  Client document collection link       ║
+// ║  POLICIES       ~6813  Policy list, add, edit, scan          ║
+// ║  BULK_VERIFY    ~6899  Extraction review modal               ║
+// ║  POLICY_FORM    ~8292  Policy form with sub-type fields      ║
+// ║  REPOSITORY     ~9637  Product database browser              ║
+// ║  FUND_LOOKUP    ~9907  iFAST fund risk lookup                ║
+// ║  PDF_REPORT     ~10142 Executive summary generation          ║
+// ║  SETTINGS       ~10693 API keys, advisor info, admin         ║
+// ╚═══════════════════════════════════════════════════════════════╝
+
+// ═══════════════════════════════════════════════════════════════
+// PERFORMANCE: useDebounce hook — delays heavy operations until typing stops
+// ═══════════════════════════════════════════════════════════════
+function useDebounce(callback, delay) {
+  const timerRef = useRef(null);
+  const callbackRef = useRef(callback);
+  callbackRef.current = callback;
+  useEffect(() => () => { if(timerRef.current) clearTimeout(timerRef.current); }, []);
+  return useCallback((...args) => {
+    if(timerRef.current) clearTimeout(timerRef.current);
+    timerRef.current = setTimeout(() => callbackRef.current(...args), delay);
+  }, [delay]);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// UX: Toast notification system — replaces alert() throughout app
+// ═══════════════════════════════════════════════════════════════
+const _toastListeners = new Set();
+const _toastQueue = [];
+function toast(message, type='success', duration=3500) {
+  const id = Date.now() + Math.random();
+  const t = {id, message, type, duration};
+  _toastQueue.push(t);
+  _toastListeners.forEach(fn => fn([..._toastQueue]));
+  setTimeout(() => {
+    const idx = _toastQueue.findIndex(x => x.id === id);
+    if(idx >= 0) { _toastQueue[idx] = {..._toastQueue[idx], exiting:true}; _toastListeners.forEach(fn => fn([..._toastQueue])); }
+    setTimeout(() => {
+      const idx2 = _toastQueue.findIndex(x => x.id === id);
+      if(idx2 >= 0) _toastQueue.splice(idx2, 1);
+      _toastListeners.forEach(fn => fn([..._toastQueue]));
+    }, 220);
+  }, duration);
+  return id;
+}
+const TOAST_ICONS = {success:'✓',error:'✕',info:'ℹ',warning:'⚠'};
+function ToastContainer() {
+  const [toasts, setToasts] = useState([]);
+  useEffect(() => { _toastListeners.add(setToasts); return () => _toastListeners.delete(setToasts); }, []);
+  if(!toasts.length) return null;
+  return ReactDOM.createPortal(
+    <div className="toast-container">
+      {toasts.slice(-4).map(t => (
+        <div key={t.id} className={`toast toast-${t.type}${t.exiting?' exiting':''}`}>
+          <span style={{fontSize:14,fontWeight:700}}>{TOAST_ICONS[t.type]||'✓'}</span>
+          <span>{t.message}</span>
+        </div>
+      ))}
+    </div>,
+    document.body
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// UX: Chart.js global animation defaults — smooth entry on all charts
+// ═══════════════════════════════════════════════════════════════
+if(window.Chart) {
+  Chart.defaults.animation = { duration: 600, easing: 'easeOutQuart' };
+  Chart.defaults.plugins.tooltip = { ...Chart.defaults.plugins.tooltip, animation: { duration: 150 } };
+}
 
 // PolicyLens Logo — inline SVG, works everywhere
 const LogoSVG = ({size=24,color='#d4a96a'}) => (
@@ -528,7 +638,7 @@ const LogoSVG = ({size=24,color='#d4a96a'}) => (
 const LogoMark = ({size=24}) => <LogoSVG size={size} />;
 
 // ═══════════════════════════════════════════════════════════════
-// CONSTANTS & DATA MODEL
+// MODULE: CONSTANTS — Categories, data model, SG constants
 // ═══════════════════════════════════════════════════════════════
 
 const CATEGORIES = {
@@ -545,7 +655,7 @@ const CATEGORIES = {
 const SUB_TYPES = {
   protection: ['Term Life','Whole Life','Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)','Critical Illness','Personal Accident','Disability Income','Long-term Care','ILP (Protection)'],
   savings: ['Endowment','Lifetime Endowment','Education Plan','Short-term Endowment'],
-  health: ['Integrated Shield Plan','Hospital Income','CareShield Life Supplement'],
+  health: ['Integrated Shield Plan','Hospital Income','CareShield Life Supplement','ElderShield 300','ElderShield 400'],
   investment: ['ILP (Investment)','Unit Trust','Single Premium Investment'],
   retirement: ['Retirement','Annuity'],
   maternity: ['Maternity Coverage'],
@@ -991,7 +1101,7 @@ async function processFile(file) {
       console.warn('[PDF] Error:', e.name, e.message);
       // If it's a password/lock issue, alert and stop — don't send locked PDF to Gemini
       if(e.name === 'PasswordException' || e.message?.includes('locked') || e.message?.includes('password') || e.message?.includes('Password')) {
-        alert('PDF is password-protected and could not be unlocked.\n\nTry adding the password in Settings → PDF Unlock Passwords.\nCommon passwords: NRIC number, DOB (DDMMYYYY).');
+        toast('PDF is password-protected — add the password in Settings → PDF Unlock Passwords','warning',5000);
         return [];
       }
       // For other errors (pdf.js not loaded, corrupt file), try sending raw to Gemini
@@ -1814,6 +1924,9 @@ var FUND_DB=[
 ['FTIF - Franklin Strategic Income','equity','global','dividend_inc',3,'Jul 2007','LU0300742896'],
 ['FTIF - Franklin Strategic Income A Mdis','equity','global','dividend_inc',3,'Jan 2015','LU1162222480'],
 ['FTIF - Franklin Technology A (acc)','equity','global','tech',10,'Apr 2018','LU1803068979'],
+['AIA Global Technology Fund','equity','global','tech',10,'',''],
+['AIA Regional Equity Fund','equity','asia','equity_general',7,'',''],
+['AIA Regional Fixed Income Fund','bond','asia','bonds_fi',3,'',''],
 ['FTIF - Franklin US Government A (Mdis)','equity','us','multi_sector',2,'Feb 1991','LU0029872446'],
 ['FTIF - Franklin US Opportunities','equity','us','multi_sector',8,'Oct 2007','LU0320765059'],
 ['FTIF - Franklin US Opportunities A Acc','equity','global','multi_sector',8,'Sep 2011','LU0672654240'],
@@ -3503,7 +3616,7 @@ var FUND_DB=[
 ];
 
 // ═══════════════════════════════════════════════════════════════
-// IndexedDB LAYER
+// MODULE: INDEXEDDB — Database layer + batch operations
 // ═══════════════════════════════════════════════════════════════
 
 const DB_NAME='PolicyLensV4';const DB_VER=1;
@@ -3527,8 +3640,56 @@ const dbPut=(store,val)=>dbOp(store,'readwrite',s=>s.put(val));
 const dbDel=(store,id)=>dbOp(store,'readwrite',s=>s.delete(id));
 const dbGet=(store,key)=>dbOp(store,'readonly',s=>s.get(key));
 
+// PERFORMANCE: Batch load — one DB open, one transaction for policies + settings
+const dbBatchLoad = async (settingKeys) => {
+  const db = await openDB();
+  const [policies, settings] = await Promise.all([
+    new Promise((res,rej) => {
+      const tx = db.transaction('policies','readonly');
+      const r = tx.objectStore('policies').getAll();
+      r.onsuccess = e => res(e.target.result || []);
+      r.onerror = e => rej(e.target.error);
+    }),
+    new Promise((res,rej) => {
+      const tx = db.transaction('settings','readonly');
+      const store = tx.objectStore('settings');
+      const results = {};
+      let pending = settingKeys.length;
+      if(pending === 0) return res(results);
+      settingKeys.forEach(key => {
+        const r = store.get(key);
+        r.onsuccess = e => { results[key] = e.target.result || null; if(--pending === 0) res(results); };
+        r.onerror = () => { results[key] = null; if(--pending === 0) res(results); };
+      });
+    })
+  ]);
+  return { policies, settings };
+};
+
+// ── Domain API — clean interface for app code (use these instead of raw dbGet/dbPut) ──
+const PolicyDB = {
+  // Policies
+  getAllPolicies: () => dbGetAll('policies'),
+  savePolicy: (p) => dbPut('policies', p),
+  deletePolicy: (id) => dbDel('policies', id),
+  // Settings (key-value)
+  getSetting: async (key) => { const r = await dbGet('settings', key).catch(()=>null); return r?.value ?? null; },
+  saveSetting: (key, value) => dbPut('settings', {key, value}),
+  // Client profile (convenience)
+  getProfile: async () => { const r = await dbGet('settings','clientProfile').catch(()=>null); return r?.value || null; },
+  saveProfile: (p) => dbPut('settings', {key:'clientProfile', value:p}),
+  // Repository
+  getAllRepo: () => dbGetAll('repository'),
+  saveRepoItem: (item) => dbPut('repository', item),
+  deleteRepoItem: (id) => dbDel('repository', id),
+  // Batch load (initial app start)
+  batchLoad: dbBatchLoad,
+  // Wipe all (danger)
+  clearStore: async (store) => { const db = await openDB(); return new Promise((res,rej)=>{try{const tx=db.transaction(store,'readwrite');tx.objectStore(store).clear();tx.oncomplete=()=>res();tx.onerror=e=>rej(e);}catch(e){rej(e)}}); },
+};
+
 // ═══════════════════════════════════════════════════════════════
-// FUZZY MATCHING
+// MODULE: FUZZY — Fuzzy matching engine
 // ═══════════════════════════════════════════════════════════════
 
 function fuzzyMatch(input, candidates, threshold=0.4) {
@@ -3561,7 +3722,7 @@ function fuzzyMatch(input, candidates, threshold=0.4) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// HELPERS
+// MODULE: HELPERS — Utility functions
 // ═══════════════════════════════════════════════════════════════
 
 const genId = () => 'p' + Date.now().toString(36) + Math.random().toString(36).slice(2,6);
@@ -3573,13 +3734,13 @@ const fmtPct = n => n==null?'-':(n*1).toFixed(2)+'%';
 const catColor = cat => CATEGORIES[cat]?.color || 'var(--text3)';
 
 // ═══════════════════════════════════════════════════════════════
-// APP CONTEXT
+// MODULE: APP_CONTEXT
 // ═══════════════════════════════════════════════════════════════
 
 const AppCtx = createContext();
 
 // ═══════════════════════════════════════════════════════════════
-// SUPABASE REPO HELPERS
+// MODULE: SUPABASE_REPO — Cloud repository sync
 // ═══════════════════════════════════════════════════════════════
 
 function getSB() {
@@ -3619,7 +3780,7 @@ async function sbRepoDelete(id) {
 
 
 // ═══════════════════════════════════════════════════════════════
-// CAMERA MODAL — In-app camera for multi-snap without leaving
+// MODULE: CAMERA — In-app camera for multi-snap
 // ═══════════════════════════════════════════════════════════════
 
 let _cameraResolve = null;
@@ -3783,7 +3944,7 @@ function CameraModal() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// ONBOARDING MODAL — First-time user guide
+// MODULE: ONBOARDING — First-time user guide
 // ═══════════════════════════════════════════════════════════════
 
 function OnboardingModal() {
@@ -3901,7 +4062,7 @@ function OnboardingModal() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// MAIN APP
+// MODULE: APP — Main App component + state management
 // ═══════════════════════════════════════════════════════════════
 
 function App() {
@@ -3916,15 +4077,12 @@ function App() {
 
   useEffect(() => {
     (async () => {
-      // Load policies + settings from local IndexedDB
-      const ps = await dbGetAll('policies');
-      const sk = await dbGet('settings','apiKey').catch(()=>null);
-      const cn = await dbGet('settings','clientName').catch(()=>null);
+      // PERFORMANCE: Batch load — single DB open, parallel reads for policies + all settings
+      const {policies: ps, settings: stg} = await dbBatchLoad(['apiKey','clientName','clientProfile']);
       setPolicies(ps || []);
-      if(sk) setApiKey(sk.value||'');
-      if(cn) setClientName(cn.value||'');
-      const cp = await dbGet('settings','clientProfile').catch(()=>null);
-      if(cp?.value) setClientProfile(cp.value);
+      if(stg.apiKey) setApiKey(stg.apiKey.value||'');
+      if(stg.clientName) setClientName(stg.clientName.value||'');
+      if(stg.clientProfile?.value) setClientProfile(stg.clientProfile.value);
 
       // Load repository from Supabase (primary) with local fallback
       // Only try Supabase if user is authenticated (session exists)
@@ -4062,16 +4220,17 @@ function App() {
 
   return (
     <AppCtx.Provider value={ctx}>
+      <ToastContainer />
       <CameraModal />
       <OnboardingModal />
       <Header />
       <div style={{flex:1,overflow:'auto',padding:'12px clamp(10px, 3vw, 20px) 40px'}}>
-        {tab==='profile' && <ProfileTab />}
-        {tab==='dashboard' && <Dashboard />}
+        {tab==='profile' && <ErrorBoundary key="profile"><ProfileTab /></ErrorBoundary>}
+        {tab==='dashboard' && <ErrorBoundary key="dashboard"><Dashboard /></ErrorBoundary>}
         <div style={{display:tab==='policies'?'block':'none'}}><Policies /></div>
-        {tab==='repository' && <Repository />}
+        {tab==='repository' && <ErrorBoundary key="repo"><Repository /></ErrorBoundary>}
         {tab==='funds' && <FundLookup />}
-        {tab==='report' && <ReportTab />}
+        {tab==='report' && <ErrorBoundary key="report"><ReportTab /></ErrorBoundary>}
         {tab==='settings' && <Settings />}
       </div>
     </AppCtx.Provider>
@@ -4079,7 +4238,7 @@ function App() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// HEADER
+// MODULE: HEADER — Navigation tabs
 // ═══════════════════════════════════════════════════════════════
 
 function Header() {
@@ -4154,15 +4313,15 @@ function Header() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// DASHBOARD — Portfolio Overview + Gap Analysis
+// MODULE: DASHBOARD — Portfolio Overview + Gap Analysis
 // ═══════════════════════════════════════════════════════════════
 
 
 // ═══════════════════════════════════════════════════════════════
-// OPENAI API HELPER — converts content blocks to OpenAI format
+// MODULE: OPENAI_HELPER — Converts content blocks to OpenAI format
 // ═══════════════════════════════════════════════════════════════
 // ═══════════════════════════════════════════════════════════════
-// JSON REPAIR — fixes truncated JSON from token limits
+// MODULE: JSON_REPAIR — Fixes truncated JSON from token limits
 // ═══════════════════════════════════════════════════════════════
 function repairJSON(raw) {
   let s = raw.replace(/```json\s*|```\s*/g,'').trim();
@@ -4228,7 +4387,7 @@ function repairJSON(raw) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// DUAL AI PIPELINE — Gemini reads docs (free), Claude extracts (smart)
+// MODULE: AI_PIPELINE — Gemini reads docs, Claude extracts structured data
 // Fallback: Gemini-only if no Anthropic key
 // ═══════════════════════════════════════════════════════════════
 
@@ -4422,7 +4581,7 @@ async function callAI(systemPrompt, contentBlocks, maxTokens) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// DROP ZONE — paste + drag-and-drop for any screen
+// MODULE: DROP_ZONE — Paste + drag-and-drop for any screen
 // ═══════════════════════════════════════════════════════════════
 
 function DropZone({onFiles, label, active}) {
@@ -4491,7 +4650,7 @@ function DropZone({onFiles, label, active}) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// MY CLIENT — Profile + Dependants
+// MODULE: PROFILE — My Client tab + Financial Profile
 // ═══════════════════════════════════════════════════════════════
 
 function ProfileTab() {
@@ -4501,8 +4660,10 @@ function ProfileTab() {
   const camRef = useRef(null);
   const uploadRef = useRef(null);
 
-  // Auto-save on change
-  useEffect(() => { saveProfile(p); }, [p]);
+  // Auto-save on change — debounced to avoid cascade on every keystroke
+  // Input fields update instantly (local state), but IndexedDB write + gap recalc waits 500ms
+  const debouncedSave = useDebounce((profile) => { saveProfile(profile); }, 500);
+  useEffect(() => { debouncedSave(p); }, [p]);
 
   // Pick up files dropped from Dashboard
   useEffect(() => {
@@ -4543,8 +4704,8 @@ function ProfileTab() {
         }
       });
       setP(updated);
-      alert('Profile updated from scan!');
-    } catch(e){alert('Scan error: '+e.message);}
+      toast('Profile updated from scan!','success');
+    } catch(e){toast('Scan error: '+e.message,'error');}
     setScanning(false);
   };
 
@@ -4566,7 +4727,7 @@ function ProfileTab() {
           <button className="btn-sm" style={{background:'rgba(239,83,80,.08)',color:'var(--red)',border:'1px solid rgba(239,83,80,.15)',fontSize:10,padding:'5px 10px',borderRadius:8,cursor:'pointer'}} onClick={()=>{
             if(!confirm('Delete all client profile data?\n\nClears name, NRIC, DOB, income, expenses, CPF settings, dependants.\n\nPolicies will NOT be deleted.')) return;
             const blank = {name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[],annualIncome:'',retirementAge:'65',monthlyExpenses:'',mortgagePayment:'',dependantSupport:'',medicalBudget:'',desiredRetIncome:'',inflationRate:'2.8',cpfScheme:'FRS',cpfPlan:'standard',cpfStartAge:'65',cpfTopUp:'',otherRetIncome:[]};
-            setP(blank); saveProfile(blank); alert('Profile cleared.');
+            setP(blank); saveProfile(blank); toast('Profile cleared','success');
           }}>🗑 Clear Profile</button>
         </div>
       </div>
@@ -4871,10 +5032,10 @@ function ProfileTab() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// RETIREMENT LITE DASHBOARD — Condensed RetireLens
+// MODULE: RETIREMENT — Retirement Lite Dashboard (condensed RetireLens)
 // ═══════════════════════════════════════════════════════════════
 
-function RetirementLiteDashboard({data,age,retAge,p,policies,cvTimeline,toSGD,fxRates}) {
+const RetirementLiteDashboard = memo(function RetirementLiteDashboard({data,age,retAge,p,policies,cvTimeline,toSGD,fxRates}) {
   const chartRef = useRef(null);
   const chartInst = useRef(null);
   const [shareMode,setShareMode] = useState(false);
@@ -5255,13 +5416,13 @@ new Chart(document.getElementById('retChart'),{type:'bar',data:{labels:${JSON.st
       )}
     </div>
   );
-}
+});
 
 // ═══════════════════════════════════════════════════════════════
-// PREMIUM CASHFLOW CHART (Tier 1 Dashboard Feature)
+// MODULE: CASHFLOW — Premium cashflow chart
 // ═══════════════════════════════════════════════════════════════
 
-function PremiumCashflowChart({policies,age,retAge}) {
+const PremiumCashflowChart = memo(function PremiumCashflowChart({policies,age,retAge}) {
   const chartRef = useRef(null);
   const chartInst = useRef(null);
 
@@ -5347,24 +5508,31 @@ function PremiumCashflowChart({policies,age,retAge}) {
       <p style={{fontSize:10,color:'var(--text3)',marginBottom:10}}>Year-by-year premium commitments — see when payments end and total outflow drops</p>
       <div style={{height:200}}><canvas ref={chartRef} /></div>
       {dropEvents.length > 0 && (
-        <div style={{marginTop:8,display:'flex',gap:6,flexWrap:'wrap'}}>
-          {dropEvents.slice(0,4).map((ev,i) => (
-            <div key={i} style={{padding:'4px 8px',background:'rgba(91,168,160,.08)',borderRadius:6,fontSize:10,color:'var(--green2)'}}>
-              Age {ev.age}: −{fmt(ev.drop)}/yr ({ev.ended.join(', ')} ends)
+        <div style={{marginTop:8}}>
+          <div style={{fontSize:9,fontWeight:600,color:'var(--text3)',textTransform:'uppercase',marginBottom:4}}>Key Premium Drops</div>
+          {dropEvents.slice(0,5).map((ev,i) => (
+            <div key={i} style={{padding:'5px 8px',background:'rgba(91,168,160,.05)',borderRadius:6,fontSize:10,marginBottom:3,borderLeft:'2px solid var(--green2)'}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                <span style={{fontWeight:600,color:'var(--green2)'}}>Age {ev.age}</span>
+                <span style={{color:'var(--green2)',fontWeight:600}}>−{fmt(ev.drop)}/yr</span>
+              </div>
+              <div style={{fontSize:9,color:'var(--text3)',marginTop:2}}>
+                {ev.ended.map((name,j) => <div key={j}>{j+1}. {name.length>40?name.substring(0,37)+'…':name}</div>)}
+              </div>
             </div>
           ))}
         </div>
       )}
     </div>
   );
-}
+});
 
 // ═══════════════════════════════════════════════════════════════
-// DASHBOARD
+// MODULE: DASHBOARD_MAIN
 // ═══════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════
-// REVIEW SESSION MODE — Guided client review walkthrough
+// MODULE: REVIEW — Guided client review walkthrough
 // ═══════════════════════════════════════════════════════════════
 function ReviewSession({onClose}) {
   const {policies, clientProfile, clientName} = useContext(AppCtx);
@@ -5487,7 +5655,7 @@ function ReviewSession({onClose}) {
               </div>
             ))}
             {premRatio > 15 && <div style={{marginTop:10,padding:10,background:'rgba(212,169,106,.06)',borderRadius:8,fontSize:11,color:'var(--gold)'}}>
-              💡 <strong>Talking point:</strong> Premiums are {premRatio}% of income. Industry guideline is 10-15%. Review if any endowment/ILP premiums can be redirected to protection.
+              📊 Premium-to-income ratio: {premRatio}%. Industry guideline: 10-15%.
             </div>}
           </div>)}
 
@@ -5546,7 +5714,7 @@ function ReviewSession({onClose}) {
               ))}
             </div>)}
             <div style={{padding:10,background:'rgba(157,138,191,.06)',borderRadius:8,fontSize:11}}>
-              💡 <strong>Talking point:</strong> {retAge-age<=10?'Retirement is close — focus on income certainty and capital preservation.':retAge-age<=20?'Good time horizon. Balance growth investments with guaranteed income streams.':'Long runway to retirement. Maximise growth potential while building protection base.'}
+              📊 {retAge-age<=10?'Retirement within 10 years — income certainty and capital preservation are priorities.':retAge-age<=20?'Good time horizon. Consider balancing growth investments with guaranteed income streams.':'Long runway to retirement. Growth potential can be maximised while building protection base.'}
             </div>
           </div>)}
 
@@ -5591,7 +5759,7 @@ function ReviewSession({onClose}) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// CLIENT UPLOAD PORTAL — Shareable link for client document collection
+// MODULE: UPLOAD_PORTAL — Client document collection link
 // ═══════════════════════════════════════════════════════════════
 function Dashboard() {
   const {policies,setTab,apiKey,clientProfile,saveProfile} = useContext(AppCtx);
@@ -5669,7 +5837,7 @@ function Dashboard() {
   const handleDashDrop = async (files) => {
     const gk = ((await dbGet('settings','geminiKey').catch(()=>null))?.value || '').trim();
     const ck = ((await dbGet('settings','anthropicKey').catch(()=>null))?.value || '').trim();
-    if(!gk && !ck){alert('Set your Gemini or Anthropic API key in Settings first');return;}
+    if(!gk && !ck){toast('Set your API key in Settings first','warning');return;}
     const choice = confirm('What are these documents?\n\nOK = Client profile (NRIC, FNA, KYC)\nCancel = Policy documents');
     if(choice) setTab('profile');
     else setTab('policies');
@@ -5685,7 +5853,7 @@ function Dashboard() {
 
   // Premium breakdown by payment mode and frequency
   const premiumBreakdown = useMemo(() => {
-    const modes = {cash:{annual:0,single:0}, srs:{annual:0,single:0}, cpfoa:{annual:0,single:0}, medisave:{annual:0,single:0}, other:{annual:0,single:0}};
+    const modes = {cash:{annual:0,single:0}, srs:{annual:0,single:0}, cpfoa:{annual:0,single:0}, cpfsa:{annual:0,single:0}, medisave:{annual:0,single:0}, other:{annual:0,single:0}};
     policies.forEach(p => {
       if(p.category==='cash_investments') return;
       if(p.status==='matured'||p.status==='surrendered'||p.status==='lapsed') return;
@@ -5699,6 +5867,7 @@ function Dashboard() {
       const method = (p.paymentMethod||'').toLowerCase().replace(/\s/g,'');
       if(method.includes('medisave')) { modes.medisave.annual += annualized; modes.medisave.single += singleAmt; }
       else if(method.includes('srs')) { modes.srs.annual += annualized; modes.srs.single += singleAmt; }
+      else if(method.includes('cpfsa')||method.includes('cpf sa')) { modes.cpfsa.annual += annualized; modes.cpfsa.single += singleAmt; }
       else if(method.includes('cpfoa')||method.includes('cpf oa')) { modes.cpfoa.annual += annualized; modes.cpfoa.single += singleAmt; }
       else { modes.cash.annual += annualized; modes.cash.single += singleAmt; }
     });
@@ -5915,7 +6084,7 @@ function Dashboard() {
     chartInst2.current = new Chart(chartRef2.current, {
       type:'line',
       data:{labels:cvTimeline.map(r=>r.age),datasets:[
-        {label:'Surrender Value',data:cvTimeline.map(r=>r.totalCV),borderColor:'#d4a96a',backgroundColor:'rgba(212,169,106,.06)',fill:true,tension:.3,pointRadius:0,borderWidth:2},
+        {label:'Surrender Value',data:cvTimeline.map(r=>r.totalCV),borderColor:'#d4a96a',backgroundColor:'rgba(212,169,106,.06)',fill:true,tension:.3,pointRadius:0,borderWidth:2,pointStyle:'rect'},
         {label:'Cumulative Premiums Paid',data:cvTimeline.map(r=>{
           let cumPrem=0;
           policies.forEach(pol=>{
@@ -5929,8 +6098,8 @@ function Dashboard() {
             cumPrem += pol.premSingle ? annPrem : annPrem * yrsInForce;
           });
           return cumPrem;
-        }),borderColor:'rgba(239,83,80,.6)',backgroundColor:'rgba(239,83,80,.03)',fill:true,tension:.3,pointRadius:0,borderWidth:1.5,borderDash:[5,3]},
-        ...(cvTimeline.some(r=>r.maturities>0)?[{label:'Maturities',data:cvTimeline.map(r=>r.maturities),type:'bar',backgroundColor:'rgba(91,168,160,.5)',borderRadius:3,barPercentage:.4}]:[]),
+        }),borderColor:'rgba(239,83,80,.6)',backgroundColor:'rgba(239,83,80,.03)',fill:true,tension:.3,pointRadius:0,borderWidth:1.5,borderDash:[5,3],pointStyle:'line'},
+        ...(cvTimeline.some(r=>r.maturities>0)?[{label:'Maturities',data:cvTimeline.map(r=>r.maturities),type:'bar',backgroundColor:'rgba(91,168,160,.5)',borderRadius:3,barPercentage:.4,pointStyle:'rect'}]:[]),
       ]},
       options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
         scales:{
@@ -6076,22 +6245,22 @@ function Dashboard() {
           try{
             const text=await file.text(); const data=JSON.parse(text);
             const arr=data.policies||(Array.isArray(data)?data:[]);
-            if(!arr.length){alert('No policies found in file');return;}
+            if(!arr.length){toast('No policies found in file','warning');return;}
             const mode=confirm(`Found ${arr.length} policies${data.clientName?' for '+data.clientName:''}.\n\nOK = Replace current portfolio\nCancel = Add to existing`);
             if(mode){for(const pol of policies) await deletePolicy(pol.id);}
             let count=0;
             for(const pol of arr){await savePolicy({...pol,id:mode?pol.id:('p_'+Date.now()+'_'+Math.random().toString(36).slice(2,5))});count++;}
             if(data.clientProfile && mode) saveProfile(data.clientProfile);
             else if(data.clientName && mode) saveProfile({...clientProfile,name:data.clientName});
-            alert(`Loaded ${count} policies`+(mode?' (replaced)':' (added)'));
-          }catch(e){alert('Error: '+e.message);}
+            toast(`Loaded ${count} policies`+(mode?' (replaced)':' (added)'),'success');
+          }catch(e){toast(e.message,'error');}
         };
         const doReset = async() => {
           if(!confirm('⚠️ RESET EVERYTHING?\n\nThis will permanently delete:\n• All '+policies.length+' policies\n• Client profile\n\nThis CANNOT be undone.')) return;
           if(!confirm('Final confirmation — delete all data?')) return;
           for(const pol of policies) await deletePolicy(pol.id);
           saveProfile({name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[]});
-          alert('Portfolio reset complete.'); window.location.reload();
+          toast('Portfolio reset — reloading…','success'); setTimeout(()=>window.location.reload(),800);
         };
         return (
           <div style={{display:'flex',gap:6,marginBottom:14,flexWrap:'wrap',alignItems:'center'}}>
@@ -6144,6 +6313,10 @@ function Dashboard() {
           {premiumBreakdown.modes.cpfoa.annual > 0 && <div style={{background:'var(--bg3)',borderRadius:8,padding:'8px 10px'}}>
             <div style={{fontSize:8,color:'var(--blue2)',textTransform:'uppercase',fontWeight:700}}>CPF OA</div>
             <div style={{fontSize:15,fontWeight:600,color:'var(--blue2)',marginTop:2}}>{fmt(premiumBreakdown.modes.cpfoa.annual)}<span style={{fontSize:9,color:'var(--text3)'}}>/yr</span></div>
+          </div>}
+          {premiumBreakdown.modes.cpfsa.annual > 0 && <div style={{background:'var(--bg3)',borderRadius:8,padding:'8px 10px'}}>
+            <div style={{fontSize:8,color:'#5b8fd9',textTransform:'uppercase',fontWeight:700}}>CPF SA</div>
+            <div style={{fontSize:15,fontWeight:600,color:'#5b8fd9',marginTop:2}}>{fmt(premiumBreakdown.modes.cpfsa.annual)}<span style={{fontSize:9,color:'var(--text3)'}}>/yr</span></div>
           </div>}
           {premiumBreakdown.totalSingle > 0 && <div style={{background:'var(--bg3)',borderRadius:8,padding:'8px 10px',borderLeft:'3px solid var(--gold)',gridColumn:premiumBreakdown.modes.medisave.annual>0||premiumBreakdown.modes.srs.annual>0?'auto':'1/-1'}}>
             <div style={{fontSize:8,color:'var(--gold)',textTransform:'uppercase',fontWeight:700}}>Single Premiums</div>
@@ -6362,7 +6535,7 @@ function Dashboard() {
           <div className="card" style={{marginBottom:16}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
               <h3 style={{fontSize:13,fontWeight:600}}>Insurer Concentration</h3>
-              {concentrated && <span style={{fontSize:10,padding:'3px 10px',borderRadius:12,background:'rgba(239,83,80,.1)',color:'var(--red)',fontWeight:600}}>⚠ {topPct}% with {entries[0][0]}</span>}
+              {entries.length > 1 && <span style={{fontSize:10,padding:'3px 10px',borderRadius:12,background:'rgba(91,168,160,.08)',color:'var(--teal)',fontWeight:500}}>{entries.length} insurers</span>}
             </div>
             <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
               {entries.map(([ins,amt],i) => {
@@ -6383,11 +6556,6 @@ function Dashboard() {
                 );
               })}
             </div>
-            {concentrated && (
-              <div style={{marginTop:8,padding:'6px 10px',background:'rgba(239,83,80,.05)',borderRadius:6,fontSize:10,color:'var(--red)'}}>
-                High concentration risk — {topPct}% of premiums with a single insurer. Consider diversifying across providers for counterparty risk management.
-              </div>
-            )}
           </div>
         );
       })()}
@@ -6498,8 +6666,8 @@ function Dashboard() {
 
       {/* ═══ TIER 1: RIDER COVERAGE MATRIX ═══ */}
       {policies.length > 0 && (() => {
-        const benefitTypes = ['death','tpd','ci','eci','di','accidental','premium_waiver'];
-        const benefitLabels = {death:'Death & TI',tpd:'TPD',ci:'Critical Illness',eci:'Early CI',di:'Disability Income',accidental:'Accidental',premium_waiver:'Prem. Waiver'};
+        const benefitTypes = ['death','tpd','ci','eci','di','accidental','acc_medical','acc_tcm','acc_dismember','premium_waiver','other'];
+        const benefitLabels = {death:'Death & TI',tpd:'TPD',ci:'Critical Illness',eci:'Early CI',di:'Disability Income',accidental:'Accidental Death',acc_medical:'Acc Medical Reimb.',acc_tcm:'Acc TCM Reimb.',acc_dismember:'Acc Dismemberment & Burns',premium_waiver:'Prem. Waiver',other:'Other'};
         // Build matrix: benefit type → array of {policy, sa}
         const matrix = {};
         benefitTypes.forEach(bt => matrix[bt] = []);
@@ -6562,13 +6730,17 @@ function Dashboard() {
                 </tbody>
               </table>
             </div>
-            {/* Overlap detection */}
+            {/* Overlap detection — only for reimbursement-nature benefits */}
             {(() => {
-              const overlaps = benefitTypes.filter(bt => matrix[bt].length >= 2).map(bt => ({type:benefitLabels[bt],count:matrix[bt].length}));
+              const reimbTypes = ['acc_medical','acc_tcm'];
+              const overlaps = benefitTypes.filter(bt => reimbTypes.includes(bt) && matrix[bt] && matrix[bt].length >= 2).map(bt => ({type:benefitLabels[bt],count:matrix[bt].length}));
+              // Also check ISP overlap (multiple ISPs)
+              const ispCount = policies.filter(p=>p.subType==='Integrated Shield Plan'&&p.status!=='lapsed'&&p.status!=='surrendered').length;
+              if(ispCount >= 2) overlaps.push({type:'ISP / Hospitalisation',count:ispCount});
               if(overlaps.length === 0) return null;
               return (
                 <div style={{marginTop:8,padding:'6px 10px',background:'rgba(212,169,106,.06)',borderRadius:6,fontSize:10,color:'var(--gold)'}}>
-                  ℹ Overlapping coverage: {overlaps.map(o => o.type+' ('+o.count+' sources)').join(', ')} — not necessarily a concern but worth reviewing at next review.
+                  ⚠️ Reimbursement overlap detected: {overlaps.map(o => o.type+' ('+o.count+' sources)').join(', ')} — reimbursement benefits cannot double-claim.
                 </div>
               );
             })()}
@@ -6692,11 +6864,11 @@ function GapBar({label,current,rec,pct,fmt:fmtFn,color}) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// POLICIES — List, Add, Edit with Sub-type System
+// MODULE: POLICIES — List, add, edit, scan, extract
 // ═══════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════
-// SMART PROFILE MERGE — extracts client details from policy scans
+// MODULE: PROFILE_MERGE — Smart profile extraction from policy scans
 // ═══════════════════════════════════════════════════════════════
 const PROFILE_FIELDS = {
   policyOwner:{profileKey:'name',label:'Client Name (Policy Owner)'},
@@ -6778,9 +6950,9 @@ function mergeToProfile(extracted, currentProfile, saveProfile) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// BULK VERIFICATION MODAL — shows extracted policies + corrections
+// MODULE: BULK_VERIFY — Extraction review modal
 // ═══════════════════════════════════════════════════════════════
-function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePolicy, onAccept, onClose}) {
+function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePolicy, onAccept, onClose, scanProgress}) {
   const [items, setItems] = useState(() => {
     const mapped = extracted.map((p,i) => ({
       ...p, _idx:i, _selected:true, _corrections:[], _repoMatch:null,
@@ -6903,7 +7075,7 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
     if(Object.keys(ilpMerges).length > 0) {
       const fundCount = Object.values(ilpMerges).flat().length;
       const ilpCount = Object.keys(ilpMerges).length;
-      alert(`Linked ${fundCount} fund${fundCount>1?'s':''} to ${ilpCount} ILP polic${ilpCount>1?'ies':'y'}. Review fund allocations in the policy form.`);
+      toast(`Linked ${fundCount} fund${fundCount>1?'s':''} to ${ilpCount} ILP polic${ilpCount>1?'ies':'y'}`,'success');
     }
 
     try { sessionStorage.removeItem('policylens_pendingExtract'); } catch(e){}
@@ -6920,6 +7092,20 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
           </div>
           <button onClick={onClose} style={{background:'none',color:'var(--text3)',fontSize:20,padding:4}}>×</button>
         </div>
+
+        {/* Live extraction progress */}
+        {scanProgress && scanProgress.pctComplete < 100 && (
+          <div style={{padding:'8px 16px',background:'rgba(212,169,106,.06)',borderBottom:'1px solid var(--border)'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4}}>
+              <span style={{fontSize:10,fontWeight:600,color:'var(--gold)'}}>✨ Still extracting...</span>
+              <span style={{fontSize:9,color:'var(--text3)'}}>Batch {scanProgress.batch}/{scanProgress.totalBatches}</span>
+            </div>
+            <div style={{height:4,background:'var(--bg4)',borderRadius:2,overflow:'hidden'}}>
+              <div style={{height:'100%',width:scanProgress.pctComplete+'%',background:'linear-gradient(90deg,var(--gold),var(--green2))',borderRadius:2,transition:'width .5s ease'}} />
+            </div>
+            <div style={{fontSize:9,color:'var(--text3)',marginTop:2}}>Review these while the rest extract — new policies will appear automatically</div>
+          </div>
+        )}
 
         {/* Batch tabs */}
         {batches.length > 1 && (
@@ -6983,80 +7169,76 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
             </div>
           )}
 
-          {/* ── VIEW: QUICK GRID ── */}
-          <div style={{overflowX:'auto',marginBottom:8}}>
-            <table style={{width:'100%',fontSize:10,borderCollapse:'collapse',minWidth:700}}>
-              <thead><tr style={{background:'var(--bg2)',fontSize:9,textTransform:'uppercase',letterSpacing:'.3px'}}>
-                <th style={{width:28,padding:'5px 4px'}}></th>
-                <th style={{padding:'5px 6px',textAlign:'left',minWidth:140}}>Policy</th>
-                <th style={{padding:'5px 4px',minWidth:90}}>Insurer</th>
-                <th style={{padding:'5px 4px',minWidth:80}}>Category</th>
-                <th style={{padding:'5px 4px',minWidth:80}}>Sub-type</th>
-                <th style={{padding:'5px 4px',textAlign:'right',minWidth:70}}>Premium</th>
-                <th style={{padding:'5px 4px',minWidth:60}}>Freq</th>
-                <th style={{padding:'5px 4px',minWidth:60}}>Method</th>
-                <th style={{padding:'5px 4px',textAlign:'right',minWidth:80}}>Sum Assured</th>
-              </tr></thead>
-              <tbody>
-                {filtered.map((item,i) => (
-                  <tr key={item._idx} style={{borderTop:'1px solid var(--border)',background:item._selected?(item._dupOf?'rgba(212,169,106,.04)':'transparent'):'rgba(0,0,0,.1)',opacity:item._selected?1:.45}}>
-                    <td style={{padding:'4px'}}><input type="checkbox" checked={item._selected} onChange={()=>toggleSelect(item._idx)} style={{width:14,height:14,accentColor:'var(--gold)'}} /></td>
-                    <td style={{padding:'4px 6px'}}>
-                      <input value={item.productName||''} onChange={e=>updateField(item._idx,'productName',e.target.value)} style={{width:'100%',fontSize:10,padding:'2px 4px',background:'transparent',border:'1px solid var(--border)',borderRadius:3,fontWeight:500}} />
-                      {item._dupOf && <div style={{fontSize:8,color:'var(--gold)'}}>🔄 Possible duplicate</div>}
-                      {item._batch > 1 && <div style={{fontSize:7,color:'var(--teal)'}}>Batch {item._batch}</div>}
-                    </td>
-                    <td style={{padding:'4px'}}><select value={item.insurer||''} onChange={e=>updateField(item._idx,'insurer',e.target.value)} style={{width:'100%',fontSize:9,padding:'2px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:3}}>
-                      <option value="">—</option>{INSURER_LIST.map(n=><option key={n} value={n}>{n}</option>)}
-                    </select></td>
-                    <td style={{padding:'4px'}}><select value={item.category||''} onChange={e=>updateField(item._idx,'category',e.target.value)} style={{width:'100%',fontSize:9,padding:'2px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:3}}>
-                      {Object.entries(CATEGORIES).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}
-                    </select></td>
-                    <td style={{padding:'4px'}}><select value={item.subType||''} onChange={e=>updateField(item._idx,'subType',e.target.value)} style={{width:'100%',fontSize:9,padding:'2px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:3}}>
-                      <option value="">—</option>{(SUB_TYPES[item.category]||[]).map(s=><option key={s} value={s}>{s}</option>)}
-                    </select></td>
-                    <td style={{padding:'4px'}}><input type="number" value={item.annualPremium||''} onChange={e=>updateField(item._idx,'annualPremium',parseFloat(e.target.value)||0)} style={{width:'100%',fontSize:10,padding:'2px 4px',background:'transparent',border:'1px solid var(--border)',borderRadius:3,textAlign:'right'}} /></td>
-                    <td style={{padding:'4px'}}><select value={item.premFrequency||'annual'} onChange={e=>updateField(item._idx,'premFrequency',e.target.value)} style={{width:'100%',fontSize:9,padding:'2px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:3}}>
-                      <option value="annual">Annual</option><option value="monthly">Monthly</option><option value="single">Single</option><option value="unknown">?</option>
-                    </select></td>
-                    <td style={{padding:'4px'}}><select value={item.paymentMethod||'Cash'} onChange={e=>updateField(item._idx,'paymentMethod',e.target.value)} style={{width:'100%',fontSize:9,padding:'2px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:3}}>
-                      <option>Cash</option><option>MediSave</option><option>SRS</option><option>CPF OA</option><option>CPF SA</option><option>MediSave+Cash</option>
-                    </select></td>
-                    <td style={{padding:'4px'}}><input type="number" value={item.sumAssured||''} onChange={e=>updateField(item._idx,'sumAssured',parseFloat(e.target.value)||0)} style={{width:'100%',fontSize:10,padding:'2px 4px',background:'transparent',border:'1px solid var(--border)',borderRadius:3,textAlign:'right'}} /></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-
-          {/* Expandable detail cards for riders/notes/fund assignment */}
-          {filtered.filter(it => (it.riders||[]).length > 0 || isFundLike(it) || it.notes).length > 0 && (
-            <details style={{marginBottom:8}}>
-              <summary style={{fontSize:10,color:'var(--gold)',cursor:'pointer',fontWeight:600,marginBottom:6}}>📋 Riders, Fund Assignments & Notes ({filtered.filter(it=>(it.riders||[]).length>0||isFundLike(it)||it.notes).length} items)</summary>
-          {filtered.map((item,i) => {
-            if(!(item.riders||[]).length && !isFundLike(item) && !item.notes) return null;
-            return (
-            <div key={item._idx} style={{background:'var(--bg3)',borderRadius:8,padding:10,marginBottom:6,borderLeft:'3px solid '+(isFundLike(item)?'var(--teal)':'var(--gold3)')}}>
-              <div style={{fontSize:11,fontWeight:600,marginBottom:4}}>{item.productName||'Policy'} <span style={{fontSize:9,color:'var(--text3)',fontWeight:400}}>{item.insurer}</span></div>
-
-              {/* Fund classification compact */}
+          {/* ── MOBILE-FRIENDLY CARD GRID ── */}
+          {filtered.map((item,i) => (
+            <div key={item._idx} style={{background:item._selected?'var(--bg3)':'var(--bg)',borderRadius:8,padding:10,marginBottom:6,border:'1px solid '+(item._dupOf?'var(--gold3)':item._selected?'var(--border2)':'var(--border)'),opacity:item._selected?1:.4}}>
+              {/* Row 1: Checkbox + Name + Insurer */}
+              <div style={{display:'flex',gap:6,alignItems:'center',marginBottom:6}}>
+                <input type="checkbox" checked={item._selected} onChange={()=>toggleSelect(item._idx)} style={{width:16,height:16,accentColor:'var(--gold)',flexShrink:0}} />
+                <input value={item.productName||''} onChange={e=>updateField(item._idx,'productName',e.target.value)} style={{flex:1,fontSize:12,padding:'4px 6px',background:'transparent',border:'1px solid var(--border)',borderRadius:4,fontWeight:600,minWidth:0}} />
+                <select value={item.insurer||''} onChange={e=>updateField(item._idx,'insurer',e.target.value)} style={{width:110,fontSize:10,padding:'4px 2px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:4,flexShrink:0}}>
+                  <option value="">Insurer</option>{INSURER_LIST.map(n=><option key={n} value={n}>{n}</option>)}
+                </select>
+              </div>
+              {/* Row 2: Category + Sub-type */}
+              <div style={{display:'flex',gap:4,marginBottom:5}}>
+                <select value={item.category||''} onChange={e=>updateField(item._idx,'category',e.target.value)} style={{flex:1,fontSize:10,padding:'3px 4px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:4}}>
+                  {Object.entries(CATEGORIES).map(([k,v])=><option key={k} value={k}>{v.label}</option>)}
+                </select>
+                <select value={item.subType||''} onChange={e=>updateField(item._idx,'subType',e.target.value)} style={{flex:1,fontSize:10,padding:'3px 4px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:4}}>
+                  <option value="">Sub-type</option>{(SUB_TYPES[item.category]||[]).map(s=><option key={s} value={s}>{s}</option>)}
+                </select>
+              </div>
+              {/* Row 3: Premium + Freq + Method + SA */}
+              <div style={{display:'grid',gridTemplateColumns:'1fr 70px 70px 1fr',gap:4}}>
+                <div>
+                  <div style={{fontSize:8,color:'var(--text3)',marginBottom:1}}>PREMIUM</div>
+                  <input type="number" value={item.annualPremium||''} onChange={e=>updateField(item._idx,'annualPremium',parseFloat(e.target.value)||0)} placeholder="$" style={{width:'100%',fontSize:11,padding:'3px 4px',background:'transparent',border:'1px solid var(--border)',borderRadius:4}} />
+                </div>
+                <div>
+                  <div style={{fontSize:8,color:'var(--text3)',marginBottom:1}}>FREQ</div>
+                  <select value={item.premFrequency||'annual'} onChange={e=>updateField(item._idx,'premFrequency',e.target.value)} style={{width:'100%',fontSize:9,padding:'3px 2px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:4}}>
+                    <option value="annual">Annual</option><option value="monthly">Mthly</option><option value="single">Single</option><option value="unknown">?</option>
+                  </select>
+                </div>
+                <div>
+                  <div style={{fontSize:8,color:'var(--text3)',marginBottom:1}}>METHOD</div>
+                  <select value={item.paymentMethod||'Cash'} onChange={e=>updateField(item._idx,'paymentMethod',e.target.value)} style={{width:'100%',fontSize:9,padding:'3px 2px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:4}}>
+                    {(()=>{const _isISP=item.subType==='Integrated Shield Plan';const _isCSL=(item.subType||'').includes('CareShield')||(item.subType||'').includes('ElderShield');return(<>
+                      <option>Cash</option>
+                      {(_isISP||_isCSL)&&<option>MediSave</option>}
+                      {(_isISP||_isCSL)&&<option>MediSave+Cash</option>}
+                      {!_isISP&&!_isCSL&&<option>SRS</option>}
+                      {!_isISP&&!_isCSL&&<option>CPF OA</option>}
+                      {!_isISP&&!_isCSL&&<option>CPF SA</option>}
+                    </>)})()}
+                  </select>
+                </div>
+                <div>
+                  <div style={{fontSize:8,color:'var(--text3)',marginBottom:1}}>SUM ASSURED</div>
+                  <input type="number" value={item.sumAssured||''} onChange={e=>updateField(item._idx,'sumAssured',parseFloat(e.target.value)||0)} placeholder="$" style={{width:'100%',fontSize:11,padding:'3px 4px',background:'transparent',border:'1px solid var(--border)',borderRadius:4}} />
+                </div>
+              </div>
+              {/* Riders inline */}
+              {(item.riders||[]).length > 0 && <div style={{display:'flex',gap:3,flexWrap:'wrap',marginTop:5}}>
+                {(item.riders||[]).map((rd,ri)=><span key={ri} onClick={()=>toggleRider(item._idx,ri)} style={{fontSize:8,padding:'2px 5px',borderRadius:4,cursor:'pointer',background:rd._selected!==false?({death:'#5b8fd922',ci:'#c97b9a22',tpd:'#9d8abf22',di:'#5ba8a022',acc_medical:'#5ba8a022',acc_tcm:'#5ba8a022',acc_dismember:'#d4a96a22'}[rd.type]||'var(--bg2)'):'var(--bg)',color:rd._selected!==false?({death:'#5b8fd9',ci:'#c97b9a',tpd:'#9d8abf',di:'#5ba8a0',acc_medical:'#5ba8a0',acc_tcm:'#5ba8a0',acc_dismember:'#d4a96a'}[rd.type]||'var(--text3)'):'var(--text3)',textDecoration:rd._selected===false?'line-through':'none'}}>{rd.riderName||(({death:'Death',tpd:'TPD',ci:'CI',eci:'ECI',di:'DI',accidental:'ADD',acc_medical:'Med',acc_tcm:'TCM',acc_dismember:'Dismem',premium_waiver:'Waiver',other:'Other'})[rd.type]||rd.type)} ${(+rd.sa||0).toLocaleString()}</span>)}
+              </div>}
+              {/* Fund classification */}
               {isFundLike(item) && (() => {
                 const dest = item._destination||'standalone';
-                return (<div style={{display:'flex',gap:3,flexWrap:'wrap',marginTop:3}}>
-                  {['standalone','cpfoa','cpfsa','later'].map(o=>{const l={standalone:'📊 UT',cpfoa:'🏦 OA',cpfsa:'🏦 SA',later:'🏷 Later'};return <button key={o} onClick={()=>updateField(item._idx,'_destination',o)} style={{padding:'1px 5px',fontSize:8,borderRadius:3,border:'1px solid '+(dest===o?'var(--teal)':'var(--border)'),background:dest===o?'rgba(91,168,160,.1)':'transparent',color:dest===o?'var(--teal)':'var(--text3)',cursor:'pointer'}}>{l[o]}</button>;})}
-                  {ilpPolicies.map(ilp=><button key={ilp.id} onClick={()=>updateField(item._idx,'_destination','ilp_'+ilp.id)} style={{padding:'1px 5px',fontSize:8,borderRadius:3,border:'1px solid '+(dest==='ilp_'+ilp.id?'var(--gold)':'var(--border)'),background:dest==='ilp_'+ilp.id?'rgba(212,169,106,.1)':'transparent',color:dest==='ilp_'+ilp.id?'var(--gold)':'var(--text3)',cursor:'pointer'}}>🔗 {(ilp.productName||'ILP').substring(0,12)}</button>)}
+                return (<div style={{display:'flex',gap:3,flexWrap:'wrap',marginTop:5}}>
+                  {['standalone','cpfoa','cpfsa','later'].map(o=>{const l={standalone:'📊 UT',cpfoa:'🏦 OA',cpfsa:'🏦 SA',later:'🏷 Later'};return <button key={o} onClick={()=>updateField(item._idx,'_destination',o)} style={{padding:'2px 6px',fontSize:8,borderRadius:4,border:'1px solid '+(dest===o?'var(--teal)':'var(--border)'),background:dest===o?'rgba(91,168,160,.1)':'transparent',color:dest===o?'var(--teal)':'var(--text3)',cursor:'pointer'}}>{l[o]}</button>;})}
+                  {ilpPolicies.map(ilp=><button key={ilp.id} onClick={()=>updateField(item._idx,'_destination','ilp_'+ilp.id)} style={{padding:'2px 6px',fontSize:8,borderRadius:4,border:'1px solid '+(dest==='ilp_'+ilp.id?'var(--gold)':'var(--border)'),background:dest==='ilp_'+ilp.id?'rgba(212,169,106,.1)':'transparent',color:dest==='ilp_'+ilp.id?'var(--gold)':'var(--text3)',cursor:'pointer'}}>🔗 {(ilp.productName||'ILP').substring(0,15)}</button>)}
                 </div>);
               })()}
-              {/* Riders compact */}
-              {(item.riders||[]).length > 0 && <div style={{display:'flex',gap:3,flexWrap:'wrap',marginTop:3}}>
-                {(item.riders||[]).map((rd,ri)=><span key={ri} onClick={()=>toggleRider(item._idx,ri)} style={{fontSize:7,padding:'1px 4px',borderRadius:3,cursor:'pointer',background:rd._selected!==false?({death:'#5b8fd922',ci:'#c97b9a22',tpd:'#9d8abf22',di:'#5ba8a022'}[rd.type]||'var(--bg2)'):'var(--bg)',color:rd._selected!==false?({death:'#5b8fd9',ci:'#c97b9a',tpd:'#9d8abf',di:'#5ba8a0'}[rd.type]||'var(--text3)'):'var(--text3)',textDecoration:rd._selected===false?'line-through':'none'}}>{{death:'Death',tpd:'TPD',ci:'CI',eci:'ECI',di:'DI',accidental:'ADD',premium_waiver:'Waiver'}[rd.type]||rd.type} ${'+'+(+rd.sa||0).toLocaleString()}</span>)}
-              </div>}
-              {item.notes && <div style={{fontSize:8,color:'var(--text3)',marginTop:2,fontStyle:'italic'}}>{typeof item.notes==='string'?item.notes.substring(0,60)+'…':''}</div>}
+              {/* Tags */}
+              <div style={{display:'flex',gap:4,marginTop:4}}>
+                {item._dupOf && <span style={{fontSize:8,padding:'1px 5px',borderRadius:3,background:'rgba(212,169,106,.1)',color:'var(--gold)'}}>🔄 Duplicate</span>}
+                {item._batch > 1 && <span style={{fontSize:8,padding:'1px 5px',borderRadius:3,background:'rgba(91,168,160,.08)',color:'var(--teal)'}}>Batch {item._batch}</span>}
+                {item.notes && <span style={{fontSize:8,color:'var(--text3)',fontStyle:'italic',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',maxWidth:200}}>📝 {item.notes}</span>}
+              </div>
             </div>
-            );
-          })}
-            </details>
-          )}
+          ))}
         </div>
 
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:16,paddingTop:12,borderTop:'1px solid var(--border)'}}>
@@ -7071,6 +7253,25 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
       </div>
     </div>
   );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MODULE: ERROR_BOUNDARY — Catches render crashes
+// ═══════════════════════════════════════════════════════════════
+class ErrorBoundary extends React.Component {
+  constructor(props){super(props);this.state={hasError:false,error:null};}
+  static getDerivedStateFromError(error){return{hasError:true,error};}
+  componentDidCatch(error,info){console.error('[ErrorBoundary]',error,info);}
+  render(){
+    if(this.state.hasError) return (
+      <div style={{padding:20,margin:12,background:'rgba(239,83,80,.06)',border:'1px solid rgba(239,83,80,.2)',borderRadius:12}}>
+        <div style={{fontSize:14,fontWeight:600,color:'var(--red)',marginBottom:8}}>Something went wrong</div>
+        <div style={{fontSize:11,color:'var(--text3)',marginBottom:12,fontFamily:'monospace',whiteSpace:'pre-wrap',maxHeight:120,overflow:'auto'}}>{String(this.state.error?.message||this.state.error)}</div>
+        <button className="btn-secondary btn-sm" onClick={()=>{this.setState({hasError:false,error:null});if(this.props.onReset)this.props.onReset();}}>Try Again</button>
+      </div>
+    );
+    return this.props.children;
+  }
 }
 
 function Policies() {
@@ -7162,8 +7363,15 @@ function Policies() {
 
 For EACH policy or instrument, return a JSON object with:
 
-CORE: insurer, productName, policyName, policyNumber, category (protection/savings/health/investment/retirement/maternity/cash_investments/other_assets), subType (Term Life/Whole Life/Universal Life (UL)/Indexed UL (IUL)/Variable UL (VUL)/Critical Illness/Personal Accident/Disability Income/Long-term Care/Endowment/Lifetime Endowment/Education Plan/Short-term Endowment/Integrated Shield Plan/Hospital Income/ILP (Protection)/ILP (Investment)/Unit Trust/Retirement/Annuity/Maternity Coverage/Fixed Deposit/T-bill/Singapore Savings Bond/Corporate Bond/Money Market/Property/Stocks\/Equities/Gold\/Precious Metals/Fixed Coupon Note (FCN)/Equity Linked Note (ELN)/Options\/Futures/Cryptocurrency/Other), currency (default SGD), sumAssured (number), annualPremium (number), premFrequency (annual/monthly/single/unknown — if document does not clearly state frequency, use unknown), premiumStructure (Single Premium/Regular Premium/Limited Pay/Flexible Premium), paymentMethod (Cash/MediSave/SRS/MediSave+Cash/CPF OA/CPF SA)
+CORE: insurer, productName, policyName, policyNumber, category (protection/savings/health/investment/retirement/maternity/cash_investments/other_assets), subType (Term Life/Whole Life/Universal Life (UL)/Indexed UL (IUL)/Variable UL (VUL)/Critical Illness/Personal Accident/Disability Income/Long-term Care/Endowment/Lifetime Endowment/Education Plan/Short-term Endowment/Integrated Shield Plan/Hospital Income/CareShield Life Supplement/ElderShield 300/ElderShield 400/ILP (Protection)/ILP (Investment)/Unit Trust/Retirement/Annuity/Maternity Coverage/Fixed Deposit/T-bill/Singapore Savings Bond/Corporate Bond/Money Market/Property/Stocks\/Equities/Gold\/Precious Metals/Fixed Coupon Note (FCN)/Equity Linked Note (ELN)/Options\/Futures/Cryptocurrency/Other), currency (default SGD), sumAssured (number), annualPremium (number), premFrequency (annual/monthly/single/unknown — if document does not clearly state frequency, use unknown), premiumStructure (Single Premium/Regular Premium/Limited Pay/Flexible Premium), paymentMethod (Cash/MediSave/SRS/MediSave+Cash/CPF OA/CPF SA)
 IMPORTANT: If document mentions CPFIS-OA, CPF-IS or CPF Investment Scheme, set paymentMethod to "CPF OA" or "CPF SA" accordingly. Standalone fund holdings (e.g. "Allianz Global High Payout", "First Sentier Bridge") without an insurance wrapper are category:investment, subType:"Unit Trust". If it mentions CPFIS, still category:investment subType:"Unit Trust".
+PAYMENT METHODS: Any insurance policy can be paid via Cash, CPF OA, CPF SA, or SRS. Look for clues:
+- "CPF Ordinary Account" / "CPFIS-OA" / "CPF OA" → paymentMethod:"CPF OA"
+- "CPF Special Account" / "CPFIS-SA" / "CPF SA" → paymentMethod:"CPF SA"  
+- "Supplementary Retirement Scheme" / "SRS" → paymentMethod:"SRS"
+- "MediSave" → paymentMethod:"MediSave" (ISP/CareShield/ElderShield only)
+- ISP plans: always "MediSave" or "MediSave+Cash"
+- If no payment clue found, use "Cash" (default)
 
 FIXED DEPOSITS / T-BILLS / SSB (category: cash_investments):
 - insurer = bank name (e.g. "DBS", "OCBC", "ICBC", "BOC", "Standard Chartered")
@@ -7190,7 +7398,14 @@ PREMIUM TERM: premStartAge (number), premTerm (number — PREMIUM PAYMENT years,
 
 DATES: inceptionDate (YYYY-MM-DD), maturityDate (YYYY-MM-DD), status (inforce/lapsed/paid-up/surrendered/matured)
 
-RIDERS: riders (JSON array). Each rider: {type (death/tpd/ci/eci/di/accidental/premium_waiver), riderName (string — product name if this is a SEPARATE rider product, e.g. "Early CompleteCare Rider III"), sa (number), premium (number — 0 if part of main plan), expiryAge (number), bundled (boolean — true if benefit is PART OF the main plan, false if a separate add-on rider product), multiClaim (boolean), totalClaimPct (number)}. CRITICAL: distinguish bundled benefits (part of main plan, no separate premium, no product name) from separate rider products (own product name, own premium, own terms).
+RIDERS: riders (JSON array). CRITICAL — capture-first approach:
+1. For EVERY benefit/coverage/rider listed in the document, create a rider entry
+2. ALWAYS set riderName to the EXACT benefit name as written (e.g. "Double Indemnity on Accidental Death", "Accidental Dismemberment and Burns", "TCM/Chiropractic Reimbursement", "Early CompleteCare Rider III")
+3. THEN classify type from: death, tpd, ci, eci, di, accidental, acc_medical, acc_tcm, acc_dismember, premium_waiver, other
+4. If the benefit name doesn't clearly match a type, use "other" — NEVER force-snap to "death" or "accidental" when unsure
+5. NEVER create duplicate types for the same benefit. "Accidental Death $100k" + "Double Indemnity on Acc Death $100k" = TWO separate riders (type:accidental + type:other), NOT two "death" entries
+Each rider: {type, riderName (ALWAYS filled — exact name from document), sa (number), premium (0 if part of plan), expiryAge, bundled (true if part of plan, false if separate add-on), multiClaim, totalClaimPct}
+Type mapping guide: "death/terminal illness" → death, "total permanent disablement/disability" → tpd, "critical illness" → ci, "early CI" → eci, "disability income" → di, "accidental death" → accidental, "medical reimbursement/expenses" → acc_medical, "TCM/chiropractic" → acc_tcm, "dismemberment/burns" → acc_dismember, "premium waiver" → premium_waiver, anything else → other
 
 SA MULTIPLIER: saMultiplier (number), multiplierEndAge (number)
 ISP: ispClass (A/B1/B2+), hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance
@@ -7264,12 +7479,17 @@ When you detect an ISP Rider, set these fields on the PARENT Integrated Shield P
 - ispCoInsCap: co-insurance cap in $ (0 if unlimited/no cap)
 
 Common ISP + Rider pairs:
-- AIA: HealthShield Gold Max + Max VitalCare / Max VitalHealth / Max Essential Care
+- AIA: HealthShield Gold Max + Max VitalCare / Max VitalHealth B / HSG Max Rider / Max Essential A / Max Essential Care / Emergency and Outpatient Care / Cancer Care Booster
 - Prudential: PRUShield + PRUExtra / PRUExtra Plus / PRUExtra Premier / PRUExtra Preferred CoPay
 - Great Eastern: GREAT SupremeHealth + GREAT TotalCare / TotalCare Elite / TotalCare Classic
 - NTUC Income: Enhanced IncomeShield + Enhanced IncomeCare / Deluxe IncomeCare
 - Singlife: Singlife Shield + Health Plus Plan 1/2/3 (Private Lite/Classic/Premier)
 - Raffles Health: Raffles Shield + Rider plans
+
+ISP COMPONENT RIDERS: ISP plans often have multiple component riders visible in the Premium tab. Capture ALL components as riders on the parent ISP with their status:
+- Each component: {type:'other', riderName:'exact name', sa:0, premium:number, bundled:false, riderStatus:'active' or 'terminated'}
+- If a component shows "Terminated" / "Teminated" / "Expired" → riderStatus:'terminated'
+- "Premium Paying" / "Active" → riderStatus:'active'
 
 If you see ONLY the rider (no parent ISP in the document), still create ONE policy:
 - productName: the PARENT ISP name (infer from insurer + rider tier)
@@ -7393,7 +7613,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
 
         const arr = await extractBatch(batches[b]);
         if(arr.length === 0 && b === 0 && batches.length === 1) {
-          alert('Could not extract any policy information. Try clearer images or a different document.');
+          toast('Could not extract policies — try clearer images','warning',4500);
           clearStaged(); setScanning(false); setScanProgress(null); return;
         }
 
@@ -7403,7 +7623,22 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
           sumAssured:parseFloat(p.sumAssured||p.faceAmount)||0,
           annualPremium:parseFloat(p.annualPremium)||0,
           monthlyBenefit:parseFloat(p.monthlyBenefit)||0,
-          riders:(p.riders||[]).map(r=>({...r, _selected:true}))
+          riders:(p.riders||[]).map(r=>{
+            const rd = {...r, _selected:true};
+            // CAPTURE-FIRST: ensure riderName is always filled
+            const typeLabels = {death:'Death & Terminal Illness',tpd:'Total Permanent Disability',ci:'Critical Illness',eci:'Early Critical Illness',di:'Disability Income',accidental:'Accidental Death',acc_medical:'Accidental Medical Reimbursement',acc_tcm:'TCM/Chiropractic Reimbursement',acc_dismember:'Accidental Dismemberment & Burns',premium_waiver:'Premium Waiver'};
+            if(!rd.riderName || rd.riderName.trim().length < 2) rd.riderName = typeLabels[rd.type] || rd.type || 'Unknown Benefit';
+            // Validate type — if not in known list, set to 'other' and preserve name
+            const validTypes = ['death','tpd','ci','eci','di','accidental','acc_medical','acc_tcm','acc_dismember','premium_waiver','other'];
+            if(!validTypes.includes(rd.type)) { rd.riderName = rd.riderName || rd.type || 'Unknown'; rd.type = 'other'; }
+            // Fix common misclassifications
+            const nm = (rd.riderName||'').toLowerCase();
+            if(nm.includes('double indemnity') || nm.includes('additional on acc')) { if(rd.type==='death') rd.type='other'; }
+            if(nm.includes('dismemberment') || nm.includes('burns')) rd.type = 'acc_dismember';
+            if(nm.includes('medical') && nm.includes('reimbursement')) rd.type = 'acc_medical';
+            if(nm.includes('tcm') || nm.includes('chiropractic')) rd.type = 'acc_tcm';
+            return rd;
+          })
         };
         // FD fields
         if(result.fdPrincipal) result.fdPrincipal = String(parseFloat(result.fdPrincipal)||0);
@@ -7638,7 +7873,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       const inferredParents = processed.filter(p => p._inferredParent);
       if(inferredParents.length > 0) {
         const names = inferredParents.map(p => p.insurer + ' ' + p.productName).join(', ');
-        setTimeout(() => alert('Note: We detected ISP rider(s) without the parent Integrated Shield Plan in your documents.\n\nAuto-created parent plan(s): ' + names + '\n\nPlease review and fill in the missing details (ward class, premium, policy number) for the parent ISP.'), 100);
+        setTimeout(() => toast('Auto-created parent ISP for ' + names + ' — please review ward class, premium & policy number','warning',6000), 100);
       }
 
       // ── CROSS-BATCH CORRELATION ──
@@ -7744,11 +7979,11 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       } else if(errMsg.includes('api key') || errMsg.includes('key')) {
         msg += '\n\nCheck your API keys in Settings.';
       }
-      alert(msg);
+      toast(msg,'warning',5000);
       // If some batches succeeded, show partial results
       if(allExtracted.length > 0) {
         setBulkExtracted([...allExtracted]);
-        alert('⚠️ Partial extraction: ' + allExtracted.length + ' policies extracted before error. You can review these now.');
+        toast(allExtracted.length + ' policies extracted before error — review now','warning',5000);
       }
       setScanning(false); setScanProgress(null);
     }
@@ -7789,8 +8024,8 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
                 }
               }
               if(files.length > 0) { handleExtract(files); }
-              else { const text = await navigator.clipboard.readText(); if(text && text.length > 20) { handleExtract([new File([text],'paste.txt',{type:'text/plain'})]); } else { alert('No images or text found in clipboard. Copy a screenshot or policy text first.'); } }
-            } catch(e) { alert('Clipboard access denied. Try Ctrl+V / Cmd+V on the drop zone instead.'); }
+              else { const text = await navigator.clipboard.readText(); if(text && text.length > 20) { handleExtract([new File([text],'paste.txt',{type:'text/plain'})]); } else { toast('No content in clipboard — copy a screenshot or text first','warning'); } }
+            } catch(e) { toast('Clipboard access denied — try Ctrl+V on the drop zone','error'); }
           }} disabled={scanning} title="Paste from clipboard">
             📋 Paste
           </button>
@@ -7800,7 +8035,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
             if(!confirm('⚠️ Delete ALL '+policies.length+' policies?\n\nThis cannot be undone. Client profile will not be affected.')) return;
             if(!confirm('Final confirmation — permanently delete all policies?')) return;
             for(const pol of policies) await deletePolicy(pol.id);
-            alert('All policies deleted.');
+            toast('All policies deleted','success');
           }}>🗑 Delete All</button>}
         </div>
       </div>
@@ -8088,7 +8323,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       </>)}
 
       {/* Bulk Verification Modal */}
-      {bulkExtracted && <BulkVerifyModal extracted={bulkExtracted} repo={repo} policies={policies} onSavePolicy={savePolicy} onClose={()=>{try{sessionStorage.removeItem('policylens_pendingExtract')}catch(e){}setBulkExtracted(null)}} onAccept={async(selected) => {
+      {bulkExtracted && <BulkVerifyModal extracted={bulkExtracted} repo={repo} policies={policies} onSavePolicy={savePolicy} scanProgress={scanProgress} onClose={()=>{try{sessionStorage.removeItem('policylens_pendingExtract')}catch(e){}setBulkExtracted(null)}} onAccept={async(selected) => {
         let count = 0;
         for(const p of selected) {
           const result = {...p, id:genId()};
@@ -8099,16 +8334,16 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
           count++;
         }
         setBulkExtracted(null);
-        alert('Imported '+count+' policies successfully!');
+        toast('Imported '+count+' policies','success');
       }} />}
 
-      {showForm && <PolicyFormModal policy={editing||scanResult} onSave={handleFormSave} onClose={handleFormClose} repo={repo} onSaveRepo={saveRepo} onDraftChange={saveDraft} onDraftClear={clearDraft} />}
+      {showForm && <ErrorBoundary onReset={()=>setShowForm(false)}><PolicyFormModal policy={editing||scanResult} onSave={handleFormSave} onClose={handleFormClose} repo={repo} onSaveRepo={saveRepo} onDraftChange={saveDraft} onDraftClear={clearDraft} /></ErrorBoundary>}
     </div>
   );
 }
 
 // ═══════════════════════════════════════════════════════════════
-// POLICY FORM MODAL — with sub-type fields & fuzzy matching
+// MODULE: POLICY_FORM — Policy form with sub-type fields & fuzzy matching
 // ═══════════════════════════════════════════════════════════════
 
 function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,onDraftClear}) {
@@ -8131,17 +8366,17 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
   }, [_cp]);
 
   const DEFAULT_RIDERS = {
-    'Term Life':       [{type:'death',sa:'',premium:'',expiryAge:'65',bundled:true}],
-    'Whole Life':      [{type:'death',sa:'',premium:'',expiryAge:'99',bundled:true},{type:'tpd',sa:'',premium:'',expiryAge:'70',bundled:true},{type:'ci',sa:'',premium:'',expiryAge:'85',bundled:true}],
-    'Universal Life (UL)': [{type:'death',sa:'',premium:'',expiryAge:'100',bundled:true}],
-    'Indexed UL (IUL)':    [{type:'death',sa:'',premium:'',expiryAge:'100',bundled:true}],
-    'Variable UL (VUL)':   [{type:'death',sa:'',premium:'',expiryAge:'100',bundled:true}],
-    'Critical Illness':    [{type:'death',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'tpd',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'ci',sa:'',premium:'',expiryAge:'65',bundled:true,multiClaim:false,totalClaimPct:300}],
-    'Personal Accident':   [{type:'accidental',sa:'',premium:'',expiryAge:'70',bundled:true}],
-    'Disability Income':   [{type:'di',sa:'',premium:'',expiryAge:'65',bundled:true}],
+    'Term Life':       [{type:'death',riderName:'Death & Terminal Illness',sa:'',premium:'',expiryAge:'65',bundled:true}],
+    'Whole Life':      [{type:'death',riderName:'Death & Terminal Illness',sa:'',premium:'',expiryAge:'99',bundled:true},{type:'tpd',riderName:'Total Permanent Disability',sa:'',premium:'',expiryAge:'70',bundled:true},{type:'ci',riderName:'Critical Illness',sa:'',premium:'',expiryAge:'85',bundled:true}],
+    'Universal Life (UL)': [{type:'death',riderName:'Death & Terminal Illness',sa:'',premium:'',expiryAge:'100',bundled:true}],
+    'Indexed UL (IUL)':    [{type:'death',riderName:'Death & Terminal Illness',sa:'',premium:'',expiryAge:'100',bundled:true}],
+    'Variable UL (VUL)':   [{type:'death',riderName:'Death & Terminal Illness',sa:'',premium:'',expiryAge:'100',bundled:true}],
+    'Critical Illness':    [{type:'death',riderName:'Death & Terminal Illness',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'tpd',riderName:'Total Permanent Disability',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'ci',riderName:'Critical Illness',sa:'',premium:'',expiryAge:'65',bundled:true,multiClaim:false,totalClaimPct:300}],
+    'Personal Accident':   [{type:'accidental',riderName:'Accidental Death',sa:'',premium:'',expiryAge:'70',bundled:true},{type:'tpd',riderName:'Permanent Total Disablement',sa:'',premium:'',expiryAge:'70',bundled:true},{type:'acc_dismember',riderName:'Accidental Dismemberment & Burns',sa:'',premium:'',expiryAge:'70',bundled:true},{type:'acc_medical',riderName:'Accidental Medical Reimbursement',sa:'',premium:'',expiryAge:'70',bundled:true},{type:'acc_tcm',riderName:'TCM/Chiropractic Reimbursement',sa:'',premium:'',expiryAge:'70',bundled:true}],
+    'Disability Income':   [{type:'di',riderName:'Disability Income',sa:'',premium:'',expiryAge:'65',bundled:true}],
     'Long-term Care':      [],
-    'ILP (Protection)': [{type:'death',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'tpd',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'ci',sa:'',premium:'',expiryAge:'65',bundled:true}],
-    'ILP (Investment)': [{type:'death',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'tpd',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'ci',sa:'',premium:'',expiryAge:'65',bundled:true}],
+    'ILP (Protection)': [{type:'death',riderName:'Death & Terminal Illness',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'tpd',riderName:'Total Permanent Disability',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'ci',riderName:'Critical Illness',sa:'',premium:'',expiryAge:'65',bundled:true}],
+    'ILP (Investment)': [{type:'death',riderName:'Death & Terminal Illness',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'tpd',riderName:'Total Permanent Disability',sa:'',premium:'',expiryAge:'65',bundled:true},{type:'ci',riderName:'Critical Illness',sa:'',premium:'',expiryAge:'65',bundled:true}],
   };
 
   const [form, setForm] = useState(() => {
@@ -8263,7 +8498,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
   const isRetirement = form.category==='retirement';
   const isHealth = form.category==='health';
   const isDI = form.subType==='Disability Income';
-  const isCSL = form.subType==='CareShield Life / Supplement';
+  const isCSL = form.subType==='CareShield Life / Supplement' || form.subType==='ElderShield 300' || form.subType==='ElderShield 400';
   const isPA = form.subType==='Personal Accident';
   const isEndowment = isSavings;
   const isAnnuity = isRetirement;
@@ -8300,7 +8535,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         if(form.premiumStructure) notesParts.push('Premium: '+form.premiumStructure+'.');
         if(form.notes) notesParts.push(form.notes);
         // Rider summary
-        const riderNotes = (form.riders||[]).filter(r=>r.riderName||!r.bundled).map(r=>(r.riderName||{death:'Death & TI',tpd:'TPD',ci:'CI',eci:'ECI',di:'DI',accidental:'ADD',premium_waiver:'Waiver'}[r.type]||r.type)+' SA $'+(parseFloat(r.sa)||0).toLocaleString()+(r.bundled===false?' (separate rider)':' (part of plan)')).join('; ');
+        const riderNotes = (form.riders||[]).filter(r=>r.riderName||!r.bundled||r.sa).map(r=>(r.riderName||{death:'Death & TI',tpd:'TPD',ci:'CI',eci:'ECI',di:'DI',accidental:'ADD',acc_medical:'Med Reimb',acc_tcm:'TCM',acc_dismember:'Dismember',premium_waiver:'Waiver',other:'Other'}[r.type]||r.type)+' SA $'+(parseFloat(r.sa)||0).toLocaleString()+(r.bundled===false?' (separate rider)':' (part of plan)')).join('; ');
         if(riderNotes) notesParts.push('Riders: '+riderNotes+'.');
         const repoItem = {
           id:'repo-'+Date.now(),
@@ -8333,7 +8568,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         const blocks = await processFile(file);
         content.push(...blocks);
       }
-      const formExtractPrompt = 'Extract insurance policy details. Return a JSON object with ALL fields: insurer, productName, policyNumber, category (protection/savings/health/investment/retirement/maternity), subType, currency, sumAssured (number), annualPremium (number), premFrequency (annual/monthly/single/unknown — if document does not clearly state frequency, use unknown), premiumStructure, paymentMethod, policyOwner, lifeInsured, gender, dob, ageAtEntry, smoker, nationality, occupation, inceptionDate, maturityDate, status, premStartAge, premTerm, premEndAge. Riders: riders (array of {type:death/tpd/ci/eci/di/accidental/premium_waiver, riderName:string (product name if separate rider e.g. Early CompleteCare Rider III), sa:number, premium:number (0 if part of main plan), expiryAge:number, bundled:boolean (true if part of main plan, false if separate rider product), multiClaim:boolean, totalClaimPct:number}). IMPORTANT: distinguish between benefits that are PART OF the main plan (bundled=true, no riderName) vs separate RIDER products (bundled=false, include riderName and rider premium). SA: saMultiplier, multiplierEndAge. ISP: ispClass, hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance. ILP: ilpGrowth, ilpDivYield, ilpMgmtFee, fundAllocations (array of {fundName:string, allocation:number} — extract fund names and percentages from remarks/notes). Cash: cashValue, cvGrowthRate, surrenderPeriod. Notes: notes (FC review headline). Return ONLY valid JSON starting with { ending with }.';
+      const formExtractPrompt = 'Extract insurance policy details. Return a JSON object with ALL fields: insurer, productName, policyNumber, category (protection/savings/health/investment/retirement/maternity), subType, currency, sumAssured (number), annualPremium (number), premFrequency (annual/monthly/single/unknown — if document does not clearly state frequency, use unknown), premiumStructure, paymentMethod, policyOwner, lifeInsured, gender, dob, ageAtEntry, smoker, nationality, occupation, inceptionDate, maturityDate, status, premStartAge, premTerm, premEndAge. Riders: riders (array) — CAPTURE-FIRST: for EVERY benefit listed, set riderName to EXACT name from document, THEN classify type from death/tpd/ci/eci/di/accidental/acc_medical/acc_tcm/acc_dismember/premium_waiver/other. If unsure, use type:"other". NEVER duplicate types for different benefits — use riderName to distinguish. Each: {type, riderName (ALWAYS filled), sa:number, premium:0 if bundled, expiryAge, bundled:boolean, multiClaim, totalClaimPct}. SA: saMultiplier, multiplierEndAge. ISP: ispClass, hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance. ILP: ilpGrowth, ilpDivYield, ilpMgmtFee, fundAllocations (array of {fundName:string, allocation:number}). Cash: cashValue, cvGrowthRate, surrenderPeriod. Notes: notes (FC review headline). Return ONLY valid JSON starting with { ending with }.';
       content.push({type:'text',text:'Extract all policy information from these documents/images.'});
       const rawText2 = await callAI(formExtractPrompt, content, 4000);
       const parsed = repairJSON(rawText2);
@@ -8351,7 +8586,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
       if(onDraftChange)onDraftChange({...form,...updates});
       // Merge client details to profile
       mergeToProfile(parsed, _cp, _sp);
-    } catch(e){alert('Scan error: '+e.message);}
+    } catch(e){toast('Scan error: '+e.message,'error');}
     setFormScanning(false);
   };
 
@@ -8457,8 +8692,10 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
               <option value="">—</option>
               <option value="Cash">Cash</option>
               {(isISP||isCSL) && <option value="MediSave">MediSave</option>}
-              {(isRetirement||isSavings) && <option value="SRS">SRS</option>}
-              {isRetirement && <option value="CPF OA">CPF OA</option>}
+              {(isISP||isCSL) && <option value="MediSave+Cash">MediSave + Cash</option>}
+              {!isISP && !isCSL && <option value="CPF OA">CPF OA</option>}
+              {!isISP && !isCSL && <option value="CPF SA">CPF SA</option>}
+              {!isISP && !isCSL && <option value="SRS">SRS</option>}
             </select>
             {isISP && <div style={{fontSize:10,color:'var(--teal)'}}>ISP: MediSave (AWL) + Cash overflow</div>}
             {isCSL && <div style={{fontSize:10,color:'var(--green2)'}}>MediSave cap $600/yr · overflow → Cash</div>}
@@ -8469,10 +8706,10 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
             <div className="field"><label>Age at Entry</label><input type="number" value={form.premStartAge||form.ageAtEntry||''} onChange={e=>{set('premStartAge',e.target.value);set('ageAtEntry',e.target.value)}} placeholder="e.g. 30" /></div>
             <div className="field">
               <label>Premium Term (years)</label>
-              <input type="number" value={form.premTerm||''} onChange={e=>set('premTerm',e.target.value)} placeholder="e.g. 25" disabled={form.premSingle||form.premWholeLife} style={form.premSingle?{opacity:.4}:{}} />
-              <div style={{display:'flex',gap:12,marginTop:4}}>
+              <input type="number" value={form.premTerm||''} onChange={e=>set('premTerm',e.target.value)} placeholder={form.premSingle?'N/A':'e.g. 25'} disabled={form.premSingle||form.premWholeLife} style={form.premSingle||form.premWholeLife?{opacity:.35,background:'var(--bg4)'}:{}} />
+              {!form.premSingle && <div style={{display:'flex',gap:12,marginTop:4}}>
                 <label style={{fontSize:11,display:'flex',alignItems:'center',gap:3,cursor:'pointer',color:form.premWholeLife?'var(--gold)':'var(--text3)'}}><input type="checkbox" checked={form.premWholeLife||false} onChange={e=>{set('premWholeLife',e.target.checked);if(e.target.checked){set('premSingle',false);set('premEndAge','Whole Life');}}} /> Whole Life</label>
-              </div>
+              </div>}
               {form.premSingle && <div style={{fontSize:9,color:'var(--gold)',marginTop:2}}>N/A — single premium</div>}
             </div>
             <div className="field"><label>Premium End Age</label><input type="number" value={form.premWholeLife?'':form.premEndAge||''} disabled={form.premWholeLife||form.premSingle} onChange={e=>set('premEndAge',e.target.value)} placeholder={form.premWholeLife?'Whole Life':form.premSingle?'N/A':'auto: start + term'} style={form.premSingle?{opacity:.4}:{}} />{form.premWholeLife && <div style={{fontSize:10,color:'var(--gold)'}}>Whole Life</div>}</div>
@@ -8666,13 +8903,13 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         {isCSL && (
           <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid rgba(26,122,94,.25)'}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
-              <div style={{fontSize:10,fontWeight:700,color:'var(--teal)',textTransform:'uppercase',letterSpacing:'.5px'}}>CareShield Life / Supplement Details</div>
+              <div style={{fontSize:10,fontWeight:700,color:'var(--teal)',textTransform:'uppercase',letterSpacing:'.5px'}}>{(form.subType||'').includes('ElderShield')?'ElderShield':'CareShield Life / Supplement'} Details</div>
               <div style={{fontSize:11,background:'rgba(26,122,94,0.1)',color:'var(--teal)',padding:'3px 8px',borderRadius:4,fontWeight:600}}>MediSave cap: ${CARESHIELD_MEDISAVE_CAP}/yr · Overflow → Cash</div>
             </div>
             <div className="grid-3" style={{marginBottom:8}}>
-              <div className="field"><label>Monthly Benefit ($)</label><input type="number" value={form.cslMonthlyBenefit||600} onChange={e=>set('cslMonthlyBenefit',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Base CareShield $600/mth</div></div>
+              <div className="field"><label>Monthly Benefit ($)</label><input type="number" value={form.cslMonthlyBenefit||(form.subType==='ElderShield 300'?300:form.subType==='ElderShield 400'?400:600)} onChange={e=>set('cslMonthlyBenefit',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>{(form.subType||'').includes('ElderShield')?'ElderShield '+form.subType.slice(-3)+'/mth · max 72 months':'Base CareShield $600/mth'}</div></div>
               <div className="field"><label>Benefit Escalation (% /yr)</label><input type="number" step="0.5" value={form.cslEscalation||0} onChange={e=>set('cslEscalation',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>0% = flat; some supplements inflate</div></div>
-              <div className="field"><label>Payout Start Age</label><input type="number" value={form.cslPayoutAge||67} onChange={e=>set('cslPayoutAge',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>CareShield from age 67</div></div>
+              <div className="field"><label>Payout Start Age</label><input type="number" value={form.cslPayoutAge||((form.subType||'').includes('ElderShield')?40:67)} onChange={e=>set('cslPayoutAge',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>{(form.subType||'').includes('ElderShield')?'ElderShield: disability-based, no age trigger':'CareShield from age 67'}</div></div>
             </div>
             <div className="grid-3">
               <div className="field"><label>Lifetime Payout?</label><select value={form.cslLifetime||'yes'} onChange={e=>set('cslLifetime',e.target.value)}>
@@ -8712,7 +8949,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         )}
 
         {/* ═══ COVERAGE & RIDERS (RetireWell-style) ═══ */}
-        {hasCoverageSection && !isISP && !isCSL && (
+        {(hasCoverageSection || isISP) && !isCSL && (
           <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)'}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
               <div>
@@ -8754,20 +8991,30 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
               </tr></thead>
               <tbody>
                 {(form.riders||[]).map((rd,ri) => (
-                  <tr key={rd.id||ri}>
+                  <tr key={rd.id||ri} style={rd.riderStatus==='terminated'?{opacity:.45,background:'rgba(239,83,80,.03)'}:{}}>
                     <td>
+                      {rd.riderStatus==='terminated' && <div style={{fontSize:7,color:'var(--red)',fontWeight:600,marginBottom:2}}>TERMINATED</div>}
                       <select value={rd.type} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],type:e.target.value};set('riders',riders);}} style={{fontSize:11,padding:'4px 6px',width:'100%',marginBottom:3}}>
                         <option value="death">Death & TI</option><option value="tpd">TPD</option><option value="ci">Critical Illness</option>
                         <option value="eci">Early CI</option><option value="di">Disability Income</option><option value="accidental">Accidental Death</option>
-                        <option value="premium_waiver">Premium Waiver</option>
+                        <option value="acc_medical">Acc Medical Reimbursement</option><option value="acc_tcm">Acc TCM Reimbursement</option>
+                        <option value="acc_dismember">Acc Dismemberment & Burns</option>
+                        <option value="premium_waiver">Premium Waiver</option><option value="other">Other</option>
                       </select>
-                      {rd.bundled===false && <FuzzyInput value={rd.riderName||''} onChange={v=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],riderName:v};set('riders',riders);}}
-                        suggestions={repo.filter(r=>r.subType==='Rider'||r.notes?.includes('rider')).map(r=>({label:r.productName,sub:r.insurer+(r.notes?' · '+r.notes.substring(0,50)+'…':''),item:r}))}
-                        onSelect={item=>{if(item.item){const riders=[...(form.riders||[])];riders[ri]={...riders[ri],riderName:item.item.productName};set('riders',riders);}}}
-                        placeholder="Rider name — search repository" style={{fontSize:10}} />}
-                      {rd.bundled!==false && <div style={{fontSize:9,color:'var(--text3)'}}>{
-                        {death:'Death & Terminal Illness',tpd:'Total Permanent Disability',ci:'Lump sum on CI diagnosis',eci:'Early-stage CI',di:'Monthly income ($/mth)',accidental:'Additional on accident',premium_waiver:'Waives premiums'}[rd.type]||''
-                      }</div>}
+                      {/* Rider name — always show for unbundled, "other", or when showName toggled */}
+                      {(rd.bundled===false || rd.type==='other' || rd._showName) ? (
+                        <input value={rd.riderName||''} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],riderName:e.target.value};set('riders',riders);}}
+                          placeholder={rd.type==='other'?'Type benefit name...':'Rider product name'} style={{fontSize:10,width:'100%',marginTop:2,padding:'3px 6px'}} />
+                      ) : (
+                        <div style={{display:'flex',alignItems:'center',gap:4,marginTop:2}}>
+                          <div style={{fontSize:9,color:'var(--text3)',flex:1}}>{
+                            {death:'Death & Terminal Illness',tpd:'Total Permanent Disability',ci:'Lump sum on CI diagnosis',eci:'Early-stage CI',di:'Monthly income ($/mth)',accidental:'Additional on accident',acc_medical:'Accidental medical expenses',acc_tcm:'TCM/chiropractic reimbursement',acc_dismember:'Accidental dismemberment & burns',premium_waiver:'Waives premiums',other:'Custom benefit — type name below'}[rd.type]||''
+                          }</div>
+                          <label style={{fontSize:8,color:'var(--gold)',cursor:'pointer',whiteSpace:'nowrap',display:'flex',alignItems:'center',gap:2}}>
+                            <input type="checkbox" checked={false} onChange={()=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],_showName:true};set('riders',riders);}} style={{width:10,height:10}} /> name
+                          </label>
+                        </div>
+                      )}
                     </td>
                     <td>{rd.type!=='premium_waiver'?<input type="number" value={rd.sa||''} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],sa:e.target.value};set('riders',riders);}} style={{width:'100%',fontSize:11}} placeholder="$" />:<span style={{color:'var(--text3)',fontSize:10}}>N/A</span>}</td>
                     <td style={{textAlign:'center'}}><input type="checkbox" checked={rd.bundled!==false} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],bundled:e.target.checked,premium:e.target.checked?'':riders[ri].premium};set('riders',riders);}} /></td>
@@ -9146,20 +9393,23 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                 {form.cvKnown!==false && <input type="number" value={form.cashValue||''} onChange={e=>set('cashValue',e.target.value)} placeholder="From latest statement" style={{marginTop:4}} />}
                 {form.cvKnown===false && <div style={{fontSize:10,color:'var(--gold)',marginTop:4}}>Auto-estimated from premiums × yield × time</div>}
               </div>
-              <div className="field"><label>Est. Yield (% p.a.)</label><input type="number" step="0.1" value={form.cvGrowthRate||'3.0'} onChange={e=>set('cvGrowthRate',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Used to project future values</div></div>
-              <div className="field"><label>Breakeven Year</label><input type="number" value={form.breakEvenYear||form.surrenderPeriod||''} onChange={e=>{set('breakEvenYear',e.target.value);set('surrenderPeriod',e.target.value)}} placeholder="Year SV ≥ premiums" /><div style={{fontSize:10,color:'var(--text3)'}}>Year where (income + SV) ≥ total premiums</div></div>
+              <div className="field"><label>Surrender Charge Period (yrs)</label><input type="number" value={form.surrenderPeriod||''} onChange={e=>set('surrenderPeriod',e.target.value)} placeholder="e.g. 15" /><div style={{fontSize:10,color:'var(--text3)'}}>Year where surrender charges = 0%</div></div>
+              <div className="field"><label>Breakeven Year</label><input type="number" value={form.breakEvenYear||''} onChange={e=>set('breakEvenYear',e.target.value)} placeholder="e.g. 20" /><div style={{fontSize:10,color:'var(--gold)'}}>SV ≥ total premiums paid</div></div>
             </div>
-            {/* ── Auto-estimated CV and maturity projection ── */}
+            {/* ── Auto-estimated CV and projection ── */}
             {(() => {
               const prem = parseFloat(form.annualPremium)||0;
               const startAge = parseInt(form.premStartAge)||0;
               const premTerm = form.premSingle ? 1 : (parseInt(form.premTerm)||0);
-              const r = (parseFloat(form.cvGrowthRate)||3)/100;
-              const matAge = parseInt(form.endPolicyTerm) ? startAge + parseInt(form.endPolicyTerm) : (parseInt(form.premEndAge)||65);
-              const totalYrs = matAge - startAge;
+              // Use weighted fund growth if available, else fallback to cvGrowthRate or 3%
+              const fundGrowth = (form.fundAllocations||[]).length > 0 ? 
+                (()=>{const tp=(form.fundAllocations||[]).reduce((s,a)=>s+(parseFloat(a.pct)||0),0);return tp>0?(form.fundAllocations||[]).reduce((s,a)=>s+(parseFloat(a.pct)||0)*(parseFloat(a.growth)||0),0)/tp:0})() : 0;
+              const r = (fundGrowth > 0 ? fundGrowth : parseFloat(form.cvGrowthRate)||parseFloat(form.ilpGrowth)||3)/100;
+              const retAge = parseInt(clientProfile?.retirementAge)||65;
               const age = clientAge;
               const yearsInForce = Math.max(0, age - startAge);
-              const totalPaid = form.premSingle ? prem : prem * Math.min(premTerm, totalYrs);
+              const totalPaid = form.premSingle ? prem : prem * Math.min(premTerm, Math.max(premTerm, retAge-startAge));
+              const yrsToRet = Math.max(0, retAge - age);
 
               // Auto-estimate current CV if unknown
               let estCV;
@@ -9170,35 +9420,39 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                 estCV = form.premSingle ? prem * Math.pow(1+r, yearsInForce) : prem*(Math.pow(1+r,paid)-1)/r * Math.pow(1+r, Math.max(0,yearsInForce-paid));
               } else { estCV = 0; }
 
-              // Project to maturity
-              const yrsToMat = Math.max(0, totalYrs - yearsInForce);
+              // Project to retirement age
               const paidRemaining = Math.max(0, premTerm - yearsInForce);
-              let matCV;
+              let retCV;
               if(estCV > 0) {
-                matCV = estCV * Math.pow(1+r, yrsToMat);
-                if(!form.premSingle && paidRemaining > 0 && r > 0) matCV += prem*(Math.pow(1+r,paidRemaining)-1)/r * Math.pow(1+r, Math.max(0,yrsToMat-paidRemaining));
+                retCV = estCV * Math.pow(1+r, yrsToRet);
+                if(!form.premSingle && paidRemaining > 0 && r > 0) retCV += prem*(Math.pow(1+r,Math.min(paidRemaining,yrsToRet))-1)/r * Math.pow(1+r, Math.max(0,yrsToRet-paidRemaining));
               } else if(prem > 0 && r > 0) {
+                const totalYrs = retAge - startAge;
                 const paid = Math.min(premTerm, totalYrs);
-                matCV = form.premSingle ? prem * Math.pow(1+r, totalYrs) : prem*(Math.pow(1+r,paid)-1)/r * Math.pow(1+r, Math.max(0,totalYrs-paid));
-              } else { matCV = 0; }
+                retCV = form.premSingle ? prem * Math.pow(1+r, totalYrs) : prem*(Math.pow(1+r,paid)-1)/r * Math.pow(1+r, Math.max(0,totalYrs-paid));
+              } else { retCV = 0; }
 
+              const netGain = retCV - totalPaid;
               if(prem === 0 && estCV === 0) return null;
               return (
-                <div style={{marginTop:10,display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10}}>
-                  <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
-                    <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Auto-Estimated CV</div>
-                    <div style={{fontSize:16,fontWeight:700,color:'var(--gold)'}}>${Math.round(estCV).toLocaleString()}</div>
-                    <div style={{fontSize:9,color:'var(--text3)'}}>Auto: yield × premiums × {yearsInForce}yr in force</div>
-                  </div>
-                  <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
-                    <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Projected CV at Age {matAge}</div>
-                    <div style={{fontSize:16,fontWeight:700,color:'var(--gold2)'}}>${Math.round(matCV).toLocaleString()}</div>
-                    <div style={{fontSize:9,color:'var(--text3)'}}>projected at current yield {form.cvGrowthRate||3}%</div>
-                  </div>
-                  <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
-                    <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>CV After Payouts (Age {matAge})</div>
-                    <div style={{fontSize:16,fontWeight:700,color:matCV>=totalPaid?'var(--green2)':'var(--red)'}}>${Math.round(matCV).toLocaleString()}</div>
-                    <div style={{fontSize:9,color:'var(--text3)'}}>total premiums: ${Math.round(totalPaid).toLocaleString()}</div>
+                <div style={{marginTop:10}}>
+                  {fundGrowth > 0 && <div style={{fontSize:9,color:'var(--teal)',marginBottom:6}}>Using weighted fund growth rate: {fundGrowth.toFixed(1)}% p.a. from Fund Allocations above</div>}
+                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10}}>
+                    <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
+                      <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Auto-Estimated CV</div>
+                      <div style={{fontSize:16,fontWeight:700,color:'var(--gold)'}}>${Math.round(estCV).toLocaleString()}</div>
+                      <div style={{fontSize:9,color:'var(--text3)'}}>Auto: yield × premiums × {yearsInForce}yr in force</div>
+                    </div>
+                    <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
+                      <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Projected CV at Age {retAge}</div>
+                      <div style={{fontSize:16,fontWeight:700,color:'var(--gold2)'}}>${Math.round(retCV).toLocaleString()}</div>
+                      <div style={{fontSize:9,color:'var(--text3)'}}>at {(r*100).toFixed(1)}% p.a.</div>
+                    </div>
+                    <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
+                      <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Net Gain / (Loss)</div>
+                      <div style={{fontSize:16,fontWeight:700,color:netGain>=0?'var(--green2)':'var(--red)'}}>{netGain>=0?'+':''}${Math.round(netGain).toLocaleString()}</div>
+                      <div style={{fontSize:9,color:'var(--text3)'}}>total premiums: ${Math.round(totalPaid).toLocaleString()}</div>
+                    </div>
                   </div>
                 </div>
               );
@@ -9239,7 +9493,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
           <div style={{display:'flex',gap:6,marginTop:6}}>
             <button className="btn-secondary btn-sm" disabled={!form.notes||form.notes.length<10||tidying} onClick={async()=>{
               const ak = ((await dbGet('settings','geminiKey').catch(()=>null))?.value||'').trim();
-              if(!ak){alert('Set Gemini API key in Settings first');return;}
+              if(!ak){toast('Set Gemini API key in Settings first','warning');return;}
               setTidying(true);
               try{
                 const tidyResp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='+ak,{
@@ -9250,7 +9504,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                 const tidyData = await tidyResp.json();
                 if(tidyData.error) throw new Error(tidyData.error.message);
                 set('notes',tidyData.candidates?.[0]?.content?.parts?.[0]?.text||form.notes);
-              }catch(e){alert('AI error: '+e.message)}
+              }catch(e){toast('AI error: '+e.message,'error')}
               setTidying(false);
             }}>{tidying?'Tidying...':'AI Tidy'}</button>
             {!isEdit && form.productName && <button className="btn-secondary btn-sm" onClick={()=>{
@@ -9264,7 +9518,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
               };
               const matches = fuzzyMatch(form.insurer+' '+form.productName, repo, 0.35);
               if(matches.length > 0){ setRepoMatches(matches.slice(0,3)); setPendingRepoItem(repoItem); }
-              else { onSaveRepo(repoItem); alert('Saved to repository!'); }
+              else { onSaveRepo(repoItem); toast('Saved to repository','success'); }
             }}>📤 Save to Repository</button>}
           </div>
 
@@ -9275,13 +9529,13 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                 <div key={m.id} style={{background:'var(--bg3)',borderRadius:8,padding:10,marginBottom:6}}>
                   <div><span style={{fontWeight:600,fontSize:13}}>{m.insurer} — {m.productName}</span> <span className="mono" style={{color:'var(--orange)',fontSize:11}}>{Math.round(m.score*100)}%</span></div>
                   <div style={{display:'flex',gap:6,marginTop:6}}>
-                    <button className="btn-secondary btn-sm" onClick={()=>{const c={...m,notes:(m.notes||'')+'\n\n--- Updated ---\n'+(pendingRepoItem.notes||'')};delete c.score;onSaveRepo(c);setRepoMatches(null);setPendingRepoItem(null);alert('Combined!');}}>🔀 Combine</button>
-                    <button className="btn-secondary btn-sm" onClick={()=>{onSaveRepo({...pendingRepoItem,id:m.id});setRepoMatches(null);setPendingRepoItem(null);alert('Overwritten!');}}>↻ Overwrite</button>
+                    <button className="btn-secondary btn-sm" onClick={()=>{const c={...m,notes:(m.notes||'')+'\n\n--- Updated ---\n'+(pendingRepoItem.notes||'')};delete c.score;onSaveRepo(c);setRepoMatches(null);setPendingRepoItem(null);toast('Combined','success');}}>🔀 Combine</button>
+                    <button className="btn-secondary btn-sm" onClick={()=>{onSaveRepo({...pendingRepoItem,id:m.id});setRepoMatches(null);setPendingRepoItem(null);toast('Overwritten','success');}}>↻ Overwrite</button>
                   </div>
                 </div>
               ))}
               <div style={{display:'flex',gap:6,marginTop:8}}>
-                <button className="btn-primary btn-sm" onClick={()=>{onSaveRepo(pendingRepoItem);setRepoMatches(null);setPendingRepoItem(null);alert('Saved as new!');}}>➕ Save as New</button>
+                <button className="btn-primary btn-sm" onClick={()=>{onSaveRepo(pendingRepoItem);setRepoMatches(null);setPendingRepoItem(null);toast('Saved as new','success');}}>➕ Save as New</button>
                 <button className="btn-secondary btn-sm" onClick={()=>{setRepoMatches(null);setPendingRepoItem(null);}}>Cancel</button>
               </div>
             </div>
@@ -9310,9 +9564,11 @@ function FundAllocationEditor({allocations,onChange,reinvest,onSyncWeighted}) {
     const matches = FUND_DB.filter(f => f[0].toLowerCase().includes(q)).slice(0,8);
     if(matches.length > 0) { setSuggestions(matches); setShowSuggestions(i); }
     else { setSuggestions([]); setShowSuggestions(-1); }
+    // Only auto-fill risk for EXACT or single match — never for no-match
     const exact = matches.find(f => f[0].toLowerCase() === q);
-    if(exact) update(i,'riskRating',exact[4]);
-    else if(matches.length === 1) update(i,'riskRating',matches[0][4]);
+    if(exact) { update(i,'riskRating',exact[4]); update(i,'_newFund',false); }
+    else if(matches.length === 1) { update(i,'riskRating',matches[0][4]); update(i,'_newFund',false); }
+    else if(matches.length === 0) { update(i,'_newFund',true); update(i,'riskRating',''); }
   };
   const selectFund = (i, fund) => {
     const n=[...allocations];
@@ -9353,6 +9609,10 @@ function FundAllocationEditor({allocations,onChange,reinvest,onSyncWeighted}) {
         <div key={i} style={{position:'relative'}}>
           <div style={{display:'grid',gridTemplateColumns:'1fr 60px 60px 60px 60px 36px 28px',gap:6,marginBottom:4,alignItems:'center'}}>
             <input value={a.fundName} onChange={e=>{update(i,'fundName',e.target.value);lookup(i,e.target.value)}} onFocus={()=>lookup(i,a.fundName)} onBlur={()=>setTimeout(()=>{setShowSuggestions(-1);setSuggestions([])},200)} placeholder="Search fund…" style={{fontSize:12}} />
+            {a._newFund && <div style={{display:'flex',alignItems:'center',gap:4,marginTop:2}}>
+              <span style={{fontSize:8,padding:'1px 5px',borderRadius:3,background:'rgba(212,169,106,.12)',color:'var(--gold)',fontWeight:600}}>🆕 New Fund</span>
+              <a href={'https://www.google.com/search?q='+encodeURIComponent((a.fundName||'')+' factsheet Singapore')} target="_blank" rel="noopener" style={{fontSize:8,color:'var(--teal)',textDecoration:'underline'}}>Search Factsheet</a>
+            </div>}
             <input value={a.pct} onChange={e=>update(i,'pct',e.target.value)} placeholder="%" type="number" style={{textAlign:'center',fontSize:12}} />
             <input value={a.growth||''} onChange={e=>update(i,'growth',e.target.value)} placeholder="6" type="number" step="0.5" style={{textAlign:'center',fontSize:12,color:'var(--green2)'}} />
             <input value={a.dividend||''} onChange={e=>update(i,'dividend',e.target.value)} placeholder="2" type="number" step="0.5" style={{textAlign:'center',fontSize:12,color:'#9d8abf'}} />
@@ -9428,7 +9688,7 @@ function FundAllocationEditor({allocations,onChange,reinvest,onSyncWeighted}) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// REPOSITORY — Browse & manage product database
+// MODULE: REPOSITORY — Product database browser
 // ═══════════════════════════════════════════════════════════════
 
 function Repository() {
@@ -9469,8 +9729,8 @@ function Repository() {
           added++;
         }
       }
-      alert('Added/updated '+added+' products to repository.');
-    } catch(e) { alert('Error: '+e.message); }
+      toast('Added/updated '+added+' products to repository','success');
+    } catch(e) { toast(e.message,'error'); }
     setRepoScanning(false);
   };
   const [search, setSearch] = useState('');
@@ -9538,7 +9798,7 @@ function Repository() {
           </p>
         </div>
         <div style={{display:'flex',gap:6}}>
-          {refreshRepo && <button className="btn-secondary btn-sm" disabled={syncing} onClick={async()=>{setSyncing(true);const ok=await refreshRepo();setSyncing(false);if(ok)alert('Synced '+repo.length+' products from cloud');else alert('Sync failed — check connection');}}>
+          {refreshRepo && <button className="btn-secondary btn-sm" disabled={syncing} onClick={async()=>{setSyncing(true);const ok=await refreshRepo();setSyncing(false);if(ok)toast('Synced '+repo.length+' products from cloud','success');else toast('Sync failed — check connection','error');}}>
             {syncing?'Syncing…':'🔄 Sync'}
           </button>}
           <input value={search} onChange={e=>setSearch(e.target.value)} placeholder="Search products…" style={{width:200}} />
@@ -9698,7 +9958,7 @@ function Repository() {
 
 
 // ═══════════════════════════════════════════════════════════════
-// FUND RISK LOOKUP — iFAST curated database
+// MODULE: FUND_LOOKUP — iFAST fund risk lookup
 // ═══════════════════════════════════════════════════════════════
 
 function FundLookup() {
@@ -9933,7 +10193,7 @@ function FundLookup() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// PDF REPORT — Executive Summary
+// MODULE: PDF_REPORT — Executive summary generation
 // ═══════════════════════════════════════════════════════════════
 
 function ReportTab() {
@@ -10044,13 +10304,14 @@ function ReportTab() {
       const totalSinglePrem2 = activePols2.filter(p=>p.premSingle||p.premiumStructure==='Single Premium'||p.premFrequency==='single').reduce((s,p)=>s+(parseFloat(p.annualPremium)||0),0);
       const totalCover = policies.filter(p=>p.status!=='matured'&&p.status!=='surrendered').reduce((s,p)=>s+(parseFloat(p.sumAssured)||0),0);
       // Premium breakdown by mode for PDF
-      const premiumBreakdown = {totalAnnual:totalPrem,totalSingle:totalSinglePrem2,modes:{cash:{annual:0},medisave:{annual:0},srs:{annual:0},cpfoa:{annual:0}}};
+      const premiumBreakdown = {totalAnnual:totalPrem,totalSingle:totalSinglePrem2,modes:{cash:{annual:0},medisave:{annual:0},srs:{annual:0},cpfoa:{annual:0},cpfsa:{annual:0}}};
       activePols2.filter(p=>!p.premSingle&&p.premiumStructure!=='Single Premium'&&p.premFrequency!=='single').forEach(p=>{
         const prem=p.premFrequency==='monthly'?(parseFloat(p.annualPremium)||0)*12:(parseFloat(p.annualPremium)||0);
         const m=(p.paymentMethod||'').toLowerCase();
         if(m.includes('medisave'))premiumBreakdown.modes.medisave.annual+=prem;
         else if(m.includes('srs'))premiumBreakdown.modes.srs.annual+=prem;
-        else if(m.includes('cpf'))premiumBreakdown.modes.cpfoa.annual+=prem;
+        else if(m.includes('cpf sa')||m.includes('cpfsa'))premiumBreakdown.modes.cpfsa.annual+=prem;
+        else if(m.includes('cpf')||m.includes('cpfoa'))premiumBreakdown.modes.cpfoa.annual+=prem;
         else premiumBreakdown.modes.cash.annual+=prem;
       });
 
@@ -10460,7 +10721,7 @@ function ReportTab() {
       addFooters();
 
       doc.save('PolicyLens_Report_'+(clientName||'Client').replace(/\s+/g,'_')+'_'+new Date().toISOString().slice(0,10)+'.pdf');
-    } catch(e){console.error('[PDF] Error:', e);alert('PDF generation error: '+e.message+'\n\nCheck browser console (F12) for details.')}
+    } catch(e){console.error('[PDF] Error:', e);toast('PDF generation error: '+e.message,'error',5000)}
     setGenerating(false);
   };
 
@@ -10483,7 +10744,7 @@ function ReportTab() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// SETTINGS
+// MODULE: SETTINGS — API keys, advisor info, admin tools
 // ═══════════════════════════════════════════════════════════════
 
 function PdfPasswordEditor() {
@@ -10547,7 +10808,7 @@ function Settings() {
     for(const p of policies) await deletePolicy(p.id);
     saveClientName('');
     saveProfile({name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[]});
-    alert('Portfolio reset complete. All data cleared.');
+    toast('Portfolio reset complete','success');
     window.location.reload();
   };
 
@@ -10574,7 +10835,7 @@ function Settings() {
       const text = await file.text();
       const data = JSON.parse(text);
       const arr = data.policies || (Array.isArray(data)?data:[]);
-      if(!arr.length){alert('No policies found in file');return;}
+      if(!arr.length){toast('No policies found in file','warning');return;}
       const mode = confirm(`Found ${arr.length} policies${data.clientName?' for '+data.clientName:''}.\n\nOK = Replace current portfolio\nCancel = Add to existing portfolio`);
       if(mode){
         // Replace — delete all existing first
@@ -10586,8 +10847,8 @@ function Settings() {
         count++;
       }
       if(data.clientName && mode) await saveClientName(data.clientName);
-      alert(`Loaded ${count} policies` + (mode?' (replaced)':' (added)'));
-    } catch(e){alert('Error loading file: '+e.message);}
+      toast(`Loaded ${count} policies` + (mode?' (replaced)':' (added)'),'success');
+    } catch(e){toast('Error loading file: '+e.message,'error');}
   };
 
   return (
@@ -10599,8 +10860,8 @@ function Settings() {
         <h3 style={{fontSize:14,fontWeight:600,marginBottom:4}}>Advisor Details</h3>
         <p style={{fontSize:11,color:'var(--text3)',marginBottom:8}}>Appears on PDF report headers, footers, and client share view</p>
         <div className="grid-2">
-          <div className="field"><label>Advisor Name</label><input value={advisorName} onChange={e=>{setAdvisorName(e.target.value);dbPut('settings',{key:'advisorName',value:e.target.value});}} onBlur={e=>{if(window.saveKeyToSupabase)saveKeyToSupabase('advisorName',e.target.value)}} placeholder="e.g. John Tan" /></div>
-          <div className="field"><label>Company</label><input value={advisorCompany} onChange={e=>{setAdvisorCompany(e.target.value);dbPut('settings',{key:'advisorCompany',value:e.target.value});}} onBlur={e=>{if(window.saveKeyToSupabase)saveKeyToSupabase('advisorCompany',e.target.value)}} placeholder="e.g. ABC Advisory" /></div>
+          <div className="field"><label>Advisor Name</label><input value={advisorName} onChange={e=>setAdvisorName(e.target.value)} onBlur={e=>{dbPut('settings',{key:'advisorName',value:e.target.value});if(window.saveKeyToSupabase)saveKeyToSupabase('advisorName',e.target.value)}} placeholder="e.g. John Tan" /></div>
+          <div className="field"><label>Company</label><input value={advisorCompany} onChange={e=>setAdvisorCompany(e.target.value)} onBlur={e=>{dbPut('settings',{key:'advisorCompany',value:e.target.value});if(window.saveKeyToSupabase)saveKeyToSupabase('advisorCompany',e.target.value)}} placeholder="e.g. ABC Advisory" /></div>
         </div>
       </div>
 
@@ -10611,7 +10872,7 @@ function Settings() {
           <p style={{fontSize:11,color:'var(--text3)',marginBottom:8}}>Portfolio save/load/reset is on the Dashboard. Repository reset is admin-only.</p>
           <button className="btn-danger btn-sm" onClick={async()=>{
             const pw = prompt('Enter admin password to reset repository:');
-            if(pw !== 'bprawn0011'){alert('Incorrect password.');return;}
+            if(pw !== 'bprawn0011'){toast('Incorrect password','error');return;}
             if(!confirm('This removes ALL repository entries and re-seeds with verified products. Proceed?')) return;
             const s = getSB();
             if(s) {
@@ -10641,14 +10902,14 @@ function Settings() {
           </div>
           <div style={{display:'flex',gap:6}}>
             <button className="btn-primary btn-sm" onClick={async()=>{
-              const k=geminiKey.trim(); if(!k||!k.startsWith('AIza')){alert('Gemini keys start with AIza...');return;}
-              const uid=window._user?.id||''; await dbPut('settings',{key:'geminiKey_'+uid,value:k}); await dbPut('settings',{key:'geminiKey',value:k}); if(window.saveKeyToSupabase) await saveKeyToSupabase('gemini',k); alert('✅ Gemini key saved & synced to your account!');
+              const k=geminiKey.trim(); if(!k||!k.startsWith('AIza')){toast('Gemini keys start with AIza…','warning');return;}
+              const uid=window._user?.id||''; await dbPut('settings',{key:'geminiKey_'+uid,value:k}); await dbPut('settings',{key:'geminiKey',value:k}); if(window.saveKeyToSupabase) await saveKeyToSupabase('gemini',k); toast('Gemini key saved & synced','success');
             }}>Save</button>
             <button className="btn-secondary btn-sm" onClick={async()=>{
               const k=((await dbGet('settings','geminiKey').catch(()=>null))?.value||'').trim();
-              if(!k){alert('No Gemini key stored');return;}
+              if(!k){toast('No Gemini key stored','warning');return;}
               try{const r=await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='+k,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({contents:[{parts:[{text:'Say hello'}]}],generationConfig:{maxOutputTokens:30}})});
-              const d=await r.json();if(d.error)alert('❌ '+d.error.message);else alert('✅ Gemini works! '+(d.candidates?.[0]?.content?.parts?.[0]?.text||''));}catch(e){alert('Error: '+e.message);}
+              const d=await r.json();if(d.error)toast(d.error.message,'error');else toast('Gemini connected — working!','success');}catch(e){toast(e.message,'error');}
             }}>Test</button>
           </div>
           <p style={{fontSize:10,color:'var(--text3)',marginTop:4}}>Get free: <a href="https://aistudio.google.com/apikey" target="_blank" style={{color:'#4285f4'}}>aistudio.google.com</a> → Create API key. 1,500 free req/day.</p>
@@ -10665,15 +10926,15 @@ function Settings() {
           </div>
           <div style={{display:'flex',gap:6}}>
             <button className="btn-primary btn-sm" onClick={async()=>{
-              const k=anthropicKey.trim(); if(!k||!k.startsWith('sk-ant-')){alert('Anthropic keys start with sk-ant-...');return;}
-              if(k.length<50){alert('Key too short ('+k.length+' chars). Full keys are ~130 chars. Copy the FULL key from Anthropic Console.');return;}
-              const uid2=window._user?.id||''; await dbPut('settings',{key:'anthropicKey_'+uid2,value:k}); await dbPut('settings',{key:'anthropicKey',value:k}); if(window.saveKeyToSupabase) await saveKeyToSupabase('anthropic',k); alert('✅ Anthropic key saved & synced to your account! ('+k.length+' chars)');
+              const k=anthropicKey.trim(); if(!k||!k.startsWith('sk-ant-')){toast('Anthropic keys start with sk-ant-…','warning');return;}
+              if(k.length<50){toast('Key too short — full keys are ~130 chars','warning',4500);return;}
+              const uid2=window._user?.id||''; await dbPut('settings',{key:'anthropicKey_'+uid2,value:k}); await dbPut('settings',{key:'anthropicKey',value:k}); if(window.saveKeyToSupabase) await saveKeyToSupabase('anthropic',k); toast('Anthropic key saved & synced ('+k.length+' chars)','success');
             }}>Save</button>
             <button className="btn-secondary btn-sm" onClick={async()=>{
               const k=((await dbGet('settings','anthropicKey').catch(()=>null))?.value||'').trim();
-              if(!k){alert('No Anthropic key stored');return;}
+              if(!k){toast('No Anthropic key stored','warning');return;}
               try{const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json','x-api-key':k,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:30,messages:[{role:'user',content:'Say hello'}]})});
-              const d=await r.json();if(d.error)alert('❌ '+d.error.message);else alert('✅ Claude works! '+(d.content?.[0]?.text||''));}catch(e){alert('Error: '+e.message);}
+              const d=await r.json();if(d.error)toast(d.error.message,'error');else toast('Claude connected — working!','success');}catch(e){toast(e.message,'error');}
             }}>Test</button>
           </div>
           <p style={{fontSize:10,color:'var(--text3)',marginTop:4}}>Get key: <a href="https://console.anthropic.com/settings/keys" target="_blank" style={{color:'#d97706'}}>console.anthropic.com</a> → Create Key → copy FULL key (~130 chars). ~$0.003/scan.</p>
@@ -10709,7 +10970,7 @@ function Settings() {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// RENDER
+// MODULE: RENDER — React root mount
 // ═══════════════════════════════════════════════════════════════
 
 ReactDOM.createRoot(document.getElementById('root')).render(<App />);
