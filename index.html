@@ -613,8 +613,8 @@ function ToastContainer() {
 // UX: Chart.js global animation defaults — smooth entry on all charts
 // ═══════════════════════════════════════════════════════════════
 if(window.Chart) {
-  Chart.defaults.animation = { duration: 600, easing: 'easeOutQuart' };
-  Chart.defaults.plugins.tooltip = { ...Chart.defaults.plugins.tooltip, animation: { duration: 150 } };
+  Chart.defaults.animation.duration = 600;
+  Chart.defaults.animation.easing = 'easeOutQuart';
 }
 
 // PolicyLens Logo — inline SVG, works everywhere
@@ -4721,9 +4721,9 @@ function ProfileTab() {
         <div style={{display:'flex',gap:6,alignItems:'center'}}>
           <input ref={camRef} type="file" accept="image/*" capture="environment" multiple style={{display:'none'}} onChange={e=>{scanProfile(e.target.files);e.target.value='';}} />
           <input ref={uploadRef} type="file" accept="image/*,.pdf,.xlsx,.xls,.doc,.docx" multiple style={{display:'none'}} onChange={e=>{scanProfile(e.target.files);e.target.value='';}} />
-          <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length) scanProfile(files);}} disabled={scanning}>{scanning?'Scanning…':'📷'}</button>
-          <button className="btn-secondary btn-sm" onClick={()=>{const inp=document.createElement('input');inp.type='file';inp.accept='image/*';inp.multiple=true;inp.onchange=e=>{if(e.target.files.length) scanProfile(e.target.files);};inp.click();}} disabled={scanning}>🖼</button>
-          <button className="btn-secondary btn-sm" onClick={()=>uploadRef.current?.click()} disabled={scanning}>{scanning?'…':'📄'}</button>
+          <button style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',fontSize:11,padding:'5px 10px',borderRadius:8,cursor:'pointer',fontWeight:500}} onClick={async()=>{const files=await openCameraModal();if(files&&files.length) scanProfile(files);}} disabled={scanning}>{scanning?'Scanning…':'📷 Camera'}</button>
+          <button style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',fontSize:11,padding:'5px 10px',borderRadius:8,cursor:'pointer',fontWeight:500}} onClick={()=>{const inp=document.createElement('input');inp.type='file';inp.accept='image/*';inp.multiple=true;inp.onchange=e=>{if(e.target.files.length) scanProfile(e.target.files);};inp.click();}} disabled={scanning}>🖼 Gallery</button>
+          <button style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',fontSize:11,padding:'5px 10px',borderRadius:8,cursor:'pointer',fontWeight:500}} onClick={()=>uploadRef.current?.click()} disabled={scanning}>{scanning?'…':'📄 Upload'}</button>
           <button className="btn-sm" style={{background:'rgba(239,83,80,.08)',color:'var(--red)',border:'1px solid rgba(239,83,80,.15)',fontSize:10,padding:'5px 10px',borderRadius:8,cursor:'pointer'}} onClick={()=>{
             if(!confirm('Delete all client profile data?\n\nClears name, NRIC, DOB, income, expenses, CPF settings, dependants.\n\nPolicies will NOT be deleted.')) return;
             const blank = {name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[],annualIncome:'',retirementAge:'65',monthlyExpenses:'',mortgagePayment:'',dependantSupport:'',medicalBudget:'',desiredRetIncome:'',inflationRate:'2.8',cpfScheme:'FRS',cpfPlan:'standard',cpfStartAge:'65',cpfTopUp:'',otherRetIncome:[]};
@@ -5312,7 +5312,7 @@ new Chart(document.getElementById('retChart'),{type:'bar',data:{labels:${JSON.st
           <p style={{fontSize:10,color:'var(--text3)'}}>CPF LIFE + policy income + other sources vs desired lifestyle</p>
         </div>
         <div style={{display:'flex',gap:6,flexShrink:0}}>
-          <button className="btn-secondary btn-sm" onClick={()=>setShareMode(!shareMode)} style={{fontSize:10}}>{shareMode?'Hide':'👁 Preview'}</button>
+          <button className="btn-secondary btn-sm" data-action="preview" onClick={()=>setShareMode(!shareMode)} style={{fontSize:10}}>{shareMode?'Hide':'👁 Preview'}</button>
           <button className="btn-primary btn-sm" onClick={handleShare} style={{fontSize:10}}>📤 Share</button>
         </div>
       </div>
@@ -6227,8 +6227,14 @@ function Dashboard() {
       {showReview && <ReviewSession onClose={()=>setShowReview(false)} />}
 
       {/* Action bar */}
-      <div style={{display:'flex',gap:6,marginBottom:12,flexWrap:'wrap'}}>
-        {policies.length >= 2 && <button className="btn-primary btn-sm" onClick={()=>setShowReview(true)} style={{fontSize:11}}>📋 Start Review Session</button>}
+      <div style={{display:'flex',gap:6,marginBottom:12,flexWrap:'wrap',alignItems:'center'}}>
+        <button style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',fontSize:11,padding:'5px 10px',borderRadius:8,cursor:'pointer',fontWeight:500}} onClick={async()=>{const files=await openCameraModal();if(files&&files.length) handleDashDrop(files);}}>📷 Camera</button>
+        <button style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',fontSize:11,padding:'5px 10px',borderRadius:8,cursor:'pointer',fontWeight:500}} onClick={()=>{const inp=document.createElement('input');inp.type='file';inp.accept='image/*';inp.multiple=true;inp.onchange=e=>{if(e.target.files.length)handleDashDrop(e.target.files);};inp.click();}}>🖼 Gallery</button>
+        <button style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',fontSize:11,padding:'5px 10px',borderRadius:8,cursor:'pointer',fontWeight:500}} onClick={()=>{const inp=document.createElement('input');inp.type='file';inp.accept='image/*,.pdf,.xlsx,.xls,.csv,.doc,.docx';inp.multiple=true;inp.onchange=e=>{if(e.target.files.length)handleDashDrop(e.target.files);};inp.click();}}>📄 Upload</button>
+        <div style={{flex:1}} />
+        <button style={{background:'rgba(91,143,217,.12)',color:'var(--blue2)',border:'1px solid rgba(91,143,217,.25)',fontSize:11,padding:'5px 12px',borderRadius:8,cursor:'pointer',fontWeight:600}} onClick={()=>{const el=document.getElementById('retirement-lite-section');if(el){el.scrollIntoView({behavior:'smooth'});setTimeout(()=>{const btn=el.querySelector('[data-action=preview]');if(btn)btn.click();},400);}else toast('Add retirement details in Profile first','info');}}>👁 Preview & Share</button>
+        <button style={{background:'rgba(91,168,160,.12)',color:'var(--green2)',border:'1px solid rgba(91,168,160,.25)',fontSize:11,padding:'5px 12px',borderRadius:8,cursor:'pointer',fontWeight:600}} onClick={()=>setTab('report')}>📄 PDF Report</button>
+        {policies.length >= 2 && <button className="btn-primary btn-sm" onClick={()=>setShowReview(true)} style={{fontSize:11}}>📋 Review</button>}
       </div>
 
       {/* ═══ PORTFOLIO ACTIONS BAR ═══ */}
@@ -6661,7 +6667,7 @@ function Dashboard() {
 
       {/* ═══ RETIREMENT INCOME DASHBOARD (Lite RetireLens) ═══ */}
       {(retirementLite.desiredMonthly > 0 || retirementLite.cpfPayout.mid > 0 || retirementLite.policyMonthlyIncome > 0) && (
-        <RetirementLiteDashboard data={retirementLite} age={age} retAge={retAge} p={p} policies={policies} cvTimeline={cvTimeline} toSGD={toSGD} fxRates={fxRates} />
+        <div id="retirement-lite-section"><RetirementLiteDashboard data={retirementLite} age={age} retAge={retAge} p={p} policies={policies} cvTimeline={cvTimeline} toSGD={toSGD} fxRates={fxRates} /></div>
       )}
 
       {/* ═══ TIER 1: RIDER COVERAGE MATRIX ═══ */}
@@ -7098,7 +7104,7 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
           <div style={{padding:'8px 16px',background:'rgba(212,169,106,.06)',borderBottom:'1px solid var(--border)'}}>
             <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4}}>
               <span style={{fontSize:10,fontWeight:600,color:'var(--gold)'}}>✨ Still extracting...</span>
-              <span style={{fontSize:9,color:'var(--text3)'}}>Batch {scanProgress.batch}/{scanProgress.totalBatches}</span>
+              <span style={{fontSize:9,color:'var(--text3)'}}>Batch {scanProgress.batch}/{scanProgress.totalBatches}{scanProgress.eta ? ' · '+scanProgress.eta : ''}</span>
             </div>
             <div style={{height:4,background:'var(--bg4)',borderRadius:2,overflow:'hidden'}}>
               <div style={{height:'100%',width:scanProgress.pctComplete+'%',background:'linear-gradient(90deg,var(--gold),var(--green2))',borderRadius:2,transition:'width .5s ease'}} />
@@ -7605,11 +7611,15 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
     let allExtracted = [];
     let firstBatchShown = false;
 
-    setScanProgress({batch:0, totalBatches, totalFiles:allFiles.length, status:'Preparing...', pctComplete:0});
+    setScanProgress({batch:0, totalBatches, totalFiles:allFiles.length, status:'Preparing...', pctComplete:0, startTime:Date.now()});
 
     try {
       for(let b=0; b<batches.length; b++) {
-        setScanProgress({batch:b+1, totalBatches, totalFiles:allFiles.length, status:`Extracting batch ${b+1} of ${totalBatches} (${batches[b].length} files)...`, pctComplete:Math.round(b/totalBatches*100)});
+        const elapsed = Date.now() - (scanProgress?.startTime||Date.now());
+        const avgPerBatch = b > 0 ? elapsed / b : 15000; // ~15s estimate for first batch
+        const remaining = Math.round((totalBatches - b) * avgPerBatch / 1000);
+        const etaText = remaining > 60 ? `~${Math.ceil(remaining/60)} min left` : `~${remaining}s left`;
+        setScanProgress({batch:b+1, totalBatches, totalFiles:allFiles.length, status:`Extracting batch ${b+1} of ${totalBatches} (${batches[b].length} files)...`, pctComplete:Math.round(b/totalBatches*100), startTime:scanProgress?.startTime||Date.now(), eta:etaText});
 
         const arr = await extractBatch(batches[b]);
         if(arr.length === 0 && b === 0 && batches.length === 1) {
@@ -8064,7 +8074,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         <div className="card" style={{marginBottom:12,padding:14,borderLeft:'3px solid var(--gold)'}}>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
             <div style={{fontSize:12,fontWeight:600,color:'var(--gold)'}}>✨ AI Extraction</div>
-            <div style={{fontSize:11,color:'var(--text3)'}}>{scanProgress.batch}/{scanProgress.totalBatches} batches · {scanProgress.totalFiles} files</div>
+            <div style={{fontSize:11,color:'var(--text3)'}}>{scanProgress.batch}/{scanProgress.totalBatches} batches · {scanProgress.totalFiles} files{scanProgress.eta ? ' · '+scanProgress.eta : ''}</div>
           </div>
           <div style={{height:6,background:'var(--bg4)',borderRadius:3,overflow:'hidden',marginBottom:6}}>
             <div style={{height:'100%',width:scanProgress.pctComplete+'%',background:'linear-gradient(90deg,var(--gold),var(--green2))',borderRadius:3,transition:'width .5s ease'}} />
