@@ -8933,7 +8933,11 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
             if(p.premSingle||p.premiumStructure==='Single Premium'||p.premFrequency==='single') return <div><div style={{fontSize:11}}>{fmt(p.annualPremium,p.currency||'SGD')}</div><div style={{fontSize:9,color:'var(--gold)'}}>Single Premium</div></div>;
             if(p.premFrequency==='monthly') return <div><div style={{fontSize:11}}>{fmt(p.annualPremium,p.currency||'SGD')}/mth</div><div style={{fontSize:9,color:'var(--text3)'}}>{fmt(parseFloat(p.annualPremium)*12,p.currency||'SGD')}/yr</div></div>;
             if(p.premFrequency==='unknown') return <div><div style={{fontSize:11}}>{fmt(p.annualPremium,p.currency||'SGD')}</div><div style={{fontSize:9,color:'var(--orange)'}}>Unconfirmed</div></div>;
-            return <div>{fmt(p.annualPremium,p.currency||'SGD')}</div>;
+            // Default: annual premium — show /yr suffix so it's unambiguous vs monthly.
+            // Suppress suffix if premium is 0/missing (nothing to qualify).
+            const prem = parseFloat(p.annualPremium)||0;
+            if(prem === 0) return <div>{fmt(p.annualPremium,p.currency||'SGD')}</div>;
+            return <div style={{fontSize:11}}>{fmt(p.annualPremium,p.currency||'SGD')}<span style={{color:'var(--text3)',fontWeight:400}}>/yr</span></div>;
           };
 
           // Action buttons
