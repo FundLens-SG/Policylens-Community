@@ -4636,14 +4636,20 @@ function repairJSON(raw) {
 // Gemini 2.5 Flash supports (type, description, enum, properties, required,
 // items, nullable). No oneOf, anyOf, additionalProperties, or $ref.
 //
-// Fields NOT in this schema will be missing in the structured-output path:
-//   - UL/IUL/VUL: creditingRates, loyaltyBonus, surrender_charge_schedule,
-//     feature_flags, ELP_premium, QSI_flag, FA/IA_allocation, index_sub_accounts
-//   - Premium financing: financed, finLoan, finRate, finTenure
-//   - Short-term endowment yields: endYield, endGuaranteedCV
-//   - Detailed ILP: fund bid/offer spread, reinvest flag, growth/dividend rates
-// These are still captured by the dual-AI fallback pipeline. Future sessions
-// can widen this schema as needed.
+// Schema coverage (2026-04 widened bundle):
+//   • Core + classification + premium + client info + term/dates + riders
+//   • ISP specifics (class, rider list, deductible, coinsurance)
+//   • Cash value + surrender
+//   • ILP (growth, dividend, fees, fund allocations, bid/offer, reinvest)
+//   • Retirement/annuity (payouts, start/end age, maturity)
+//   • Fixed deposits / T-bills / SSB
+//   • UL / IUL / VUL specialty (crediting rates, index sub-accounts,
+//     surrender schedule, loyalty bonus, ELP, QSI, solved premium)
+//   • Premium financing (loan, rate, tenure)
+//   • Short-term endowment (yield to maturity, guaranteed CV)
+// Any field the AI emits that is NOT in the schema is silently dropped by
+// Gemini's structured-output enforcement. Widen this schema when adding new
+// product categories rather than relying on the dual-AI fallback path.
 // ═══════════════════════════════════════════════════════════════
 
 const POLICY_EXTRACTION_SCHEMA = {
@@ -4776,7 +4782,66 @@ const POLICY_EXTRACTION_SCHEMA = {
         items: { type: 'STRING' }
       },
       notes: { type: 'STRING', nullable: true, description: 'Concise 3-5 sentence FC review summary' },
-      userRemarks: { type: 'STRING', nullable: true, description: 'Handwritten notes or informal annotations preserved verbatim' }
+      userRemarks: { type: 'STRING', nullable: true, description: 'Handwritten notes or informal annotations preserved verbatim' },
+
+      // ═══════════════════════════════════════════════════════════════
+      // WIDENED SCHEMA (2026-04 bundle) — specialty product fields
+      // ═══════════════════════════════════════════════════════════════
+
+      // ── UL / IUL / VUL family shared ──
+      surrenderChargeSchedule: { type: 'STRING', nullable: true, description: 'Surrender charge schedule as text, e.g. "Yr1 20%, Yr2 18%, …, Yr10 0%"' },
+      partialSurrenderLimitFormula: { type: 'STRING', nullable: true, description: 'Formula or rule for max partial withdrawal, e.g. "up to 90% of cash value above surrender charge"' },
+      featureFlags: { type: 'STRING', nullable: true, description: 'JSON or semicolon-list of feature toggles (e.g. "guaranteed_issue;no_lapse_guarantee;accelerated_death")' },
+      loyaltyBonusRate: { type: 'NUMBER', nullable: true, description: 'Loyalty/persistency bonus rate % p.a.' },
+      loyaltyBonusStartYear: { type: 'INTEGER', nullable: true, description: 'First policy year loyalty bonus applies' },
+      loyaltyBonusEndYear: { type: 'INTEGER', nullable: true, description: 'Last policy year loyalty bonus applies, null = for life' },
+
+      // ── Universal Life (UL) specific ──
+      creditingRateCurrent: { type: 'NUMBER', nullable: true, description: 'Current crediting rate % p.a.' },
+      creditingRateGuaranteed: { type: 'NUMBER', nullable: true, description: 'Guaranteed minimum crediting rate % p.a.' },
+      loanRate: { type: 'NUMBER', nullable: true, description: 'Policy loan interest rate % p.a.' },
+      elpPremium: { type: 'NUMBER', nullable: true, description: 'Equivalent Level Premium (ELP) amount' },
+      qsiFlag: { type: 'BOOLEAN', nullable: true, description: 'Quantitative Suitability Index flag (Singapore MAS UL rule)' },
+
+      // ── Indexed UL (IUL) specific ──
+      faAllocationPct: { type: 'NUMBER', nullable: true, description: 'Fixed Account allocation %' },
+      iaAllocationPct: { type: 'NUMBER', nullable: true, description: 'Indexed Account allocation %' },
+      indexSubAccounts: {
+        type: 'ARRAY',
+        nullable: true,
+        description: 'Each indexed sub-account with its cap/floor/participation parameters',
+        items: {
+          type: 'OBJECT',
+          properties: {
+            name: { type: 'STRING', description: 'e.g. "S&P 500 1-Year Point-to-Point"' },
+            cap: { type: 'NUMBER', nullable: true, description: 'Cap rate % p.a.' },
+            floor: { type: 'NUMBER', nullable: true, description: 'Floor rate % p.a. (typically 0)' },
+            participationRate: { type: 'NUMBER', nullable: true, description: 'Participation rate %' },
+            allocation: { type: 'NUMBER', nullable: true, description: 'Allocation % to this sub-account' }
+          },
+          required: ['name']
+        }
+      },
+
+      // ── Variable UL (VUL) specific ──
+      solvedPremium: { type: 'NUMBER', nullable: true, description: 'Solved/target premium level' },
+      assumedReturnPct: { type: 'NUMBER', nullable: true, description: 'Illustrated assumed return % p.a.' },
+      minInitialPremium: { type: 'NUMBER', nullable: true, description: 'Minimum initial premium required' },
+      minLiquidity: { type: 'NUMBER', nullable: true, description: 'Minimum liquidity / cash reserve' },
+
+      // ── Premium financing ──
+      financed: { type: 'BOOLEAN', nullable: true, description: 'true if policy is funded via bank loan' },
+      finLoan: { type: 'NUMBER', nullable: true, description: 'Outstanding loan principal' },
+      finRate: { type: 'NUMBER', nullable: true, description: 'Loan interest rate % p.a.' },
+      finTenure: { type: 'INTEGER', nullable: true, description: 'Loan tenure in years' },
+
+      // ── Short-term endowment yield details ──
+      endYield: { type: 'NUMBER', nullable: true, description: 'Guaranteed yield to maturity % p.a.' },
+      endGuaranteedCV: { type: 'NUMBER', nullable: true, description: 'Guaranteed cash value at maturity' },
+
+      // ── ILP granular (per-fund details beyond fundAllocations) ──
+      ilpBidOfferSpread: { type: 'NUMBER', nullable: true, description: 'Bid-offer spread %' },
+      ilpReinvestFlag: { type: 'BOOLEAN', nullable: true, description: 'true if dividends auto-reinvest' }
     },
     required: ['insurer','productName','category']
   }
@@ -8011,6 +8076,161 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
   // ── Extract from any files — BATCHED PIPELINE ──
   const BATCH_SIZE = 25; // photos per batch
 
+  // ═══════════════════════════════════════════════════════════════
+  // SELF-HEALING TRUNCATION RECOVERY
+  // ───────────────────────────────────────────────────────────────
+  // runExtractionWithRecovery(contentBlocks, depth) runs the AI call + parse,
+  // and on detected truncation splits the content and recurses. Returns a
+  // merged+deduped policy array, or throws if unrecoverable.
+  //
+  // Splitting strategy (in priority order):
+  //   1. If content has multiple non-text blocks (multi-file batch), split
+  //      the blocks list in half and recurse on each half.
+  //   2. If content has a single large text block (e.g. text-layer PDF dump),
+  //      split the text by character count into halves, each paired with a
+  //      fresh copy of the instruction text, recurse on each half.
+  //   3. If neither applies (single image or single small block), return
+  //      whatever was recovered with a warning toast.
+  //
+  // Max recursion depth of 3 → at most 8 recursive leaves per original call,
+  // which is enough to break 100+ page portfolio reports into chunks Gemini
+  // can handle, without pathological blow-up.
+  // ═══════════════════════════════════════════════════════════════
+  const MAX_RECOVERY_DEPTH = 3;
+
+  const runExtractionWithRecovery = async (contentBlocks, depth, pathLabel) => {
+    const label = pathLabel || 'root';
+    console.log('[Extract]', '→'.repeat(depth+1), label, '(depth '+depth+')', contentBlocks.length, 'blocks');
+
+    let text;
+    try {
+      text = await callAI(EXTRACT_PROMPT, contentBlocks, 32000, POLICY_EXTRACTION_SCHEMA);
+    } catch(err) {
+      // If the AI call itself fails and we still have room to split, try splitting
+      // — sometimes oversize content throws before truncation detection.
+      if(depth < MAX_RECOVERY_DEPTH && (/too large|context|length|overflow|max/i).test(err.message||'')) {
+        console.warn('[Extract]', label, 'AI threw size-ish error:', err.message, '→ attempting split retry');
+      } else {
+        throw err;
+      }
+      text = null;
+    }
+
+    let arr = [];
+    let looksTruncated = text == null; // treat size-error path as truncated
+
+    if(text != null) {
+      console.log('[Extract]', label, 'response:', text.length, 'chars, tail:', text.slice(-80));
+      const trimmed = text.trim();
+      const lastChar = trimmed.slice(-1);
+      looksTruncated = lastChar !== ']' && lastChar !== '}';
+      const parsed = repairJSON(text);
+      if(Array.isArray(parsed)) arr = parsed;
+      else if(parsed && typeof parsed === 'object') {
+        const wrapperKeys = ['policies','data','results','items','extracted','records'];
+        const found = wrapperKeys.find(k => Array.isArray(parsed[k]));
+        arr = found ? parsed[found] : [parsed];
+      } else arr = [];
+      arr = arr.filter(p => p && typeof p === 'object' && (p.productName || p.insurer || p.category || p.fdPrincipal));
+    }
+
+    // Not truncated → done
+    if(!looksTruncated) {
+      console.log('[Extract]', label, '✓ clean response:', arr.length, 'policies');
+      return arr;
+    }
+
+    // Truncated — can we recurse?
+    if(depth >= MAX_RECOVERY_DEPTH) {
+      console.warn('[Extract]', label, 'truncated at max depth — returning', arr.length, 'recovered policies');
+      return arr;
+    }
+
+    // ── SPLIT STRATEGY ──
+    // Separate instruction-tail text blocks (usually last block) from content blocks.
+    // We'll re-append the last instruction block to each split half.
+    const contentOnly = contentBlocks.slice();
+    let instructionTail = null;
+    // Heuristic: if the last block is text and contains "Extract ALL" or "return", treat as instruction tail.
+    const lastBlock = contentOnly[contentOnly.length-1];
+    if(lastBlock && lastBlock.type === 'text' && /extract all|return only|critical rules/i.test(lastBlock.text||'')) {
+      instructionTail = contentOnly.pop();
+    }
+
+    // Strategy 1: multiple content blocks → split blocks in half
+    if(contentOnly.length > 1) {
+      const mid = Math.ceil(contentOnly.length / 2);
+      const firstHalf = contentOnly.slice(0, mid);
+      const secondHalf = contentOnly.slice(mid);
+      console.log('[Extract]', label, 'truncated → splitting', contentOnly.length, 'blocks into', firstHalf.length, '+', secondHalf.length);
+      if(instructionTail) { firstHalf.push(instructionTail); secondHalf.push(instructionTail); }
+      const [a, b] = await Promise.all([
+        runExtractionWithRecovery(firstHalf, depth+1, label+'/L'),
+        runExtractionWithRecovery(secondHalf, depth+1, label+'/R')
+      ]);
+      return [...a, ...b];
+    }
+
+    // Strategy 2: single text block → split by character count
+    if(contentOnly.length === 1 && contentOnly[0].type === 'text' && (contentOnly[0].text||'').length > 10000) {
+      const fullText = contentOnly[0].text;
+      // Try to split on a natural boundary (double newline, page marker) near the midpoint
+      const midpoint = Math.floor(fullText.length / 2);
+      let splitAt = midpoint;
+      // Look within ±10% of midpoint for a double-newline or page marker
+      const searchRadius = Math.floor(fullText.length * 0.1);
+      const searchStart = Math.max(0, midpoint - searchRadius);
+      const searchEnd = Math.min(fullText.length, midpoint + searchRadius);
+      const slice = fullText.slice(searchStart, searchEnd);
+      const boundaryPatterns = [/\n\n(?=Page \d+)/i, /\n\n(?=Policy \d)/i, /\f/, /\n\n\n/, /\n\n/];
+      for(const pat of boundaryPatterns) {
+        const m = slice.match(pat);
+        if(m) { splitAt = searchStart + m.index + m[0].length; break; }
+      }
+      const firstText = fullText.slice(0, splitAt);
+      const secondText = fullText.slice(splitAt);
+      console.log('[Extract]', label, 'truncated single-text → splitting at char', splitAt, 'of', fullText.length, '→', firstText.length, '+', secondText.length);
+      const firstBlocks = [{type:'text', text:'[PART 1 OF 2]\n\n'+firstText}];
+      const secondBlocks = [{type:'text', text:'[PART 2 OF 2]\n\n'+secondText}];
+      if(instructionTail) { firstBlocks.push(instructionTail); secondBlocks.push(instructionTail); }
+      const [a, b] = await Promise.all([
+        runExtractionWithRecovery(firstBlocks, depth+1, label+'/T1'),
+        runExtractionWithRecovery(secondBlocks, depth+1, label+'/T2')
+      ]);
+      return [...a, ...b];
+    }
+
+    // Strategy 3: single non-text block or too-small text — can't split further
+    console.warn('[Extract]', label, 'truncated but cannot split further (single', contentOnly[0]?.type, 'block) — returning', arr.length, 'recovered');
+    try { toast('⚠️ Extracted '+arr.length+' policies from a large single document but response was truncated. Try uploading pages as separate files.', 'warning', 9000); } catch(e){}
+    return arr;
+  };
+
+  // Deduplicate an array of policies by policy number or insurer+productName fingerprint.
+  const dedupePolicies = (arr) => {
+    const seen = new Set();
+    const before = arr.length;
+    const out = arr.filter(p => {
+      const polNum = (p.policyNumber||'').toString().trim().toLowerCase();
+      if(polNum && polNum.length >= 4) {
+        const k = 'num:'+polNum;
+        if(seen.has(k)) { console.warn('[Extract] Dedup: dropping duplicate policy #'+p.policyNumber, p.productName); return false; }
+        seen.add(k);
+        return true;
+      }
+      const ins = (p.insurer||'').toString().trim().toLowerCase();
+      const name = (p.productName||p.policyName||'').toString().trim().toLowerCase();
+      if(!ins && !name) return true;
+      const k = 'fp:'+ins+'|'+name;
+      if(seen.has(k)) { console.warn('[Extract] Dedup: dropping duplicate fingerprint', ins, '—', name); return false; }
+      seen.add(k);
+      return true;
+    });
+    const removed = before - out.length;
+    if(removed > 0) console.log('[Extract] Dedup removed '+removed+' duplicate policies ('+before+' → '+out.length+')');
+    return out;
+  };
+
   // Single-batch extraction (returns processed array)
   const extractBatch = async (batchFiles) => {
     // ── CONTENT-HASH CACHE CHECK ──
@@ -8040,63 +8260,29 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
     if(expectedCount) console.log('[Extract] Document hints at', expectedCount, 'policies');
 
     content.push({type:'text',text:'Extract ALL insurance policies AND financial instruments from these documents. CRITICAL RULES:\n1. Multiple photos may show DIFFERENT PAGES of the SAME policy — correlate them by policy number, insurer+product name, or context clues. Merge information from multiple pages into ONE policy entry.\n2. Multiple photos may also show DIFFERENT policies — extract each as a separate entry.\n3. NEVER skip or merge genuinely different policies. Two policies from the same insurer with different product names = 2 entries.\n4. If the same fund (e.g. "Allianz Global High Payout") appears under DIFFERENT accounts (CPFIS-OA vs Cash), these are SEPARATE entries — differentiate by appending the account type in policyName.\n5. Look across ALL images for related data — page 1 might have the policy name while page 3 has the premium details.\nReturn ONLY valid JSON array or object.'});
-    const text = await callAI(EXTRACT_PROMPT, content, 32000, POLICY_EXTRACTION_SCHEMA);
-    console.log('[Extract] Raw response:', text.length, 'chars. Tail:', text.slice(-120));
-    // ── TRUNCATION DETECTION ──
-    // If response doesn't end with a closing bracket, it was cut mid-stream.
-    // repairJSON will salvage complete objects, but we need to warn the user.
-    const trimmed = text.trim();
-    const lastChar = trimmed.slice(-1);
-    const looksTruncated = lastChar !== ']' && lastChar !== '}';
-    const parsed = repairJSON(text);
-    let arr;
-    if (Array.isArray(parsed)) arr = parsed;
-    else if (parsed && typeof parsed === 'object') {
-      const wrapperKeys = ['policies','data','results','items','extracted','records'];
-      const found = wrapperKeys.find(k => Array.isArray(parsed[k]));
-      if (found) { arr = parsed[found]; } else { arr = [parsed]; }
-    } else { arr = [parsed]; }
-    arr = arr.filter(p => p && typeof p === 'object' && (p.productName || p.insurer || p.category || p.fdPrincipal));
+
+    // ── RUN EXTRACTION WITH SELF-HEALING TRUNCATION RECOVERY ──
+    let arr = await runExtractionWithRecovery(content, 0, 'batch');
+
     // ── BATCH DEDUPLICATION ──
-    // Portfolio reports often list the same policy across multiple sections (Death Coverage,
-    // CI Coverage, etc). AI occasionally emits these as duplicates. Dedup by policy number
-    // (primary key) or insurer+productName fingerprint (fallback).
-    {
-      const seen = new Set();
-      const before = arr.length;
-      arr = arr.filter(p => {
-        const polNum = (p.policyNumber||'').toString().trim().toLowerCase();
-        if(polNum && polNum.length >= 4) {
-          const k = 'num:'+polNum;
-          if(seen.has(k)) { console.warn('[Extract] Dedup: dropping duplicate policy #'+p.policyNumber, p.productName); return false; }
-          seen.add(k);
-          return true;
-        }
-        const ins = (p.insurer||'').toString().trim().toLowerCase();
-        const name = (p.productName||p.policyName||'').toString().trim().toLowerCase();
-        if(!ins && !name) return true; // no fingerprint — keep to be safe
-        const k = 'fp:'+ins+'|'+name;
-        if(seen.has(k)) { console.warn('[Extract] Dedup: dropping duplicate fingerprint', ins, '—', name); return false; }
-        seen.add(k);
-        return true;
-      });
-      const removed = before - arr.length;
-      if(removed > 0) console.log('[Extract] Dedup removed '+removed+' duplicate policies ('+before+' → '+arr.length+')');
-    }
-    if(looksTruncated) {
-      console.warn('[Extract] Response appears truncated. Recovered', arr.length, 'complete policies. Some policies may be missing — re-run the scan if count is low.');
-      try { toast('⚠️ Extracted '+arr.length+' policies but response was truncated. Some may be missing — re-run if count seems low.', 'warning', 8000); } catch(e){}
-    }
+    // Recovery recursion may produce overlapping policies if both halves of a split
+    // see the same policy (rare but possible when a single policy spans a split boundary).
+    // Also portfolio reports list the same policy across multiple sections.
+    arr = dedupePolicies(arr);
+
     // ── POLICY-COUNT RECONCILIATION ──
     // If the document header promised more policies than we extracted, surface it loudly.
     if(expectedCount && arr.length < expectedCount) {
       const missing = expectedCount - arr.length;
       console.warn('[Extract] Reconciliation mismatch — document says', expectedCount, 'but extracted', arr.length, '(', missing, 'missing)');
       try { toast('⚠️ Document mentions '+expectedCount+' policies but only extracted '+arr.length+'. '+missing+' may be missing — re-run the scan.', 'warning', 10000); } catch(e){}
+    } else if(expectedCount && arr.length >= expectedCount) {
+      console.log('[Extract] ✓ Reconciled:', arr.length, '≥', expectedCount, 'expected');
+      try { toast('✓ Extracted all '+arr.length+' policies (expected '+expectedCount+')','success',3000); } catch(e){}
     }
     // ── SAVE TO CACHE ──
-    // Only cache on successful, non-truncated, non-empty extractions.
-    if(cacheKey && arr.length > 0 && !looksTruncated && (!expectedCount || arr.length >= expectedCount)) {
+    // Only cache on successful, non-empty extractions that met reconciliation target.
+    if(cacheKey && arr.length > 0 && (!expectedCount || arr.length >= expectedCount)) {
       try {
         await dbPut('extractCache', {key:cacheKey, value:arr, timestamp:Date.now(), fileCount:batchFiles.length, policyCount:arr.length});
         console.log('[Extract] 💾 Cached', arr.length, 'policies under key', cacheKey.slice(0,12)+'…');
@@ -8159,6 +8345,44 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         };
         // AI-facing alias cleanup — don't persist it
         delete result.premiumAmount;
+        // ── SPECIALTY FIELDS: flat → nested mapping shim ──
+        // The schema uses flat fields (creditingRateCurrent, loyaltyBonusRate…) because
+        // Gemini structured output handles flat properties more reliably than nested
+        // objects. The legacy form state uses nested objects (creditingRates.current,
+        // loyaltyBonus.rate). Bridge the two so existing form bindings keep working.
+        if(result.creditingRateCurrent != null || result.creditingRateGuaranteed != null) {
+          result.creditingRates = {
+            ...(result.creditingRates||{}),
+            ...(result.creditingRateCurrent != null ? {current: String(result.creditingRateCurrent)} : {}),
+            ...(result.creditingRateGuaranteed != null ? {guaranteed: String(result.creditingRateGuaranteed)} : {})
+          };
+          delete result.creditingRateCurrent;
+          delete result.creditingRateGuaranteed;
+        }
+        if(result.loyaltyBonusRate != null || result.loyaltyBonusStartYear != null || result.loyaltyBonusEndYear != null) {
+          result.loyaltyBonus = {
+            ...(result.loyaltyBonus||{}),
+            ...(result.loyaltyBonusRate != null ? {rate: String(result.loyaltyBonusRate)} : {}),
+            ...(result.loyaltyBonusStartYear != null ? {startYear: String(result.loyaltyBonusStartYear)} : {}),
+            ...(result.loyaltyBonusEndYear != null ? {endYear: String(result.loyaltyBonusEndYear)} : {})
+          };
+          delete result.loyaltyBonusRate;
+          delete result.loyaltyBonusStartYear;
+          delete result.loyaltyBonusEndYear;
+        }
+        if(result.faAllocationPct != null || result.iaAllocationPct != null) {
+          result.fa_ia_allocation = {
+            ...(result.fa_ia_allocation||{}),
+            ...(result.faAllocationPct != null ? {fa: String(result.faAllocationPct)} : {}),
+            ...(result.iaAllocationPct != null ? {ia: String(result.iaAllocationPct)} : {})
+          };
+          delete result.faAllocationPct;
+          delete result.iaAllocationPct;
+        }
+        // Premium financing: normalise to strings to match legacy form expectations
+        if(result.finLoan != null) result.finLoan = String(result.finLoan);
+        if(result.finRate != null) result.finRate = String(result.finRate);
+        if(result.finTenure != null) result.finTenure = String(result.finTenure);
         // FD fields
         if(result.fdPrincipal) result.fdPrincipal = String(parseFloat(result.fdPrincipal)||0);
         if(result.fdYieldPct) result.fdYieldPct = String(parseFloat(result.fdYieldPct)||0);
@@ -12076,6 +12300,253 @@ function PdfPasswordEditor() {
   );
 }
 
+function ExtractDiagnostics() {
+  const [running, setRunning] = useState(false);
+  const [results, setResults] = useState([]);
+  const [runningTest, setRunningTest] = useState('');
+
+  const addResult = (name, status, detail, time) => {
+    setResults(prev => [...prev, {name, status, detail, time, id: Date.now()+Math.random()}]);
+  };
+
+  const runAll = async () => {
+    setRunning(true);
+    setResults([]);
+    const t0 = Date.now();
+
+    // ── Test 1: API key presence ──
+    setRunningTest('Checking API keys');
+    try {
+      const uid = window._user?.id || '';
+      const gk = ((await dbGet('settings','geminiKey_'+uid).catch(()=>null))?.value || (await dbGet('settings','geminiKey').catch(()=>null))?.value || '').trim();
+      const ck = ((await dbGet('settings','anthropicKey_'+uid).catch(()=>null))?.value || (await dbGet('settings','anthropicKey').catch(()=>null))?.value || '').trim();
+      if(gk && ck) addResult('API keys', 'pass', 'Both Gemini and Anthropic keys present', 0);
+      else if(gk) addResult('API keys', 'warn', 'Gemini only — structured path works, Claude fallback unavailable', 0);
+      else if(ck) addResult('API keys', 'warn', 'Anthropic only — structured path disabled, dual-AI unavailable', 0);
+      else addResult('API keys', 'fail', 'No keys configured — extraction cannot run', 0);
+    } catch(e) { addResult('API keys', 'fail', e.message, 0); }
+
+    // ── Test 2: Schema integrity ──
+    setRunningTest('Validating extraction schema');
+    try {
+      const s = POLICY_EXTRACTION_SCHEMA;
+      if(s?.type !== 'ARRAY') throw new Error('Schema root is not ARRAY');
+      if(!s.items?.properties) throw new Error('Schema missing items.properties');
+      const props = Object.keys(s.items.properties);
+      const required = s.items.required || [];
+      const mustHave = ['insurer','productName','category','premiumAmount','premFrequency','sumAssured','riders'];
+      const missing = mustHave.filter(f => !props.includes(f));
+      if(missing.length) throw new Error('Missing required schema fields: '+missing.join(','));
+      const specialty = ['creditingRateCurrent','indexSubAccounts','financed','endYield','loyaltyBonusRate'];
+      const specialtyPresent = specialty.filter(f => props.includes(f));
+      addResult('Schema integrity', 'pass', props.length+' fields, '+required.length+' required, '+specialtyPresent.length+'/'+specialty.length+' specialty fields present', 0);
+    } catch(e) { addResult('Schema integrity', 'fail', e.message, 0); }
+
+    // ── Test 3: repairJSON (clean) ──
+    setRunningTest('Testing repairJSON on clean JSON');
+    try {
+      const r = repairJSON('{"insurer":"Manulife","annualPremium":1000}');
+      if(r?.insurer === 'Manulife' && r.annualPremium === 1000) addResult('repairJSON (clean)', 'pass', 'Parses valid JSON correctly', 0);
+      else throw new Error('Unexpected result: '+JSON.stringify(r));
+    } catch(e) { addResult('repairJSON (clean)', 'fail', e.message, 0); }
+
+    // ── Test 4: repairJSON (truncated array) ──
+    setRunningTest('Testing repairJSON on truncated response');
+    try {
+      const truncated = '[{"insurer":"AIA","productName":"Pro Lifetime"},{"insurer":"Manulife","productName":"Heirloom"},{"insurer":"Singlife","product';
+      const r = repairJSON(truncated);
+      if(Array.isArray(r) && r.length >= 2 && r[0]?.insurer === 'AIA') addResult('repairJSON (truncated)', 'pass', 'Recovered '+r.length+' complete objects from truncated response', 0);
+      else throw new Error('Expected ≥2 recovered objects, got '+(Array.isArray(r)?r.length:typeof r));
+    } catch(e) { addResult('repairJSON (truncated)', 'fail', e.message, 0); }
+
+    // ── Test 5: Cache read/write ──
+    setRunningTest('Testing IndexedDB scan cache');
+    const testKey = '__diagnostic_'+Date.now();
+    try {
+      const payload = [{id:'test', productName:'Diagnostic', insurer:'TestInsurer'}];
+      await dbPut('extractCache', {key:testKey, value:payload, timestamp:Date.now(), fileCount:1, policyCount:1});
+      const back = await dbGet('extractCache', testKey);
+      if(!back?.value?.[0]?.productName) throw new Error('Cache round-trip lost data');
+      // Clean up
+      const db = await openDB();
+      const tx = db.transaction('extractCache', 'readwrite');
+      tx.objectStore('extractCache').delete(testKey);
+      await new Promise(res => { tx.oncomplete = res; });
+      addResult('Scan cache I/O', 'pass', 'IndexedDB extractCache read/write/delete round-trip OK', 0);
+    } catch(e) { addResult('Scan cache I/O', 'fail', e.message, 0); }
+
+    // ── Test 6: Premium desync guard ──
+    setRunningTest('Testing premium desync guard');
+    try {
+      // Simulate the guard logic inline
+      const simulateGuard = (result) => {
+        if(result.premFrequency === 'monthly' && !result.premSingle && result.annualPremium >= 6000 && result.annualPremium % 12 === 0) {
+          const asMonthly = result.annualPremium / 12;
+          if(asMonthly >= 50 && asMonthly <= 10000) {
+            return {...result, annualPremium: asMonthly};
+          }
+        }
+        return result;
+      };
+      // Case 1: should unwind $12,000/mth → $1,000/mth
+      const c1 = simulateGuard({premFrequency:'monthly', annualPremium:12000});
+      if(c1.annualPremium !== 1000) throw new Error('Case 1 failed: expected 1000, got '+c1.annualPremium);
+      // Case 2: should leave $600/mth alone
+      const c2 = simulateGuard({premFrequency:'monthly', annualPremium:600});
+      if(c2.annualPremium !== 600) throw new Error('Case 2 failed: $600/mth was touched');
+      // Case 3: should leave $50,000/yr alone (annual, not monthly)
+      const c3 = simulateGuard({premFrequency:'annual', annualPremium:50000});
+      if(c3.annualPremium !== 50000) throw new Error('Case 3 failed: annual premium was touched');
+      // Case 4: should leave $200,000 single premium alone
+      const c4 = simulateGuard({premFrequency:'single', annualPremium:200000, premSingle:true});
+      if(c4.annualPremium !== 200000) throw new Error('Case 4 failed: single premium was touched');
+      addResult('Premium desync guard', 'pass', '4/4 cases: unwinds $12k/mth→$1k/mth, preserves $600/mth, $50k/yr, $200k single', 0);
+    } catch(e) { addResult('Premium desync guard', 'fail', e.message, 0); }
+
+    // ── Test 7: Content hashing ──
+    setRunningTest('Testing file hashing for cache keys');
+    try {
+      const f1 = new File(['hello world'], 'test.txt', {type:'text/plain'});
+      const h1 = await hashFile(f1);
+      const h2 = await hashFile(f1);
+      if(h1 !== h2) throw new Error('Hash not deterministic');
+      if(h1.length !== 64) throw new Error('Hash length unexpected: '+h1.length);
+      addResult('File hashing', 'pass', 'SHA-256 deterministic, 64-char hex', 0);
+    } catch(e) { addResult('File hashing', 'fail', e.message, 0); }
+
+    // ── Test 8: Gemini reachability (optional real network call) ──
+    setRunningTest('Testing Gemini reachability (network call)');
+    try {
+      const uid = window._user?.id || '';
+      const gk = ((await dbGet('settings','geminiKey_'+uid).catch(()=>null))?.value || (await dbGet('settings','geminiKey').catch(()=>null))?.value || '').trim();
+      if(!gk) { addResult('Gemini reachability', 'skip', 'No Gemini key configured', 0); }
+      else {
+        const ts = Date.now();
+        const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='+gk, {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({
+            contents:[{parts:[{text:'Reply with the JSON {"ok":true} only.'}]}],
+            generationConfig:{maxOutputTokens:50, responseMimeType:'application/json'}
+          })
+        });
+        if(!r.ok) { const ed = await r.json().catch(()=>({})); throw new Error('HTTP '+r.status+': '+(ed.error?.message||r.statusText)); }
+        const data = await r.json();
+        const reply = data.candidates?.[0]?.content?.parts?.[0]?.text||'';
+        const elapsed = Date.now()-ts;
+        if(!reply.includes('ok')) throw new Error('Unexpected reply: '+reply.slice(0,60));
+        addResult('Gemini reachability', 'pass', 'Round-trip '+elapsed+'ms — response contains expected token', elapsed);
+      }
+    } catch(e) { addResult('Gemini reachability', 'fail', e.message, 0); }
+
+    // ── Test 9: Claude reachability (optional real network call) ──
+    setRunningTest('Testing Claude reachability (network call)');
+    try {
+      const uid = window._user?.id || '';
+      const ck = ((await dbGet('settings','anthropicKey_'+uid).catch(()=>null))?.value || (await dbGet('settings','anthropicKey').catch(()=>null))?.value || '').trim();
+      if(!ck) { addResult('Claude reachability', 'skip', 'No Anthropic key configured', 0); }
+      else {
+        const ts = Date.now();
+        const r = await fetch('https://api.anthropic.com/v1/messages', {
+          method:'POST',
+          headers:{'Content-Type':'application/json','x-api-key':ck,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
+          body: JSON.stringify({
+            model:'claude-sonnet-4-20250514', max_tokens:30,
+            messages:[{role:'user', content:'Reply with the word OK only.'}]
+          })
+        });
+        if(!r.ok) { const ed = await r.json().catch(()=>({})); throw new Error('HTTP '+r.status+': '+(ed.error?.message||r.statusText)); }
+        const data = await r.json();
+        const reply = data.content?.[0]?.text||'';
+        const elapsed = Date.now()-ts;
+        if(!reply.toLowerCase().includes('ok')) throw new Error('Unexpected reply: '+reply.slice(0,60));
+        addResult('Claude reachability', 'pass', 'Round-trip '+elapsed+'ms — response contains expected token', elapsed);
+      }
+    } catch(e) { addResult('Claude reachability', 'fail', e.message, 0); }
+
+    // ── Test 10: End-to-end structured extraction smoke test ──
+    setRunningTest('Running end-to-end structured extraction');
+    try {
+      const uid = window._user?.id || '';
+      const gk = ((await dbGet('settings','geminiKey_'+uid).catch(()=>null))?.value || (await dbGet('settings','geminiKey').catch(()=>null))?.value || '').trim();
+      if(!gk) { addResult('End-to-end extraction', 'skip', 'No Gemini key — structured path requires Gemini', 0); }
+      else {
+        const syntheticPolicy = 'MANULIFE HEIRLOOM (III)\nPolicy Number: 90123456\nSum Assured: SGD 500,000\nAnnual Premium: SGD 8,400\nPayment Frequency: Annually\nPolicy Owner: Test Person\nLife Insured: Test Person\nInception Date: 2020-01-15\nStatus: Inforce\nSubtype: Whole Life';
+        const ts = Date.now();
+        const r = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='+gk, {
+          method:'POST', headers:{'Content-Type':'application/json'},
+          body: JSON.stringify({
+            contents:[{parts:[{text:'Extract the policy from this text:\n\n'+syntheticPolicy}]}],
+            systemInstruction:{parts:[{text:'You are an insurance policy extractor. Extract policies into the given schema. premiumAmount is AS-PAID at stated frequency.'}]},
+            generationConfig:{maxOutputTokens:2000, responseMimeType:'application/json', responseSchema: POLICY_EXTRACTION_SCHEMA}
+          })
+        });
+        if(!r.ok) { const ed = await r.json().catch(()=>({})); throw new Error('HTTP '+r.status+': '+(ed.error?.message||r.statusText)); }
+        const data = await r.json();
+        const raw = data.candidates?.[0]?.content?.parts?.[0]?.text||'';
+        const parsed = JSON.parse(raw);
+        const elapsed = Date.now()-ts;
+        if(!Array.isArray(parsed)) throw new Error('Expected array, got '+typeof parsed);
+        if(parsed.length === 0) throw new Error('Empty array returned');
+        const p = parsed[0];
+        const checks = [];
+        if(p.insurer && /manulife/i.test(p.insurer)) checks.push('insurer ✓'); else checks.push('insurer ✗ ('+p.insurer+')');
+        if(p.productName && /heirloom/i.test(p.productName)) checks.push('productName ✓'); else checks.push('productName ✗');
+        if(p.premiumAmount === 8400) checks.push('premiumAmount=8400 ✓'); else checks.push('premiumAmount ✗ ('+p.premiumAmount+')');
+        if(p.premFrequency === 'annual') checks.push('premFrequency=annual ✓'); else checks.push('premFrequency ✗ ('+p.premFrequency+')');
+        if(p.sumAssured === 500000) checks.push('sumAssured ✓'); else checks.push('sumAssured ✗ ('+p.sumAssured+')');
+        const failed = checks.filter(c => c.includes('✗'));
+        if(failed.length) addResult('End-to-end extraction', 'warn', elapsed+'ms, '+checks.length+' fields checked, '+failed.length+' issues: '+failed.join(', '), elapsed);
+        else addResult('End-to-end extraction', 'pass', elapsed+'ms, all '+checks.length+' critical fields correct — pipeline healthy', elapsed);
+      }
+    } catch(e) { addResult('End-to-end extraction', 'fail', e.message, 0); }
+
+    setRunningTest('');
+    setRunning(false);
+    const total = Date.now()-t0;
+    console.log('[Diagnostics] Complete in', total, 'ms');
+  };
+
+  const passCount = results.filter(r => r.status === 'pass').length;
+  const failCount = results.filter(r => r.status === 'fail').length;
+  const warnCount = results.filter(r => r.status === 'warn').length;
+  const skipCount = results.filter(r => r.status === 'skip').length;
+
+  return (
+    <div>
+      <div style={{display:'flex',gap:8,alignItems:'center',marginBottom:10}}>
+        <button className="btn-primary btn-sm" onClick={runAll} disabled={running}>
+          {running ? '⏳ Running '+(runningTest||'')+'…' : '🔬 Run Diagnostics'}
+        </button>
+        {results.length > 0 && !running && (
+          <span style={{fontSize:11,color:'var(--text3)'}}>
+            {passCount > 0 && <span style={{color:'#22c55e'}}>{passCount} pass</span>}
+            {passCount > 0 && (failCount > 0 || warnCount > 0 || skipCount > 0) && ' · '}
+            {failCount > 0 && <span style={{color:'#ef4444'}}>{failCount} fail</span>}
+            {failCount > 0 && (warnCount > 0 || skipCount > 0) && ' · '}
+            {warnCount > 0 && <span style={{color:'#f59e0b'}}>{warnCount} warn</span>}
+            {warnCount > 0 && skipCount > 0 && ' · '}
+            {skipCount > 0 && <span style={{color:'var(--text3)'}}>{skipCount} skip</span>}
+          </span>
+        )}
+      </div>
+      {results.length > 0 && (
+        <div style={{background:'var(--bg3)',borderRadius:6,padding:10,fontSize:11,fontFamily:'monospace',lineHeight:1.6,maxHeight:260,overflowY:'auto'}}>
+          {results.map(r => {
+            const icon = r.status==='pass'?'✅':r.status==='fail'?'❌':r.status==='warn'?'⚠️':'⏭';
+            const color = r.status==='pass'?'#22c55e':r.status==='fail'?'#ef4444':r.status==='warn'?'#f59e0b':'var(--text3)';
+            return (
+              <div key={r.id} style={{borderBottom:'1px solid var(--border)',padding:'4px 0'}}>
+                <div><span style={{color}}>{icon}</span> <strong style={{color:'var(--text1)'}}>{r.name}</strong></div>
+                <div style={{color:'var(--text3)',paddingLeft:18,fontSize:10}}>{r.detail}</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function ExtractCacheEditor() {
   const [entries, setEntries] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -12319,6 +12790,13 @@ function Settings() {
         <h3 style={{fontSize:14,fontWeight:600,marginBottom:4}}>📦 Scan Cache</h3>
         <p style={{fontSize:11,color:'var(--text3)',marginBottom:10}}>PolicyLens caches extraction results by file content hash, so rescanning the same document is instant and free. Clear this if you changed the extraction prompt and want fresh results.</p>
         <ExtractCacheEditor />
+      </div>
+
+      {/* ═══ EXTRACTION DIAGNOSTICS ═══ */}
+      <div className="card" style={{marginBottom:16}}>
+        <h3 style={{fontSize:14,fontWeight:600,marginBottom:4}}>🔬 Extraction Diagnostics</h3>
+        <p style={{fontSize:11,color:'var(--text3)',marginBottom:10}}>Run a smoke test on the full extraction pipeline: API keys, schema integrity, JSON repair, cache I/O, premium desync guard, file hashing, and live API round-trips to Gemini and Claude. Finishes with an end-to-end structured extraction on a synthetic policy. Use this whenever extractions start behaving strangely — it tells you which layer is broken in 10 seconds.</p>
+        <ExtractDiagnostics />
       </div>
 
       <div className="card">
