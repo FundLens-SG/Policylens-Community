@@ -664,11 +664,11 @@ const CATEGORIES = {
 };
 
 const SUB_TYPES = {
-  protection: ['Term Life','Whole Life','Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)','Critical Illness','Personal Accident','Disability Income','Long-term Care','ILP (Protection)'],
+  protection: ['Term Life','Whole Life','Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)','Critical Illness','Early Critical Illness','Personal Accident','Disability Income','Long-term Care','ILP (Protection)'],
   savings: ['Endowment','Lifetime Endowment','Education Plan','Short-term Endowment'],
-  health: ['Integrated Shield Plan','Hospital Income','CareShield Life Supplement','ElderShield 300','ElderShield 400'],
+  health: ['Integrated Shield Plan','Hospital Income','CareShield Life / Supplement','ElderShield 300','ElderShield 400','Long-term Care'],
   investment: ['ILP (Investment)','Unit Trust','Single Premium Investment'],
-  retirement: ['Retirement','Annuity'],
+  retirement: ['Retirement Income (Par WL)','Annuity','CPF Life','Income Plan','Retirement'],
   maternity: ['Maternity Coverage'],
   cash_investments: ['Fixed Deposit','T-bill','Singapore Savings Bond','Corporate Bond','Money Market'],
   other_assets: ['Property','Stocks/Equities','Gold/Precious Metals','Fixed Coupon Note (FCN)','Equity Linked Note (ELN)','Options/Futures','Cryptocurrency','Art/Collectibles','Other'],
@@ -730,7 +730,239 @@ function calcISPBreakdown(totalPrem, age) {
   const ispCash = Math.max(0, ispAdditional - awl);
   return { msl, awl, ispAdditional, ispMediSave, ispCash, totalMediSave: msl + ispMediSave, totalCash: ispCash };
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// LIFE-STAGE PROJECTION
+// ═══════════════════════════════════════════════════════════════════════
+// Returns {death, cv, income, ci} values for a single policy at a target
+// age, given the client's current age for relative-time calculations.
+// All values are in the policy's native currency — the caller must apply
+// FX conversion if aggregating across currencies.
+//
+// DESIGN NOTES:
+// • This is a VISUAL projection, not an actuarial calc. The goal is to
+//   show the FC and client how the portfolio evolves with the client's
+//   age — it's about trends, not penny-precision.
+// • Conservative defaults: missing rates default to 3% CV growth and 6%
+//   ILP growth — the same defaults the form uses.
+// • Inactive policies (lapsed/surrendered/matured) always return zeros.
+// • Term Life and DI coverage expire at their stated end ages.
+// • Retirement plans switch from accumulation (cv) to income phase at
+//   annuityStartAge, with cv decaying as payouts are drawn (unless
+//   retPayoutMode='reinvest' which compounds).
+// • SA multipliers are honoured: if targetAge is past multiplierEndAge,
+//   revert to 1× base SA.
+// • CI riders on protection bases contribute to CI track, not death track.
+// ═══════════════════════════════════════════════════════════════════════
+function projectPolicyAtAge(pol, targetAge, clientCurrentAge) {
+  const zero = { death: 0, cv: 0, income: 0, ci: 0 };
+  if(!pol || typeof pol !== 'object') return zero;
+
+  // Skip inactive policies entirely
+  if(['lapsed','surrendered','matured'].includes(pol.status)) return zero;
+
+  const cat = pol.category || '';
+  const sub = pol.subType || '';
+  const sa = parseFloat(pol.sumAssured) || 0;
+  const entryAge = parseInt(pol.ageAtEntry) || parseInt(pol.premStartAge) || clientCurrentAge || 30;
+  const yearsFromNow = Math.max(0, targetAge - (clientCurrentAge || entryAge));
+
+  // Compute maturity age if possible (needed for term-life / endowment expiry)
+  let maturityAge = null;
+  if(pol.maturityDate) {
+    try {
+      const mdt = new Date(pol.maturityDate).getTime();
+      const now = Date.now();
+      const msPerYear = 31557600000;
+      maturityAge = (clientCurrentAge || 30) + Math.floor((mdt - now) / msPerYear);
+    } catch(e) {}
+  }
+  // Policy term fallback
+  const polTermEnd = (parseInt(pol.endPolicyTerm) && entryAge) ? (entryAge + parseInt(pol.endPolicyTerm)) : null;
+  const coverageEnd = maturityAge || polTermEnd || null;
+
+  let death = 0, cv = 0, income = 0, ci = 0;
+
+  // ── DEATH / TPD SA ──
+  // Protection-category life products with a sum assured contribute here,
+  // excluding sub-types that have their own tracks (CI, ECI, DI, PA, LTC).
+  const isLifeProtection = cat === 'protection' && !['Critical Illness','Early Critical Illness','Disability Income','Personal Accident','Long-term Care'].includes(sub);
+  if(isLifeProtection && sa > 0) {
+    const mult = parseFloat(pol.saMultiplier) || 1;
+    const multEnd = parseInt(pol.multiplierEndAge) || 0;
+    const effMult = (multEnd > 0 && targetAge > multEnd) ? 1 : Math.max(1, mult);
+    death = sa * effMult;
+    // Term-life expiry: zero out death benefit past term end
+    if(sub === 'Term Life') {
+      const termEnd = coverageEnd || (parseInt(pol.premEndAge) || (entryAge + 20));
+      if(targetAge > termEnd) death = 0;
+    }
+  }
+  // Savings (endowment) plans have a death benefit during the policy term
+  if(cat === 'savings' && sa > 0) {
+    death = sa;
+    if(coverageEnd && targetAge > coverageEnd) death = 0;
+  }
+  // Retirement par WL plans carry a death benefit too (typically SA or CV)
+  if(cat === 'retirement' && sa > 0) death = sa;
+
+  // ── CRITICAL ILLNESS SA (separate track) ──
+  // Standalone CI / ECI policies
+  if(sub === 'Critical Illness' || sub === 'Early Critical Illness') {
+    const mult = parseFloat(pol.saMultiplier) || 1;
+    const multEnd = parseInt(pol.multiplierEndAge) || 0;
+    const effMult = (multEnd > 0 && targetAge > multEnd) ? 1 : Math.max(1, mult);
+    ci = sa * effMult;
+    // ECI total-claim cap: up to 200-500% SA with power reset
+    if(sub === 'Early Critical Illness' && parseFloat(pol.ciTotalCap) > 100) {
+      ci = sa * (parseFloat(pol.ciTotalCap) / 100);
+    }
+  }
+  // CI riders on other protection bases contribute additional CI coverage
+  if(Array.isArray(pol.riders)) {
+    for(const rd of pol.riders) {
+      if(!rd) continue;
+      if(rd.type === 'ci' || rd.type === 'eci') {
+        const rdSA = parseFloat(rd.sa) || 0;
+        if(rdSA > 0) ci += rdSA;
+      }
+    }
+  }
+
+  // ── CASH VALUE (projected) ──
+  const currentCV = parseFloat(pol.cashValue) || 0;
+  const cvGrowth = (parseFloat(pol.cvGrowthRate) || 3) / 100;
+
+  // ILP / ILP Investment — compound at effective rate
+  if(sub === 'ILP (Investment)' || sub === 'ILP (Protection)') {
+    const growth = (parseFloat(pol.ilpGrowth) || 6) / 100;
+    const divY = (parseFloat(pol.ilpDivYield) || 2) / 100;
+    const fee = (parseFloat(pol.ilpMgmtFee) || 1.5) / 100;
+    const effRate = Math.max(0, pol.divReinvest ? (growth + divY - fee) : (growth - fee));
+    cv = currentCV * Math.pow(1 + effRate, yearsFromNow);
+  }
+  // UL family — compound at current crediting rate
+  else if(['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(sub)) {
+    const creditRate = (parseFloat(pol.creditingRates?.current) || 4) / 100;
+    cv = currentCV * Math.pow(1 + creditRate, yearsFromNow);
+  }
+  // Endowment — grow to maturity, then hold at maturity value
+  else if(cat === 'savings' && currentCV > 0) {
+    if(coverageEnd && targetAge >= coverageEnd) {
+      // At or past maturity: use guaranteed + non-guaranteed bonus as terminal value
+      const matVal = parseFloat(pol.endGuaranteedCV) || 0;
+      const bonus = parseFloat(pol.endNonGuarBonus) || 0;
+      cv = matVal + bonus || currentCV * Math.pow(1 + cvGrowth, Math.max(0, (coverageEnd - clientCurrentAge)));
+    } else {
+      cv = currentCV * Math.pow(1 + cvGrowth, yearsFromNow);
+    }
+  }
+  // Retirement plan in accumulation or income phase
+  else if(cat === 'retirement') {
+    const annuityStart = parseInt(pol.annuityStartAge) || 65;
+    const annuityEnd = parseInt(pol.annuityEndAge) || 99;
+    const monthly = parseFloat(pol.annuityMonthly) || 0;
+    const annualPayout = parseFloat(pol.annuityPayout) || monthly * 12;
+
+    // Income phase: passive income from this plan
+    if(targetAge >= annuityStart && targetAge <= annuityEnd && annualPayout > 0) {
+      income = monthly > 0 ? monthly : annualPayout / 12;
+    }
+
+    // CV projection respects payout vs reinvest mode
+    const yearsToStart = Math.max(0, annuityStart - (clientCurrentAge || entryAge));
+    if(targetAge < annuityStart) {
+      // Pure accumulation
+      cv = currentCV * Math.pow(1 + cvGrowth, yearsFromNow);
+    } else if(pol.retPayoutMode === 'reinvest') {
+      // Continues to compound even during income period
+      cv = currentCV * Math.pow(1 + cvGrowth, yearsFromNow);
+    } else {
+      // Income phase with drawdown — CV holds at accumulation-end value
+      // (simplified: real par fund retains bonuses even during payout)
+      cv = currentCV * Math.pow(1 + cvGrowth, yearsToStart);
+    }
+  }
+  // Cash investments (FD/T-bill/SSB) — hold principal until maturity, then zero
+  else if(cat === 'cash_investments') {
+    const principal = parseFloat(pol.fdPrincipal) || currentCV || 0;
+    let fdMatAge = null;
+    if(pol.fdMaturityDate) {
+      try {
+        const mdt = new Date(pol.fdMaturityDate).getTime();
+        const now = Date.now();
+        fdMatAge = (clientCurrentAge || 30) + Math.floor((mdt - now) / 31557600000);
+      } catch(e) {}
+    }
+    if(!fdMatAge || targetAge <= fdMatAge) {
+      const yld = (parseFloat(pol.fdYieldPct) || 0) / 100;
+      cv = principal * Math.pow(1 + yld, Math.min(yearsFromNow, fdMatAge ? fdMatAge - (clientCurrentAge || 0) : yearsFromNow));
+    } else {
+      cv = 0; // matured — would be reinvested / spent
+    }
+  }
+  // Default protection WL with cash value
+  else if(currentCV > 0) {
+    cv = currentCV * Math.pow(1 + cvGrowth, yearsFromNow);
+  }
+
+  return { death, cv, income, ci };
+}
+
 const CARESHIELD_MEDISAVE_CAP = 600;
+// ═══ CARESHIELD LIFE 2026 SCHEME ENHANCEMENT (MOH announced 27 Aug 2025) ═══
+// From 1 Jan 2026 the monthly payout growth rate DOUBLES from 2% to 4% p.a., running
+// through 2030. New-claim monthly payout in 2026 is S$689 (up from S$676 under old rate).
+// By 2030 it reaches S$806. Once a claim begins, the amount locks for life. The 3-of-6
+// ADL eligibility threshold is UNCHANGED. Premiums rise by an average S$38/yr with
+// S$570M of transitional government support to moderate the increase.
+const CARESHIELD_PAYOUT_2026 = 689;          // new-claim monthly payout for a claim starting in 2026
+const CARESHIELD_PAYOUT_2030 = 806;          // projected new-claim payout in 2030 under 4% growth
+const CARESHIELD_GROWTH_RATE = 0.04;         // 4% p.a. from 2026–2030 (was 2%)
+const CARESHIELD_ADL_TRIGGER = 3;            // unchanged: 3 of 6 ADLs = severe disability
+const ELDERSHIELD_300_MAX_MONTHS = 72;       // legacy ElderShield 300: $300/mo × 72 mo
+const ELDERSHIELD_400_MAX_MONTHS = 72;       // legacy ElderShield 400: $400/mo × 72 mo
+
+// ═══ ISP RIDER REFORM 2026 (MOH announced 26 Nov 2025, effective 1 Apr 2026) ═══
+// MOH introduced sweeping rule changes to Integrated Shield Plan riders to curb
+// "buffet syndrome" healthcare over-consumption. Three key changes for riders
+// sold from 1 Apr 2026: (1) riders CAN'T cover the IP deductible ($1,500-$3,500
+// depending on ward class), (2) min co-pay cap raised from $3,000/yr to $6,000/yr,
+// (3) new rider premiums ~30% cheaper. The 5% co-insurance minimum is unchanged.
+// Policyholders fall into THREE groups based on rider inception date:
+//   LEGACY       — rider bought before 27 Nov 2025 → grandfathered, no forced switch,
+//                  keeps full deductible coverage & $3k co-pay cap, but premiums may
+//                  rise as the legacy pool shrinks (closed book)
+//   TRANSITIONAL — rider bought 27 Nov 2025 – 31 Mar 2026 → must transition to a
+//                  compliant new rider no later than next renewal AFTER 1 Apr 2028
+//   NEW-2026     — rider bought from 1 Apr 2026 → already on new design ($1.5-3.5k
+//                  deductible out of pocket, $6k co-pay cap, ~30% cheaper premium)
+// Separately, MediShield Life introduces a $500 outpatient deductible from 1 Jan 2026.
+const ISP_LEGACY_CUTOFF = '2025-11-27';      // rider inception before this = legacy group
+const ISP_TRANSITION_CUTOFF = '2026-03-31';  // rider inception up to this = transitional group
+const ISP_RIDER_REFORM_DATE = '2026-04-01';  // from this date = new-2026 compliant rider
+const ISP_FORCED_SWITCH_DATE = '2028-04-01'; // transitional riders must switch at next renewal after this
+const ISP_NEW_CO_PAY_CAP = 6000;             // /yr under new design (was 3000)
+const ISP_LEGACY_CO_PAY_CAP = 3000;          // /yr for legacy/transitional riders
+const ISP_MIN_DEDUCTIBLE_A = 3500;           // Class A ward
+const ISP_MIN_DEDUCTIBLE_B1 = 2500;          // Class B1
+const ISP_MIN_DEDUCTIBLE_B2 = 1500;          // Class B2
+const MEDISHIELD_OUTPATIENT_DEDUCTIBLE = 500; // /yr from 1 Jan 2026 (new)
+
+// Given a rider inception date (or fallback to policy inception), returns one of
+// 'legacy' | 'transitional' | 'new-2026' | 'unknown'. Used to drive the rider
+// generation banner in the ISP panel and to select correct defaults for deductible
+// coverage and co-pay cap.
+function getISPRiderGeneration(dateStr) {
+  if(!dateStr) return 'unknown';
+  const d = new Date(dateStr);
+  if(isNaN(d.getTime())) return 'unknown';
+  const legacyCutoff = new Date(ISP_LEGACY_CUTOFF);
+  const reformDate = new Date(ISP_RIDER_REFORM_DATE);
+  if(d < legacyCutoff) return 'legacy';
+  if(d < reformDate) return 'transitional';
+  return 'new-2026';
+}
 
 // ═══ CPF LIFE INFRASTRUCTURE (CPF Board 2025/2026) ═══
 const CPF_CONSTANTS = {
@@ -1127,6 +1359,209 @@ function parseExpectedPolicyCount(text) {
   return Math.max(...counts);
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// REPO-GROUNDED PRIORS FOR DOCUMENT EXTRACTION
+// ═══════════════════════════════════════════════════════════════════════
+// Scans document text for known products from the user's repository and
+// injects their canonical classification into the extraction prompt as
+// authoritative priors. This fixes the "AIA Gen3 classified as ILP" class
+// of bug at the root: once a product is in the repo with correct category
+// and subType, every subsequent scan of that product inherits the known
+// classification regardless of how the document looks.
+//
+// Matching is CONSERVATIVE — we require BOTH the insurer name AND either
+// the product name or product code to appear in the text. Confidence:
+//   1.00 — insurer + exact productName + productCode match
+//   0.90 — insurer + productName substring match
+//   0.70 — insurer + productCode only (shorter distinctive codes)
+// Only matches with score >= 0.70 are returned.
+//
+// The prior block is injected into the content array BEFORE the instruction
+// tail, so the AI sees it as authoritative context. Matched products are
+// logged to the console for debugging.
+// ═══════════════════════════════════════════════════════════════════════
+
+function normaliseTextForMatch(s) {
+  return (s || '').toLowerCase()
+    .replace(/[–—\-_]/g, ' ')   // normalise dashes/underscores to spaces
+    .replace(/[().,;:!?'"]/g, ' ') // strip common punctuation
+    .replace(/\s+/g, ' ')         // collapse whitespace
+    .trim();
+}
+
+function fuzzyMatchReposFromText(sourceText, repo) {
+  if(!sourceText || !repo || !Array.isArray(repo) || repo.length === 0) return [];
+  const text = normaliseTextForMatch(sourceText);
+  if(text.length < 20) return [];  // too short to match reliably
+  const matches = [];
+  const seen = new Set();
+  for(const r of repo) {
+    if(!r || !r.insurer || !r.productName) continue;
+    const key = (r.insurer + '|' + r.productName).toLowerCase();
+    if(seen.has(key)) continue;  // dedup same-product entries across sources
+    seen.add(key);
+    const insurerN = normaliseTextForMatch(r.insurer);
+    const productNameN = normaliseTextForMatch(r.productName);
+    const productCodeN = r.productCode ? normaliseTextForMatch(r.productCode) : '';
+    // Insurer must appear (prevents cross-insurer hallucination)
+    if(insurerN.length < 3 || !text.includes(insurerN)) continue;
+    const nameMatch = productNameN.length >= 4 && text.includes(productNameN);
+    // Product code must be distinctive (>= 3 chars) to avoid false positives on common abbreviations
+    const codeMatch = productCodeN.length >= 3 && text.includes(' '+productCodeN+' ');
+    if(!nameMatch && !codeMatch) continue;
+    let score = 0;
+    let matchType = '';
+    if(nameMatch && codeMatch) { score = 1.00; matchType = 'name+code'; }
+    else if(nameMatch) { score = 0.90; matchType = 'name'; }
+    else if(codeMatch) { score = 0.70; matchType = 'code'; }
+    matches.push({ repo: r, score, matchType });
+  }
+  // Sort by score desc, then by productName specificity (longer = more specific)
+  matches.sort((a, b) => b.score - a.score || (b.repo.productName.length - a.repo.productName.length));
+  return matches;
+}
+
+// Build a prior-knowledge text block from matched repo entries. Returns an
+// empty string if no matches — avoiding prompt bloat when there's nothing to say.
+function buildRepoPriorBlock(matches, maxInclude) {
+  if(!matches || matches.length === 0) return '';
+  const topMatches = matches.slice(0, maxInclude || 6);
+  const lines = [
+    '',
+    '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+    'REPOSITORY PRIOR KNOWLEDGE — AUTHORITATIVE UNLESS DOCUMENT CONTRADICTS',
+    '━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━',
+    'The products below were identified in the document and match entries',
+    'already present in our verified product repository. When extracting these',
+    'policies, you MUST use the canonical category and subType shown here.',
+    'Do NOT reclassify a known product. Example: "AIA Gen3" is ALWAYS',
+    'category=retirement, subType=Retirement Income (Par WL) — NEVER',
+    'investment/ILP regardless of how the document appears to describe it.',
+    'Use the notes field as authoritative context about the product mechanics.',
+    'Only override a repository value if the document EXPLICITLY and clearly',
+    'shows a different value (e.g. a different premium term number).',
+    ''
+  ];
+  for(const m of topMatches) {
+    const r = m.repo;
+    lines.push('── ' + r.insurer + ' · ' + r.productName + (r.productCode ? ' (' + r.productCode + ')' : '') + ' ──');
+    lines.push('  category: ' + (r.category || 'unknown'));
+    lines.push('  subType: ' + (r.subType || 'unknown'));
+    if(r.currency) lines.push('  currency: ' + r.currency);
+    if(r.notes) {
+      // Truncate long notes to keep prior block compact (max ~400 chars per product)
+      const notesShort = r.notes.length > 400 ? r.notes.slice(0, 400).trim() + '…' : r.notes;
+      lines.push('  notes: ' + notesShort);
+    }
+    lines.push('  match: ' + m.score.toFixed(2) + ' confidence (' + m.matchType + ')');
+    lines.push('');
+  }
+  lines.push('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+  lines.push('');
+  return lines.join('\n');
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// POST-EXTRACT REPO RECONCILIATION
+// ═══════════════════════════════════════════════════════════════════════
+// Safety net for cases where text-based prior injection couldn't fire
+// (image-only scans, OCR gaps, or when the model simply ignored the prior).
+// After extraction, each policy is fuzzy-matched against the repo on
+// (insurer, productName). High-confidence matches trigger reconciliation of
+// classification fields — category, subType, currency, productCode.
+//
+// RULES:
+//   • Empty extracted value + repo has value → FILL (enrichment)
+//   • Extracted value matches repo → no-op
+//   • Extracted value DIFFERS from repo → OVERRIDE (repo wins on classification
+//     because the repo is human-verified; this is the fix for cases like
+//     AIA Gen3 being classified as investment/ILP despite the prior)
+//   • Numeric/identifier fields (premium, SA, policy number, dates) are
+//     NEVER touched — those are document-specific and must come from the doc
+//   • Notes field is NEVER overridden — document notes are policy-specific
+//
+// Reconciliation runs AFTER dedupe and BEFORE the zero-premium health check,
+// so overrides don't affect the cache-save decision.
+// ═══════════════════════════════════════════════════════════════════════
+
+function matchRepoForPolicy(policy, repo) {
+  if(!policy || !policy.insurer || !policy.productName || !repo || !Array.isArray(repo)) return null;
+  const polInsurer = normaliseTextForMatch(policy.insurer);
+  const polProduct = normaliseTextForMatch(policy.productName);
+  const polCode = policy.productCode ? normaliseTextForMatch(policy.productCode) : '';
+  if(polInsurer.length < 3 || polProduct.length < 4) return null;
+  const candidates = [];
+  for(const r of repo) {
+    if(!r || !r.insurer || !r.productName) continue;
+    const rInsurer = normaliseTextForMatch(r.insurer);
+    const rProduct = normaliseTextForMatch(r.productName);
+    const rCode = r.productCode ? normaliseTextForMatch(r.productCode) : '';
+    // Insurer must match exactly (normalised) — prevents cross-insurer confusion
+    if(rInsurer !== polInsurer) continue;
+    // Product name: bidirectional substring match (e.g. "AIA Gen3 II" matches repo "AIA Gen3")
+    const exactName = polProduct === rProduct;
+    const substringName = !exactName && (polProduct.includes(rProduct) || rProduct.includes(polProduct));
+    const codeMatch = polCode && rCode && polCode === rCode;
+    if(!exactName && !substringName && !codeMatch) continue;
+    // Scoring
+    let score = 0;
+    if(exactName && codeMatch) score = 1.00;
+    else if(exactName) score = 0.95;
+    else if(substringName && codeMatch) score = 0.92;
+    else if(substringName) score = 0.90;
+    else if(codeMatch) score = 0.75;
+    candidates.push({ repo: r, score });
+  }
+  if(candidates.length === 0) return null;
+  candidates.sort((a, b) => b.score - a.score || (b.repo.productName.length - a.repo.productName.length));
+  return candidates[0];
+}
+
+// Reconcile an extracted policy against the repo. Mutates the policy object
+// and returns a list of changes applied (or null if no reconciliation happened).
+// Only runs when the match score is >= 0.90 to avoid incorrect overrides on
+// marginal matches. Classification fields (category, subType) are overridden;
+// informational fields (currency, productCode) are only filled if empty.
+function reconcilePolicyAgainstRepo(policy, repo) {
+  const match = matchRepoForPolicy(policy, repo);
+  if(!match || match.score < 0.90) return null;
+  const r = match.repo;
+  const changes = [];
+
+  // CATEGORY — fill or override (classification authority)
+  if(!policy.category && r.category) {
+    changes.push({ field: 'category', from: null, to: r.category, action: 'filled' });
+    policy.category = r.category;
+  } else if(policy.category && r.category && policy.category !== r.category) {
+    changes.push({ field: 'category', from: policy.category, to: r.category, action: 'overridden' });
+    policy.category = r.category;
+  }
+
+  // SUBTYPE — fill or override (classification authority)
+  if(!policy.subType && r.subType) {
+    changes.push({ field: 'subType', from: null, to: r.subType, action: 'filled' });
+    policy.subType = r.subType;
+  } else if(policy.subType && r.subType && policy.subType !== r.subType) {
+    changes.push({ field: 'subType', from: policy.subType, to: r.subType, action: 'overridden' });
+    policy.subType = r.subType;
+  }
+
+  // CURRENCY — fill only (document currency wins if specified)
+  if(!policy.currency && r.currency) {
+    changes.push({ field: 'currency', from: null, to: r.currency, action: 'filled' });
+    policy.currency = r.currency;
+  }
+
+  // PRODUCT CODE — fill only (repo is the canonical source for codes)
+  if(!policy.productCode && r.productCode) {
+    changes.push({ field: 'productCode', from: null, to: r.productCode, action: 'filled' });
+    policy.productCode = r.productCode;
+  }
+
+  if(changes.length === 0) return null;
+  return { match, changes };
+}
+
 // Master function: takes a File, returns content blocks ready for AI
 async function processFile(file) {
   const isPDF = file.type === 'application/pdf' || file.name?.toLowerCase().endsWith('.pdf');
@@ -1513,6 +1948,18 @@ const SEED_REPOSITORY = [
 
   // ═══ HSBC LIFE ═══
   {id:'repo-hsbc-lwp',insurer:'HSBC Life',productName:'Life Wealth Protect',productCode:'LWP',category:'protection',subType:'Whole Life',currency:'SGD',notes:'Par whole life protection plan. Death + TPD. Distributed through HSBC bank branches (bancassurance). Annual bonuses + terminal bonus (non-guaranteed). SDIC protected.',editHistory:[]},
+
+  // ═══ LONG-TERM CARE: BASE SCHEMES (GOVERNMENT) ═══
+  {id:'repo-govt-careshield-life',insurer:'CPF Board',productName:'CareShield Life',productCode:'CSHL',category:'health',subType:'CareShield Life / Supplement',currency:'SGD',notes:'Mandatory national long-term care insurance (MOH/CPF). Auto-enrolled at age 30 for Singapore Citizens/PRs born 1980 or later; optional for 1979 or earlier (auto-enrolled Dec 2021 unless opted out). 2026 ENHANCEMENT: monthly payout for new claims is $689 (up from $676 under old 2% growth), annual growth rate DOUBLED from 2% to 4% through 2030, reaching $806/mo by 2030. Severe disability trigger UNCHANGED at 3 of 6 ADLs (washing, toileting, feeding, dressing, transferring, walking). Lifetime payout as long as severely disabled. Payout amount locks at age 67 or first claim. Premiums payable to age 67, fully MediSave-deductible, with $570M govt transitional support 2026-2030 (avg +$38/yr). Replaces ElderShield for younger cohorts.',editHistory:[]},
+  {id:'repo-govt-eldershield-300',insurer:'CPF Board',productName:'ElderShield 300',productCode:'ES300',category:'health',subType:'ElderShield 300',currency:'SGD',notes:'Legacy government long-term care scheme (pre-2007). $300/month payout for a MAXIMUM of 72 months (6 years) on severe disability (3 of 6 ADLs). For those born 1979 or earlier who did not switch to CareShield Life. Administered by private insurers (Singlife, Great Eastern, Income). Fixed payout duration — not lifetime. MediSave-payable. Being phased out as cohort moves to CareShield Life.',editHistory:[]},
+  {id:'repo-govt-eldershield-400',insurer:'CPF Board',productName:'ElderShield 400',productCode:'ES400',category:'health',subType:'ElderShield 400',currency:'SGD',notes:'Legacy government long-term care scheme (2007-2020). $400/month payout for a MAXIMUM of 72 months (6 years) on severe disability (3 of 6 ADLs). For those born 1979 or earlier who did not switch to CareShield Life. Administered by private insurers (Singlife, Great Eastern, Income). Those born 1970-1979 on ElderShield 400 were auto-enrolled into CareShield Life from Dec 2021 unless opted out. MediSave-payable.',editHistory:[]},
+
+  // ═══ LONG-TERM CARE: PRIVATE SUPPLEMENTS (3 MOH-APPROVED INSURERS) ═══
+  {id:'repo-ge-great-careshield',insurer:'Great Eastern',productName:'GREAT CareShield',productCode:'GCS',category:'health',subType:'CareShield Life / Supplement',currency:'SGD',notes:'PRIVATE SUPPLEMENT stacks on top of CareShield Life or ElderShield. EARLIEST TRIGGER of the three insurers: 1 of 6 ADLs (mild disability). Monthly Benefit: $300-$5,000 (increments of $100). INITIAL LUMP SUM BENEFIT: up to $15,000 on first valid claim. At 2+ ADLs: adds 60% Caregiver Benefit + 30% Dependant Care Benefit (both as % of monthly benefit, monthly payouts). Lifetime monthly payouts. Premium waiver on claim. Level premiums — do not increase with age but not guaranteed. MediSave-payable up to $600/yr. Best for: early trigger coverage and family support. SDIC protected.',editHistory:[]},
+  {id:'repo-income-care-secure',insurer:'Income Insurance',productName:'Care Secure',productCode:'ICS',category:'health',subType:'CareShield Life / Supplement',currency:'SGD',notes:'PRIVATE SUPPLEMENT — CHEAPEST of the three insurers. Trigger at 2 of 6 ADLs (moderate disability). Monthly Disability Benefit $1,200-$5,000 (increments of $100). CRITICAL QUIRK: benefit is INCLUSIVE of CareShield Life — effective supplement = benefit MINUS CSHL payout. Support Benefit (lump sum): 300% of monthly benefit at 2 ADLs, 600% at 3 ADLs. Dependant Benefit: 25% of monthly benefit × 36 months if at least one dependant. Death Benefit: 300% of monthly benefit if receiving disability payout. Premium waiver at 2 ADLs. MediSave up to $600/yr. From 1 Jan 2026: "adjusted benefit" ensures equivalent protection continues as CSHL growth rises to 4%. Best for: budget-conscious buyers who want basic supplement coverage. SDIC protected. Also distributed via Prudential FC network.',editHistory:[]},
+  {id:'repo-income-care-secure-pro',insurer:'Income Insurance',productName:'Care Secure Pro',productCode:'ICSP',category:'health',subType:'CareShield Life / Supplement',currency:'SGD',notes:'PRIVATE SUPPLEMENT — newer enhanced version of Care Secure. COMPREHENSIVE COVERAGE: mild (1 ADL — 24 months of payouts), moderate (2 ADLs — Support Benefit), severe (3 ADLs — full Disability Benefit with waiver). Monthly Benefit $1,200-$5,000. Two premium payment options: to age 67 or to age 99. Example illustration: 32-year-old male, $1,200 monthly benefit, premium to age 99 = $790/yr; 40-year-old female, $1,500 benefit = $1,657/yr. Death benefit, rehabilitation benefit, premium waiver on disability. MediSave up to $600/yr. SDIC protected. Best for: those wanting mild-stage coverage + long premium term flexibility.',editHistory:[]},
+  {id:'repo-singlife-careshield-std',insurer:'Singlife',productName:'Singlife CareShield Standard',productCode:'SCSS',category:'health',subType:'CareShield Life / Supplement',currency:'SGD',notes:'PRIVATE SUPPLEMENT stacks on top of CareShield Life (does NOT deduct). Trigger at 3 of 6 ADLs (severe disability). Monthly Benefit: $200-$5,000. Fixed payout OR 2%/3% annual escalation options. LUMP SUM BENEFIT: 3× first monthly benefit at severe disability (one-time). Rehabilitation Benefit: 50% of benefit temporarily if disability improves from severe to moderate. Premium waiver at 1 ADL (mild). Up to 35% lifetime premium discount (highest in market as of 2026). MediSave up to $600/yr. MINDEF/MHA/POGIS members get extra 20% first-year discount. Lifetime monthly payouts. SDIC protected.',editHistory:[]},
+  {id:'repo-singlife-careshield-plus',insurer:'Singlife',productName:'Singlife CareShield Plus',productCode:'SCSP',category:'health',subType:'CareShield Life / Supplement',currency:'SGD',notes:'PRIVATE SUPPLEMENT — enhanced Plus version of Singlife CareShield. EARLIER TRIGGER than Standard: 2 of 6 ADLs (moderate). Monthly Benefit $200-$5,000 stacks on top of CareShield Life. Fixed or 2%/3% escalation. Lump Sum Benefit 3× first monthly. Rehabilitation Benefit. Premium waiver at 1 ADL. ADD-ON BENEFIT available: additional monthly payout for up to 12 months at 1 ADL (mild disability), giving Plus holders effective 1-ADL coverage. Up to 35% lifetime premium discount. Preferred partner discount for Homage (20% off Severe Disability Assessment, 5% off home care services). SDIC protected. Best for: earlier trigger + lifestyle partner benefits.',editHistory:[]},
 ];
 
 // ═══════════════════════════════════════════════════════════════
@@ -4293,7 +4740,36 @@ function App() {
     (async () => {
       // PERFORMANCE: Batch load — single DB open, parallel reads for policies + all settings
       const {policies: ps, settings: stg} = await dbBatchLoad(['apiKey','clientName','clientProfile']);
-      setPolicies(ps || []);
+      // ── ONE-SHOT CLEANUP: fix stale status='matured' on policies with FUTURE maturity dates ──
+      // Previously the AI/importer could set status='matured' on policies that clearly hadn't
+      // matured yet (e.g. AIA Gen3 with maturity 2088 flagged as matured). The display-layer
+      // fix in isMaturedPolicy handles this at read time, but users editing those policies
+      // still see the wrong status in the dropdown. This sweep corrects the stored data once.
+      let cleaned = 0;
+      const now = Date.now();
+      const fixedPolicies = (ps || []).map(pol => {
+        if(pol.status !== 'matured') return pol;
+        const polMatT = pol.maturityDate ? new Date(pol.maturityDate).getTime() : NaN;
+        const fdMatT = pol.fdMaturityDate ? new Date(pol.fdMaturityDate).getTime() : NaN;
+        // If either relevant date is in the future, the policy is NOT actually matured
+        if((isFinite(polMatT) && polMatT > now) || (isFinite(fdMatT) && fdMatT > now)) {
+          cleaned++;
+          return {...pol, status: 'inforce'};
+        }
+        return pol;
+      });
+      setPolicies(fixedPolicies);
+      // Persist corrections back to IndexedDB (fire-and-forget)
+      if(cleaned > 0) {
+        console.log('[StatusCleanup] Corrected '+cleaned+' policies with stale matured status + future maturity date');
+        (async () => {
+          for(const p of fixedPolicies) {
+            if((ps || []).find(o => o.id === p.id && o.status === 'matured' && p.status === 'inforce')) {
+              try { await dbPut('policies', p); } catch(e) { console.warn('[StatusCleanup] Persist failed for', p.id, e); }
+            }
+          }
+        })();
+      }
       if(stg.apiKey) setApiKey(stg.apiKey.value||'');
       if(stg.clientName) setClientName(stg.clientName.value||'');
       if(stg.clientProfile?.value) setClientProfile(stg.clientProfile.value);
@@ -4757,6 +5233,10 @@ const POLICY_EXTRACTION_SCHEMA = {
       riderPremium: { type: 'NUMBER', nullable: true, description: 'Combined rider premium' },
       ispDeductible: { type: 'NUMBER', nullable: true },
       ispCoinsurance: { type: 'NUMBER', nullable: true },
+      ispCoInsCap: { type: 'NUMBER', nullable: true, description: 'Annual co-payment cap. $3000 for legacy/transitional riders (inception before 1 Apr 2026), $6000 for new-2026 compliant riders.' },
+      ispRiderInceptionDate: { type: 'STRING', nullable: true, description: 'YYYY-MM-DD — critical for MOH 2026 reform classification. Often same as policy inception if rider bought together.' },
+      ispRiderGeneration: { type: 'STRING', enum: ['legacy','transitional','new-2026','unknown'], nullable: true, description: 'legacy=rider inception before 27 Nov 2025 (grandfathered); transitional=27 Nov 2025 to 31 Mar 2026 (must switch at next renewal after 1 Apr 2028); new-2026=from 1 Apr 2026 (compliant with new MOH rules). Leave blank to auto-compute from ispRiderInceptionDate.' },
+      ispPanelRequired: { type: 'BOOLEAN', nullable: true, description: 'true if co-pay cap only applies when using panel/pre-authorised doctors' },
       // ── Cash value ──
       cashValue: { type: 'NUMBER', nullable: true },
       cvGrowthRate: { type: 'NUMBER', nullable: true, description: 'Projected % p.a.' },
@@ -7168,6 +7648,141 @@ function Dashboard() {
         <div id="retirement-lite-section"><RetirementLiteDashboard data={retirementLite} age={age} retAge={retAge} p={p} policies={policies} cvTimeline={cvTimeline} toSGD={toSGD} fxRates={fxRates} /></div>
       )}
 
+      {/* ═══ LIFE-STAGE PROJECTION ═══
+          Shows the three headline metrics (Death SA, Cash Value, Monthly Income)
+          at 5-year age intervals from the client's current age out to age 85.
+          This is the single-screen lifecycle view that compresses the entire
+          financial arc into one glanceable table. Current age column highlighted.
+          Trend arrows show direction vs previous bracket. ═══ */}
+      {policies.length > 0 && (() => {
+        const currentAge = age || 35;
+        const maxAge = Math.min(currentAge + 35, 90);
+        // Build bracket list: current age + every 5 years up to maxAge
+        const ages = [currentAge];
+        for(let a = Math.ceil((currentAge + 1) / 5) * 5; a <= maxAge; a += 5) {
+          if(a !== currentAge) ages.push(a);
+        }
+        if(ages.length < 2) return null;
+
+        // Compute projection rows
+        const rows = ages.map(targetAge => {
+          let death = 0, cv = 0, income = 0, ci = 0;
+          for(const pol of policies) {
+            const vals = projectPolicyAtAge(pol, targetAge, currentAge);
+            death += toSGD(vals.death, pol.currency);
+            cv += toSGD(vals.cv, pol.currency);
+            income += toSGD(vals.income, pol.currency);
+            ci += toSGD(vals.ci, pol.currency);
+          }
+          return { age: targetAge, death, cv, income, ci };
+        });
+
+        // Small value formatter — $1.2M, $450k, $3.4k
+        const fmtShort = (n) => {
+          if(!n || n === 0) return '—';
+          if(n >= 1e6) return '$' + (n/1e6).toFixed(1) + 'M';
+          if(n >= 1e3) return '$' + Math.round(n/1e3) + 'k';
+          return '$' + Math.round(n);
+        };
+        // Trend arrow: compare current cell to previous cell in same row
+        const trendArrow = (curr, prev) => {
+          if(prev == null || prev === 0) return '';
+          const delta = curr - prev;
+          const pct = Math.abs(delta / prev);
+          if(pct < 0.02) return <span style={{color:'var(--text3)',fontSize:9,marginLeft:2}}>→</span>;
+          if(delta > 0) return <span style={{color:'#2d6a4f',fontSize:9,marginLeft:2}}>▲</span>;
+          return <span style={{color:'#b91c1c',fontSize:9,marginLeft:2}}>▼</span>;
+        };
+
+        const metricRows = [
+          { key:'death', label:'Death / TPD SA', color:'#5b8fd9', bg:'rgba(91,143,217,.06)' },
+          { key:'ci', label:'Critical Illness SA', color:'#b91c1c', bg:'rgba(185,28,28,.06)' },
+          { key:'cv', label:'Cash Value', color:'#d4a96a', bg:'rgba(212,169,106,.06)' },
+          { key:'income', label:'Passive Income / mo', color:'#5ba8a0', bg:'rgba(91,168,160,.06)' },
+        ];
+
+        // Peak value per row for sanity display
+        const peaks = {};
+        metricRows.forEach(m => {
+          peaks[m.key] = Math.max(...rows.map(r => r[m.key]));
+        });
+
+        return (
+          <div className="card" style={{marginBottom:16,background:'linear-gradient(135deg,var(--bg2),rgba(212,169,106,.05))',border:'1px solid rgba(212,169,106,.25)'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:4,flexWrap:'wrap',gap:6}}>
+              <h3 style={{fontSize:13,fontWeight:600,color:'var(--gold)'}}>📈 Life-Stage Projection</h3>
+              <span style={{fontSize:10,padding:'3px 10px',borderRadius:12,background:'rgba(212,169,106,.12)',color:'var(--gold)',fontWeight:500}}>Age {currentAge} → {maxAge}</span>
+            </div>
+            <div style={{fontSize:10,color:'var(--text3)',marginBottom:10,lineHeight:1.5}}>
+              How your portfolio evolves with you. Each column is your total coverage / cash value / passive income at that age, aggregated across all in-force policies. Current age highlighted.
+            </div>
+            <div style={{overflowX:'auto',borderRadius:8,border:'1px solid var(--border)'}}>
+              <table style={{width:'100%',fontSize:11,borderCollapse:'collapse',minWidth:Math.max(400, ages.length * 70)}}>
+                <thead>
+                  <tr style={{background:'var(--bg3)'}}>
+                    <th style={{textAlign:'left',padding:'8px 10px',fontSize:10,fontWeight:700,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.5px',minWidth:130,position:'sticky',left:0,background:'var(--bg3)',zIndex:1}}>Metric</th>
+                    {ages.map((a, i) => {
+                      const isNow = i === 0;
+                      return (
+                        <th key={a} style={{
+                          textAlign:'center',
+                          padding:'8px 6px',
+                          fontSize:isNow?11:10,
+                          fontWeight:isNow?700:600,
+                          color:isNow?'var(--gold)':'var(--text2)',
+                          background:isNow?'rgba(212,169,106,.12)':'var(--bg3)',
+                          borderLeft:isNow?'2px solid var(--gold)':'1px solid var(--border)',
+                          whiteSpace:'nowrap'
+                        }}>
+                          {a}{isNow?' ●':''}
+                          <div style={{fontSize:8,color:'var(--text3)',fontWeight:400,marginTop:1}}>{isNow?'now':'+'+(a-currentAge)+'y'}</div>
+                        </th>
+                      );
+                    })}
+                  </tr>
+                </thead>
+                <tbody>
+                  {metricRows.map(m => {
+                    const hasAnyValue = rows.some(r => r[m.key] > 0);
+                    if(!hasAnyValue) return null;
+                    return (
+                      <tr key={m.key} style={{borderTop:'1px solid var(--border)'}}>
+                        <td style={{padding:'8px 10px',fontWeight:600,color:m.color,background:m.bg,position:'sticky',left:0,zIndex:1,borderRight:'1px solid var(--border)'}}>
+                          {m.label}
+                          {peaks[m.key] > 0 && <div style={{fontSize:8,color:'var(--text3)',fontWeight:400,marginTop:1}}>peak {fmtShort(peaks[m.key])}</div>}
+                        </td>
+                        {rows.map((r, i) => {
+                          const val = r[m.key];
+                          const isNow = i === 0;
+                          const prev = i > 0 ? rows[i-1][m.key] : null;
+                          return (
+                            <td key={r.age} style={{
+                              textAlign:'center',
+                              padding:'8px 6px',
+                              fontWeight:isNow?700:500,
+                              color:val > 0 ? (isNow?'var(--gold)':'var(--text2)') : 'var(--text3)',
+                              background:isNow?'rgba(212,169,106,.08)':'transparent',
+                              borderLeft:isNow?'2px solid var(--gold)':'1px solid var(--border)',
+                              whiteSpace:'nowrap'
+                            }}>
+                              {m.key === 'income' ? (val > 0 ? fmtShort(val) + '/mo' : '—') : fmtShort(val)}
+                              {!isNow && trendArrow(val, prev)}
+                            </td>
+                          );
+                        })}
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <div style={{fontSize:9,color:'var(--text3)',marginTop:8,padding:'6px 10px',background:'var(--bg3)',borderRadius:6,lineHeight:1.5}}>
+              ▲ increasing · ▼ decreasing · → stable &nbsp;·&nbsp; Projections use each policy's configured growth rate (CV) or illustrated yield (ILP/UL). Term-life coverage zeros at term end. Retirement plans switch from accumulation to income phase at their configured start age. Figures in today's dollars — not inflation-adjusted.
+            </div>
+          </div>
+        );
+      })()}
+
       {/* ═══ TIER 1: RIDER COVERAGE MATRIX ═══ */}
       {policies.length > 0 && (() => {
         const benefitTypes = ['death','tpd','ci','eci','di','accidental','acc_medical','acc_tcm','acc_dismember','premium_waiver','other'];
@@ -7837,14 +8452,26 @@ function Policies() {
   const handleFormSave = (p) => { savePolicy(p); setShowForm(false); setScanResult(null); clearDraft(); };
 
   const filtered = filter==='all'?policies:policies.filter(p=>p.category===filter);
-  // Separate matured policies (FDs past maturity OR any policy with status=matured)
+  // Separate matured policies (authoritative: maturity date wins over stale status flags)
+  // Previously we trusted pol.status==='matured' blindly, which mis-classified policies
+  // where the AI/scanner had set status wrongly while the maturityDate was clearly in the
+  // future (e.g. AIA Gen3 with maturity 2088 being shown as matured). Now the date is the
+  // source of truth whenever available.
   const isMaturedPolicy = (pol) => {
-    // FDs/T-bills past maturity date
-    if(pol.category==='cash_investments' && pol.fdMaturityDate && new Date(pol.fdMaturityDate) < new Date() && !pol.fdAutoRenew) return true;
-    // Any policy with status explicitly set to matured
-    if(pol.status==='matured') return true;
-    // Endowments past maturity date
-    if(pol.maturityDate && new Date(pol.maturityDate) < new Date() && (pol.category==='savings' || pol.category==='cash_investments')) return true;
+    const now = Date.now();
+    const parseDate = (d) => { if(!d) return null; const t = new Date(d).getTime(); return isFinite(t) ? t : null; };
+    const fdMat = parseDate(pol.fdMaturityDate);
+    const polMat = parseDate(pol.maturityDate);
+    // ── Any policy with a MATURITY DATE IN THE FUTURE is NOT matured ──
+    // This overrides any stale status flag.
+    if(polMat != null && polMat > now) return false;
+    if(fdMat != null && fdMat > now) return false;
+    // ── FDs/T-bills past maturity (not auto-renewing) ──
+    if(pol.category==='cash_investments' && fdMat != null && fdMat < now && !pol.fdAutoRenew) return true;
+    // ── Any policy with a past maturity date ──
+    if(polMat != null && polMat < now) return true;
+    // ── Explicit status flags (only when no contradicting future date above) ──
+    if(pol.status==='matured' || pol.status==='surrendered' || pol.status==='lapsed') return true;
     return false;
   };
   const activePolicies = filtered.filter(p => !isMaturedPolicy(p));
@@ -7912,7 +8539,7 @@ Each rider: {type, riderName (ALWAYS filled — exact name from document), sa (n
 Type mapping guide: "death/terminal illness" → death, "total permanent disablement/disability" → tpd, "critical illness" → ci, "early CI" → eci, "disability income" → di, "accidental death" → accidental, "medical reimbursement/expenses" → acc_medical, "TCM/chiropractic" → acc_tcm, "dismemberment/burns" → acc_dismember, "premium waiver" → premium_waiver, anything else → other
 
 SA MULTIPLIER: saMultiplier (number), multiplierEndAge (number)
-ISP: ispClass (A/B1/B2+), hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance
+ISP: ispClass (A/B1/B2+), hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance, ispCoInsCap (annual co-pay cap; $3000 for legacy riders pre-27Nov2025, $6000 for new-design riders from 1Apr2026), ispRiderInceptionDate (YYYY-MM-DD — the date the rider started; critical for MOH 2026 reform classification. Fall back to policy inception if the rider share a date with the ISP), ispRiderGeneration (one of legacy/transitional/new-2026 — legacy=rider inception before 27 Nov 2025; transitional=27 Nov 2025 to 31 Mar 2026; new-2026=from 1 Apr 2026. If the document doesn't specify, leave blank and the app will auto-compute from ispRiderInceptionDate), ispPanelRequired (boolean — true if co-pay cap only applies with panel/pre-authorised doctors)
 CASH VALUE: cashValue (number), cvGrowthRate (% p.a.), surrenderPeriod (years)
 UL/IUL/VUL: creditingMechanism, creditingRates {current, guaranteed}, loyaltyBonus {rate, startYear}
 ILP: ilpGrowth, ilpDivYield, ilpMgmtFee, fundAllocations (JSON array of {fundName:string, allocation:number (percentage e.g. 80)}). CRITICAL ILP FUND EXTRACTION: If the document mentions fund names with percentages like "80% Manulife Global Multi Asset 20% Neuberger Berman", extract as fundAllocations:[{fundName:"Manulife Global Multi Asset",allocation:80},{fundName:"Neuberger Berman",allocation:20}]. If only ONE fund is mentioned (e.g. "PRULink US Dividend Wealth Fund"), set allocation to 100. Look in remarks, notes columns, and any fund composition fields.
@@ -8275,7 +8902,29 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
     const expectedCount = parseExpectedPolicyCount(sourceText);
     if(expectedCount) console.log('[Extract] Document hints at', expectedCount, 'policies');
 
-    content.push({type:'text',text:'Extract ALL insurance policies AND financial instruments from these documents. CRITICAL RULES:\n1. Multiple photos may show DIFFERENT PAGES of the SAME policy — correlate them by policy number, insurer+product name, or context clues. Merge information from multiple pages into ONE policy entry.\n2. Multiple photos may also show DIFFERENT policies — extract each as a separate entry.\n3. NEVER skip or merge genuinely different policies. Two policies from the same insurer with different product names = 2 entries.\n4. If the same fund (e.g. "Allianz Global High Payout") appears under DIFFERENT accounts (CPFIS-OA vs Cash), these are SEPARATE entries — differentiate by appending the account type in policyName.\n5. Look across ALL images for related data — page 1 might have the policy name while page 3 has the premium details.\nReturn ONLY valid JSON array or object.'});
+    // ── REPO-GROUNDED PRIORS ──
+    // Scan source text for known products in the repository. If matched, inject
+    // a PRIOR KNOWLEDGE block into the content array so the AI uses canonical
+    // classification instead of guessing from document appearance.
+    // This runs in-process with zero additional AI calls — we use the text
+    // already extracted from text-layer PDFs / CSVs / Excel. For image-only
+    // scans sourceText is empty and priors silently skip (post-extract
+    // reconciliation would catch those, planned for a follow-up).
+    const priorMatches = fuzzyMatchReposFromText(sourceText, repo);
+    if(priorMatches.length > 0) {
+      const topNames = priorMatches.slice(0, 6).map(m => m.repo.insurer+' '+m.repo.productName+' ('+m.score.toFixed(2)+')').join(', ');
+      console.log('[PriorInjection] Matched', priorMatches.length, 'repo product(s):', topNames);
+      const priorBlock = buildRepoPriorBlock(priorMatches, 6);
+      if(priorBlock) {
+        // Push as its own text block BEFORE the instruction tail so the AI
+        // reads the prior knowledge as authoritative context.
+        content.push({type:'text', text: priorBlock});
+      }
+    } else {
+      console.log('[PriorInjection] No repo matches in source text (length='+sourceText.length+', repo size='+repo.length+')');
+    }
+
+    content.push({type:'text',text:'Extract ALL insurance policies AND financial instruments from these documents. CRITICAL RULES:\n1. Multiple photos may show DIFFERENT PAGES of the SAME policy — correlate them by policy number, insurer+product name, or context clues. Merge information from multiple pages into ONE policy entry.\n2. Multiple photos may also show DIFFERENT policies — extract each as a separate entry.\n3. NEVER skip or merge genuinely different policies. Two policies from the same insurer with different product names = 2 entries.\n4. If the same fund (e.g. "Allianz Global High Payout") appears under DIFFERENT accounts (CPFIS-OA vs Cash), these are SEPARATE entries — differentiate by appending the account type in policyName.\n5. Look across ALL images for related data — page 1 might have the policy name while page 3 has the premium details.\n6. If REPOSITORY PRIOR KNOWLEDGE is provided above, treat those products\' canonical category/subType as authoritative — do not reclassify them based on document appearance.\nReturn ONLY valid JSON array or object.'});
 
     // ── RUN EXTRACTION WITH SELF-HEALING TRUNCATION RECOVERY ──
     let arr = await runExtractionWithRecovery(content, 0, 'batch');
@@ -8285,6 +8934,39 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
     // see the same policy (rare but possible when a single policy spans a split boundary).
     // Also portfolio reports list the same policy across multiple sections.
     arr = dedupePolicies(arr);
+
+    // ── POST-EXTRACT REPO RECONCILIATION (Prong 2 of repo-grounded priors) ──
+    // Safety net for image-only scans where text-based prior injection couldn't
+    // fire. For each extracted policy, fuzzy-match against (insurer, productName)
+    // in the repo and reconcile classification fields (category, subType, currency,
+    // productCode). Catches cases where:
+    //   • Source text was empty (pure image scan) so pre-extract priors didn't run
+    //   • The LLM ignored the injected prior and misclassified anyway
+    //   • The match score was just below the pre-extract threshold
+    // Numeric/identifier fields (premium, SA, dates, policy number) are never
+    // touched — those stay from the document. Only classification is corrected.
+    const reconciliations = [];
+    for(const pol of arr) {
+      const result = reconcilePolicyAgainstRepo(pol, repo);
+      if(result) reconciliations.push({ policyLabel: (pol.insurer||'?')+' '+(pol.productName||'?'), matchScore: result.match.score, changes: result.changes });
+    }
+    if(reconciliations.length > 0) {
+      console.log('[PostExtract] Reconciled '+reconciliations.length+' policies against repo:');
+      for(const rec of reconciliations) {
+        for(const ch of rec.changes) {
+          const arrow = ch.action === 'overridden' ? '⚠→' : '→';
+          console.log('  '+arrow+' '+rec.policyLabel+' · '+ch.field+': '+(ch.from||'(empty)')+' → '+ch.to+' ['+ch.action+' @ '+rec.matchScore.toFixed(2)+']');
+        }
+      }
+      // Count overrides (these are the interesting cases — misclassifications caught)
+      const overrideCount = reconciliations.reduce((sum, rec) => sum + rec.changes.filter(c => c.action === 'overridden').length, 0);
+      const fillCount = reconciliations.reduce((sum, rec) => sum + rec.changes.filter(c => c.action === 'filled').length, 0);
+      if(overrideCount > 0) {
+        try { toast('✓ Repo reconciliation: corrected '+overrideCount+' misclassification'+(overrideCount>1?'s':'')+(fillCount>0?' and filled '+fillCount+' empty field'+(fillCount>1?'s':''):''), 'success', 6000); } catch(e) {}
+      } else if(fillCount > 0) {
+        try { toast('✓ Repo reconciliation: filled '+fillCount+' empty field'+(fillCount>1?'s':'')+' from repository', 'success', 4000); } catch(e) {}
+      }
+    }
 
     // ── POLICY-COUNT RECONCILIATION ──
     // If the document header promised more policies than we extracted, surface it loudly.
@@ -9176,6 +9858,8 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
     riders:[], saMultiplier:'1', multiplierEndAge:'70',
     // ISP
     ispClass:'', hasRider:false, riderList:'', riderPremium:'', ispDeductible:'3500', ispCoinsurance:'5', ispCoInsCap:'',
+    // ISP 2026 rider reform tracking (auto-computed from ispRiderInceptionDate)
+    ispRiderInceptionDate:'', ispRiderGeneration:'', ispPanelRequired:true, ispCdlCoverage:false,
     // Cash value
     cashValue:'', cvGrowthRate:'3.0', cvKnown:true, surrenderPeriod:'',
     // ILP (RetireWell)
@@ -9310,19 +9994,41 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
   const isFD = ['Fixed Deposit','T-bill','Singapore Savings Bond','Corporate Bond','Money Market'].includes(form.subType);
   const isILP = form.subType==='ILP (Protection)' || form.subType==='ILP (Investment)';
   const isISP = form.subType==='Integrated Shield Plan';
+  // ── Unit Trust is NOT an insurance policy — it can be withdrawn anytime.
+  // No surrender value, no riders, no premium term, no maturity. Just a holding
+  // with current value, cost basis, and fund analysis.
+  const isUnitTrust = form.subType === 'Unit Trust';
+  // ── Hospital Income is pure indemnity — daily cash benefit per hospitalisation day.
+  // No surrender value. Coverage & Riders remains enabled for optional add-ons.
+  const isHospitalIncome = form.subType === 'Hospital Income';
   const isProtection = form.category==='protection';
   const isInvestment = form.category==='investment';
   const isSavings = form.category==='savings';
   const isRetirement = form.category==='retirement';
   const isHealth = form.category==='health';
   const isDI = form.subType==='Disability Income';
-  const isCSL = form.subType==='CareShield Life / Supplement' || form.subType==='ElderShield 300' || form.subType==='ElderShield 400';
+  // isCSL (formerly CareShield/ElderShield-only) is now the unified Long-term Care
+  // flag — covers CareShield Life, ElderShield 300/400, and the generic "Long-term Care"
+  // subtype used for private supplement products that don't fit a specific labelling.
+  const isCSL = form.subType==='CareShield Life / Supplement' || form.subType==='ElderShield 300' || form.subType==='ElderShield 400' || form.subType==='Long-term Care';
   const isPA = form.subType==='Personal Accident';
+  // ── Critical Illness vs Early Critical Illness ──
+  // Major CI plans cover ~37 late-stage conditions with a single payout.
+  // Early CI plans cover 150+ conditions across early/intermediate/late stages,
+  // typically with multi-claim reset and progressive payout (30–50% early, 100% late).
+  // Both trigger the CI Stage panel which adapts inputs to whichever is selected.
+  const isCI = form.subType==='Critical Illness';
+  const isECI = form.subType==='Early Critical Illness';
+  const isAnyCI = isCI || isECI;
   const isEndowment = isSavings;
   const isAnnuity = isRetirement;
-  const noRiderCategories = isISP || isCSL || isCashInvestment;
+  const noRiderCategories = isISP || isCSL || isCashInvestment || isUnitTrust;
   const hasCoverageSection = !noRiderCategories;
-  const hasCV = (isProtection||isInvestment||isRetirement) && form.subType!=='Term Life' && !isISP && !isCSL && !isDI && !isPA && !isCashInvestment;
+  // Retirement/annuity policies get their own Income Progress panel instead of
+  // the generic CV card — the generic projection (to age 65) makes no sense for
+  // an annuity already paying out, and the concept of "surrender value" is
+  // meaningless once income has begun.
+  const hasCV = (isProtection||isInvestment) && form.subType!=='Term Life' && !isISP && !isCSL && !isDI && !isPA && !isCashInvestment && !isUnitTrust && !isHospitalIncome;
   // Matured check for FD/T-bills
   const fdMatured = isFD && form.fdMaturityDate && new Date(form.fdMaturityDate) < new Date();
 
@@ -9737,6 +10443,182 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
           </div>
         )}
 
+        {/* ═══ RETIREMENT / ANNUITY INCOME PROGRESS ═══ */}
+        {/* For any retirement-category plan (annuity, income plan, CPF Life,
+            Retirement Income Par WL like AIA Gen3, etc). Handles three phases:
+            ACCUMULATION — still paying premiums, income not yet started
+            INCOME ACTIVE — currently receiving payouts
+            COMPLETE — past the end age, all payouts done
+            The generic CV card doesn't work for these because (1) it projects to
+            retirement age 65, which is meaningless for an annuity already paying
+            out, and (2) "surrender value" is a meaningless concept once income
+            has begun. This panel replaces that for category='retirement'. */}
+        {isRetirement && (
+          <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid rgba(212,169,106,.3)'}}>
+            {(() => {
+              const totalAnnual = parseFloat(form.annuityPayout) || (parseFloat(form.annuityMonthly)||0) * 12;
+              const monthly = parseFloat(form.annuityMonthly) || (totalAnnual / 12);
+              const guarPct = parseFloat(form.retGuarPct);
+              const guarAnnual = isFinite(guarPct) && guarPct >= 0 ? totalAnnual * guarPct / 100 : null;
+              const nonGuarAnnual = guarAnnual != null ? totalAnnual - guarAnnual : null;
+              const startAge = parseInt(form.annuityStartAge) || 65;
+              const endAge = parseInt(form.annuityEndAge) || 99;
+              const age = clientAge;
+              const startDate = form.inceptionDate ? new Date(form.inceptionDate) : null;
+              const entryAge = parseInt(form.ageAtEntry) || parseInt(form.premStartAge) || startAge - 10;
+              // ── Phase detection ──
+              let phase, phaseLabel, phaseColor;
+              if(age < startAge) { phase = 'accum'; phaseLabel = 'Accumulation'; phaseColor = '#9d8abf'; }
+              else if(age <= endAge) { phase = 'income'; phaseLabel = 'Income Active'; phaseColor = 'var(--green2)'; }
+              else { phase = 'done'; phaseLabel = 'Complete'; phaseColor = 'var(--text3)'; }
+              // ── Timeline metrics ──
+              const yearsToStart = Math.max(0, startAge - age);
+              const yearsReceived = Math.max(0, Math.min(age, endAge) - startAge + (phase === 'done' || phase === 'income' ? 1 : 0));
+              const yearsRemaining = phase === 'income' ? Math.max(0, endAge - age) : 0;
+              const lifetimeYears = Math.max(0, endAge - startAge + 1);
+              const lifetime = endAge >= 99;
+              // ── Cumulative values (rough — doesn't account for non-guar bonus growth) ──
+              const cumReceived = yearsReceived * totalAnnual;
+              const lifetimeProjection = lifetimeYears * totalAnnual;
+              // ── Premiums paid (rough) ──
+              const prem = parseFloat(form.annualPremium)||0;
+              const premTerm = form.premSingle ? 1 : (parseInt(form.premTerm)||10);
+              const totalPrem = form.premSingle ? prem : prem * premTerm;
+              // ── Payback ratio ──
+              const payback = totalPrem > 0 ? (lifetimeProjection / totalPrem) : 0;
+              return (
+                <>
+                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12,flexWrap:'wrap',gap:8}}>
+                    <div style={{fontSize:10,fontWeight:700,color:'var(--gold)',textTransform:'uppercase',letterSpacing:'.5px'}}>💰 Retirement / Annuity — Income Progress</div>
+                    <span style={{fontSize:10,padding:'3px 10px',borderRadius:4,background:'rgba(212,169,106,.12)',color:phaseColor,fontWeight:700,textTransform:'uppercase',border:'1px solid '+phaseColor+'33'}}>
+                      Phase: {phaseLabel}
+                      {phase === 'accum' && yearsToStart > 0 && <span style={{opacity:.7,marginLeft:6}}>· income starts in {yearsToStart}yr</span>}
+                      {phase === 'income' && <span style={{opacity:.7,marginLeft:6}}>· year {yearsReceived} of {lifetime?'life':lifetimeYears}</span>}
+                    </span>
+                  </div>
+                  {/* ── Inputs ── */}
+                  <div className="grid-3" style={{marginBottom:8}}>
+                    <div className="field">
+                      <label>Monthly Payout ($)</label>
+                      <input type="number" value={form.annuityMonthly||''} onChange={e=>{set('annuityMonthly',e.target.value);set('annuityPayout',String((parseFloat(e.target.value)||0)*12));}} placeholder="e.g. 1500" />
+                      <div style={{fontSize:10,color:'var(--text3)'}}>Annual equivalent: ${Math.round(totalAnnual).toLocaleString()}/yr</div>
+                    </div>
+                    <div className="field">
+                      <label>Payout Start Age</label>
+                      <input type="number" value={form.annuityStartAge||''} onChange={e=>set('annuityStartAge',e.target.value)} placeholder="65" />
+                      <div style={{fontSize:10,color:'var(--text3)'}}>When income begins</div>
+                    </div>
+                    <div className="field">
+                      <label>Payout End Age</label>
+                      <input type="number" value={form.annuityEndAge||''} onChange={e=>set('annuityEndAge',e.target.value)} placeholder="99 = lifetime" />
+                      <div style={{fontSize:10,color:'var(--text3)'}}>{lifetime?'Lifetime payout':'Finite term: '+lifetimeYears+'yr'}</div>
+                    </div>
+                  </div>
+                  <div className="grid-3" style={{marginBottom:10}}>
+                    <div className="field">
+                      <label>Guaranteed % of Payout</label>
+                      <input type="number" step="5" value={form.retGuarPct||''} onChange={e=>set('retGuarPct',e.target.value)} placeholder="e.g. 74" />
+                      <div style={{fontSize:10,color:'var(--text3)'}}>Par plans: typical 60–85% · CPF Life: 100%</div>
+                    </div>
+                    <div className="field">
+                      <label>Terminal Lump Sum ($)</label>
+                      <input type="number" value={form.retMaturitySum||''} onChange={e=>set('retMaturitySum',e.target.value)} placeholder="0 = none" />
+                      <div style={{fontSize:10,color:'var(--text3)'}}>Final bonus at end (if any)</div>
+                    </div>
+                    <div className="field">
+                      <label>Payout Mode</label>
+                      <select value={form.retPayoutMode||'payout'} onChange={e=>set('retPayoutMode',e.target.value)}>
+                        <option value="payout">Take as income</option>
+                        <option value="reinvest">Reinvest (accumulate)</option>
+                      </select>
+                      <div style={{fontSize:10,color:'var(--text3)'}}>Reinvest = compound instead of draw</div>
+                    </div>
+                  </div>
+                  {/* ── Guaranteed / Non-guaranteed breakdown ── */}
+                  {guarAnnual != null && totalAnnual > 0 && (
+                    <div style={{marginBottom:10,padding:'8px 12px',background:'var(--bg2)',borderRadius:6,fontSize:11,display:'flex',justifyContent:'space-between',flexWrap:'wrap',gap:8}}>
+                      <span style={{color:'var(--green2)'}}><strong>Guaranteed:</strong> ${Math.round(guarAnnual).toLocaleString()}/yr ({guarPct.toFixed(0)}%)</span>
+                      <span style={{color:'#9d8abf'}}><strong>Non-guaranteed:</strong> ${Math.round(nonGuarAnnual).toLocaleString()}/yr ({(100-guarPct).toFixed(0)}%)</span>
+                      <span style={{color:'var(--gold)'}}><strong>Total:</strong> ${Math.round(totalAnnual).toLocaleString()}/yr</span>
+                    </div>
+                  )}
+                  {/* ── Summary cards — content depends on phase ── */}
+                  {totalAnnual > 0 && (
+                    <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10}}>
+                      {phase === 'accum' && (
+                        <>
+                          <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
+                            <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Years to Income</div>
+                            <div style={{fontSize:18,fontWeight:700,color:'#9d8abf'}}>{yearsToStart}yr</div>
+                            <div style={{fontSize:9,color:'var(--text3)'}}>income begins at age {startAge}</div>
+                          </div>
+                          <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
+                            <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Future Annual Income</div>
+                            <div style={{fontSize:16,fontWeight:700,color:'var(--gold)'}}>${Math.round(totalAnnual).toLocaleString()}</div>
+                            <div style={{fontSize:9,color:'var(--text3)'}}>${Math.round(monthly).toLocaleString()}/month</div>
+                          </div>
+                          <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
+                            <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Lifetime Projection</div>
+                            <div style={{fontSize:16,fontWeight:700,color:'var(--gold2)'}}>${Math.round(lifetimeProjection).toLocaleString()}</div>
+                            <div style={{fontSize:9,color:'var(--text3)'}}>{lifetime?'to age 99':lifetimeYears+' years'} of payouts</div>
+                          </div>
+                        </>
+                      )}
+                      {phase === 'income' && (
+                        <>
+                          <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
+                            <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Received to Date</div>
+                            <div style={{fontSize:16,fontWeight:700,color:'var(--green2)'}}>${Math.round(cumReceived).toLocaleString()}</div>
+                            <div style={{fontSize:9,color:'var(--text3)'}}>{yearsReceived} of {lifetime?'life':lifetimeYears} years</div>
+                          </div>
+                          <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
+                            <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Current Annual</div>
+                            <div style={{fontSize:16,fontWeight:700,color:'var(--gold)'}}>${Math.round(totalAnnual).toLocaleString()}</div>
+                            <div style={{fontSize:9,color:'var(--text3)'}}>${Math.round(monthly).toLocaleString()}/month</div>
+                          </div>
+                          <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
+                            <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Projected Lifetime</div>
+                            <div style={{fontSize:16,fontWeight:700,color:'var(--gold2)'}}>${Math.round(lifetimeProjection).toLocaleString()}</div>
+                            <div style={{fontSize:9,color:'var(--text3)'}}>{yearsRemaining}yr remaining</div>
+                          </div>
+                        </>
+                      )}
+                      {phase === 'done' && (
+                        <>
+                          <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
+                            <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Total Received</div>
+                            <div style={{fontSize:16,fontWeight:700,color:'var(--gold)'}}>${Math.round(cumReceived).toLocaleString()}</div>
+                            <div style={{fontSize:9,color:'var(--text3)'}}>complete</div>
+                          </div>
+                          <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
+                            <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Duration</div>
+                            <div style={{fontSize:16,fontWeight:700,color:'var(--text2)'}}>{lifetimeYears}yr</div>
+                            <div style={{fontSize:9,color:'var(--text3)'}}>age {startAge}–{endAge}</div>
+                          </div>
+                          <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
+                            <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Premiums Paid</div>
+                            <div style={{fontSize:16,fontWeight:700,color:'var(--text2)'}}>${Math.round(totalPrem).toLocaleString()}</div>
+                            <div style={{fontSize:9,color:'var(--text3)'}}>{payback>0?payback.toFixed(1)+'× payback':'—'}</div>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  )}
+                  {/* ── Premium vs projected income summary ── */}
+                  {totalAnnual > 0 && totalPrem > 0 && phase !== 'done' && (
+                    <div style={{marginTop:8,padding:'6px 10px',background:'rgba(212,169,106,.06)',borderRadius:6,fontSize:10,color:'var(--text3)',textAlign:'center'}}>
+                      Premiums: <strong style={{color:'var(--text2)'}}>${totalPrem.toLocaleString()}</strong> ({premTerm}yr × ${prem.toLocaleString()})
+                      · Lifetime income: <strong style={{color:'var(--gold)'}}>${Math.round(lifetimeProjection).toLocaleString()}</strong>
+                      · Payback: <strong style={{color:payback>=1?'var(--green2)':'var(--red)'}}>{payback.toFixed(1)}×</strong>
+                      {form.retMaturitySum > 0 && <> · Terminal sum: <strong style={{color:'var(--gold2)'}}>${parseFloat(form.retMaturitySum).toLocaleString()}</strong></>}
+                    </div>
+                  )}
+                </>
+              );
+            })()}
+          </div>
+        )}
+
         {/* ═══ DISABILITY INCOME ═══ */}
         {isDI && (
           <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid rgba(45,106,79,.25)'}}>
@@ -9750,40 +10632,322 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
           </div>
         )}
 
-        {/* ═══ CARESHIELD LIFE / SUPPLEMENT ═══ */}
+        {/* ═══ HOSPITAL INCOME — daily cash benefit per hospitalisation day ═══ */}
+        {/* Hospital Income plans pay a fixed daily cash benefit while the insured is
+            hospitalised. Unlike ISP (indemnity reimbursement of actual bills), these
+            pay regardless of actual costs — used to cover lost income, incidentals,
+            and caregiver costs during a hospital stay. Often has an ICU uplift and
+            a max days/year cap. No cash value, pure indemnity. */}
+        {isHospitalIncome && (
+          <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid rgba(91,168,160,.25)'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+              <div style={{fontSize:10,fontWeight:700,color:'var(--teal)',textTransform:'uppercase',letterSpacing:'.5px'}}>🏥 Hospital Income — Daily Cash Benefit</div>
+              <span style={{fontSize:9,padding:'2px 8px',borderRadius:4,background:'rgba(91,168,160,.15)',color:'var(--teal)',fontWeight:600,textTransform:'uppercase'}}>Pure indemnity · Pays regardless of actual bill</span>
+            </div>
+            <div className="grid-3" style={{marginBottom:10}}>
+              <div className="field">
+                <label>Daily Benefit ($/day)</label>
+                <input type="number" value={form.hiDailyBenefit||''} onChange={e=>set('hiDailyBenefit',e.target.value)} placeholder="e.g. 200" />
+                <div style={{fontSize:10,color:'var(--text3)'}}>Cash paid per day in hospital</div>
+              </div>
+              <div className="field">
+                <label>Ward Class Eligibility</label>
+                <select value={form.hiWardClass||'any'} onChange={e=>set('hiWardClass',e.target.value)}>
+                  <option value="any">Any ward (most common)</option>
+                  <option value="private">Private hospital only</option>
+                  <option value="A">Class A (restructured)</option>
+                  <option value="B1">Class B1 (restructured)</option>
+                  <option value="B2">Class B2 (restructured)</option>
+                  <option value="C">Class C (restructured)</option>
+                  <option value="community">Community hospital</option>
+                </select>
+                <div style={{fontSize:10,color:'var(--text3)'}}>Where the policy pays out</div>
+              </div>
+              <div className="field">
+                <label>ICU Multiplier</label>
+                <select value={form.hiIcuMultiplier||'2'} onChange={e=>set('hiIcuMultiplier',e.target.value)}>
+                  <option value="1">1× (no uplift)</option>
+                  <option value="2">2× (typical)</option>
+                  <option value="3">3× (premium)</option>
+                </select>
+                <div style={{fontSize:10,color:'var(--text3)'}}>Daily benefit in ICU</div>
+              </div>
+            </div>
+            <div className="grid-3" style={{marginBottom:10}}>
+              <div className="field">
+                <label>Max Days / Year</label>
+                <input type="number" value={form.hiMaxDays||'365'} onChange={e=>set('hiMaxDays',e.target.value)} placeholder="365" />
+                <div style={{fontSize:10,color:'var(--text3)'}}>Annual cap on payable days</div>
+              </div>
+              <div className="field">
+                <label>Deductible (first N days)</label>
+                <input type="number" value={form.hiDeductibleDays||'0'} onChange={e=>set('hiDeductibleDays',e.target.value)} placeholder="0" />
+                <div style={{fontSize:10,color:'var(--text3)'}}>Days before payout starts (usually 0)</div>
+              </div>
+              <div className="field">
+                <label>Waiting Period (days)</label>
+                <input type="number" value={form.hiWaitingDays||'30'} onChange={e=>set('hiWaitingDays',e.target.value)} placeholder="30" />
+                <div style={{fontSize:10,color:'var(--text3)'}}>After policy start · typically 30</div>
+              </div>
+            </div>
+            {/* Summary: annual max payout */}
+            {(() => {
+              const daily = parseFloat(form.hiDailyBenefit)||0;
+              const maxDays = parseInt(form.hiMaxDays)||365;
+              const deduct = parseInt(form.hiDeductibleDays)||0;
+              const icuMult = parseFloat(form.hiIcuMultiplier)||2;
+              const payableDays = Math.max(0, maxDays - deduct);
+              const annualWard = daily * payableDays;
+              const annualIcu = daily * icuMult * payableDays;
+              if(daily === 0) return null;
+              return (
+                <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10}}>
+                  <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
+                    <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Daily Benefit</div>
+                    <div style={{fontSize:16,fontWeight:700,color:'var(--teal)'}}>${daily.toLocaleString()}/day</div>
+                    <div style={{fontSize:9,color:'var(--text3)'}}>General ward</div>
+                  </div>
+                  <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
+                    <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Annual Max (Ward)</div>
+                    <div style={{fontSize:16,fontWeight:700,color:'var(--gold)'}}>${annualWard.toLocaleString()}</div>
+                    <div style={{fontSize:9,color:'var(--text3)'}}>{payableDays} payable days</div>
+                  </div>
+                  <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
+                    <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Annual Max (ICU)</div>
+                    <div style={{fontSize:16,fontWeight:700,color:'var(--gold2)'}}>${annualIcu.toLocaleString()}</div>
+                    <div style={{fontSize:9,color:'var(--text3)'}}>at {icuMult}× daily</div>
+                  </div>
+                </div>
+              );
+            })()}
+          </div>
+        )}
+
+        {/* ═══ LONG-TERM CARE / CARESHIELD / ELDERSHIELD / SUPPLEMENTS ═══ */}
+        {/* Unified LTC panel covering:
+            • CareShield Life (government scheme, 3 ADLs, $689/mo in 2026 growing 4% p.a.)
+            • ElderShield 300/400 (legacy, $300 or $400/mo × 72 months, 3 ADLs)
+            • Private supplements from Great Eastern, Income Insurance, Singlife
+              — which can trigger at 1 or 2 ADLs (earlier than base), pay initial
+              lump sums, stack on top of CSHL, and add caregiver/dependant benefits. */}
         {isCSL && (
           <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid rgba(26,122,94,.25)'}}>
-            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12}}>
-              <div style={{fontSize:10,fontWeight:700,color:'var(--teal)',textTransform:'uppercase',letterSpacing:'.5px'}}>{(form.subType||'').includes('ElderShield')?'ElderShield':'CareShield Life / Supplement'} Details</div>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12,flexWrap:'wrap',gap:8}}>
+              <div style={{fontSize:10,fontWeight:700,color:'var(--teal)',textTransform:'uppercase',letterSpacing:'.5px'}}>
+                🛡 {form.subType==='Long-term Care'?'Long-term Care':(form.subType||'').includes('ElderShield')?'ElderShield '+form.subType.slice(-3):'CareShield Life / Supplement'}
+              </div>
               <div style={{fontSize:11,background:'rgba(26,122,94,0.1)',color:'var(--teal)',padding:'3px 8px',borderRadius:4,fontWeight:600}}>MediSave cap: ${CARESHIELD_MEDISAVE_CAP}/yr · Overflow → Cash</div>
             </div>
+            {/* 2026 CareShield Life enhancement notice */}
+            {form.subType==='CareShield Life / Supplement' && (
+              <div style={{marginBottom:10,padding:'8px 12px',background:'rgba(26,122,94,.06)',border:'1px solid rgba(26,122,94,.2)',borderRadius:6,fontSize:10,color:'var(--text3)',lineHeight:1.5}}>
+                <strong style={{color:'var(--teal)'}}>2026 Scheme Enhancement:</strong> Base CareShield Life payout for new claims in 2026 is <strong>${CARESHIELD_PAYOUT_2026}/mth</strong> (was $676 under old 2% growth). Annual growth rate doubled from 2% → <strong>4%</strong> through 2030. Severe disability threshold unchanged at 3 of 6 ADLs. Supplements stack on top unless explicitly "inclusive of CSHL" (Income Care Secure).
+              </div>
+            )}
+            {/* Row 1: Plan type + monthly benefit + trigger */}
             <div className="grid-3" style={{marginBottom:8}}>
-              <div className="field"><label>Monthly Benefit ($)</label><input type="number" value={form.cslMonthlyBenefit||(form.subType==='ElderShield 300'?300:form.subType==='ElderShield 400'?400:600)} onChange={e=>set('cslMonthlyBenefit',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>{(form.subType||'').includes('ElderShield')?'ElderShield '+form.subType.slice(-3)+'/mth · max 72 months':'Base CareShield $600/mth'}</div></div>
-              <div className="field"><label>Benefit Escalation (% /yr)</label><input type="number" step="0.5" value={form.cslEscalation||0} onChange={e=>set('cslEscalation',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>0% = flat; some supplements inflate</div></div>
-              <div className="field"><label>Payout Start Age</label><input type="number" value={form.cslPayoutAge||((form.subType||'').includes('ElderShield')?40:67)} onChange={e=>set('cslPayoutAge',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>{(form.subType||'').includes('ElderShield')?'ElderShield: disability-based, no age trigger':'CareShield from age 67'}</div></div>
+              <div className="field">
+                <label>Plan Type</label>
+                <select value={form.ltcPlanType||(form.subType==='CareShield Life / Supplement'?'base':form.subType==='Long-term Care'?'supplement':'base')} onChange={e=>set('ltcPlanType',e.target.value)}>
+                  <option value="base">Base scheme (CSHL / ElderShield)</option>
+                  <option value="supplement">Private supplement</option>
+                </select>
+                <div style={{fontSize:10,color:'var(--text3)'}}>Supplements stack or are inclusive</div>
+              </div>
+              <div className="field">
+                <label>Monthly Benefit ($)</label>
+                <input type="number" value={form.cslMonthlyBenefit||(form.subType==='ElderShield 300'?300:form.subType==='ElderShield 400'?400:form.subType==='CareShield Life / Supplement'?CARESHIELD_PAYOUT_2026:'')} onChange={e=>set('cslMonthlyBenefit',e.target.value)} placeholder="e.g. 1500" />
+                <div style={{fontSize:10,color:'var(--text3)'}}>
+                  {form.subType==='ElderShield 300'?'ES300: $300/mth · max 72 months':
+                   form.subType==='ElderShield 400'?'ES400: $400/mth · max 72 months':
+                   form.subType==='CareShield Life / Supplement'?'CSHL 2026: $'+CARESHIELD_PAYOUT_2026+'/mth (new claims)':
+                   'Supplement: typically $300–$5,000'}
+                </div>
+              </div>
+              <div className="field">
+                <label>ADL Trigger Level</label>
+                <select value={form.ltcAdlTrigger||'3'} onChange={e=>set('ltcAdlTrigger',e.target.value)}>
+                  <option value="1">1 of 6 ADLs (mild — GE CareShield, add-on benefits)</option>
+                  <option value="2">2 of 6 ADLs (moderate — Income Care Secure, Singlife Plus)</option>
+                  <option value="3">3 of 6 ADLs (severe — base schemes, Singlife Std)</option>
+                </select>
+                <div style={{fontSize:10,color:'var(--text3)'}}>Disability threshold for payout start</div>
+              </div>
             </div>
+            {/* Row 2: Escalation + payout duration + initial lump sum */}
+            <div className="grid-3" style={{marginBottom:8}}>
+              <div className="field">
+                <label>Benefit Escalation (% /yr)</label>
+                <input type="number" step="0.5" value={form.cslEscalation||(form.subType==='CareShield Life / Supplement'?4:0)} onChange={e=>set('cslEscalation',e.target.value)} />
+                <div style={{fontSize:10,color:'var(--text3)'}}>CSHL 2026: 4% · Supplements: 0/2/3% options</div>
+              </div>
+              <div className="field">
+                <label>Payout Duration</label>
+                <select value={form.cslLifetime||'yes'} onChange={e=>set('cslLifetime',e.target.value)}>
+                  <option value="yes">Lifetime (as long as disabled)</option>
+                  <option value="72">Max 72 months (ElderShield 300/400)</option>
+                  <option value="no">Fixed term (specify in notes)</option>
+                </select>
+                <div style={{fontSize:10,color:'var(--text3)'}}>Base CSHL = lifetime · ES = 6 years cap</div>
+              </div>
+              <div className="field">
+                <label>Initial Lump Sum ($)</label>
+                <input type="number" value={form.ltcInitialLumpSum||''} onChange={e=>set('ltcInitialLumpSum',e.target.value)} placeholder="0" />
+                <div style={{fontSize:10,color:'var(--text3)'}}>GE CareShield up to $15k · Singlife 3× monthly</div>
+              </div>
+            </div>
+            {/* Row 3: Supplement-specific benefit uplifts */}
+            {(form.ltcPlanType==='supplement' || form.subType==='Long-term Care') && (
+              <div className="grid-3" style={{marginBottom:8}}>
+                <div className="field">
+                  <label>Caregiver Benefit (% of monthly)</label>
+                  <input type="number" value={form.ltcCaregiverPct||''} onChange={e=>set('ltcCaregiverPct',e.target.value)} placeholder="e.g. 60" />
+                  <div style={{fontSize:10,color:'var(--text3)'}}>GE CareShield: 60% at 2+ ADLs</div>
+                </div>
+                <div className="field">
+                  <label>Dependant Care Benefit (%)</label>
+                  <input type="number" value={form.ltcDependantPct||''} onChange={e=>set('ltcDependantPct',e.target.value)} placeholder="e.g. 30" />
+                  <div style={{fontSize:10,color:'var(--text3)'}}>GE: 30% · Income: 25% × 36 months</div>
+                </div>
+                <div className="field">
+                  <label>Inclusive of CSHL?</label>
+                  <select value={form.ltcInclusive?'yes':'no'} onChange={e=>set('ltcInclusive',e.target.value==='yes')}>
+                    <option value="no">No — stacks on top (GE, Singlife)</option>
+                    <option value="yes">Yes — deducts CSHL (Income Care Secure)</option>
+                  </select>
+                  <div style={{fontSize:10,color:'var(--text3)'}}>Effective = benefit − CSHL if inclusive</div>
+                </div>
+              </div>
+            )}
+            {/* Row 4: MediSave/Cash split + total effective monthly */}
             <div className="grid-3">
-              <div className="field"><label>Lifetime Payout?</label><select value={form.cslLifetime||'yes'} onChange={e=>set('cslLifetime',e.target.value)}>
-                <option value="yes">Yes — lifetime (as long as disabled)</option>
-                <option value="no">No — fixed term</option>
-              </select></div>
               {(() => {
                 const prem = parseFloat(form.annualPremium)||0;
                 const msCap = CARESHIELD_MEDISAVE_CAP;
                 const msPart = Math.min(prem, msCap);
                 const cashPart = Math.max(0, prem - msCap);
+                const monthly = parseFloat(form.cslMonthlyBenefit)||0;
+                const caregiverAdd = (parseFloat(form.ltcCaregiverPct)||0)/100 * monthly;
+                const dependantAdd = (parseFloat(form.ltcDependantPct)||0)/100 * monthly;
+                const inclusive = form.ltcInclusive;
+                const effectiveMonthly = inclusive ? Math.max(0, monthly - CARESHIELD_PAYOUT_2026) : monthly;
+                const totalAtTrigger = effectiveMonthly + caregiverAdd + dependantAdd;
                 return (<>
                   <div style={{background:'var(--bg2)',borderRadius:8,padding:10,border:'1px solid var(--border)',textAlign:'center'}}>
                     <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>MediSave</div>
                     <div style={{fontSize:14,fontWeight:700,color:'var(--teal)'}}>${msPart.toLocaleString()}/yr</div>
+                    <div style={{fontSize:9,color:'var(--text3)'}}>up to $600/yr cap</div>
                   </div>
                   <div style={{background:cashPart>0?'rgba(244,63,94,.06)':'var(--bg2)',borderRadius:8,padding:10,border:'1px solid '+(cashPart>0?'rgba(244,63,94,.2)':'var(--border)'),textAlign:'center'}}>
                     <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Cash (above cap)</div>
                     <div style={{fontSize:14,fontWeight:700,color:cashPart>0?'var(--red)':'var(--green2)'}}>${cashPart.toLocaleString()}/yr</div>
                   </div>
+                  <div style={{background:'rgba(212,169,106,.06)',borderRadius:8,padding:10,border:'1px solid rgba(212,169,106,.25)',textAlign:'center'}}>
+                    <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Total at Trigger</div>
+                    <div style={{fontSize:14,fontWeight:700,color:'var(--gold)'}}>${Math.round(totalAtTrigger).toLocaleString()}/mth</div>
+                    <div style={{fontSize:9,color:'var(--text3)'}}>{inclusive?'incl. CSHL deducted':'base + uplifts'}</div>
+                  </div>
                 </>);
               })()}
             </div>
+          </div>
+        )}
+
+        {/* ═══ CRITICAL ILLNESS STAGE COVERAGE ═══ */}
+        {/* Shown for both "Critical Illness" (major CI only) and "Early Critical Illness"
+            (covers all 3 stages with progressive payout). Distinction:
+            • Major CI plans: ~37 late-stage conditions, single claim at 100% SA
+            • Early CI plans: 150+ conditions across early/intermediate/late with
+              progressive payout (typically 30–50% early, 50–100% intermediate,
+              100% late), usually multi-claim with power reset up to 300–500% total SA
+            The panel adapts its prompts based on which sub-type is selected. */}
+        {isAnyCI && (
+          <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid rgba(244,63,94,.25)'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10,flexWrap:'wrap',gap:8}}>
+              <div style={{fontSize:10,fontWeight:700,color:'var(--red)',textTransform:'uppercase',letterSpacing:'.5px'}}>
+                🩺 {isECI?'Early Critical Illness — Stage & Multi-Claim':'Critical Illness — Conditions & Payout'}
+              </div>
+              <span style={{fontSize:9,padding:'2px 8px',borderRadius:4,background:'rgba(244,63,94,.1)',color:'var(--red)',fontWeight:600,textTransform:'uppercase'}}>
+                {isECI?'150+ conditions · all stages':'Late-stage only · single claim'}
+              </span>
+            </div>
+            <div style={{fontSize:10,color:'var(--text3)',marginBottom:10,padding:'6px 10px',background:'var(--bg2)',borderRadius:6,lineHeight:1.5}}>
+              {isECI
+                ? 'Early CI plans cover early / intermediate / late stages with progressive payouts. Typical structure: 30–50% SA for early, 50–100% for intermediate, 100% for late. Often multi-claim with power reset (total cap 300–500% SA) and covers 150+ conditions. Examples: AIA Ultimate Critical Cover, Manulife LifeReady Plus, Singlife Multipay CI, Great Eastern GREAT Multi-Life Protect.'
+                : 'Major CI plans cover ~37 late-stage conditions with a single 100% SA payout. Premium is much lower than Early CI because only the terminal stage is covered. Add an Early CI rider or a separate Early CI plan if the client needs progressive-stage coverage.'}
+            </div>
+            <div className="grid-3" style={{marginBottom:8}}>
+              <div className="field">
+                <label>Number of Conditions Covered</label>
+                <input type="number" value={form.ciConditions||(isECI?'150':'37')} onChange={e=>set('ciConditions',e.target.value)} placeholder={isECI?'150':'37'} />
+                <div style={{fontSize:10,color:'var(--text3)'}}>{isECI?'Across early + intermediate + late':'Late-stage only (LIA-37 standard)'}</div>
+              </div>
+              <div className="field">
+                <label>Early Stage Payout (% SA)</label>
+                <input type="number" value={form.ciEarlyPct||(isECI?'50':'')} onChange={e=>set('ciEarlyPct',e.target.value)} placeholder={isECI?'e.g. 50':'n/a for major CI'} disabled={!isECI} />
+                <div style={{fontSize:10,color:'var(--text3)'}}>{isECI?'Typically 30–50% of SA':'Major CI: no early payout'}</div>
+              </div>
+              <div className="field">
+                <label>Late Stage Payout (% SA)</label>
+                <input type="number" value={form.ciLatePct||'100'} onChange={e=>set('ciLatePct',e.target.value)} placeholder="100" />
+                <div style={{fontSize:10,color:'var(--text3)'}}>Always 100% of SA at claim</div>
+              </div>
+            </div>
+            <div className="grid-3" style={{marginBottom:8}}>
+              <div className="field">
+                <label>Multi-Claim?</label>
+                <select value={form.ciMultiClaim?'yes':'no'} onChange={e=>set('ciMultiClaim',e.target.value==='yes')}>
+                  <option value="no">No — single claim at 100% SA</option>
+                  <option value="yes">Yes — multiple claims allowed</option>
+                </select>
+                <div style={{fontSize:10,color:'var(--text3)'}}>{isECI?'Most early CI plans are multi-claim':'Major CI: usually single-claim'}</div>
+              </div>
+              <div className="field">
+                <label>Total Claim Cap (% SA)</label>
+                <input type="number" value={form.ciTotalCap||(form.ciMultiClaim?(isECI?'300':'200'):'100')} onChange={e=>set('ciTotalCap',e.target.value)} placeholder="300" disabled={!form.ciMultiClaim} />
+                <div style={{fontSize:10,color:'var(--text3)'}}>{form.ciMultiClaim?'Lifetime ceiling · 200–500% typical':'Single claim = 100%'}</div>
+              </div>
+              <div className="field">
+                <label>Power Reset?</label>
+                <select value={form.ciPowerReset?'yes':'no'} onChange={e=>set('ciPowerReset',e.target.value==='yes')} disabled={!form.ciMultiClaim}>
+                  <option value="no">No reset after claim</option>
+                  <option value="yes">Yes — SA resets to 100% after waiting period</option>
+                </select>
+                <div style={{fontSize:10,color:'var(--text3)'}}>AIA UCC: unlimited reset after 12mo claim-free</div>
+              </div>
+            </div>
+            {/* Summary card */}
+            {(() => {
+              const sa = parseFloat(form.sumAssured)||0;
+              const earlyPct = isECI ? (parseFloat(form.ciEarlyPct)||0) : 0;
+              const latePct = parseFloat(form.ciLatePct)||100;
+              const totalCap = parseFloat(form.ciTotalCap)||100;
+              const earlyPayout = sa * earlyPct / 100;
+              const latePayout = sa * latePct / 100;
+              const maxPayout = sa * totalCap / 100;
+              if(sa === 0) return null;
+              return (
+                <div style={{display:'grid',gridTemplateColumns: isECI ? '1fr 1fr 1fr' : '1fr 1fr', gap:10}}>
+                  {isECI && (
+                    <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
+                      <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Early Stage Payout</div>
+                      <div style={{fontSize:16,fontWeight:700,color:'var(--gold)'}}>${Math.round(earlyPayout).toLocaleString()}</div>
+                      <div style={{fontSize:9,color:'var(--text3)'}}>{earlyPct}% of ${sa.toLocaleString()} SA</div>
+                    </div>
+                  )}
+                  <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
+                    <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Late Stage Payout</div>
+                    <div style={{fontSize:16,fontWeight:700,color:'var(--red)'}}>${Math.round(latePayout).toLocaleString()}</div>
+                    <div style={{fontSize:9,color:'var(--text3)'}}>{latePct}% of SA · per claim</div>
+                  </div>
+                  <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
+                    <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Max Lifetime Payout</div>
+                    <div style={{fontSize:16,fontWeight:700,color:'var(--gold2)'}}>${Math.round(maxPayout).toLocaleString()}</div>
+                    <div style={{fontSize:9,color:'var(--text3)'}}>{totalCap}% cap{form.ciPowerReset?' · resettable':''}</div>
+                  </div>
+                </div>
+              );
+            })()}
           </div>
         )}
 
@@ -9895,6 +11059,85 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         {/* ═══ ISP — INTEGRATED SHIELD PLAN ═══ */}
         {isISP && (
           <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid rgba(59,130,246,.3)'}}>
+            {/* ── 1 Apr 2026 Rider Reform Status Banner ──
+                Auto-classifies the rider into Legacy / Transitional / New-2026
+                based on ispRiderInceptionDate (fallback: policy inceptionDate).
+                Only renders when the policy has a rider — no rider = no reform exposure. */}
+            {form.hasRider && (() => {
+              const incDate = form.ispRiderInceptionDate || form.inceptionDate;
+              const gen = form.ispRiderGeneration || getISPRiderGeneration(incDate);
+              const genMeta = {
+                'legacy': {
+                  label: 'Legacy Group',
+                  color: '#2d6a4f',
+                  bg: 'rgba(45,106,79,.08)',
+                  border: 'rgba(45,106,79,.35)',
+                  badge: 'GRANDFATHERED',
+                  badgeBg: '#2d6a4f',
+                  icon: '🛡',
+                  summary: 'Grandfathered — keeps full deductible coverage & $3,000 co-pay cap',
+                  detail: 'Rider inception BEFORE 27 Nov 2025. No forced switch to new design. Client retains full deductible coverage and pays 5% co-insurance capped at $3,000/yr. WATCH: premiums for the legacy pool may rise faster than new riders as the closed book shrinks — review at each renewal and compare against switching to a new-2026 rider (30% cheaper premium but higher cash exposure at claim).'
+                },
+                'transitional': {
+                  label: 'Transitional Group',
+                  color: '#b45309',
+                  bg: 'rgba(245,158,11,.08)',
+                  border: 'rgba(245,158,11,.45)',
+                  badge: 'SWITCHES BY 2028',
+                  badgeBg: '#d97706',
+                  icon: '⚠',
+                  summary: 'Must transition to new-design rider at next renewal after 1 Apr 2028',
+                  detail: 'Rider inception between 27 Nov 2025 and 31 Mar 2026. Retains legacy terms TEMPORARILY but MUST transition to a compliant new-design rider at the next policy renewal after 1 April 2028. After switching: deductible ($1,500-$3,500 depending on ward class) becomes client responsibility, co-pay cap doubles from $3k to $6k/yr, premium falls ~30%. Plan the switch — use the cash savings on premium to offset the higher worst-case claim exposure.'
+                },
+                'new-2026': {
+                  label: 'New 2026 Rider',
+                  color: '#0891b2',
+                  bg: 'rgba(91,168,160,.08)',
+                  border: 'rgba(91,168,160,.35)',
+                  badge: 'CURRENT DESIGN',
+                  badgeBg: '#0891b2',
+                  icon: '✓',
+                  summary: 'Compliant with new MOH rules effective 1 Apr 2026',
+                  detail: 'Rider inception from 1 April 2026. Already on new design: rider does NOT cover the IP deductible ($1,500 B2 / $2,500 B1 / $3,500 A/Private) — client pays deductible out of pocket or via MediSave. Co-payment cap is $6,000/yr (panel usage required for the cap to apply — off-panel means uncapped 5%). Premium is ~30% lower than legacy equivalents.'
+                },
+                'unknown': {
+                  label: 'Status unknown',
+                  color: '#71717a',
+                  bg: 'rgba(113,113,122,.08)',
+                  border: 'rgba(113,113,122,.35)',
+                  badge: 'SET DATE',
+                  badgeBg: '#71717a',
+                  icon: '?',
+                  summary: 'Enter the rider inception date below to auto-classify',
+                  detail: 'Add a rider inception date in the Rider section below to auto-determine whether this rider is Legacy (before 27 Nov 2025), Transitional (27 Nov 2025 – 31 Mar 2026), or New-2026 (from 1 Apr 2026). Each group has materially different deductible and co-pay implications.'
+                }
+              };
+              const info = genMeta[gen] || genMeta['unknown'];
+              return (
+                <div style={{marginBottom:12,padding:'10px 12px',background:info.bg,border:'1px solid '+info.border,borderRadius:6}}>
+                  <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:6,marginBottom:4}}>
+                    <div style={{fontSize:11,fontWeight:700,color:info.color,textTransform:'uppercase',letterSpacing:'.5px'}}>
+                      {info.icon} 1 Apr 2026 Rider Reform · {info.label}
+                    </div>
+                    <span style={{fontSize:9,padding:'2px 8px',borderRadius:4,background:info.badgeBg,color:'#fff',fontWeight:700,letterSpacing:'.3px'}}>
+                      {info.badge}
+                    </span>
+                  </div>
+                  <div style={{fontSize:11,color:'var(--text2)',fontWeight:600,marginBottom:4}}>{info.summary}</div>
+                  <div style={{fontSize:10,color:'var(--text3)',lineHeight:1.55}}>{info.detail}</div>
+                  {gen === 'transitional' && (() => {
+                    const switchDate = new Date(ISP_FORCED_SWITCH_DATE);
+                    const now = new Date();
+                    const monthsUntil = Math.max(0, Math.round((switchDate - now) / (1000*60*60*24*30)));
+                    return (
+                      <div style={{marginTop:6,padding:'4px 8px',background:'rgba(245,158,11,.12)',borderRadius:4,fontSize:10,color:'#92400e',fontWeight:600}}>
+                        ⏱ Forced switch window opens in approximately {monthsUntil} months (next renewal after 1 Apr 2028)
+                      </div>
+                    );
+                  })()}
+                </div>
+              );
+            })()}
             {(() => {
               // Use client DOB age if available, else fall back to premStartAge field
               const profileAge = clientAge || 35;
@@ -10023,9 +11266,9 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
             </div>
             <div style={{fontSize:10,fontWeight:700,color:'var(--text2)',textTransform:'uppercase',marginBottom:6}}>Patient Liability {form.hasRider ? '(With Rider)' : '(No Rider)'}</div>
             <div className="grid-3" style={{marginBottom:8}}>
-              <div className="field"><label>Annual Deductible ($)</label><input type="number" value={form.ispDeductible||3500} onChange={e=>set('ispDeductible',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Client pays this first before insurance covers</div></div>
+              <div className="field"><label>Annual Deductible ($)</label><input type="number" value={form.ispDeductible||3500} onChange={e=>set('ispDeductible',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>A ${ISP_MIN_DEDUCTIBLE_A} · B1 ${ISP_MIN_DEDUCTIBLE_B1} · B2 ${ISP_MIN_DEDUCTIBLE_B2} {form.hasRider && form.ispRiderGeneration==='new-2026' ? '· NEW riders CANNOT cover this' : form.hasRider ? '· legacy rider covers this' : ''}</div></div>
               <div className="field"><label>Co-Insurance (%)</label><input type="number" value={form.ispCoinsurance||(form.hasRider?5:10)} onChange={e=>set('ispCoinsurance',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>{form.hasRider?'Min 5% — MOH rule since Mar 2018':'% of bill after deductible'}</div></div>
-              <div className="field"><label>Co-Insurance Cap ($)</label><input type="number" value={form.ispCoInsCap||''} onChange={e=>set('ispCoInsCap',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Panel providers only</div></div>
+              <div className="field"><label>Co-Insurance Cap ($/yr)</label><input type="number" value={form.ispCoInsCap||(form.hasRider?(form.ispRiderGeneration==='new-2026'?ISP_NEW_CO_PAY_CAP:ISP_LEGACY_CO_PAY_CAP):'')} onChange={e=>set('ispCoInsCap',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>{form.hasRider?(form.ispRiderGeneration==='new-2026'?'NEW 2026: $'+ISP_NEW_CO_PAY_CAP+'/yr · panel only':form.ispRiderGeneration==='legacy'?'LEGACY: $'+ISP_LEGACY_CO_PAY_CAP+'/yr · panel only':'Legacy $'+ISP_LEGACY_CO_PAY_CAP+' or new $'+ISP_NEW_CO_PAY_CAP):'Panel providers only'}</div></div>
             </div>
             <div className="grid-3">
               <div className="field"><label>Has Rider?</label><select value={form.hasRider?'yes':'no'} onChange={e=>set('hasRider',e.target.value==='yes')}>
@@ -10036,6 +11279,38 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                 placeholder="e.g. PRUExtra Premier CoPay" /></div>}
               {form.hasRider && <div className="field"><label>Rider Premium ($/yr, Cash)</label><input type="number" value={form.riderPremium||''} onChange={e=>set('riderPremium',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Always cash — not MediSave payable</div></div>}
             </div>
+            {/* ── 2026 Rider Reform Tracking Fields ── */}
+            {form.hasRider && (
+              <div className="grid-3" style={{marginTop:8}}>
+                <div className="field">
+                  <label>Rider Inception Date</label>
+                  <input type="date" value={form.ispRiderInceptionDate||''} onChange={e=>{
+                    set('ispRiderInceptionDate',e.target.value);
+                    // Clear manual override when user changes date so auto-detection re-runs
+                    if(form.ispRiderGeneration) set('ispRiderGeneration','');
+                  }} />
+                  <div style={{fontSize:10,color:'var(--text3)'}}>Drives reform classification · defaults to policy inception if blank</div>
+                </div>
+                <div className="field">
+                  <label>Rider Generation</label>
+                  <select value={form.ispRiderGeneration||getISPRiderGeneration(form.ispRiderInceptionDate||form.inceptionDate)} onChange={e=>set('ispRiderGeneration',e.target.value)}>
+                    <option value="unknown">Unknown — set date</option>
+                    <option value="legacy">Legacy (before 27 Nov 2025)</option>
+                    <option value="transitional">Transitional (27 Nov 25 – 31 Mar 26)</option>
+                    <option value="new-2026">New-2026 (from 1 Apr 2026)</option>
+                  </select>
+                  <div style={{fontSize:10,color:'var(--text3)'}}>Auto-detected from date · override if needed</div>
+                </div>
+                <div className="field">
+                  <label>Panel Usage Required?</label>
+                  <select value={form.ispPanelRequired?'yes':'no'} onChange={e=>set('ispPanelRequired',e.target.value==='yes')}>
+                    <option value="yes">Yes — panel/pre-auth required</option>
+                    <option value="no">No — off-panel allowed</option>
+                  </select>
+                  <div style={{fontSize:10,color:'var(--text3)'}}>Off-panel = uncapped 5% co-insurance</div>
+                </div>
+              </div>
+            )}
           </div>
         )}
 
@@ -10227,6 +11502,87 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
               if((form.fundAllocations||[]).length>0){set('ilpGrowth',w.growth);set('ilpDivYield',w.dividend);}
             }} />
           </div>
+        )}
+
+        {/* ═══ UNIT TRUST HOLDING — NOT A POLICY ═══ */}
+        {/* Unit trusts can be withdrawn anytime. They have no surrender value, no
+            premium term, no riders, no maturity date. Just a current market value,
+            a cost basis (what was invested), and the fund(s) held. */}
+        {isUnitTrust && (
+          <>
+            <div style={{marginTop:8,padding:14,background:'rgba(157,138,191,.06)',borderRadius:10,border:'1px solid rgba(157,138,191,.3)'}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+                <h4 style={{fontSize:13,fontWeight:600,color:'#9d8abf',margin:0}}>📊 Unit Trust Holding</h4>
+                <span style={{fontSize:9,padding:'2px 8px',borderRadius:4,background:'rgba(157,138,191,.15)',color:'#9d8abf',fontWeight:600,textTransform:'uppercase'}}>Withdraw anytime · No lock-in</span>
+              </div>
+              <div style={{fontSize:10,color:'var(--text3)',marginBottom:10,padding:'6px 10px',background:'var(--bg2)',borderRadius:6}}>
+                A unit trust is a fund holding, not an insurance contract. No surrender charges, no premium term, no death benefit. The "Premium" field above represents your total cost basis (amount invested).
+              </div>
+              <div className="grid-3" style={{marginBottom:10}}>
+                <div className="field">
+                  <label>Current Market Value ($)</label>
+                  <input type="number" value={form.cashValue||''} onChange={e=>set('cashValue',e.target.value)} placeholder="From latest statement" />
+                  <div style={{fontSize:10,color:'var(--text3)'}}>NAV × units held today</div>
+                </div>
+                <div className="field">
+                  <label>Cost Basis ($)</label>
+                  <input type="number" value={form.annualPremium||''} onChange={e=>set('annualPremium',e.target.value)} placeholder="Total amount invested" />
+                  <div style={{fontSize:10,color:'var(--text3)'}}>Same as premium above — kept in sync</div>
+                </div>
+                <div className="field">
+                  <label>Distributions Received ($)</label>
+                  <input type="number" value={form.utDistributions||''} onChange={e=>set('utDistributions',e.target.value)} placeholder="0" />
+                  <div style={{fontSize:10,color:'var(--text3)'}}>Dividends/coupons banked to date</div>
+                </div>
+              </div>
+              {/* ── Gain/Loss summary ── */}
+              {(() => {
+                const mv = parseFloat(form.cashValue)||0;
+                const cost = parseFloat(form.annualPremium)||0;
+                const dist = parseFloat(form.utDistributions)||0;
+                const unrealised = mv - cost;
+                const totalReturn = unrealised + dist;
+                const pctUnrealised = cost > 0 ? (unrealised/cost*100) : 0;
+                const pctTotal = cost > 0 ? (totalReturn/cost*100) : 0;
+                const startDate = form.inceptionDate ? new Date(form.inceptionDate) : null;
+                const yrs = startDate ? Math.max(0.1, (Date.now()-startDate.getTime())/31557600000) : 0;
+                const annualised = cost > 0 && yrs > 0 && mv > 0 ? ((Math.pow((mv+dist)/cost, 1/yrs)-1)*100) : null;
+                if(mv === 0 && cost === 0) return null;
+                return (
+                  <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10}}>
+                    <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
+                      <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Unrealised P/L</div>
+                      <div style={{fontSize:16,fontWeight:700,color:unrealised>=0?'var(--green2)':'var(--red)'}}>{unrealised>=0?'+':''}${Math.round(unrealised).toLocaleString()}</div>
+                      <div style={{fontSize:9,color:'var(--text3)'}}>{pctUnrealised>=0?'+':''}{pctUnrealised.toFixed(1)}% on cost</div>
+                    </div>
+                    <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
+                      <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Total Return</div>
+                      <div style={{fontSize:16,fontWeight:700,color:totalReturn>=0?'var(--gold)':'var(--red)'}}>{totalReturn>=0?'+':''}${Math.round(totalReturn).toLocaleString()}</div>
+                      <div style={{fontSize:9,color:'var(--text3)'}}>incl. ${dist.toLocaleString()} distributions</div>
+                    </div>
+                    <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
+                      <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Annualised Return</div>
+                      <div style={{fontSize:16,fontWeight:700,color:annualised!=null&&annualised>=0?'var(--gold2)':'var(--red)'}}>{annualised!=null?(annualised>=0?'+':'')+annualised.toFixed(1)+'%':'—'}</div>
+                      <div style={{fontSize:9,color:'var(--text3)'}}>{yrs>0?'over '+yrs.toFixed(1)+' yrs':'need inception date'}</div>
+                    </div>
+                  </div>
+                );
+              })()}
+            </div>
+            {/* ── Fund underlying (usually one fund for a UT) ── */}
+            <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)'}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+                <h4 style={{fontSize:13,fontWeight:600,color:'var(--purple)',margin:0}}>Fund Holding</h4>
+                <div style={{fontSize:10,color:'var(--text3)'}}>Usually one fund for a UT · Add more for a basket</div>
+              </div>
+              <FundAllocationEditor
+                allocations={form.fundAllocations||[]}
+                onChange={v=>set('fundAllocations',v)}
+                reinvest={false}
+                policyFee={'0'}
+                onSyncWeighted={w=>{/* UT uses fund info for display only — no parent sync */}} />
+            </div>
+          </>
         )}
 
         {/* ═══ CASH / SURRENDER VALUE ═══ */}
