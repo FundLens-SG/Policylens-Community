@@ -1032,7 +1032,7 @@ async function pdfToImages(pdfDoc, maxPages=12) {
 // Extraction pipeline version stamp — bump this whenever EXTRACT_PROMPT, post-processing
 // logic, or schema changes. All previously-cached results become invalid, forcing a fresh
 // AI call. Protects users from seeing stale extractions after upgrades.
-const EXTRACT_PIPELINE_VERSION = 'v6-2026-04-06-premium-required';
+const EXTRACT_PIPELINE_VERSION = 'v7-2026-04-06-income-classification';
 
 // SHA-256 hash of a File's bytes — used as content-addressable cache key.
 async function hashFile(file) {
@@ -1469,6 +1469,8 @@ const SEED_REPOSITORY = [
   {id:'repo-aia-acc',insurer:'AIA',productName:'Absolute Critical Cover',productCode:'ACC',category:'protection',subType:'Critical Illness',currency:'SGD',notes:'Par whole life CI. Covers critical illnesses + chronic diseases + future unknown diseases. Pre-early benefit for chronic conditions. Multi-stage CI payouts. Potential cash value accumulation. AIA Vitality compatible. SDIC protected.',editHistory:[]},
   {id:'repo-aia-sft',insurer:'AIA',productName:'Secure Flexi Term',productCode:'SFT',category:'protection',subType:'Term Life',currency:'SGD',notes:'Non-par regular premium term life. Death + TI + terminal cancer. Flexible coverage duration. Renewable at end of term (premium not guaranteed). Conversion privilege to WL/endowment/ILP before age 65 without medical underwriting. Optional add-ons: Critical Cover (43 CI), Early Critical Cover (32 early + 29 intermediate CI + 5 special conditions), TPD, premium waivers. AIA Vitality discount up to 15%.',editHistory:[]},
   {id:'repo-aia-plp2',insurer:'AIA',productName:'Pro Lifetime Protector (II)',productCode:'PLP2',category:'investment',subType:'Investment-Linked Policy (ILP)',currency:'SGD',notes:'ILP with protection. Death + accidental disability + multi-stage CI (150 conditions via Lifetime Critical Cover rider with power reset up to 300% SA). Optional Relapse Benefit rider. Guided portfolios: Pro Adventurous/Balanced/Cautious (Mercer). 100%/102% premiums invested from Yr5/Yr10. No-lapse guarantee first 10 years. Cash access from Yr2 no charges. AIA Vitality +10% coverage +10% rider discount Yr1.',editHistory:[]},
+  {id:'repo-aia-gen3',insurer:'AIA',productName:'AIA Gen3',productCode:'GEN3',category:'retirement',subType:'Retirement Income (Par WL)',currency:'SGD',notes:'LIMITED-PAY PARTICIPATING WHOLE LIFE with guaranteed coupon income — NOT an ILP, no fund allocation, no investment component. 10-year premium payment term. Guaranteed coupon 2.25% p.a. of insured amount from end of year 10. Non-guaranteed cash dividends (~0.8% typical) — total illustrated payout ~3.05% p.a. Dividends may be retained with AIA at 3.25% (non-guaranteed). Guaranteed cash values accumulate from policy year 3. Lump sum TPD benefit to age 65. Designed for 3-generation legacy: policy assignable to child at age 21 (child receives payouts for life), death benefit to grandchild. Typical illustration: $7,980/yr for $100k SA. Participating whole life — lifetime coverage with regular income from year 10. CLASSIFY AS retirement/Retirement Income (Par WL), NEVER as investment/ILP. No fundAllocations, no ilpGrowth, no management fee. Use annuityPayout for the guaranteed + dividend income.',editHistory:[]},
+  {id:'repo-aia-gen2',insurer:'AIA',productName:'AIA Gen2',productCode:'GEN2',category:'retirement',subType:'Retirement Income (Par WL)',currency:'SGD',notes:'Predecessor to AIA Gen3. Limited-pay participating whole life with guaranteed coupons, similar 10-year premium term and 2-generation legacy structure. NOT an ILP. Classify as retirement → Retirement Income (Par WL).',editHistory:[]},
   {id:'repo-aia-wlc2',insurer:'AIA',productName:'Whole Life Cover (II)',productCode:'WLC2',category:'protection',subType:'Whole Life',currency:'SGD',notes:'Direct Purchase Insurance (DPI). Par whole life. Death+TI to age 100, TPD to age 65. Up to 5× boosted coverage. Annual bonuses + terminal bonus. Stable cash value accumulation. Low-cost, no-advice channel. Optional CI add-on to age 100. Available online at aia.com.sg.',editHistory:[]},
 
   // ═══ PRUDENTIAL SINGAPORE ═══
@@ -8008,6 +8010,21 @@ OTHER PLANS:
 - "Income" / "Payout" plans → check if monthly income (Annuity) or lump sum (Endowment)
 - "VitalCare" / "VitalHealth" without "Max" prefix → could be standalone, check context
 
+CRITICAL — GUARANTEED-COUPON WHOLE LIFE PLANS ARE RETIREMENT/INCOME, NOT ILP:
+When you see a plan that has ALL of the following characteristics:
+- Limited premium payment term (typically 5, 10, 15, 20 years)
+- Participating whole life base plan
+- Guaranteed coupon / guaranteed annual income / guaranteed cash payout (e.g. "2.25% coupon", "guaranteed yearly coupon", "guaranteed monthly income")
+- Lifetime coverage
+- Cash dividends on top of guaranteed coupon
+- NO mention of fund allocations, unit prices, sub-funds, or "invested into"
+→ This is a Retirement/Income Plan. Set category="retirement", subType="Retirement Income (Par WL)" or "Annuity".
+→ NEVER classify as ILP (Investment) or ILP (Protection). These plans have NO investment component for the policyholder to allocate.
+→ Examples: AIA Gen3, AIA Gen2, AIA Pro Secure (income variant), Prudential PRUWealth Income, NTUC Income Gro Retire Flex Pro / Gro Retire Ease / Gro Annuity Pro, Singlife MySavings / MyLifeIncome, Manulife RetireReady Plus, China Life Lifetime Income / Life Prestige Gold, Great Eastern GREAT Wealth Multiplier / GREAT Retire Income.
+→ For these, set annuityPayout (annual income), annuityStartAge (usually = age + premTerm, e.g. 10-year pay starting at 30 → payouts begin at 40), annuityEndAge (typically lifetime = 100 or whole life). DO NOT set ilpGrowth, ilpDivYield, ilpMgmtFee, or fundAllocations.
+
+AIA GEN3 SPECIFIC: "Give the gift of a lasting legacy", "generation after generation", "3 generations", "guaranteed coupon benefit of 2.25% yearly" are all strong hints for AIA Gen3. This is a participating whole life income plan. Classify as retirement → Retirement Income (Par WL). Use guaranteedCoupon=2.25, annuityPayout = sumAssured × 0.0305 (total illustrated), annuityStartAge = age at entry + 10. NOT an ILP under any circumstances.
+
 KNOWN PRODUCT PREMIUM TERMS — auto-fill premTerm if not stated in document:
 - Manulife InvestReady (III) 13 Yrs Flexi 10 → premTerm: 10 (the "Flexi 10" indicates 10-year premium term)
 - Manulife InvestReady (III) 10 Yrs Flexi 5 → premTerm: 5
@@ -9249,6 +9266,39 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
   });
   const setNested = (parent,k,v) => setForm(f=>{const nf={...f,[parent]:{...f[parent],[k]:v}};if(onDraftChange)onDraftChange(nf);return nf});
 
+  // ── DIRTY TRACKING + SAFE CLOSE ──
+  // Capture initial form snapshot on mount. requestClose() compares against current
+  // and asks the user to confirm if there are unsaved changes. Used by the × button,
+  // the Cancel button, and the overlay click-to-close handler.
+  const initialFormJson = useRef(null);
+  useEffect(() => { initialFormJson.current = JSON.stringify(form); /* eslint-disable-next-line */ }, []);
+  const isDirty = () => {
+    if(initialFormJson.current == null) return false;
+    return JSON.stringify(form) !== initialFormJson.current;
+  };
+  const requestClose = () => {
+    if(isDirty()) {
+      if(!confirm('You have unsaved changes. Exit without saving?')) return;
+    }
+    onClose();
+  };
+
+  // ── SAFE OVERLAY CLICK — only closes on a pure click whose mousedown AND mouseup
+  // both landed on the overlay itself. This defeats the drag-out-then-release close
+  // bug where a user clicks inside a field, drags the cursor outside, and releases
+  // over the overlay. The browser fires `click` on the overlay in that case, which
+  // previously auto-closed the modal and discarded edits.
+  const overlayMouseDownOnSelf = useRef(false);
+  const handleOverlayMouseDown = (e) => {
+    overlayMouseDownOnSelf.current = (e.target === e.currentTarget);
+  };
+  const handleOverlayMouseUp = (e) => {
+    if(overlayMouseDownOnSelf.current && e.target === e.currentTarget) {
+      requestClose();
+    }
+    overlayMouseDownOnSelf.current = false;
+  };
+
   const PREMIUM_STRUCTURES = ['Regular Premium','Single Premium','Limited Pay','Flexible Premium'];
   const isUL = ['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(form.subType);
   const isULPlain = form.subType==='Universal Life (UL)';
@@ -9364,17 +9414,17 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
   };
 
   return (
-    <div className="modal-overlay" onClick={e=>{if(e.target===e.currentTarget)onClose()}}>
-      <div className="modal">
+    <div className="modal-overlay" onMouseDown={handleOverlayMouseDown} onMouseUp={handleOverlayMouseUp}>
+      <div className="modal" onMouseDown={e=>e.stopPropagation()} onMouseUp={e=>e.stopPropagation()}>
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
-          <h3 style={{fontSize:16,fontWeight:600}}>{isEdit?'Edit Policy':'Add Policy'}</h3>
+          <h3 style={{fontSize:16,fontWeight:600}}>{isEdit?'Edit Policy':'Add Policy'}{isDirty() && <span style={{color:'var(--orange)',fontSize:10,fontWeight:500,marginLeft:8}}>• unsaved changes</span>}</h3>
           <div style={{display:'flex',gap:6,alignItems:'center'}}>
             <input ref={formCamRef} type="file" accept="image/*" capture="environment" multiple style={{display:'none'}} onChange={e=>{scanIntoForm(e.target.files);e.target.value='';}} />
             <input ref={formUploadRef} type="file" accept="image/*,.pdf,.xlsx,.xls,.csv,.doc,.docx" multiple style={{display:'none'}} onChange={e=>{scanIntoForm(e.target.files);e.target.value='';}} />
             <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length) scanIntoForm(files);}} disabled={formScanning}>{formScanning?'Scanning…':'📷'}</button>
             <button className="btn-secondary btn-sm" onClick={()=>{const inp=document.createElement('input');inp.type='file';inp.accept='image/*';inp.multiple=true;inp.onchange=e=>{if(e.target.files.length) scanIntoForm(e.target.files);};inp.click();}} disabled={formScanning}>🖼</button>
             <button className="btn-secondary btn-sm" onClick={()=>formUploadRef.current?.click()} disabled={formScanning}>{formScanning?'…':'📄'}</button>
-            <button onClick={onClose} style={{background:'none',color:'var(--text3)',fontSize:20,marginLeft:4}}>×</button>
+            <button onClick={requestClose} style={{background:'none',color:'var(--text3)',fontSize:20,marginLeft:4}}>×</button>
           </div>
         </div>
 
@@ -10146,8 +10196,8 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
               <h4 style={{fontSize:13,fontWeight:600,color:'var(--purple)',margin:0}}>Fund Allocations</h4>
               <div style={{fontSize:10,color:'var(--text3)'}}>Per-fund overrides → weighted policy rates</div>
             </div>
-            <FundAllocationEditor allocations={form.fundAllocations||[]} onChange={v=>set('fundAllocations',v)} reinvest={form.divReinvest} onSyncWeighted={w=>{
-              if((form.fundAllocations||[]).length>0){set('ilpGrowth',w.growth);set('ilpDivYield',w.dividend);set('ilpMgmtFee',w.fee);}
+            <FundAllocationEditor allocations={form.fundAllocations||[]} onChange={v=>set('fundAllocations',v)} reinvest={form.divReinvest} policyFee={form.ilpMgmtFee||'1.5'} onSyncWeighted={w=>{
+              if((form.fundAllocations||[]).length>0){set('ilpGrowth',w.growth);set('ilpDivYield',w.dividend);}
             }} />
           </div>
         )}
@@ -10156,7 +10206,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         {hasCV && (
           <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px dashed var(--border)'}}>
             <h4 style={{fontSize:13,fontWeight:600,marginBottom:10,color:'var(--text2)'}}>Surrender Value {isILP?'/ Fund Value':''}</h4>
-            <div className="grid-3">
+            <div className="grid-2">
               <div className="field">
                 <label>Current Surrender Value</label>
                 <div style={{display:'flex',gap:6}}>
@@ -10164,27 +10214,33 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                   <button className={`btn-sm ${form.cvKnown===false?'btn-primary':'btn-secondary'}`} onClick={()=>set('cvKnown',false)} style={{flex:1,fontSize:10}}>? I don't know</button>
                 </div>
                 {form.cvKnown!==false && <input type="number" value={form.cashValue||''} onChange={e=>set('cashValue',e.target.value)} placeholder="From latest statement" style={{marginTop:4}} />}
-                {form.cvKnown===false && <div style={{fontSize:10,color:'var(--gold)',marginTop:4}}>Auto-estimated from premiums × yield × time</div>}
+                {form.cvKnown===false && <div style={{fontSize:10,color:'var(--gold)',marginTop:4}}>Auto-estimated from premiums × effective rate × time</div>}
               </div>
-              <div className="field"><label>Surrender Charge Period (yrs)</label><input type="number" value={form.surrenderPeriod||''} onChange={e=>set('surrenderPeriod',e.target.value)} placeholder="e.g. 15" /><div style={{fontSize:10,color:'var(--text3)'}}>Year where surrender charges = 0%</div></div>
-              <div className="field"><label>Breakeven Year</label><input type="number" value={form.breakEvenYear||''} onChange={e=>set('breakEvenYear',e.target.value)} placeholder="e.g. 20" /><div style={{fontSize:10,color:'var(--gold)'}}>SV ≥ total premiums paid</div></div>
+              <div className="field"><label>Surrender Charge Period (yrs)</label><input type="number" value={form.surrenderPeriod||''} onChange={e=>set('surrenderPeriod',e.target.value)} placeholder="e.g. 15" /><div style={{fontSize:10,color:'var(--text3)'}}>Year when surrender charges drop to 0% (insurer's schedule). Breakeven year is auto-computed below — they're different concepts.</div></div>
             </div>
-            {/* ── Auto-estimated CV and projection ── */}
+            {/* ── Auto-estimated CV, projection, and breakeven ── */}
             {(() => {
               const prem = parseFloat(form.annualPremium)||0;
-              const startAge = parseInt(form.premStartAge)||0;
+              const startAge = parseInt(form.premStartAge)||parseInt(form.ageAtEntry)||0;
               const premTerm = form.premSingle ? 1 : (parseInt(form.premTerm)||0);
-              // Use weighted fund growth if available, else fallback to cvGrowthRate or 3%
+              // ── EFFECTIVE COMPOUNDING RATE ──
+              // If dividends reinvest: they compound into the fund → rate = growth + div − fee
+              // If dividends pay out: fund grows on price only → rate = growth − fee
+              //                       (dividends are a separate income stream, not compounding)
               const fundGrowth = (form.fundAllocations||[]).length > 0 ? 
                 (()=>{const tp=(form.fundAllocations||[]).reduce((s,a)=>s+(parseFloat(a.pct)||0),0);return tp>0?(form.fundAllocations||[]).reduce((s,a)=>s+(parseFloat(a.pct)||0)*(parseFloat(a.growth)||0),0)/tp:0})() : 0;
-              const r = (fundGrowth > 0 ? fundGrowth : parseFloat(form.cvGrowthRate)||parseFloat(form.ilpGrowth)||3)/100;
+              const growthPct = fundGrowth > 0 ? fundGrowth : (parseFloat(form.ilpGrowth)||parseFloat(form.cvGrowthRate)||3);
+              const divPct = parseFloat(form.ilpDivYield)||0;
+              const feePct = parseFloat(form.ilpMgmtFee)||(isILP?1.5:0);
+              const effRate = form.divReinvest ? (growthPct + divPct - feePct) : (growthPct - feePct);
+              const r = Math.max(-0.1, effRate / 100); // floor at -10% to avoid insane negatives
               const retAge = parseInt(_cp?.retirementAge)||65;
               const age = clientAge;
               const yearsInForce = Math.max(0, age - startAge);
               const totalPaid = form.premSingle ? prem : prem * Math.min(premTerm, Math.max(premTerm, retAge-startAge));
               const yrsToRet = Math.max(0, retAge - age);
 
-              // Auto-estimate current CV if unknown
+              // Auto-estimate current CV if unknown (uses effective rate)
               let estCV;
               if(form.cvKnown!==false && parseFloat(form.cashValue) > 0) {
                 estCV = parseFloat(form.cashValue);
@@ -10193,7 +10249,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                 estCV = form.premSingle ? prem * Math.pow(1+r, yearsInForce) : prem*(Math.pow(1+r,paid)-1)/r * Math.pow(1+r, Math.max(0,yearsInForce-paid));
               } else { estCV = 0; }
 
-              // Project to retirement age
+              // Project to retirement age (uses effective rate)
               const paidRemaining = Math.max(0, premTerm - yearsInForce);
               let retCV;
               if(estCV > 0) {
@@ -10205,27 +10261,85 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                 retCV = form.premSingle ? prem * Math.pow(1+r, totalYrs) : prem*(Math.pow(1+r,paid)-1)/r * Math.pow(1+r, Math.max(0,totalYrs-paid));
               } else { retCV = 0; }
 
+              // ── AUTO-COMPUTED BREAKEVEN YEAR ──
+              // Walk forward year by year from inception. Track cumulative premiums paid
+              // vs cumulative fund value. Breakeven = first year where fundValue ≥ premiumsPaid.
+              // For non-reinvest mode, we also compute a "total wealth" breakeven that counts
+              // dividend income received as if banked at 0% (conservative).
+              let breakevenFund = null, breakevenTotal = null;
+              if(prem > 0 && premTerm > 0) {
+                let fund = 0;
+                let paidSoFar = 0;
+                let divBanked = 0;
+                const maxScan = form.premSingle ? 40 : Math.min(60, premTerm + 40);
+                for(let y = 1; y <= maxScan; y++) {
+                  // Contribute premium this year if still in pay period
+                  if(form.premSingle) {
+                    if(y === 1) { fund += prem; paidSoFar += prem; }
+                  } else if(y <= premTerm) {
+                    fund += prem; paidSoFar += prem;
+                  }
+                  // Grow fund by effective rate
+                  fund *= (1 + r);
+                  // If dividends don't reinvest, they're taken out of the fund and banked separately
+                  if(!form.divReinvest && divPct > 0) {
+                    const divThisYear = fund * (divPct / 100);
+                    fund -= divThisYear;
+                    divBanked += divThisYear;
+                  }
+                  if(breakevenFund == null && fund >= paidSoFar && y > 1) breakevenFund = y;
+                  if(breakevenTotal == null && (fund + divBanked) >= paidSoFar && y > 1) breakevenTotal = y;
+                  if(breakevenFund && breakevenTotal) break;
+                }
+              }
+
               const netGain = retCV - totalPaid;
               if(prem === 0 && estCV === 0) return null;
               return (
                 <div style={{marginTop:10}}>
-                  {fundGrowth > 0 && <div style={{fontSize:9,color:'var(--teal)',marginBottom:6}}>Using weighted fund growth rate: {fundGrowth.toFixed(1)}% p.a. from Fund Allocations above</div>}
+                  <div style={{fontSize:10,color:'var(--teal)',marginBottom:6,padding:'4px 8px',background:'rgba(91,168,160,.06)',borderRadius:6}}>
+                    <strong>Effective compounding rate:</strong> {effRate.toFixed(2)}% p.a.{' '}
+                    {form.divReinvest
+                      ? '= '+growthPct.toFixed(1)+'% growth + '+divPct.toFixed(1)+'% dividend − '+feePct.toFixed(1)+'% fee (dividends reinvest → compound)'
+                      : '= '+growthPct.toFixed(1)+'% growth − '+feePct.toFixed(1)+'% fee (dividends paid out, not compounding)'}
+                    {fundGrowth > 0 && <span style={{color:'var(--purple)'}}> · Growth weighted from {(form.fundAllocations||[]).length} fund{(form.fundAllocations||[]).length===1?'':'s'}</span>}
+                  </div>
                   <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10}}>
                     <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
                       <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Auto-Estimated CV</div>
                       <div style={{fontSize:16,fontWeight:700,color:'var(--gold)'}}>${Math.round(estCV).toLocaleString()}</div>
-                      <div style={{fontSize:9,color:'var(--text3)'}}>Auto: yield × premiums × {yearsInForce}yr in force</div>
+                      <div style={{fontSize:9,color:'var(--text3)'}}>{yearsInForce}yr in force @ {effRate.toFixed(1)}% p.a.</div>
                     </div>
                     <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
                       <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Projected CV at Age {retAge}</div>
                       <div style={{fontSize:16,fontWeight:700,color:'var(--gold2)'}}>${Math.round(retCV).toLocaleString()}</div>
-                      <div style={{fontSize:9,color:'var(--text3)'}}>at {(r*100).toFixed(1)}% p.a.</div>
+                      <div style={{fontSize:9,color:'var(--text3)'}}>at {effRate.toFixed(1)}% p.a.</div>
                     </div>
                     <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
                       <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Net Gain / (Loss)</div>
                       <div style={{fontSize:16,fontWeight:700,color:netGain>=0?'var(--green2)':'var(--red)'}}>{netGain>=0?'+':''}${Math.round(netGain).toLocaleString()}</div>
                       <div style={{fontSize:9,color:'var(--text3)'}}>total premiums: ${Math.round(totalPaid).toLocaleString()}</div>
                     </div>
+                  </div>
+                  {/* ── Breakeven row ── */}
+                  <div style={{marginTop:8,display:'grid',gridTemplateColumns: !form.divReinvest && divPct > 0 ? '1fr 1fr 1fr' : '1fr 1fr', gap:10}}>
+                    <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
+                      <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Surrender Charge Ends</div>
+                      <div style={{fontSize:16,fontWeight:700,color:'var(--text2)'}}>{form.surrenderPeriod ? 'Year '+form.surrenderPeriod : '—'}</div>
+                      <div style={{fontSize:9,color:'var(--text3)'}}>Insurer's charge schedule</div>
+                    </div>
+                    <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
+                      <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>{!form.divReinvest && divPct > 0 ? 'Fund-Value Breakeven' : 'Breakeven Year'}</div>
+                      <div style={{fontSize:16,fontWeight:700,color:breakevenFund?'var(--green2)':'var(--text3)'}}>{breakevenFund ? 'Year '+breakevenFund : 'Never at this rate'}</div>
+                      <div style={{fontSize:9,color:'var(--text3)'}}>Fund ≥ total premiums paid</div>
+                    </div>
+                    {!form.divReinvest && divPct > 0 && (
+                      <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
+                        <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Total Wealth Breakeven</div>
+                        <div style={{fontSize:16,fontWeight:700,color:breakevenTotal?'var(--gold)':'var(--text3)'}}>{breakevenTotal ? 'Year '+breakevenTotal : 'Never'}</div>
+                        <div style={{fontSize:9,color:'var(--text3)'}}>Fund + dividends received</div>
+                      </div>
+                    )}
                   </div>
                 </div>
               );
@@ -10316,7 +10430,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         </div>
 
         <div style={{display:'flex',justifyContent:'flex-end',gap:8,marginTop:16}}>
-          <button className="btn-secondary" onClick={onClose}>Cancel</button>
+          <button className="btn-secondary" onClick={requestClose}>Cancel</button>
           <button className="btn-primary" onClick={handleSubmit}>{isEdit?'Save Changes':'Add Policy'}</button>
         </div>
       </div>
@@ -10324,12 +10438,14 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
   );
 }
 
-function FundAllocationEditor({allocations,onChange,reinvest,onSyncWeighted}) {
-  const add = () => onChange([...allocations, {fundName:'',pct:'',growth:'6',dividend:'2',fee:'1.5',riskRating:''}]);
+function FundAllocationEditor({allocations,onChange,reinvest,onSyncWeighted,policyFee}) {
+  const add = () => onChange([...allocations, {fundName:'',pct:'',growth:'',dividend:'',riskRating:''}]);
   const update = (i,k,v) => {const n=[...allocations];n[i]={...n[i],[k]:v};onChange(n)};
   const remove = i => onChange(allocations.filter((_,idx)=>idx!==i));
   const [showSuggestions,setShowSuggestions] = useState(-1);
   const [suggestions,setSuggestions] = useState([]);
+  const [fetchingRow,setFetchingRow] = useState(-1);
+
   // Lookup from fund DB — FUND_DB format: [name, type, region, sector, risk, date, isin]
   const lookup = (i,name) => {
     if(!name || name.length < 2) { setSuggestions([]); setShowSuggestions(-1); return; }
@@ -10349,49 +10465,90 @@ function FundAllocationEditor({allocations,onChange,reinvest,onSyncWeighted}) {
     onChange(n); setSuggestions([]); setShowSuggestions(-1);
   };
 
-  // Weighted calculations
+  // ── AUTO-FETCH SINCE-INCEPTION RETURN ──
+  // Calls callAI with a targeted prompt to look up the fund's historical performance.
+  // The AI returns JSON with growth (unit price annualised return) and dividend yield.
+  // Populates the row's growth + dividend fields. Uses a strict prompt and asks the AI
+  // to return "unknown" rather than hallucinate if it can't identify the fund.
+  const autoFetchReturn = async (i) => {
+    const fund = allocations[i];
+    if(!fund?.fundName || fund.fundName.trim().length < 3) {
+      try { toast('Type a fund name first','warning',3000); } catch(e){}
+      return;
+    }
+    setFetchingRow(i);
+    try {
+      const prompt = 'You are a Singapore-licensed fund analyst. For the fund named below, provide its SINCE-INCEPTION ANNUALISED RETURN (unit price appreciation % p.a.) and its CURRENT DIVIDEND YIELD % p.a. Only respond based on factual knowledge — if you are not highly confident about the specific fund, return {"unknown":true,"reason":"..."}. Return ONLY valid JSON, no commentary.';
+      const content = [{type:'text', text:'Fund name: "'+fund.fundName+'"\n\nReturn JSON in this exact shape:\n{\n  "growth": <number, since-inception annualised unit-price return %, e.g. 5.8>,\n  "dividend": <number, current distribution yield %, 0 if accumulation/non-distributing>,\n  "inceptionDate": "<YYYY-MM-DD or null if unknown>",\n  "confidence": "high" | "medium" | "low",\n  "source": "<brief note, e.g. factsheet, Morningstar, fund prospectus>"\n}\n\nIf you cannot identify the fund with reasonable confidence, return: {"unknown":true,"reason":"..."}'}];
+      const text = await callAI(prompt, content, 500);
+      const cleaned = (text||'').replace(/```json\s*|```\s*/g,'').trim();
+      const parsed = JSON.parse(cleaned);
+      if(parsed.unknown) {
+        try { toast('Fund not recognized: '+(parsed.reason||'unknown fund'),'warning',5000); } catch(e){}
+      } else {
+        const g = parseFloat(parsed.growth);
+        const d = parseFloat(parsed.dividend);
+        if(isFinite(g) && g >= -50 && g <= 50) update(i,'growth',String(g.toFixed(1)));
+        if(isFinite(d) && d >= 0 && d <= 30) update(i,'dividend',String(d.toFixed(1)));
+        try { toast('Fetched: '+(isFinite(g)?g.toFixed(1)+'% growth':'')+(isFinite(d)?' · '+d.toFixed(1)+'% div':'')+(parsed.confidence?' ('+parsed.confidence+' confidence)':''),'success',5000); } catch(e){}
+      }
+    } catch(e) {
+      console.warn('[AutoFetch] Error:', e);
+      try { toast('Auto-fetch failed: '+(e.message||'AI error')+'. Try typing values manually.','error',5000); } catch(err){}
+    }
+    setFetchingRow(-1);
+  };
+
+  // Weighted calculations (fee now comes from policy level, not per-fund)
   const totalPct = allocations.reduce((s,a) => s + (parseFloat(a.pct)||0), 0);
   const wGrowth = totalPct > 0 ? allocations.reduce((s,a) => s + (parseFloat(a.pct)||0) * (parseFloat(a.growth)||0), 0) / totalPct : 0;
   const wDiv = totalPct > 0 ? allocations.reduce((s,a) => s + (parseFloat(a.pct)||0) * (parseFloat(a.dividend)||0), 0) / totalPct : 0;
-  const wFee = totalPct > 0 ? allocations.reduce((s,a) => s + (parseFloat(a.pct)||0) * (parseFloat(a.fee)||0), 0) / totalPct : 0;
+  const polFeeNum = parseFloat(policyFee)||0;
   const wRisk = totalPct > 0 ? allocations.reduce((s,a) => s + (parseFloat(a.pct)||0) * (parseFloat(a.riskRating)||5), 0) / totalPct : 0;
-  const netReturn = reinvest ? (wGrowth + wDiv - wFee) : (wGrowth - wFee);
+  const netReturn = reinvest ? (wGrowth + wDiv - polFeeNum) : (wGrowth - polFeeNum);
 
-  // Sync weighted values to parent form
+  // Sync weighted values to parent form (no fee — policy owns that)
   useEffect(() => {
-    if(onSyncWeighted && totalPct > 0) onSyncWeighted({growth:wGrowth.toFixed(2), dividend:wDiv.toFixed(2), fee:wFee.toFixed(2), risk:wRisk.toFixed(1)});
-  }, [wGrowth, wDiv, wFee, wRisk, totalPct]);
+    if(onSyncWeighted && totalPct > 0) onSyncWeighted({growth:wGrowth.toFixed(2), dividend:wDiv.toFixed(2), risk:wRisk.toFixed(1)});
+  }, [wGrowth, wDiv, wRisk, totalPct]);
 
   const riskColor = r => r>=7?'var(--red2)':r>=5?'var(--orange)':'var(--green2)';
 
   return (
     <div>
-      {/* Header row */}
+      {/* Header row — 6 cols: Fund, Alloc, Growth, Div, Risk, Actions (↻ + ×) */}
       {allocations.length > 0 && (
-        <div style={{display:'grid',gridTemplateColumns:'1fr 60px 60px 60px 60px 36px 28px',gap:6,marginBottom:4,padding:'0 2px'}}>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 58px 64px 64px 36px 56px',gap:6,marginBottom:4,padding:'0 2px'}}>
           <div style={{fontSize:9,color:'var(--text3)',fontWeight:600,textTransform:'uppercase'}}>Fund Name</div>
           <div style={{fontSize:9,color:'var(--text3)',fontWeight:600,textTransform:'uppercase',textAlign:'center'}}>Alloc %</div>
           <div style={{fontSize:9,color:'var(--green2)',fontWeight:600,textTransform:'uppercase',textAlign:'center'}}>Growth</div>
           <div style={{fontSize:9,color:'#9d8abf',fontWeight:600,textTransform:'uppercase',textAlign:'center'}}>Div %</div>
-          <div style={{fontSize:9,color:'var(--red)',fontWeight:600,textTransform:'uppercase',textAlign:'center'}}>Fee %</div>
           <div style={{fontSize:9,color:'var(--text3)',fontWeight:600,textTransform:'uppercase',textAlign:'center'}}>Risk</div>
-          <div></div>
+          <div style={{fontSize:9,color:'var(--text3)',fontWeight:600,textTransform:'uppercase',textAlign:'center'}}>Actions</div>
         </div>
       )}
       {allocations.map((a,i) => (
         <div key={i} style={{position:'relative'}}>
-          <div style={{display:'grid',gridTemplateColumns:'1fr 60px 60px 60px 60px 36px 28px',gap:6,marginBottom:4,alignItems:'center'}}>
+          <div style={{display:'grid',gridTemplateColumns:'1fr 58px 64px 64px 36px 56px',gap:6,marginBottom:4,alignItems:'center'}}>
             <input value={a.fundName} onChange={e=>{update(i,'fundName',e.target.value);lookup(i,e.target.value)}} onFocus={()=>lookup(i,a.fundName)} onBlur={()=>setTimeout(()=>{setShowSuggestions(-1);setSuggestions([])},200)} placeholder="Search fund…" style={{fontSize:12}} />
-            {a._newFund && <div style={{display:'flex',alignItems:'center',gap:4,marginTop:2}}>
+            {a._newFund && <div style={{display:'flex',alignItems:'center',gap:4,marginTop:2,gridColumn:'1'}}>
               <span style={{fontSize:8,padding:'1px 5px',borderRadius:3,background:'rgba(212,169,106,.12)',color:'var(--gold)',fontWeight:600}}>🆕 New Fund</span>
               <a href={'https://www.google.com/search?q='+encodeURIComponent((a.fundName||'')+' factsheet Singapore')} target="_blank" rel="noopener" style={{fontSize:8,color:'var(--teal)',textDecoration:'underline'}}>Search Factsheet</a>
             </div>}
             <input value={a.pct} onChange={e=>update(i,'pct',e.target.value)} placeholder="%" type="number" style={{textAlign:'center',fontSize:12}} />
-            <input value={a.growth||''} onChange={e=>update(i,'growth',e.target.value)} placeholder="6" type="number" step="0.5" style={{textAlign:'center',fontSize:12,color:'var(--green2)'}} />
-            <input value={a.dividend||''} onChange={e=>update(i,'dividend',e.target.value)} placeholder="2" type="number" step="0.5" style={{textAlign:'center',fontSize:12,color:'#9d8abf'}} />
-            <input value={a.fee||''} onChange={e=>update(i,'fee',e.target.value)} placeholder="1.5" type="number" step="0.1" style={{textAlign:'center',fontSize:12,color:'var(--red)'}} />
+            <input value={a.growth||''} onChange={e=>update(i,'growth',e.target.value)} placeholder="auto" type="number" step="0.5" style={{textAlign:'center',fontSize:12,color:'var(--green2)'}} />
+            <input value={a.dividend||''} onChange={e=>update(i,'dividend',e.target.value)} placeholder="auto" type="number" step="0.5" style={{textAlign:'center',fontSize:12,color:'#9d8abf'}} />
             <span className="mono" style={{textAlign:'center',fontSize:11,fontWeight:600,color:riskColor(a.riskRating)}}>{a.riskRating||'-'}</span>
-            <button className="btn-danger btn-sm" onClick={()=>remove(i)} style={{padding:'2px 6px',fontSize:11}}>×</button>
+            <div style={{display:'flex',gap:3,justifyContent:'center'}}>
+              <button
+                title="Auto-fetch since-inception return from AI"
+                onClick={()=>autoFetchReturn(i)}
+                disabled={fetchingRow===i || !a.fundName}
+                style={{background:fetchingRow===i?'var(--gold-dim)':'var(--bg2)',color:fetchingRow===i?'var(--gold)':'var(--teal)',border:'1px solid var(--border2)',borderRadius:4,padding:'2px 5px',fontSize:11,cursor:(fetchingRow===i||!a.fundName)?'default':'pointer',opacity:!a.fundName?.4:1}}>
+                {fetchingRow===i ? '⏳' : '↻'}
+              </button>
+              <button className="btn-danger btn-sm" onClick={()=>remove(i)} style={{padding:'2px 5px',fontSize:11}}>×</button>
+            </div>
           </div>
           {/* Autocomplete dropdown */}
           {showSuggestions===i && suggestions.length > 0 && (
@@ -10418,7 +10575,7 @@ function FundAllocationEditor({allocations,onChange,reinvest,onSyncWeighted}) {
         {totalPct === 100 && <span style={{fontSize:10,color:'var(--green2)',fontWeight:600}}>✓ 100% allocated</span>}
       </div>
 
-      {/* ── Weighted Summary Panel ── */}
+      {/* ── Weighted Summary Panel — 5 cols: Growth, Div, Policy Fee, Net, Risk ── */}
       {allocations.length > 0 && totalPct > 0 && (
         <div style={{marginTop:10,padding:10,background:'var(--bg2)',borderRadius:8,border:'1px solid var(--border)'}}>
           <div className="resp-5col" style={{textAlign:'center'}}>
@@ -10433,9 +10590,9 @@ function FundAllocationEditor({allocations,onChange,reinvest,onSyncWeighted}) {
               <div style={{fontSize:9,color:'var(--text3)'}}>{reinvest?'Reinvested':'Paid out'}</div>
             </div>
             <div>
-              <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',fontWeight:600}}>Avg Fee</div>
-              <div style={{fontSize:15,fontWeight:700,color:'var(--red)'}}>{wFee.toFixed(2)}%</div>
-              <div style={{fontSize:9,color:'var(--text3)'}}>Mgmt fee</div>
+              <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',fontWeight:600}}>Policy Fee</div>
+              <div style={{fontSize:15,fontWeight:700,color:'var(--red)'}}>{polFeeNum.toFixed(2)}%</div>
+              <div style={{fontSize:9,color:'var(--text3)'}}>Set above</div>
             </div>
             <div>
               <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',fontWeight:600}}>{reinvest?'Total Yield':'Net Growth'}</div>
@@ -10450,12 +10607,12 @@ function FundAllocationEditor({allocations,onChange,reinvest,onSyncWeighted}) {
           </div>
           {!reinvest && wDiv > 0 && (
             <div style={{marginTop:6,padding:'4px 8px',background:'rgba(157,138,191,.08)',borderRadius:6,fontSize:10,color:'#9d8abf',textAlign:'center'}}>
-              Dividends paid out separately at {wDiv.toFixed(2)}% p.a. — Total return incl. dividends: {(wGrowth + wDiv - wFee).toFixed(2)}%
+              Dividends paid out separately at {wDiv.toFixed(2)}% p.a. — Total return incl. dividends: {(wGrowth + wDiv - polFeeNum).toFixed(2)}%
             </div>
           )}
         </div>
       )}
-      <div style={{fontSize:10,color:'var(--text3)',marginTop:4}}>Risk ratings auto-looked up from {FUND_DB.length.toLocaleString()} instruments (iFAST universe). Per-fund growth/div/fee override the policy-level defaults.</div>
+      <div style={{fontSize:10,color:'var(--text3)',marginTop:4}}>Risk ratings auto-looked up from {FUND_DB.length.toLocaleString()} instruments (iFAST universe). ↻ auto-fetches since-inception return from AI. Management fee is set once at policy level above.</div>
     </div>
   );
 }
