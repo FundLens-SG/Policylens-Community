@@ -3743,6 +3743,90 @@ var FUND_DB=[
 ];
 
 // ═══════════════════════════════════════════════════════════════
+// FUND MATCHER — scored best-match against FUND_DB
+// ───────────────────────────────────────────────────────────────
+// Replaces the previous naive Array.find() substring lookup which returned the
+// FIRST database entry containing the query as a substring. That approach
+// silently mis-identified many funds: e.g. a query like "Allianz Global" would
+// pick whichever "Allianz Global..." entry happened to appear first in FUND_DB
+// alphabetically, not the most specific match. This scores every candidate
+// and returns the highest-ranking one above a quality threshold.
+// ═══════════════════════════════════════════════════════════════
+
+function scoreFundMatch(query, dbName) {
+  if(!query || !dbName) return 0;
+  const origQ = String(query).trim();
+  const origD = String(dbName).trim();
+  const q = origQ.toLowerCase().replace(/\s+/g,' ');
+  const d = origD.toLowerCase().replace(/\s+/g,' ');
+  if(q === d) return 1000; // exact match — unbeatable
+  // Tokenize — keep 2-char tokens (US, EU, AI, HK, SG are meaningful in fund names)
+  // but filter prepositions/articles which are noise.
+  const stopWords = new Set(['fund','funds','the','and','an','of','in','for','on','to','by','at','or','is','as','it']);
+  const qWords = q.split(/[\s\-&,\.\/]+/).filter(w => w.length >= 2 && !stopWords.has(w));
+  const dWordsLower = d.split(/[\s\-&,\.\/]+/).filter(w => w.length >= 2 && !stopWords.has(w));
+  if(qWords.length === 0 || dWordsLower.length === 0) return 0;
+  // Word match — exact match for all lengths; prefix match only when both tokens ≥3 chars
+  // (prevents "us" from prefix-matching "usa" or "AI" from matching "Asia").
+  const wordIn = (w, arr) => arr.some(a => a === w || (w.length >= 3 && a.length >= 3 && a.startsWith(w)) || (w.length >= 3 && a.length >= 3 && w.startsWith(a)));
+  let matchedQ = qWords.filter(w => wordIn(w, dWordsLower)).length;
+  // ── ACRONYM EXPANSION ──
+  // If the original query contains an all-caps 2-4 letter token (e.g. "AI", "US", "EU"),
+  // and the DB name has consecutive words whose initial letters spell that acronym,
+  // award a bonus and count it as a matched query word. Handles "Allianz Global AI" →
+  // "Allianz Global Artificial Intelligence".
+  const acronymRe = /\b[A-Z]{2,4}\b/g;
+  const acronyms = origQ.match(acronymRe) || [];
+  const dWordsRaw = origD.split(/[\s\-&,\.\/]+/).filter(Boolean);
+  let acronymBonus = 0;
+  for(const acr of acronyms) {
+    const letters = acr.toLowerCase();
+    // Skip if this acronym is already present verbatim in the DB name
+    if(dWordsLower.includes(letters)) continue;
+    // Look for consecutive DB words whose initial letters spell the acronym
+    for(let i=0; i<=dWordsRaw.length-letters.length; i++) {
+      let match = true;
+      for(let j=0; j<letters.length; j++) {
+        if(!dWordsRaw[i+j] || dWordsRaw[i+j][0].toLowerCase() !== letters[j]) { match=false; break; }
+      }
+      if(match) { acronymBonus += 80; matchedQ++; break; }
+    }
+  }
+  // Require at least 60% of query words (including expanded acronyms) to match.
+  if(matchedQ < Math.ceil(qWords.length * 0.6)) return 0;
+  // For very short queries (1 word), reject unless it's the exact match case handled above.
+  // A single-token query like "Allianz" or "PRULink" is inherently ambiguous because many
+  // DB entries contain it — picking one would mis-identify the fund. Force NO MATCH so
+  // the caller keeps the original AI-extracted name as-is.
+  if(matchedQ < 2 && qWords.length < 2) return 0;
+  // Base score: fraction of query matched.
+  let score = (matchedQ / qWords.length) * 100;
+  // Bonus: fraction of db name matched (penalises db names with many unrelated extra words).
+  const matchedD = dWordsLower.filter(w => wordIn(w, qWords)).length;
+  score += (matchedD / dWordsLower.length) * 60;
+  // Substring bonus.
+  if(d.includes(q)) score += 40;
+  if(q.includes(d)) score += 20;
+  // Acronym bonus.
+  score += acronymBonus;
+  // Penalty for big length differences.
+  score -= Math.min(30, Math.abs(q.length - d.length) * 0.4);
+  return Math.max(0, score);
+}
+
+function findBestFund(query, minScore) {
+  if(!query || typeof FUND_DB === 'undefined' || !FUND_DB.length) return null;
+  const threshold = (typeof minScore === 'number') ? minScore : 55;
+  let bestScore = 0;
+  let best = null;
+  for(const f of FUND_DB) {
+    const s = scoreFundMatch(query, f[0]);
+    if(s > bestScore) { bestScore = s; best = f; if(s >= 1000) break; }
+  }
+  return bestScore >= threshold ? best : null;
+}
+
+// ═══════════════════════════════════════════════════════════════
 // MODULE: INDEXEDDB — Database layer + batch operations
 // ═══════════════════════════════════════════════════════════════
 
@@ -6375,14 +6459,24 @@ function Dashboard() {
           // Reinvest: total yield compounds into fund. Payout: only growth-fee compounds, div paid separately.
           const netRate = isReinvest ? (growth + div - fee) : (growth - fee);
           const drawdownAge = parseInt(pol.ilpDivDrawdownAge)||retAge;
-          const totalPremPaid = isSingle ? prem : prem * Math.min(premTerm, yearsInForce+1);
+          // ── CV PROJECTION HORIZON CAP ──
+          // Investment policies should not compound all the way to age 100+ in projections.
+          // After drawdown age (default = retAge), assume the fund is realised/cashed out
+          // and freeze the value at its drawdown-age level. Prevents unrealistic exponential
+          // growth shown on the retirement timeline chart. Dividends accrue only for a
+          // reasonable 20-year drawdown window.
+          const effectiveYrs = Math.min(yearsInForce, Math.max(0, drawdownAge - startAge));
+          const effectivePremYrs = Math.min(premTerm, effectiveYrs+1);
+          const totalPremPaid = isSingle ? prem : prem * effectivePremYrs;
           let fv = parseFloat(pol.cashValue) > 0 && yearsInForce <= 1 ? parseFloat(pol.cashValue) :
-            (netRate>0 && !isSingle ? prem*(Math.pow(1+netRate,Math.min(premTerm,yearsInForce+1))-1)/netRate*Math.pow(1+netRate,Math.max(0,yearsInForce-premTerm)) : totalPremPaid*Math.pow(1+Math.max(0,netRate),yearsInForce));
-          // Dividend income (only when NOT reinvesting)
-          if(!isReinvest && yr >= drawdownAge && div > 0) {
+            (netRate>0 && !isSingle ? prem*(Math.pow(1+netRate,effectivePremYrs)-1)/netRate*Math.pow(1+netRate,Math.max(0,effectiveYrs-premTerm)) : totalPremPaid*Math.pow(1+Math.max(0,netRate),effectiveYrs));
+          // Dividend income (only when NOT reinvesting) — accrue for up to 20 years after drawdown
+          if(!isReinvest && yr >= drawdownAge && yr <= drawdownAge + 20 && div > 0) {
             const divAmt = Math.round(fv * div);
             row.dividends += divAmt; row.income += divAmt;
           }
+          // Stop showing the policy entirely more than 20 years past drawdown — assume realised
+          if(yr > drawdownAge + 20) return;
           row.totalCV += Math.round(fv); row.policies.push({name:pol.productName||pol.insurer,cv:Math.round(fv),type:'ilp',divReinvest:isReinvest});
         }
       });
@@ -8258,26 +8352,18 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
                 }
               }
             }
-            // Fuzzy match extracted names to FUND_DB for exact names
+            // Scored match — collects all candidates, ranks them, picks the best above threshold.
+            // Previous naive .find() substring match returned the first alphabetical hit and
+            // misidentified many funds. See findBestFund helper above FUND_DB.
             if(fundAllocs.length > 0 && typeof FUND_DB !== 'undefined') {
               fundAllocs.forEach((fa,i) => {
-                const q = fa.fundName.toLowerCase().replace(/\s+/g,' ');
-                // Try exact substring match first
-                let best = FUND_DB.find(f => f[0].toLowerCase().includes(q));
-                // Try key words if no exact match
-                if(!best) {
-                  const words = q.split(' ').filter(w => w.length > 3);
-                  if(words.length >= 2) {
-                    best = FUND_DB.find(f => {
-                      const fn = f[0].toLowerCase();
-                      return words.every(w => fn.includes(w));
-                    });
-                  }
-                }
+                const best = findBestFund(fa.fundName);
                 if(best) {
+                  console.log('[Extract] Matched fund "'+fa.fundName+'" → "'+best[0]+'"');
                   fundAllocs[i].fundName = best[0];
                   fundAllocs[i].riskRating = best[4];
-                  console.log('[Extract] Matched fund "'+fa.fundName+'" → "'+best[0]+'"');
+                } else {
+                  console.log('[Extract] No confident DB match for fund "'+fa.fundName+'" — keeping as-is');
                 }
               });
               result.fundAllocations = fundAllocs;
@@ -8285,16 +8371,11 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
             }
           }
         }
-        // Also process AI-returned fundAllocations — fuzzy match names to DB
+        // Also process AI-returned fundAllocations — scored match to DB
         if(result.fundAllocations && result.fundAllocations.length > 0 && typeof FUND_DB !== 'undefined') {
           result.fundAllocations.forEach((fa,i) => {
             if(!fa.fundName) return;
-            const q = fa.fundName.toLowerCase().replace(/\s+/g,' ');
-            let best = FUND_DB.find(f => f[0].toLowerCase().includes(q));
-            if(!best) {
-              const words = q.split(' ').filter(w => w.length > 3);
-              if(words.length >= 2) best = FUND_DB.find(f => words.every(w => f[0].toLowerCase().includes(w)));
-            }
+            const best = findBestFund(fa.fundName);
             if(best) {
               result.fundAllocations[i] = {...fa, fundName:best[0], riskRating:best[4]};
             }
@@ -9848,7 +9929,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
               const fundGrowth = (form.fundAllocations||[]).length > 0 ? 
                 (()=>{const tp=(form.fundAllocations||[]).reduce((s,a)=>s+(parseFloat(a.pct)||0),0);return tp>0?(form.fundAllocations||[]).reduce((s,a)=>s+(parseFloat(a.pct)||0)*(parseFloat(a.growth)||0),0)/tp:0})() : 0;
               const r = (fundGrowth > 0 ? fundGrowth : parseFloat(form.cvGrowthRate)||parseFloat(form.ilpGrowth)||3)/100;
-              const retAge = parseInt(clientProfile?.retirementAge)||65;
+              const retAge = parseInt(_cp?.retirementAge)||65;
               const age = clientAge;
               const yearsInForce = Math.max(0, age - startAge);
               const totalPaid = form.premSingle ? prem : prem * Math.min(premTerm, Math.max(premTerm, retAge-startAge));
