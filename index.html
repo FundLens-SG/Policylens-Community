@@ -732,6 +732,58 @@ function calcISPBreakdown(totalPrem, age) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════
+// CALCULATION HELPERS — used by both module-level projectors and React
+// component code. Keep these pure (no React state, no closures) so they
+// can be unit-tested and called from anywhere.
+// ═══════════════════════════════════════════════════════════════════════
+
+// Returns the policy's premium normalised to an annual figure.
+// CRITICAL: pol.annualPremium stores the AS-PAID amount, NOT the annualised
+// amount. For a $100/mo policy it stores 100, not 1200. ALWAYS use this
+// helper for aggregating, comparing, sorting, or charting premium values
+// across policies — never read pol.annualPremium directly for those uses.
+//   monthly  → raw × 12
+//   annual   → raw
+//   single   → raw lump sum (caller decides whether to include single-pays)
+//   unknown  → raw (treated as annual, the historical default)
+function annualizedPremium(pol) {
+  if(!pol) return 0;
+  const raw = parseFloat(pol.annualPremium) || 0;
+  if(!raw) return 0;
+  if(pol.premFrequency === 'monthly') return raw * 12;
+  return raw;
+}
+
+// Realistic SG par Whole Life cash-value trajectory as a multiple of
+// cumulative premiums paid. Models acquisition-cost recovery: years 1-2
+// retain almost nothing, breakeven around year 10-12, then bonuses
+// compound. Returns null past the curve so the caller can switch to
+// pure compound growth from the breakeven point.
+function wlCVRatio(yearsInForce) {
+  if(yearsInForce <= 0) return 0;
+  // Index = full years in force. Values are CV ÷ premiums-paid-so-far.
+  // year:  0    1    2    3    4    5    6    7    8    9    10   11   12
+  const curve = [0, 0.05, 0.15, 0.27, 0.40, 0.52, 0.62, 0.72, 0.82, 0.92, 1.00, 1.08, 1.16];
+  const i = Math.floor(yearsInForce);
+  if(i >= curve.length) return null;
+  return curve[i];
+}
+
+// ILP surrender-charge retention factor. Years 1-10 only — silent haircut
+// to model the surrender penalty schedule typical of SG ILPs. Does NOT
+// model allocation rates, bid-offer spread, or other front-end costs
+// (deliberately kept invisible to the user). Returns the fraction of
+// fund value the client would actually receive on surrender.
+function ilpSurrenderRetention(yearsInForce) {
+  if(yearsInForce < 0) return 1;
+  const policyYear = Math.floor(yearsInForce) + 1; // 1-indexed
+  // year:  1    2    3    4    5    6    7    8    9    10+
+  const t = {1:0.50, 2:0.70, 3:0.80, 4:0.88, 5:0.92, 6:0.95, 7:0.97, 8:0.98, 9:0.99};
+  return t[policyYear] ?? 1.0;
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // LIFE-STAGE PROJECTION
 // ═══════════════════════════════════════════════════════════════════════
 // Returns {death, cv, income, ci} values for a single policy at a target
@@ -803,8 +855,9 @@ function projectPolicyAtAge(pol, targetAge, clientCurrentAge) {
     death = sa;
     if(coverageEnd && targetAge > coverageEnd) death = 0;
   }
-  // Retirement par WL plans carry a death benefit too (typically SA or CV)
-  if(cat === 'retirement' && sa > 0) death = sa;
+  // Retirement par WL plans carry a death benefit too — but the chosen
+  // mode (sa / cv / higher_cv_prem / custom) depends on cv which is
+  // computed below. Deferred to end-of-function.
 
   // ── CRITICAL ILLNESS SA (separate track) ──
   // Standalone CI / ECI policies
@@ -871,16 +924,22 @@ function projectPolicyAtAge(pol, targetAge, clientCurrentAge) {
 
     // CV projection respects payout vs reinvest mode
     const yearsToStart = Math.max(0, annuityStart - (clientCurrentAge || entryAge));
+    const cvAtStart = currentCV * Math.pow(1 + cvGrowth, yearsToStart);
     if(targetAge < annuityStart) {
       // Pure accumulation
       cv = currentCV * Math.pow(1 + cvGrowth, yearsFromNow);
     } else if(pol.retPayoutMode === 'reinvest') {
-      // Continues to compound even during income period
-      cv = currentCV * Math.pow(1 + cvGrowth, yearsFromNow);
+      // Reinvest mode: payouts are added back to the fund — effectively
+      // continued compounding past annuity start. Approximation: keep
+      // compounding cvAtStart at cvGrowth (the payout-as-reinvested
+      // contribution roughly cancels the drawdown).
+      const yearsIntoPayout = targetAge - annuityStart;
+      cv = cvAtStart * Math.pow(1 + cvGrowth, yearsIntoPayout);
     } else {
-      // Income phase with drawdown — CV holds at accumulation-end value
-      // (simplified: real par fund retains bonuses even during payout)
-      cv = currentCV * Math.pow(1 + cvGrowth, yearsToStart);
+      // Drawdown mode: CV grows until annuityStart, then payouts deplete
+      // it. Bounded at zero. Mirrors cvTimeline drawdown logic.
+      const yearsIntoPayout = Math.min(targetAge - annuityStart + 1, Math.max(1, annuityEnd - annuityStart + 1));
+      cv = Math.max(0, cvAtStart - annualPayout * yearsIntoPayout);
     }
   }
   // Cash investments (FD/T-bill/SSB) — hold principal until maturity, then zero
@@ -896,7 +955,18 @@ function projectPolicyAtAge(pol, targetAge, clientCurrentAge) {
     }
     if(!fdMatAge || targetAge <= fdMatAge) {
       const yld = (parseFloat(pol.fdYieldPct) || 0) / 100;
-      cv = principal * Math.pow(1 + yld, Math.min(yearsFromNow, fdMatAge ? fdMatAge - (clientCurrentAge || 0) : yearsFromNow));
+      // ── SG cash-instrument convention (Bug #8) ──
+      // Retail SG cash instruments do NOT auto-compound for the holder:
+      //   • Fixed Deposits → simple interest, paid out at rollover
+      //   • T-bills        → zero-coupon, yield baked into price discount
+      //   • SSBs           → step-up coupons paid semi-annually (treated as
+      //                       simple interest using the 10-yr average yield)
+      //   • Corporate bonds → coupons paid (income, not CV growth)
+      //   • Money market    → effectively simple
+      // Compounding overstates returns meaningfully on long tenors (e.g. a
+      // 10-year SSB at 3% compounded vs simple ≈ 4.5% drift).
+      const yearsHeld = Math.min(yearsFromNow, fdMatAge ? fdMatAge - (clientCurrentAge || 0) : yearsFromNow);
+      cv = principal * (1 + yld * Math.max(0, yearsHeld));
     } else {
       cv = 0; // matured — would be reinvested / spent
     }
@@ -904,6 +974,42 @@ function projectPolicyAtAge(pol, targetAge, clientCurrentAge) {
   // Default protection WL with cash value
   else if(currentCV > 0) {
     cv = currentCV * Math.pow(1 + cvGrowth, yearsFromNow);
+  }
+
+  // ── DEFERRED: retirement death benefit (depends on cv computed above) ──
+  // Form offers four modes: 'sa' (default), 'cv', 'higher_cv_prem', 'custom'.
+  if(cat === 'retirement') {
+    const dbMode = pol.retDeathBenefit || (sa > 0 ? 'sa' : 'cv');
+    if(dbMode === 'cv') {
+      death = cv;
+    } else if(dbMode === 'higher_cv_prem') {
+      const annPrem = annualizedPremium(pol);
+      const yrsPaid = Math.max(0, Math.min(yearsFromNow + Math.max(0, (clientCurrentAge||entryAge) - entryAge), parseInt(pol.premTerm)||99));
+      const totalPaid = pol.premSingle ? (parseFloat(pol.annualPremium) || 0) : annPrem * Math.max(1, yrsPaid);
+      death = Math.max(cv, totalPaid);
+    } else if(dbMode === 'custom') {
+      death = parseFloat(pol.retDeathBenefitCustom) || sa || cv;
+    } else {
+      death = sa > 0 ? sa : cv;
+    }
+  }
+
+  // ── PREMIUM FINANCING ADJUSTMENT (Bug audit: UL/IUL/VUL) ──
+  // When the policy is funded by a bank loan (typical SG private banking
+  // setup for UL family policies, sometimes annuities), the loan principal
+  // must be repaid from death proceeds and surrender proceeds first. The
+  // dashboard should show NET-of-loan figures so the FC and client see the
+  // true position, not the gross sum-assured headline.
+  // We apply this to ANY category where pol.financed is set — same logic
+  // works for UL, IUL, VUL, financed annuities, and even property assets.
+  if(pol.financed) {
+    const finLoan = parseFloat(pol.finLoan) || 0;
+    if(finLoan > 0) {
+      death = Math.max(0, death - finLoan);
+      cv = Math.max(0, cv - finLoan);
+      // CI track is NOT reduced — CI claims pay out separately and don't
+      // typically trigger loan repayment unless the policy lapses.
+    }
   }
 
   return { death, cv, income, ci };
@@ -977,6 +1083,15 @@ const CPF_CONSTANTS = {
   OW_CEILING: 8000,
   // CPF LIFE estimated monthly payouts at age 65 (2026 cohort turning 55, Standard Plan)
   // Source: CPF LIFE Estimator / MOF Annex E-3
+  //
+  // ⚠️ COHORT LIMITATION (Bug #13) ⚠️
+  // CPF LIFE annuitisation rates vary by retirement cohort because each cohort's
+  // mortality table and interest assumptions are different. These figures are
+  // anchored to the 2026 cohort (turning 55 this year). For clients in older
+  // cohorts the actual locked-in payout may differ by ±5–10%. The new
+  // `cpfCurrentMonthly` profile field overrides this estimation entirely for
+  // clients already in payout phase. For pre-55 clients in distant cohorts,
+  // accuracy will degrade gradually over 5+ year horizons.
   LIFE_PAYOUTS: {
     BRS: { standard: {low:900,mid:950,high:1000},  basic: {low:800,mid:850,high:900},  escalating: {low:750,mid:790,high:830} },
     FRS: { standard: {low:1680,mid:1780,high:1880}, basic: {low:1500,mid:1600,high:1700}, escalating: {low:1400,mid:1480,high:1560} },
@@ -1131,17 +1246,57 @@ function getCPFLifePayoutAll(raBalance, payoutStartAge=65) {
   return result;
 }
 
-// Project RA balance at a given age, starting from RA at 55
-function projectRAToAge(raAt55, targetAge) {
+// Project RA balance at a given age, starting from RA at 55.
+//
+// PARAMETERS
+//   raAt55           — RA balance at 55 (post-SA-to-RA transfer)
+//   targetAge        — age to project to
+//   otherCpfAt55     — optional: OA + MA balance at 55, used to model the
+//                      pooled extra-interest tier correctly. CPF rules give
+//                      +2% on the first $30k and +1% on the next $30k of
+//                      TOTAL CPF balances (with priority to RA), so an RA-only
+//                      calculation slightly OVERSTATES extra interest when
+//                      the client has significant OA/MA balances. If omitted,
+//                      we assume RA gets the full extra-interest tier (legacy
+//                      behaviour, conservative for retirees with low OA).
+//   payoutFromAge    — optional: if the client is already in CPF Life payout
+//                      phase, age at which payouts began. Past this age the
+//                      function stops growing RA (real-world: payouts deplete
+//                      it faster than 4% interest grows it for most plans).
+//   monthlyPayout    — optional: known monthly CPF Life payout for clients
+//                      already drawing. When provided alongside payoutFromAge,
+//                      the projection subtracts cumulative payouts from RA so
+//                      it actually decays during the income phase.
+function projectRAToAge(raAt55, targetAge, otherCpfAt55 = 0, payoutFromAge = null, monthlyPayout = 0) {
   if(targetAge <= 55) return raAt55;
   let ra = raAt55;
+  let otherCpf = otherCpfAt55 || 0;
   for(let age = 55; age < targetAge; age++) {
-    // RA earns 4% + extra interest
+    // RA earns 4%
     ra *= (1 + CPF_CONSTANTS.RA_RATE);
-    // Extra interest for 55+: +2% on first $30k, +1% on next $30k
-    const extra2 = Math.min(ra, 30000) * 0.02;
-    const extra1 = Math.max(0, Math.min(ra, 60000) - 30000) * 0.01;
-    ra += extra2 + extra1;
+    // OA portion of "other CPF" continues to earn its own rate. We approximate
+    // it at OA rate since OA dominates after 55 for most clients.
+    if(otherCpf > 0) otherCpf *= (1 + CPF_CONSTANTS.OA_RATE);
+
+    // ── Pooled extra interest (55+) ──
+    // CPF rules: +2% on first $30k and +1% on next $30k of TOTAL CPF balances,
+    // applied with priority to RA. So if RA = $50k and OA = $40k, the +2%
+    // applies to RA's first $30k (RA-priority), and the +1% applies to RA's
+    // next $20k + OA's first $10k. We model the RA share of the pooled bonus.
+    const totalCpf = ra + otherCpf;
+    const tier2Cap = Math.min(totalCpf, 30000);
+    const tier1Cap = Math.max(0, Math.min(totalCpf, 60000) - 30000);
+    // RA-priority: how much of each tier is RA's share
+    const raTier2 = Math.min(ra, tier2Cap);
+    const raTier1 = Math.min(Math.max(0, ra - tier2Cap), tier1Cap);
+    ra += raTier2 * 0.02 + raTier1 * 0.01;
+
+    // ── Payout-phase decay (if applicable) ──
+    if(payoutFromAge && monthlyPayout > 0 && age + 1 > payoutFromAge) {
+      // Subtract this year's payouts from RA. CPF Life is annuitised so RA
+      // depletes regardless of interest credited. Bounded at 0.
+      ra = Math.max(0, ra - monthlyPayout * 12);
+    }
   }
   return Math.round(ra);
 }
@@ -1158,8 +1313,13 @@ async function fetchFXRate(from='USD', to='SGD') {
     const r = await fetch('https://api.exchangerate-api.com/v4/latest/' + from);
     if(r.ok) { const d = await r.json(); return d.rates?.[to] || null; }
   } catch(e) {}
-  // Fallback defaults
-  const defaults = {USDSGD:1.34, GBPSGD:1.70, EURSGD:1.45, HKDSGD:0.17, AUDSGD:0.88, JPYSGD:0.009, CNYSGD:0.185, MYRSGD:0.30};
+  // ⚠️ Fallback defaults — REVIEW QUARTERLY ⚠️
+  // These fire only when the live API is unreachable. Stale values silently
+  // mis-state SGD aggregates for any non-SGD policy. Last reviewed: Q1 2026.
+  // If the live API is up these values are never used. To refresh: query
+  // exchangerate-api.com or any FX API and update both this map AND the
+  // initial state in the React component (search 'fxRates' useState).
+  const defaults = {USDSGD:1.32, GBPSGD:1.68, EURSGD:1.43, HKDSGD:0.17, AUDSGD:0.86, JPYSGD:0.0085, CNYSGD:0.18, MYRSGD:0.30};
   return defaults[from+to] || null;
 }
 
@@ -5903,7 +6063,7 @@ function ProfileTab() {
           <button style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',fontSize:11,padding:'5px 10px',borderRadius:8,cursor:'pointer',fontWeight:500}} onClick={()=>uploadRef.current?.click()} disabled={scanning}>{scanning?'…':'📄 Upload'}</button>
           <button className="btn-sm" style={{background:'rgba(239,83,80,.08)',color:'var(--red)',border:'1px solid rgba(239,83,80,.15)',fontSize:10,padding:'5px 10px',borderRadius:8,cursor:'pointer'}} onClick={()=>{
             if(!confirm('Delete all client profile data?\n\nClears name, NRIC, DOB, income, expenses, CPF settings, dependants.\n\nPolicies will NOT be deleted.')) return;
-            const blank = {name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[],annualIncome:'',retirementAge:'65',monthlyExpenses:'',mortgagePayment:'',dependantSupport:'',medicalBudget:'',desiredRetIncome:'',inflationRate:'2.8',cpfScheme:'FRS',cpfPlan:'standard',cpfStartAge:'65',cpfTopUp:'',otherRetIncome:[]};
+            const blank = {name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[],annualIncome:'',retirementAge:'65',monthlyExpenses:'',mortgagePayment:'',dependantSupport:'',medicalBudget:'',desiredRetIncome:'',inflationRate:'2.8',cpfScheme:'FRS',cpfPlan:'standard',cpfStartAge:'65',cpfTopUp:'',cpfCurrentMonthly:'',otherRetIncome:[]};
             setP(blank); saveProfile(blank); toast('Profile cleared','success');
           }}>🗑 Clear Profile</button>
         </div>
@@ -5996,6 +6156,13 @@ function ProfileTab() {
                 <div className="field"><label>Payout Start Age</label><input type="number" value={p.cpfStartAge||65} onChange={e=>set('cpfStartAge',e.target.value)} min="65" max="70" /><div style={{fontSize:9,color:'var(--text3)'}}>65–70 (↑7%/yr deferred)</div></div>
                 <div className="field"><label>SA Top-up ($)</label><input type="number" value={p.cpfTopUp||''} onChange={e=>set('cpfTopUp',e.target.value)} placeholder="0" /><div style={{fontSize:9,color:'var(--text3)'}}>Voluntary top-up to RA</div></div>
               </div>
+              {(age||0) >= (parseInt(p.cpfStartAge)||65) && (
+                <div className="field" style={{marginTop:6}}>
+                  <label>Current Monthly Payout ($) <span style={{color:'var(--text3)',fontWeight:400}}>· already drawing</span></label>
+                  <input type="number" value={p.cpfCurrentMonthly||''} onChange={e=>set('cpfCurrentMonthly',e.target.value)} placeholder="locked-in monthly amount" />
+                  <div style={{fontSize:9,color:'var(--text3)'}}>Override estimation for clients already in payout phase</div>
+                </div>
+              )}
               {p.cpfScheme && p.cpfScheme !== 'none' && (() => {
                 const startAge = parseInt(p.cpfStartAge)||65;
                 const clientAge = age || 35;
@@ -6083,6 +6250,13 @@ function ProfileTab() {
                   </select>
                 </div>
               </div>
+              {(age||0) >= (parseInt(p.cpfStartAge)||65) && (
+                <div className="field" style={{marginBottom:6}}>
+                  <label>Current Monthly Payout ($) <span style={{color:'var(--text3)',fontWeight:400}}>· already drawing</span></label>
+                  <input type="number" value={p.cpfCurrentMonthly||''} onChange={e=>set('cpfCurrentMonthly',e.target.value)} placeholder="locked-in monthly amount" />
+                  <div style={{fontSize:9,color:'var(--text3)'}}>Override estimation for clients already in payout phase</div>
+                </div>
+              )}
 
               {/* Projection result */}
               {age && parseFloat(p.cpfMonthlySalary) > 0 && (() => {
@@ -6317,7 +6491,7 @@ const RetirementLiteDashboard = memo(function RetirementLiteDashboard({data,age,
       lastMain = g.main;
       const headerRow = showMain ? `<tr><td colspan="6" style="padding:12px 8px 4px;font-size:13px;font-weight:700;color:#d4a96a;border:none">${g.main}</td></tr>` : '';
       const subRow = g.sub ? `<tr><td colspan="6" style="padding:2px 8px 6px;font-size:10px;font-weight:600;color:#a39580;text-transform:uppercase;letter-spacing:.5px;border:none">${g.sub} (${g.items.length})</td></tr>` : '';
-      const sortedItems = [...g.items].sort((a,b) => (a.subType||'').localeCompare(b.subType||'') || (a.insurer||'').localeCompare(b.insurer||'') || (parseFloat(b.annualPremium)||0)-(parseFloat(a.annualPremium)||0));
+      const sortedItems = [...g.items].sort((a,b) => (a.subType||'').localeCompare(b.subType||'') || (a.insurer||'').localeCompare(b.insurer||'') || annualizedPremium(b)-annualizedPremium(a));
       const rows = sortedItems.map(pol => {
         const prem = parseFloat(pol.annualPremium)||0;
         if(isFI) {
@@ -6330,7 +6504,8 @@ const RetirementLiteDashboard = memo(function RetirementLiteDashboard({data,age,
           </tr>`;
         }
         const isSP = pol.premSingle||pol.premFrequency==='single'||pol.premiumStructure==='Single Premium';
-        const premStr = isSP ? '$'+Math.round(prem).toLocaleString()+' <span style="font-size:8px;color:#d4a96a">SP</span>' : prem ? '$'+Math.round(pol.premFrequency==='monthly'?prem*12:prem).toLocaleString()+'/yr' : '';
+        const annPrem = annualizedPremium(pol);
+        const premStr = isSP ? '$'+Math.round(prem).toLocaleString()+' <span style="font-size:8px;color:#d4a96a">SP</span>' : annPrem ? '$'+Math.round(annPrem).toLocaleString()+'/yr' : '';
         const method = pol.paymentMethod || 'Cash';
         return `<tr>
           <td style="padding:4px 8px;font-size:10px">${pol.insurer||''}</td>
@@ -6616,7 +6791,7 @@ const PremiumCashflowChart = memo(function PremiumCashflowChart({policies,age,re
         if(pol.category==='cash_investments') return;
         const startAge = parseInt(pol.premStartAge)||parseInt(pol.ageAtEntry)||age;
         const premTerm = pol.premSingle ? 1 : (pol.premWholeLife ? Math.max(65-startAge,30) : (parseInt(pol.premTerm)||(parseInt(pol.premEndAge)>0?parseInt(pol.premEndAge)-startAge:25)));
-        const prem = parseFloat(pol.annualPremium)||0;
+        const prem = annualizedPremium(pol);
         if(yr >= startAge && yr < startAge + premTerm && prem > 0) {
           const name = (pol.insurer?pol.insurer.split(' ')[0]+' ':'')+(pol.productName||pol.subType||'Policy');
           row.byPolicy[name] = (row.byPolicy[name]||0) + prem;
@@ -6733,9 +6908,9 @@ function ReviewSession({onClose}) {
   const rDI=income>0?Math.round(income/12*0.75):3000;
 
   // Premium analysis
-  const totalAnnual = active.filter(pol=>!pol.premSingle&&pol.premFrequency!=='single'&&pol.category!=='cash_investments').reduce((s,pol)=>s+(pol.premFrequency==='monthly'?(parseFloat(pol.annualPremium)||0)*12:(parseFloat(pol.annualPremium)||0)),0);
+  const totalAnnual = active.filter(pol=>!pol.premSingle&&pol.premFrequency!=='single'&&pol.category!=='cash_investments').reduce((s,pol)=>s+annualizedPremium(pol),0);
   const premRatio = income > 0 ? Math.round(totalAnnual/income*100) : 0;
-  const highPremPolicies = active.filter(pol=>(parseFloat(pol.annualPremium)||0)>5000 && pol.category!=='cash_investments').sort((a,b)=>(parseFloat(b.annualPremium)||0)-(parseFloat(a.annualPremium)||0));
+  const highPremPolicies = active.filter(pol=>annualizedPremium(pol)>5000 && pol.category!=='cash_investments').sort((a,b)=>annualizedPremium(b)-annualizedPremium(a));
 
   // Cash value
   const cvPolicies = active.filter(pol=>parseFloat(pol.cashValue)>0).sort((a,b)=>(parseFloat(b.cashValue)||0)-(parseFloat(a.cashValue)||0));
@@ -6830,7 +7005,7 @@ function ReviewSession({onClose}) {
             {highPremPolicies.slice(0,8).map(pol => (
               <div key={pol.id} style={{display:'flex',justifyContent:'space-between',alignItems:'center',padding:'6px 8px',borderBottom:'1px solid var(--border)',fontSize:11}}>
                 <div><span style={{fontWeight:500}}>{pol.productName||pol.policyName}</span> <span style={{color:'var(--text3)',fontSize:10}}>{pol.insurer}</span></div>
-                <div style={{fontWeight:600,color:'var(--gold)'}}>{fmt(parseFloat(pol.annualPremium)||0)}/yr</div>
+                <div style={{fontWeight:600,color:'var(--gold)'}}>{fmt(annualizedPremium(pol))}/yr</div>
               </div>
             ))}
             {premRatio > 15 && <div style={{marginTop:10,padding:10,background:'rgba(212,169,106,.06)',borderRadius:8,fontSize:11,color:'var(--gold)'}}>
@@ -6848,9 +7023,9 @@ function ReviewSession({onClose}) {
             </div>
             {cvPolicies.slice(0,10).map(pol => {
               const cv = parseFloat(pol.cashValue)||0;
-              const prem = parseFloat(pol.annualPremium)||0;
+              const annPrem = annualizedPremium(pol);
               const yrs = parseInt(pol.premStartAge) ? age - parseInt(pol.premStartAge) : 5;
-              const totalPaid = pol.premSingle ? prem : prem * yrs;
+              const totalPaid = pol.premSingle ? (parseFloat(pol.annualPremium)||0) : annPrem * Math.max(1,yrs);
               const gain = cv - totalPaid;
               return (
                 <div key={pol.id} style={{padding:'8px',borderBottom:'1px solid var(--border)',fontSize:11}}>
@@ -6968,7 +7143,9 @@ function Dashboard() {
   const [ciIncDep,setCiIncDep] = useState(false);
 
   // ── FX RATE STATE ──
-  const [fxRates, setFxRates] = useState({USDSGD:1.34, GBPSGD:1.70, EURSGD:1.45});
+  // Initial FX state — overwritten by live API on mount. See fetchFXRate
+  // for the canonical fallback table; keep these in sync. Reviewed Q1 2026.
+  const [fxRates, setFxRates] = useState({USDSGD:1.32, GBPSGD:1.68, EURSGD:1.43});
   const [fxManual, setFxManual] = useState(false);
   const [fxLoading, setFxLoading] = useState(false);
   useEffect(() => {
@@ -6989,7 +7166,18 @@ function Dashboard() {
   const toSGD = (amount, currency) => {
     if(!currency || currency === 'SGD') return amount;
     const key = currency + 'SGD';
-    return amount * (fxRates[key] || 1);
+    const rate = fxRates[key];
+    if(rate) return amount * rate;
+    // Fallback: treat as 1:1 — but log loudly so silent corruption is detectable.
+    // Throttled by currency to avoid console spam in projection loops.
+    if(typeof window !== 'undefined') {
+      window.__fxFallbackWarned = window.__fxFallbackWarned || new Set();
+      if(!window.__fxFallbackWarned.has(currency)) {
+        window.__fxFallbackWarned.add(currency);
+        console.warn(`[FX] No rate loaded for ${currency}→SGD — falling back to 1:1. ${currency} amounts in aggregates may be understated.`);
+      }
+    }
+    return amount;
   };
 
   // ── CURRENCY CONSOLIDATION ──
@@ -6998,7 +7186,7 @@ function Dashboard() {
     policies.forEach(pol => {
       const ccy = pol.currency || 'SGD';
       if(!byCcy[ccy]) byCcy[ccy] = {premium:0,coverage:0,cv:0,count:0,policies:[]};
-      byCcy[ccy].premium += parseFloat(pol.annualPremium)||0;
+      byCcy[ccy].premium += annualizedPremium(pol);
       byCcy[ccy].coverage += parseFloat(pol.sumAssured)||0;
       byCcy[ccy].count += 1;
       byCcy[ccy].policies.push(pol);
@@ -7131,9 +7319,20 @@ function Dashboard() {
         const startAge = parseInt(pol.premStartAge)||parseInt(pol.ageAtEntry)||age;
         const yearsInForce = yr - startAge;
         if(yearsInForce < 0) return;
-        const prem = parseFloat(pol.annualPremium)||0;
+        // Use annualizedPremium so monthly-billed policies are handled correctly.
+        // For single premium it returns the raw lump sum, which is what the
+        // compound-growth formulas below expect.
+        const prem = annualizedPremium(pol);
         const isSingle = pol.premSingle;
         const premTerm = isSingle ? 1 : (pol.premWholeLife ? Math.max(65-startAge, 30) : (parseInt(pol.premTerm)||(parseInt(pol.premEndAge)>0?parseInt(pol.premEndAge)-startAge:25)));
+        const ccy = pol.currency || 'SGD';
+        // ── PREMIUM FINANCING ADJUSTMENT (audit fix) ──
+        // When the policy is funded by a bank loan, the loan principal is
+        // owed against any cash value or maturity proceeds. We subtract it
+        // from each branch's contribution before adding to row totals so the
+        // dashboard reflects the true client-owned position.
+        const finLoanSGD = pol.financed ? toSGD(parseFloat(pol.finLoan)||0, ccy) : 0;
+        const netOfFin = (v) => Math.max(0, v - finLoanSGD);
 
         if(pol.category==='savings') {
           const sub = pol.endSubtype||'limited';
@@ -7141,12 +7340,30 @@ function Dashboard() {
           const policyTerm = sub==='lifetime' ? 99-startAge : (parseInt(pol.endPolicyTerm)||payYrs+(parseInt(pol.endWaitYrs)||0));
           const matAge = startAge + policyTerm;
           const r = (parseFloat(pol.endYield)||parseFloat(pol.cvGrowthRate)||4)/100;
+          // ── ANCHOR AT USER CV (Bug #15) ──
+          // When the user provides a current cash value, treat it as the
+          // anchor at the present age and grow it forward, instead of jumping
+          // from a 1-year userCV display to a 2-year inception formula. This
+          // eliminates the visible step at age start+2.
+          const userCV = parseFloat(pol.cashValue) || 0;
+          const currentYIF = Math.max(0, (age||startAge) - startAge);
           let cv;
-          if(parseFloat(pol.cashValue) > 0 && yearsInForce <= 1) cv = parseFloat(pol.cashValue);
-          else if(parseFloat(pol.endGuaranteedCV) > 0 && yearsInForce >= policyTerm) cv = parseFloat(pol.endGuaranteedCV) + (parseFloat(pol.endNonGuarBonus)||0);
-          else { const paid = Math.min(payYrs, yearsInForce+1); cv = isSingle ? prem * Math.pow(1+r, yearsInForce) : (r>0 ? prem*(Math.pow(1+r,paid)-1)/r*Math.pow(1+r, Math.max(0,yearsInForce-paid)) : prem*paid); }
-          if(yr === matAge && sub!=='lifetime') { row.maturities += Math.round(cv); }
-          else if(yr <= matAge || sub==='lifetime') { row.totalCV += Math.round(cv); row.policies.push({name:pol.productName||pol.insurer,cv:Math.round(cv),type:'endowment'}); }
+          if(parseFloat(pol.endGuaranteedCV) > 0 && yearsInForce >= policyTerm) {
+            cv = parseFloat(pol.endGuaranteedCV) + (parseFloat(pol.endNonGuarBonus)||0);
+          } else if(userCV > 0) {
+            const yrsFromAnchor = Math.max(0, yearsInForce - currentYIF);
+            cv = userCV * Math.pow(1+r, yrsFromAnchor);
+            if(!isSingle && r > 0) {
+              const remainingPayYrs = Math.min(yrsFromAnchor, Math.max(0, payYrs - currentYIF));
+              if(remainingPayYrs > 0) cv += prem * (Math.pow(1+r, remainingPayYrs) - 1) / r;
+            }
+          } else {
+            const paid = Math.min(payYrs, yearsInForce+1);
+            cv = isSingle ? prem * Math.pow(1+r, yearsInForce) : (r>0 ? prem*(Math.pow(1+r,paid)-1)/r*Math.pow(1+r, Math.max(0,yearsInForce-paid)) : prem*paid);
+          }
+          const cvSGD = toSGD(cv, ccy);
+          if(yr === matAge && sub!=='lifetime') { row.maturities += netOfFin(Math.round(cvSGD)); }
+          else if(yr <= matAge || sub==='lifetime') { row.totalCV += netOfFin(Math.round(cvSGD)); row.policies.push({name:pol.productName||pol.insurer,cv:netOfFin(Math.round(cvSGD)),type:'endowment'}); }
         }
 
         if(pol.category==='retirement') {
@@ -7154,20 +7371,71 @@ function Dashboard() {
           const payoutEnd = parseInt(pol.annuityEndAge)||85;
           const annPayout = parseFloat(pol.annuityPayout)||(parseFloat(pol.annuityMonthly)||parseFloat(pol.monthlyBenefit)||0)*12;
           const r = (parseFloat(pol.retAccumYield)||3.5)/100;
-          const paidYrs = Math.min(premTerm, yearsInForce+1);
-          let cv = parseFloat(pol.cashValue) > 0 && yearsInForce <= 1 ? parseFloat(pol.cashValue) :
-            (isSingle ? prem * Math.pow(1+r, yearsInForce) : (r>0 ? prem*(Math.pow(1+r,paidYrs)-1)/r*Math.pow(1+r,Math.max(0,yearsInForce-paidYrs)) : prem*paidYrs));
+          // Anchor at user CV when available — same logic as savings (Bug #15).
+          const userCV = parseFloat(pol.cashValue) || 0;
+          const currentYIF = Math.max(0, (age||startAge) - startAge);
+          let cv;
+          if(userCV > 0) {
+            const yrsFromAnchor = Math.max(0, yearsInForce - currentYIF);
+            cv = userCV * Math.pow(1+r, yrsFromAnchor);
+            if(!isSingle && r > 0) {
+              const remainingPremYrs = Math.min(yrsFromAnchor, Math.max(0, premTerm - currentYIF));
+              if(remainingPremYrs > 0) cv += prem * (Math.pow(1+r, remainingPremYrs) - 1) / r;
+            }
+          } else {
+            const paidYrs = Math.min(premTerm, yearsInForce+1);
+            cv = isSingle ? prem * Math.pow(1+r, yearsInForce) : (r>0 ? prem*(Math.pow(1+r,paidYrs)-1)/r*Math.pow(1+r,Math.max(0,yearsInForce-paidYrs)) : prem*paidYrs);
+          }
+          // Drawdown still applies post-anchor
           if(yr >= payoutStart && yr <= payoutEnd && pol.retPayoutMode!=='reinvest') cv = Math.max(0, cv - annPayout*(yr-payoutStart+1));
-          if(yr >= payoutStart && yr <= payoutEnd) row.income += annPayout;
-          if(yr <= payoutEnd) { row.totalCV += Math.max(0,Math.round(cv)); row.policies.push({name:pol.productName||pol.insurer,cv:Math.max(0,Math.round(cv)),type:'annuity'}); }
+          const cvSGD = toSGD(cv, ccy);
+          const incomeSGD = toSGD(annPayout, ccy);
+          if(yr >= payoutStart && yr <= payoutEnd) row.income += incomeSGD;
+          if(yr <= payoutEnd) { row.totalCV += netOfFin(Math.max(0,Math.round(cvSGD))); row.policies.push({name:pol.productName||pol.insurer,cv:netOfFin(Math.max(0,Math.round(cvSGD))),type:'annuity'}); }
         }
 
         if(pol.category==='protection' && !['Term Life','Personal Accident','Critical Illness'].includes(pol.subType)) {
+          // ── REALISTIC PAR WL CV TRAJECTORY ──
+          // Old formula treated every premium dollar as immediately invested
+          // (FV-of-annuity), overstating early-year CV by 5-10×. Real par WL has
+          // heavy acquisition costs that suppress CV in years 1-2 and only reach
+          // breakeven around year 10-12. After breakeven, par bonuses compound.
+          // When the user provides a current CV, that always takes priority over
+          // the curve (Bug #15 anchor logic).
           const r = (parseFloat(pol.cvGrowthRate)||3)/100;
-          const totalPremPaid = isSingle ? prem : prem * Math.min(premTerm, yearsInForce+1);
-          let cv = parseFloat(pol.cashValue) > 0 && yearsInForce <= 1 ? parseFloat(pol.cashValue) :
-            (r>0 && !isSingle ? prem*(Math.pow(1+r,Math.min(premTerm,yearsInForce+1))-1)/r*Math.pow(1+r,Math.max(0,yearsInForce-premTerm)) : totalPremPaid*Math.pow(1+r,yearsInForce));
-          row.totalCV += Math.round(cv); row.policies.push({name:pol.productName||pol.insurer,cv:Math.round(cv),type:'protection'});
+          const yearsCounted = Math.min(premTerm, yearsInForce+1);
+          const totalPremPaid = isSingle ? prem : prem * yearsCounted;
+          const userCV = parseFloat(pol.cashValue) || 0;
+          const currentYIF = Math.max(0, (age||startAge) - startAge);
+          let cv;
+          if(userCV > 0) {
+            // Anchor + grow forward + add subsequent premiums
+            const yrsFromAnchor = Math.max(0, yearsInForce - currentYIF);
+            cv = userCV * Math.pow(1+r, yrsFromAnchor);
+            if(!isSingle && r > 0) {
+              const remainingPremYrs = Math.min(yrsFromAnchor, Math.max(0, premTerm - currentYIF));
+              if(remainingPremYrs > 0) cv += prem * (Math.pow(1+r, remainingPremYrs) - 1) / r;
+            }
+          } else if(isSingle) {
+            cv = totalPremPaid * Math.pow(1+r, yearsInForce);
+          } else {
+            const ratio = wlCVRatio(yearsInForce);
+            if(ratio !== null) {
+              // Early-years curve: CV is a fraction of premiums-paid-so-far
+              cv = totalPremPaid * ratio;
+            } else {
+              // Past breakeven (year 12+): start from breakeven value and
+              // compound forward + add subsequent paid premiums at lower haircut
+              const breakeven = 12;
+              const breakevenPremPaid = prem * breakeven;
+              const cvAtBreakeven = breakevenPremPaid * 1.16; // matches curve endpoint
+              const yrsBeyond = yearsInForce - breakeven;
+              const additionalPremPaid = prem * Math.max(0, yearsCounted - breakeven);
+              cv = cvAtBreakeven * Math.pow(1+r, yrsBeyond) + additionalPremPaid * Math.pow(1+r, Math.max(0, yrsBeyond/2));
+            }
+          }
+          const cvSGD = toSGD(cv, ccy);
+          row.totalCV += netOfFin(Math.round(cvSGD)); row.policies.push({name:pol.productName||pol.insurer,cv:netOfFin(Math.round(cvSGD)),type:'protection'});
         }
 
         if(pol.category==='investment') {
@@ -7187,16 +7455,38 @@ function Dashboard() {
           const effectiveYrs = Math.min(yearsInForce, Math.max(0, drawdownAge - startAge));
           const effectivePremYrs = Math.min(premTerm, effectiveYrs+1);
           const totalPremPaid = isSingle ? prem : prem * effectivePremYrs;
-          let fv = parseFloat(pol.cashValue) > 0 && yearsInForce <= 1 ? parseFloat(pol.cashValue) :
-            (netRate>0 && !isSingle ? prem*(Math.pow(1+netRate,effectivePremYrs)-1)/netRate*Math.pow(1+netRate,Math.max(0,effectiveYrs-premTerm)) : totalPremPaid*Math.pow(1+Math.max(0,netRate),effectiveYrs));
+          // Anchor at user CV when present (Bug #15) — overrides both the
+          // inception formula and the surrender penalty curve, since the user
+          // value already reflects whatever charges have been deducted.
+          const userCV = parseFloat(pol.cashValue) || 0;
+          const currentYIF = Math.max(0, (age||startAge) - startAge);
+          const usingAnchor = userCV > 0;
+          let fv;
+          if(usingAnchor) {
+            const yrsFromAnchor = Math.max(0, effectiveYrs - currentYIF);
+            fv = userCV * Math.pow(1+Math.max(0,netRate), yrsFromAnchor);
+            if(!isSingle && netRate > 0) {
+              const remainingPremYrs = Math.min(yrsFromAnchor, Math.max(0, premTerm - currentYIF));
+              if(remainingPremYrs > 0) fv += prem * (Math.pow(1+netRate, remainingPremYrs) - 1) / netRate;
+            }
+          } else {
+            fv = (netRate>0 && !isSingle ? prem*(Math.pow(1+netRate,effectivePremYrs)-1)/netRate*Math.pow(1+netRate,Math.max(0,effectiveYrs-premTerm)) : totalPremPaid*Math.pow(1+Math.max(0,netRate),effectiveYrs));
+          }
+          // ── ILP SURRENDER PENALTY (years 1-10, silent) ──
+          // Skip when we have a user-supplied anchor — that value already
+          // reflects the actual surrender position. Skips single premiums.
+          if(!isSingle && !usingAnchor) {
+            fv = fv * ilpSurrenderRetention(yearsInForce);
+          }
+          const fvSGD = toSGD(fv, ccy);
           // Dividend income (only when NOT reinvesting) — accrue for up to 20 years after drawdown
           if(!isReinvest && yr >= drawdownAge && yr <= drawdownAge + 20 && div > 0) {
-            const divAmt = Math.round(fv * div);
+            const divAmt = Math.round(fvSGD * div);
             row.dividends += divAmt; row.income += divAmt;
           }
           // Stop showing the policy entirely more than 20 years past drawdown — assume realised
           if(yr > drawdownAge + 20) return;
-          row.totalCV += Math.round(fv); row.policies.push({name:pol.productName||pol.insurer,cv:Math.round(fv),type:'ilp',divReinvest:isReinvest});
+          row.totalCV += netOfFin(Math.round(fvSGD)); row.policies.push({name:pol.productName||pol.insurer,cv:netOfFin(Math.round(fvSGD)),type:'ilp',divReinvest:isReinvest});
         }
       });
       rows.push(row);
@@ -7216,21 +7506,35 @@ function Dashboard() {
     // Age-aware CPF LIFE payout
     let cpfPayout = {low:0, mid:0, high:0};
     if(cpfScheme !== 'none') {
-      let raAt65 = 0;
-      if(p.cpfUseScheme === false && parseFloat(p.cpfMonthlySalary) > 0) {
-        // Custom balance mode — project from actual CPF balances to age 65
-        const proj = projectCPFToRetirement(age||35, parseFloat(p.cpfMonthlySalary)||0, parseFloat(p.cpfOA)||0, parseFloat(p.cpfSA)||0, parseFloat(p.cpfMA)||0, 65);
-        raAt65 = proj.ra;
+      // ── Bug #9 fix: clients already in payout phase ──
+      // If the client is already drawing CPF Life and has told us their
+      // actual monthly payout, use that directly. The estimation chain
+      // (project RA from 55 → estimate payout) is meaningless once payouts
+      // have started — RA depletes with each draw and the client already
+      // knows their locked-in figure.
+      const knownPayout = parseFloat(p.cpfCurrentMonthly) || 0;
+      if((age||0) >= cpfStartAge && knownPayout > 0) {
+        cpfPayout = {low: Math.round(knownPayout*0.97), mid: Math.round(knownPayout), high: Math.round(knownPayout*1.03)};
       } else {
-        // Scheme mode — project scheme amount growing 3.5%/yr to age 55, then compound to 65
-        const schemeBase = getCPFSchemeAmount(cpfScheme);
-        const yearsTo55 = Math.max(0, 55 - (age||35));
-        const projectedScheme = Math.round(schemeBase * Math.pow(1.035, yearsTo55)) + (parseFloat(p.cpfTopUp)||0);
-        raAt65 = projectRAToAge(projectedScheme, 65);
+        let raAt65 = 0;
+        if(p.cpfUseScheme === false && parseFloat(p.cpfMonthlySalary) > 0) {
+          // Custom balance mode — project from actual CPF balances to age 65
+          const proj = projectCPFToRetirement(age||35, parseFloat(p.cpfMonthlySalary)||0, parseFloat(p.cpfOA)||0, parseFloat(p.cpfSA)||0, parseFloat(p.cpfMA)||0, 65);
+          raAt65 = proj.ra;
+        } else {
+          // Scheme mode — project scheme amount growing 3.5%/yr to age 55, then compound to 65
+          const schemeBase = getCPFSchemeAmount(cpfScheme);
+          const yearsTo55 = Math.max(0, 55 - (age||35));
+          const projectedScheme = Math.round(schemeBase * Math.pow(1.035, yearsTo55)) + (parseFloat(p.cpfTopUp)||0);
+          // Pass OA+MA balances to projectRAToAge so it models pooled extra
+          // interest correctly (Bug #10). Falls back to RA-only when unknown.
+          const otherCpf = (parseFloat(p.cpfOA)||0) + (parseFloat(p.cpfMA)||0);
+          raAt65 = projectRAToAge(projectedScheme, 65, otherCpf);
+        }
+        // estimateCPFLifePayout takes RA at 65, applies deferment internally
+        const est = estimateCPFLifePayout(raAt65, cpfPlan, cpfStartAge);
+        cpfPayout = {low: Math.round(est.monthly*0.94), mid: est.monthly, high: Math.round(est.monthly*1.06)};
       }
-      // estimateCPFLifePayout takes RA at 65, applies deferment internally
-      const est = estimateCPFLifePayout(raAt65, cpfPlan, cpfStartAge);
-      cpfPayout = {low: Math.round(est.monthly*0.94), mid: est.monthly, high: Math.round(est.monthly*1.06)};
     }
     const retRow = cvTimeline.find(r => r.age === retAge);
     const policyMonthlyIncome = retRow ? Math.round(retRow.income/12) : 0;
@@ -7313,7 +7617,7 @@ function Dashboard() {
     if(!chartRef.current) return;
     if(chartInst.current) chartInst.current.destroy();
     const cats = Object.keys(CATEGORIES).filter(c => c !== 'cash_investments'); // FDs aren't premiums
-    const data = cats.map(c => (byCategory[c]||[]).reduce((s,p) => s + (parseFloat(p.annualPremium)||0), 0));
+    const data = cats.map(c => (byCategory[c]||[]).reduce((s,p) => s + annualizedPremium(p), 0));
     chartInst.current = new Chart(chartRef.current, {
       type:'doughnut',
       data:{labels:cats.map(c=>CATEGORIES[c].label),datasets:[{data,backgroundColor:['#5b8fd9','#5ba8a0','#c97b9a','#9d8abf','#d4a96a','#c97b9a'],borderWidth:0,hoverOffset:4}]},
@@ -7681,7 +7985,7 @@ function Dashboard() {
         const byInsurer = {};
         policies.forEach(pol => {
           const ins = pol.insurer||'Unknown';
-          byInsurer[ins] = (byInsurer[ins]||0) + (parseFloat(pol.annualPremium)||0);
+          byInsurer[ins] = (byInsurer[ins]||0) + annualizedPremium(pol);
         });
         const entries = Object.entries(byInsurer).sort((a,b)=>b[1]-a[1]);
         const total = entries.reduce((s,e)=>s+e[1],0);
@@ -7978,7 +8282,7 @@ function Dashboard() {
                   <span style={{fontSize:12,fontWeight:600}}>{v.label}</span>
                 </div>
                 <div style={{fontSize:20,fontWeight:700}}>{ps.length}</div>
-                <div style={{fontSize:10,color:'var(--text3)'}}>{fmt(ps.reduce((s,p)=>s+(parseFloat(p.annualPremium)||0),0))} premium</div>
+                <div style={{fontSize:10,color:'var(--text3)'}}>{fmt(ps.reduce((s,p)=>s+annualizedPremium(p),0))} premium</div>
               </div>
             );
           })}
@@ -9125,9 +9429,17 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       const processed = arr.map(p => {
         const result = {...p, id:genId(), _batch:b+1, status:p.status||'inforce',
           sumAssured:parseFloat(p.sumAssured||p.faceAmount)||0,
-          // AI now returns premiumAmount (new, unambiguous name). Internal schema still uses
-          // annualPremium for backward compat with cached policies and all downstream code.
-          // Prefer the new field; fall back to legacy.
+          // ⚠️ FIELD NAMING HAZARD ⚠️
+          // The internal storage field is `annualPremium` for historical/backcompat
+          // reasons, but it actually stores the AS-PAID amount at whatever frequency
+          // the policy is billed (e.g. 1000 for a $1000/mo policy, not 12000).
+          // The companion field `premFrequency` carries the period.
+          // ALWAYS read aggregated premium values via the `annualizedPremium(pol)`
+          // helper at the top of this file — never read pol.annualPremium directly
+          // for sums, sorts, comparisons, or charts. Display sites should also use
+          // the helper or branch on premFrequency explicitly.
+          // The AI now returns premiumAmount (new unambiguous name); we still
+          // store under annualPremium for backward compat with cached policies.
           annualPremium:parseFloat(p.premiumAmount ?? p.annualPremium)||0,
           monthlyBenefit:parseFloat(p.monthlyBenefit)||0,
           riders:(p.riders||[]).map(r=>{
@@ -9688,7 +10000,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
           ];
           const fiItems = activePolicies.filter(p => p.category==='cash_investments');
           const otherItems = activePolicies.filter(p => p.category==='other_assets');
-          const insGroups = insuranceGroups.map(g => ({...g, items: activePolicies.filter(g.match).sort((a,b) => (a.subType||'').localeCompare(b.subType||'') || (a.insurer||'').localeCompare(b.insurer||'') || (parseFloat(b.annualPremium)||0)-(parseFloat(a.annualPremium)||0))})).filter(g => g.items.length > 0);
+          const insGroups = insuranceGroups.map(g => ({...g, items: activePolicies.filter(g.match).sort((a,b) => (a.subType||'').localeCompare(b.subType||'') || (a.insurer||'').localeCompare(b.insurer||'') || annualizedPremium(b)-annualizedPremium(a))})).filter(g => g.items.length > 0);
           // Unmatched (not in any group above)
           const cpfLifePols = activePolicies.filter(isCPFLifePolicy);
           const allGrouped = new Set([...insGroups.flatMap(g=>g.items.map(p=>p.id)), ...fiItems.map(p=>p.id), ...otherItems.map(p=>p.id), ...cpfLifePols.map(p=>p.id)]);
@@ -11657,6 +11969,46 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                 <div className="field"><label>Investment Risk</label><input disabled value="Client" /></div>
               </div>
             )}
+            {/* ── PREMIUM FINANCING (UL/IUL/VUL — common SG private banking setup) ── */}
+            <div style={{marginTop:10,paddingTop:10,borderTop:'1px solid var(--border)'}}>
+              <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8,cursor:'pointer',userSelect:'none'}} onClick={()=>set('financed',!form.financed)}>
+                <div style={{width:36,height:20,borderRadius:10,background:form.financed?'var(--orange)':'var(--border)',position:'relative',flexShrink:0}}>
+                  <div style={{position:'absolute',top:2,left:form.financed?18:2,width:16,height:16,borderRadius:'50%',background:'#fff',transition:'left .2s'}}></div>
+                </div>
+                <span style={{fontSize:12,fontWeight:600,color:form.financed?'var(--orange)':'var(--text3)'}}>Premium Financing (Bank Loan, Interest-Only)</span>
+              </div>
+              {form.financed && (
+                <div style={{background:'rgba(245,158,11,.06)',borderRadius:7,padding:10,border:'1px solid rgba(245,158,11,.25)'}}>
+                  <div style={{fontSize:10,color:'var(--text3)',marginBottom:8}}>Single premium funded by bank loan · ongoing interest-only payments · loan principal repaid from death benefit or surrender proceeds. Dashboard CV and death benefit will be shown net of loan when set.</div>
+                  <div className="grid-3">
+                    <div className="field"><label>Loan Amount ($)</label><input type="number" value={form.finLoan||''} onChange={e=>set('finLoan',e.target.value)} /></div>
+                    <div className="field"><label>Interest Rate % p.a.</label><input type="number" step="0.1" value={form.finRate||''} onChange={e=>set('finRate',e.target.value)} />
+                      <div style={{fontSize:10,color:'var(--red)'}}>Int-only: ${Math.round((parseFloat(form.finLoan)||0)*(parseFloat(form.finRate)||0)/100).toLocaleString()}/yr</div>
+                    </div>
+                    <div className="field"><label>Loan Tenure (yrs)</label><input type="number" value={form.finTenure||''} onChange={e=>set('finTenure',e.target.value)} placeholder="e.g. 10" /></div>
+                  </div>
+                  {(() => {
+                    const sp = parseFloat(form.annualPremium)||0;
+                    const ln = parseFloat(form.finLoan)||0;
+                    const rt = (parseFloat(form.finRate)||0)/100;
+                    const tn = parseInt(form.finTenure)||0;
+                    const cashDown = Math.max(0, sp - ln);
+                    const totalInterest = ln * rt * tn;
+                    const totalOutlay = cashDown + totalInterest;
+                    const sa = parseFloat(form.sumAssured)||0;
+                    const netDB = Math.max(0, sa - ln);
+                    return (
+                      <div style={{marginTop:8,padding:8,background:'var(--bg2)',borderRadius:6,fontSize:10,display:'grid',gridTemplateColumns:'1fr 1fr',gap:6}}>
+                        <div>Cash down: <strong style={{color:'var(--text2)'}}>${Math.round(cashDown).toLocaleString()}</strong></div>
+                        <div>Total interest ({tn||0}yr): <strong style={{color:'var(--orange)'}}>${Math.round(totalInterest).toLocaleString()}</strong></div>
+                        <div>Total client outlay: <strong style={{color:'var(--text2)'}}>${Math.round(totalOutlay).toLocaleString()}</strong></div>
+                        <div>Net DB (SA − loan): <strong style={{color:netDB>0?'var(--green2)':'var(--red)'}}>${Math.round(netDB).toLocaleString()}</strong></div>
+                      </div>
+                    );
+                  })()}
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -14070,7 +14422,7 @@ function ReportTab() {
       policies.forEach(pol=>{
         const startAge=parseInt(pol.premStartAge)||age;
         const yif=retAge-startAge;if(yif<0)return;
-        const prem=parseFloat(pol.annualPremium)||0;
+        const prem=annualizedPremium(pol);
         const pt=pol.premSingle?1:(pol.premWholeLife?Math.max(65-(parseInt(pol.premStartAge)||parseInt(pol.ageAtEntry)||35),30):(parseInt(pol.premTerm)||(parseInt(pol.premEndAge)>0?parseInt(pol.premEndAge)-(parseInt(pol.premStartAge)||35):25)));
         const r=(parseFloat(pol.cvGrowthRate)||parseFloat(pol.endYield)||parseFloat(pol.retAccumYield)||3)/100;
         if(pol.category==='savings'){
