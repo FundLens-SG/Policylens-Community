@@ -1022,6 +1022,108 @@ async function pdfToImages(pdfDoc, maxPages=12) {
   return images;
 }
 
+// ═══════════════════════════════════════════════════════════════
+// MODULE: SCAN_UTILS — Hash, text-layer extraction, reconciliation
+// ═══════════════════════════════════════════════════════════════
+
+// Extraction pipeline version stamp — bump this whenever EXTRACT_PROMPT, post-processing
+// logic, or schema changes. All previously-cached results become invalid, forcing a fresh
+// AI call. Protects users from seeing stale extractions after upgrades.
+const EXTRACT_PIPELINE_VERSION = 'v4-2026-04-06-premiumAmount-dedup';
+
+// SHA-256 hash of a File's bytes — used as content-addressable cache key.
+async function hashFile(file) {
+  const buf = await file.arrayBuffer();
+  const digest = await crypto.subtle.digest('SHA-256', buf);
+  return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2,'0')).join('');
+}
+
+// Compute an order-independent cache key for a batch of files, stamped with pipeline version.
+async function batchCacheKey(files) {
+  const hashes = await Promise.all(Array.from(files).map(hashFile));
+  hashes.sort();
+  return EXTRACT_PIPELINE_VERSION + ':' + hashes.join('|');
+}
+
+// Extract the text layer of an already-opened pdf.js document.
+// Much cheaper than sending the PDF to Gemini, and removes truncation risk for text-native PDFs.
+async function extractPdfTextLayer(pdfDoc, maxPages) {
+  const total = pdfDoc.numPages;
+  const pages = Math.min(total, maxPages || 200);
+  const sections = [];
+  for(let i = 1; i <= pages; i++) {
+    try {
+      const page = await pdfDoc.getPage(i);
+      const content = await page.getTextContent();
+      // Group items by their y-coordinate to preserve row structure (important for tables)
+      const rows = {};
+      for(const item of content.items) {
+        if(!item.str) continue;
+        const y = Math.round(item.transform[5]);
+        if(!rows[y]) rows[y] = [];
+        rows[y].push(item.str);
+      }
+      const sortedYs = Object.keys(rows).map(Number).sort((a,b) => b - a); // top → bottom
+      const pageText = sortedYs.map(y => rows[y].join(' ')).join('\n');
+      if(pageText.trim()) sections.push('--- Page '+i+' ---\n'+pageText);
+    } catch(e) {
+      console.warn('[PDF TextLayer] Page '+i+' failed:', e.message);
+    }
+  }
+  return sections.join('\n\n');
+}
+
+// Decide whether an extracted text layer is meaningful (vs. a scanned PDF that needs OCR,
+// or a PDF with corrupted custom-font encoding like some Singlife BetterView exports).
+function isTextLayerMeaningful(text) {
+  if(!text || text.length < 500) return false;
+  const alphaChars = (text.match(/[a-zA-Z]/g) || []).length;
+  const ratio = alphaChars / text.length;
+  if(ratio < 0.25) return false;
+  // CRITICAL: some PDFs (notably Singlife BetterView) use custom font encodings that
+  // pdf.js can't map. The text layer comes back alphabetic-ish but completely garbled.
+  // Verify we see at least a few common insurance-domain words before trusting it.
+  // If none appear, the text is unusable and we must fall through to Gemini PDF upload.
+  const domainPatterns = [
+    /\bpolic(?:y|ies)\b/i,
+    /\bpremium\b/i,
+    /\binsur(?:er|ance|ed)\b/i,
+    /\bcoverage\b/i,
+    /\bsum\s+assured\b/i,
+    /\bbeneficiary\b/i,
+    /\bmaturity\b/i,
+    /\bsurrender\b/i,
+  ];
+  const hits = domainPatterns.filter(p => p.test(text)).length;
+  if(hits < 2) {
+    console.warn('[PDF TextLayer] Text is alphabetic but lacks domain vocabulary ('+hits+'/8 domain words found). Likely garbled font encoding — rejecting.');
+    return false;
+  }
+  return true;
+}
+
+// Parse "You have N active policies" style hints from portfolio reports for reconciliation.
+// Returns the highest count found, or null if no hint is present.
+function parseExpectedPolicyCount(text) {
+  if(!text || typeof text !== 'string') return null;
+  const patterns = [
+    /you\s+have\s+(\d{1,3})\s+active\s+polic/gi,
+    /(\d{1,3})\s+active\s+polic(?:ies|y)/gi,
+    /total\s+of\s+(\d{1,3})\s+polic/gi,
+    /(\d{1,3})\s+polic(?:ies|y)\s+found/gi,
+  ];
+  const counts = [];
+  for(const p of patterns) {
+    const matches = text.matchAll(p);
+    for(const m of matches) {
+      const n = parseInt(m[1]);
+      if(n >= 1 && n <= 200) counts.push(n);
+    }
+  }
+  if(counts.length === 0) return null;
+  return Math.max(...counts);
+}
+
 // Master function: takes a File, returns content blocks ready for AI
 async function processFile(file) {
   const isPDF = file.type === 'application/pdf' || file.name?.toLowerCase().endsWith('.pdf');
@@ -1095,13 +1197,27 @@ async function processFile(file) {
     try {
       if(typeof pdfjsLib === 'undefined') throw new Error('pdf.js not loaded');
       const {doc, wasLocked} = await tryUnlockPDF(arrayBuffer);
+      if(doc.numPages === 0) throw new Error('PDF has no pages');
+      // ── TEXT-LAYER FAST PATH ──
+      // For text-native PDFs (Singlife BetterView, Manulife statements, SGFinDex exports),
+      // extract the text layer directly. This is ~10× cheaper than sending the PDF to Gemini,
+      // eliminates output-token truncation, and is lossless for structured table data.
+      try {
+        const textLayer = await extractPdfTextLayer(doc, 200);
+        if(isTextLayerMeaningful(textLayer)) {
+          console.log('[PDF] Text-layer fast path: '+doc.numPages+' pages → '+textLayer.length+' chars (skipping Gemini PDF upload)');
+          return [{type:'text', text:'[PDF: '+file.name+' — '+doc.numPages+' pages]\n\n'+textLayer}];
+        }
+        console.log('[PDF] Text layer sparse/empty ('+(textLayer||'').length+' chars) — likely scanned. Falling through to image/document path.');
+      } catch(textErr) {
+        console.warn('[PDF] Text-layer extraction failed:', textErr.message, '— falling through.');
+      }
+      // ── FALLBACK: locked PDFs get rasterized; unlocked PDFs get sent as document blocks ──
       if(wasLocked) {
         console.log('[PDF] Locked PDF unlocked, rendering to images...');
         const images = await pdfToImages(doc);
         return images.map(b64 => ({type:'image', source:{type:'base64', media_type:'image/jpeg', data:b64}}));
       } else {
-        // Check if PDF has pages before sending to Gemini
-        if(doc.numPages === 0) throw new Error('PDF has no pages');
         const b64 = await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file)});
         return [{type:'document', source:{type:'base64', media_type:'application/pdf', data:b64}}];
       }
@@ -3627,7 +3743,7 @@ var FUND_DB=[
 // MODULE: INDEXEDDB — Database layer + batch operations
 // ═══════════════════════════════════════════════════════════════
 
-const DB_NAME='PolicyLensV4';const DB_VER=1;
+const DB_NAME='PolicyLensV4';const DB_VER=2;
 const openDB=()=>new Promise((res,rej)=>{
   const r=indexedDB.open(DB_NAME,DB_VER);
   r.onupgradeneeded=e=>{
@@ -3635,6 +3751,7 @@ const openDB=()=>new Promise((res,rej)=>{
     if(!db.objectStoreNames.contains('policies'))db.createObjectStore('policies',{keyPath:'id'});
     if(!db.objectStoreNames.contains('repository'))db.createObjectStore('repository',{keyPath:'id'});
     if(!db.objectStoreNames.contains('settings'))db.createObjectStore('settings',{keyPath:'key'});
+    if(!db.objectStoreNames.contains('extractCache'))db.createObjectStore('extractCache',{keyPath:'key'});
   };
   r.onsuccess=e=>res(e.target.result);
   r.onerror=e=>rej(e.target.error);
@@ -4439,8 +4556,8 @@ async function geminiRead(geminiKey, contentBlocks) {
       method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({
         contents:[{parts}],
-        systemInstruction:{parts:[{text:'You are a document reader. Extract ALL text, numbers, tables, and data from these documents. Preserve table structures. Include every detail — policy numbers, dates, amounts, rider names, conditions, charges. Output as plain text, organized by section.'}]},
-        generationConfig:{maxOutputTokens:16000}
+        systemInstruction:{parts:[{text:'You are a document reader. Extract ALL text, numbers, tables, and data from these documents. Preserve table structures. Include EVERY detail — policy numbers, dates, amounts, rider names, conditions, charges. This may be a multi-page portfolio report with 10+ policies; you MUST dump every single policy with its full row of data. Do NOT summarize, do NOT skip rows, do NOT truncate. Output as plain text, organized by section.'}]},
+        generationConfig:{maxOutputTokens:60000}
       })
     });
   } catch(fetchErr) {
@@ -4465,7 +4582,7 @@ async function claudeExtract(anthropicKey, systemPrompt, rawText, maxTokens) {
     resp = await fetch('https://api.anthropic.com/v1/messages',{
       method:'POST',
       headers:{'Content-Type':'application/json','x-api-key':anthropicKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:maxTokens||4000,
+      body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:maxTokens||8000,
         system:systemPrompt+'\n\nRespond with ONLY valid JSON. Start with { end with }.',
         messages:[{role:'user',content:rawText}]
       })
@@ -7360,7 +7477,7 @@ function Policies() {
 
 For EACH policy or instrument, return a JSON object with:
 
-CORE: insurer, productName, policyName, policyNumber, category (protection/savings/health/investment/retirement/maternity/cash_investments/other_assets), subType (Term Life/Whole Life/Universal Life (UL)/Indexed UL (IUL)/Variable UL (VUL)/Critical Illness/Personal Accident/Disability Income/Long-term Care/Endowment/Lifetime Endowment/Education Plan/Short-term Endowment/Integrated Shield Plan/Hospital Income/CareShield Life Supplement/ElderShield 300/ElderShield 400/ILP (Protection)/ILP (Investment)/Unit Trust/Retirement/Annuity/Maternity Coverage/Fixed Deposit/T-bill/Singapore Savings Bond/Corporate Bond/Money Market/Property/Stocks\/Equities/Gold\/Precious Metals/Fixed Coupon Note (FCN)/Equity Linked Note (ELN)/Options\/Futures/Cryptocurrency/Other), currency (default SGD), sumAssured (number), annualPremium (number), premFrequency (annual/monthly/single/unknown — if document does not clearly state frequency, use unknown), premiumStructure (Single Premium/Regular Premium/Limited Pay/Flexible Premium), paymentMethod (Cash/MediSave/SRS/MediSave+Cash/CPF OA/CPF SA)
+CORE: insurer, productName, policyName, policyNumber, category (protection/savings/health/investment/retirement/maternity/cash_investments/other_assets), subType (Term Life/Whole Life/Universal Life (UL)/Indexed UL (IUL)/Variable UL (VUL)/Critical Illness/Personal Accident/Disability Income/Long-term Care/Endowment/Lifetime Endowment/Education Plan/Short-term Endowment/Integrated Shield Plan/Hospital Income/CareShield Life Supplement/ElderShield 300/ElderShield 400/ILP (Protection)/ILP (Investment)/Unit Trust/Retirement/Annuity/Maternity Coverage/Fixed Deposit/T-bill/Singapore Savings Bond/Corporate Bond/Money Market/Property/Stocks\/Equities/Gold\/Precious Metals/Fixed Coupon Note (FCN)/Equity Linked Note (ELN)/Options\/Futures/Cryptocurrency/Other), currency (default SGD), sumAssured (number), premiumAmount (number — the premium AS PAID, at whatever frequency it is billed. Do NOT convert or normalize. If document shows "$1,000 Monthly", return premiumAmount=1000. If document shows "$12,000 Annually", return premiumAmount=12000. If document shows "$50,000 Single Premium", return premiumAmount=50000. The frequency is captured in the separate premFrequency field below — NEVER multiply or divide the amount to match a different period), premFrequency (annual/monthly/single/unknown — MUST match the exact period of the premiumAmount value above. Singlife/SGFinDex portfolio reports have a "How Often You Pay" column — copy that verbatim: Monthly→monthly, Annually→annual, "Single Premium"→single. If unclear, use unknown), premiumStructure (Single Premium/Regular Premium/Limited Pay/Flexible Premium), paymentMethod (Cash/MediSave/SRS/MediSave+Cash/CPF OA/CPF SA)
 IMPORTANT: If document mentions CPFIS-OA, CPF-IS or CPF Investment Scheme, set paymentMethod to "CPF OA" or "CPF SA" accordingly. Standalone fund holdings (e.g. "Allianz Global High Payout", "First Sentier Bridge") without an insurance wrapper are category:investment, subType:"Unit Trust". If it mentions CPFIS, still category:investment subType:"Unit Trust".
 PAYMENT METHODS: Any insurance policy can be paid via Cash, CPF OA, CPF SA, or SRS. Look for clues:
 - "CPF Ordinary Account" / "CPFIS-OA" / "CPF OA" → paymentMethod:"CPF OA"
@@ -7384,7 +7501,7 @@ FIXED DEPOSITS / T-BILLS / SSB (category: cash_investments):
 
 SHORT-TERM ENDOWMENTS (≤3 years, single premium):
 - category: "savings", subType: "Short-term Endowment"
-- annualPremium = total premium paid (single premium amount)
+- premiumAmount = total premium paid (single premium amount)
 - premiumStructure: "Single Premium"
 - endYield = expected yield % p.a.
 - endGuaranteedCV = expected maturity sum if given
@@ -7438,7 +7555,7 @@ EXCEL/SPREADSHEET HANDLING: If the input is a spreadsheet or tabular data:
 - If a plan has a separate rider premium column, set the rider's bundled=false and premium to that value.
 
 PREMIUM AMOUNT SANITY: Double-check premium amounts:
-- Short-term endowments (≤3yr): typically $10,000–$500,000 single premium. If "$30,000.00" appears in source, annualPremium=30000, NOT 3000000. Watch decimal places: "$30,000.00" = 30000, NOT 3000000. Be careful with comma-separated thousands: $30,000 = thirty thousand, $300,000 = three hundred thousand.
+- Short-term endowments (≤3yr): typically $10,000–$500,000 single premium. If "$30,000.00" appears in source, premiumAmount=30000, NOT 3000000. Watch decimal places: "$30,000.00" = 30000, NOT 3000000. Be careful with comma-separated thousands: $30,000 = thirty thousand, $300,000 = three hundred thousand.
 - Regular annual premiums for life/CI/endowment: typically $500–$50,000/year
 - ILP/Investment single premiums: typically $10,000–$500,000
 - Only universal life financed policies reach $500k+ single premiums
@@ -7572,14 +7689,41 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
 
   // Single-batch extraction (returns processed array)
   const extractBatch = async (batchFiles) => {
+    // ── CONTENT-HASH CACHE CHECK ──
+    // Hash the batch's file bytes. If we've already extracted this exact set of files,
+    // return the cached AI output — zero token cost, near-instant rescans.
+    let cacheKey = null;
+    try {
+      cacheKey = await batchCacheKey(batchFiles);
+      const cached = await dbGet('extractCache', cacheKey).catch(()=>null);
+      if(cached && Array.isArray(cached.value) && cached.value.length > 0) {
+        console.log('[Extract] ✨ Cache hit:', cacheKey.slice(0,12)+'…', '→', cached.value.length, 'policies (no API cost)');
+        try { toast('📦 Loaded '+cached.value.length+' policies from cache (no API call)','success',3500); } catch(e){}
+        return cached.value;
+      }
+    } catch(e) { console.warn('[Extract] Cache check failed (non-fatal):', e.message); }
+
     const content = [];
     for(const file of batchFiles){
       const blocks = await processFile(file);
       content.push(...blocks);
     }
+    // ── EXPECTED POLICY COUNT (for reconciliation) ──
+    // Scan the text blocks for hints like "You have 16 active policies" before the AI call.
+    // If the final extracted count is lower than this hint, we'll warn the user.
+    const sourceText = content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+    const expectedCount = parseExpectedPolicyCount(sourceText);
+    if(expectedCount) console.log('[Extract] Document hints at', expectedCount, 'policies');
+
     content.push({type:'text',text:'Extract ALL insurance policies AND financial instruments from these documents. CRITICAL RULES:\n1. Multiple photos may show DIFFERENT PAGES of the SAME policy — correlate them by policy number, insurer+product name, or context clues. Merge information from multiple pages into ONE policy entry.\n2. Multiple photos may also show DIFFERENT policies — extract each as a separate entry.\n3. NEVER skip or merge genuinely different policies. Two policies from the same insurer with different product names = 2 entries.\n4. If the same fund (e.g. "Allianz Global High Payout") appears under DIFFERENT accounts (CPFIS-OA vs Cash), these are SEPARATE entries — differentiate by appending the account type in policyName.\n5. Look across ALL images for related data — page 1 might have the policy name while page 3 has the premium details.\nReturn ONLY valid JSON array or object.'});
-    const text = await callAI(EXTRACT_PROMPT, content, 16000);
-    console.log('[Extract] Raw response:', text.slice(0,500));
+    const text = await callAI(EXTRACT_PROMPT, content, 32000);
+    console.log('[Extract] Raw response:', text.length, 'chars. Tail:', text.slice(-120));
+    // ── TRUNCATION DETECTION ──
+    // If response doesn't end with a closing bracket, it was cut mid-stream.
+    // repairJSON will salvage complete objects, but we need to warn the user.
+    const trimmed = text.trim();
+    const lastChar = trimmed.slice(-1);
+    const looksTruncated = lastChar !== ']' && lastChar !== '}';
     const parsed = repairJSON(text);
     let arr;
     if (Array.isArray(parsed)) arr = parsed;
@@ -7589,6 +7733,51 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       if (found) { arr = parsed[found]; } else { arr = [parsed]; }
     } else { arr = [parsed]; }
     arr = arr.filter(p => p && typeof p === 'object' && (p.productName || p.insurer || p.category || p.fdPrincipal));
+    // ── BATCH DEDUPLICATION ──
+    // Portfolio reports often list the same policy across multiple sections (Death Coverage,
+    // CI Coverage, etc). AI occasionally emits these as duplicates. Dedup by policy number
+    // (primary key) or insurer+productName fingerprint (fallback).
+    {
+      const seen = new Set();
+      const before = arr.length;
+      arr = arr.filter(p => {
+        const polNum = (p.policyNumber||'').toString().trim().toLowerCase();
+        if(polNum && polNum.length >= 4) {
+          const k = 'num:'+polNum;
+          if(seen.has(k)) { console.warn('[Extract] Dedup: dropping duplicate policy #'+p.policyNumber, p.productName); return false; }
+          seen.add(k);
+          return true;
+        }
+        const ins = (p.insurer||'').toString().trim().toLowerCase();
+        const name = (p.productName||p.policyName||'').toString().trim().toLowerCase();
+        if(!ins && !name) return true; // no fingerprint — keep to be safe
+        const k = 'fp:'+ins+'|'+name;
+        if(seen.has(k)) { console.warn('[Extract] Dedup: dropping duplicate fingerprint', ins, '—', name); return false; }
+        seen.add(k);
+        return true;
+      });
+      const removed = before - arr.length;
+      if(removed > 0) console.log('[Extract] Dedup removed '+removed+' duplicate policies ('+before+' → '+arr.length+')');
+    }
+    if(looksTruncated) {
+      console.warn('[Extract] Response appears truncated. Recovered', arr.length, 'complete policies. Some policies may be missing — re-run the scan if count is low.');
+      try { toast('⚠️ Extracted '+arr.length+' policies but response was truncated. Some may be missing — re-run if count seems low.', 'warning', 8000); } catch(e){}
+    }
+    // ── POLICY-COUNT RECONCILIATION ──
+    // If the document header promised more policies than we extracted, surface it loudly.
+    if(expectedCount && arr.length < expectedCount) {
+      const missing = expectedCount - arr.length;
+      console.warn('[Extract] Reconciliation mismatch — document says', expectedCount, 'but extracted', arr.length, '(', missing, 'missing)');
+      try { toast('⚠️ Document mentions '+expectedCount+' policies but only extracted '+arr.length+'. '+missing+' may be missing — re-run the scan.', 'warning', 10000); } catch(e){}
+    }
+    // ── SAVE TO CACHE ──
+    // Only cache on successful, non-truncated, non-empty extractions.
+    if(cacheKey && arr.length > 0 && !looksTruncated && (!expectedCount || arr.length >= expectedCount)) {
+      try {
+        await dbPut('extractCache', {key:cacheKey, value:arr, timestamp:Date.now(), fileCount:batchFiles.length, policyCount:arr.length});
+        console.log('[Extract] 💾 Cached', arr.length, 'policies under key', cacheKey.slice(0,12)+'…');
+      } catch(e) { console.warn('[Extract] Cache write failed (non-fatal):', e.message); }
+    }
     return arr;
   };
 
@@ -7622,7 +7811,10 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       const processed = arr.map(p => {
         const result = {...p, id:genId(), _batch:b+1, status:p.status||'inforce',
           sumAssured:parseFloat(p.sumAssured||p.faceAmount)||0,
-          annualPremium:parseFloat(p.annualPremium)||0,
+          // AI now returns premiumAmount (new, unambiguous name). Internal schema still uses
+          // annualPremium for backward compat with cached policies and all downstream code.
+          // Prefer the new field; fall back to legacy.
+          annualPremium:parseFloat(p.premiumAmount ?? p.annualPremium)||0,
           monthlyBenefit:parseFloat(p.monthlyBenefit)||0,
           riders:(p.riders||[]).map(r=>{
             const rd = {...r, _selected:true};
@@ -7641,6 +7833,8 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
             return rd;
           })
         };
+        // AI-facing alias cleanup — don't persist it
+        delete result.premiumAmount;
         // FD fields
         if(result.fdPrincipal) result.fdPrincipal = String(parseFloat(result.fdPrincipal)||0);
         if(result.fdYieldPct) result.fdYieldPct = String(parseFloat(result.fdYieldPct)||0);
@@ -7650,6 +7844,19 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         // Sync premSingle from premiumStructure
         if(result.premiumStructure==='Single Premium' || result.premFrequency==='single') result.premSingle = true;
         if(result.premSingle && !result.premiumStructure) result.premiumStructure = 'Single Premium';
+        // ── MONTHLY PREMIUM DESYNC GUARD (belt-and-braces) ──
+        // The AI now returns premiumAmount rather than annualPremium, which should eliminate
+        // the semantic collision. But this guard stays because: (1) legacy cached/imported
+        // records may still have confused values, (2) models occasionally disobey clear prompts.
+        // If we ever see a monthly premium ≥ $6,000 that's exactly divisible by 12 and
+        // unwinds to a plausible monthly amount ($50-$10k), assume it was double-scaled.
+        if(result.premFrequency === 'monthly' && !result.premSingle && result.annualPremium >= 6000 && result.annualPremium % 12 === 0) {
+          const asMonthly = result.annualPremium / 12;
+          if(asMonthly >= 50 && asMonthly <= 10000) {
+            console.warn('[Extract] Monthly premium desync fix:', result.productName, '$'+result.annualPremium+'/mth (impossible)', '→', '$'+asMonthly+'/mth');
+            result.annualPremium = asMonthly;
+          }
+        }
         if(result.premStartAge && result.premTerm && !result.premEndAge) result.premEndAge = String(parseInt(result.premStartAge)+parseInt(result.premTerm));
         if(result.ageAtEntry && result.premTerm && !result.premEndAge) result.premEndAge = String(parseInt(result.ageAtEntry)+parseInt(result.premTerm));
         if(result.ageAtEntry && !result.premStartAge) result.premStartAge = result.ageAtEntry;
@@ -8569,10 +8776,15 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         const blocks = await processFile(file);
         content.push(...blocks);
       }
-      const formExtractPrompt = 'Extract insurance policy details. Return a JSON object with ALL fields: insurer, productName, policyNumber, category (protection/savings/health/investment/retirement/maternity), subType, currency, sumAssured (number), annualPremium (number), premFrequency (annual/monthly/single/unknown — if document does not clearly state frequency, use unknown), premiumStructure, paymentMethod, policyOwner, lifeInsured, gender, dob, ageAtEntry, smoker, nationality, occupation, inceptionDate, maturityDate, status, premStartAge, premTerm, premEndAge. Riders: riders (array) — CAPTURE-FIRST: for EVERY benefit listed, set riderName to EXACT name from document, THEN classify type from death/tpd/ci/eci/di/accidental/acc_medical/acc_tcm/acc_dismember/premium_waiver/other. If unsure, use type:"other". NEVER duplicate types for different benefits — use riderName to distinguish. Each: {type, riderName (ALWAYS filled), sa:number, premium:0 if bundled, expiryAge, bundled:boolean, multiClaim, totalClaimPct}. SA: saMultiplier, multiplierEndAge. ISP: ispClass, hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance. ILP: ilpGrowth, ilpDivYield, ilpMgmtFee, fundAllocations (array of {fundName:string, allocation:number}). Cash: cashValue, cvGrowthRate, surrenderPeriod. Notes: notes (FC review headline). Return ONLY valid JSON starting with { ending with }.';
+      const formExtractPrompt = 'Extract insurance policy details. Return a JSON object with ALL fields: insurer, productName, policyNumber, category (protection/savings/health/investment/retirement/maternity), subType, currency, sumAssured (number), premiumAmount (number — the premium AS PAID at its stated frequency. "$1,000/mth" → premiumAmount=1000 premFrequency="monthly". "$12,000/yr" → premiumAmount=12000 premFrequency="annual". Do NOT convert between periods), premFrequency (annual/monthly/single/unknown — must match the period of premiumAmount. If unclear, use unknown), premiumStructure, paymentMethod, policyOwner, lifeInsured, gender, dob, ageAtEntry, smoker, nationality, occupation, inceptionDate, maturityDate, status, premStartAge, premTerm, premEndAge. Riders: riders (array) — CAPTURE-FIRST: for EVERY benefit listed, set riderName to EXACT name from document, THEN classify type from death/tpd/ci/eci/di/accidental/acc_medical/acc_tcm/acc_dismember/premium_waiver/other. If unsure, use type:"other". NEVER duplicate types for different benefits — use riderName to distinguish. Each: {type, riderName (ALWAYS filled), sa:number, premium:0 if bundled, expiryAge, bundled:boolean, multiClaim, totalClaimPct}. SA: saMultiplier, multiplierEndAge. ISP: ispClass, hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance. ILP: ilpGrowth, ilpDivYield, ilpMgmtFee, fundAllocations (array of {fundName:string, allocation:number}). Cash: cashValue, cvGrowthRate, surrenderPeriod. Notes: notes (FC review headline). Return ONLY valid JSON starting with { ending with }.';
       content.push({type:'text',text:'Extract all policy information from these documents/images.'});
       const rawText2 = await callAI(formExtractPrompt, content, 4000);
       const parsed = repairJSON(rawText2);
+      // Map AI-facing premiumAmount → internal annualPremium field
+      if(parsed && typeof parsed === 'object' && parsed.premiumAmount !== undefined && parsed.annualPremium === undefined) {
+        parsed.annualPremium = parsed.premiumAmount;
+        delete parsed.premiumAmount;
+      }
       const overwrites = [];
       const updates = {};
       Object.entries(parsed).forEach(([k,v])=>{
@@ -10775,6 +10987,62 @@ function PdfPasswordEditor() {
   );
 }
 
+function ExtractCacheEditor() {
+  const [entries, setEntries] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const refresh = async () => {
+    try {
+      const all = await dbGetAll('extractCache').catch(()=>[]);
+      // Sort newest first
+      all.sort((a,b) => (b.timestamp||0) - (a.timestamp||0));
+      setEntries(all);
+    } catch(e) { setEntries([]); }
+    setLoading(false);
+  };
+  useEffect(() => { refresh(); }, []);
+  const clearAll = async () => {
+    if(!confirm('Clear all '+entries.length+' cached scans? You will have to re-run extraction (and re-spend tokens) on any rescans.')) return;
+    try {
+      const db = await openDB();
+      const tx = db.transaction('extractCache', 'readwrite');
+      tx.objectStore('extractCache').clear();
+      await new Promise((res,rej) => { tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
+      toast('Scan cache cleared','success');
+      refresh();
+    } catch(e) { toast('Clear failed: '+e.message,'error'); }
+  };
+  const totalPolicies = entries.reduce((s,e) => s + (e.policyCount||0), 0);
+  return (
+    <div>
+      {loading ? (
+        <div style={{fontSize:11,color:'var(--text3)'}}>Loading cache…</div>
+      ) : entries.length === 0 ? (
+        <div style={{fontSize:11,color:'var(--text3)',fontStyle:'italic'}}>Cache is empty — scans will be cached automatically after this.</div>
+      ) : (
+        <div>
+          <div style={{fontSize:11,color:'var(--text2)',marginBottom:8}}>
+            <strong>{entries.length}</strong> cached scans · <strong>{totalPolicies}</strong> policies saved from re-extraction
+          </div>
+          <div style={{maxHeight:160,overflowY:'auto',background:'var(--bg3)',borderRadius:6,padding:8,marginBottom:8,fontSize:10,fontFamily:'monospace',lineHeight:1.5}}>
+            {entries.slice(0,10).map((e,i) => (
+              <div key={i} style={{color:'var(--text3)',borderBottom:i<9?'1px solid var(--border)':'none',padding:'3px 0'}}>
+                <span style={{color:'var(--gold)'}}>{e.policyCount||'?'}</span> policies ·
+                <span> {e.fileCount||1} file{e.fileCount===1?'':'s'} · </span>
+                <span>{e.timestamp ? new Date(e.timestamp).toLocaleString() : 'unknown date'}</span>
+              </div>
+            ))}
+            {entries.length > 10 && <div style={{color:'var(--text3)',padding:'3px 0',fontStyle:'italic'}}>…and {entries.length - 10} more</div>}
+          </div>
+        </div>
+      )}
+      <div style={{display:'flex',gap:8,alignItems:'center'}}>
+        <button className="btn-secondary btn-sm" onClick={refresh}>🔄 Refresh</button>
+        <button className="btn-secondary btn-sm" onClick={clearAll} disabled={entries.length === 0} style={{color:entries.length>0?'var(--orange)':undefined}}>🗑 Clear All</button>
+      </div>
+    </div>
+  );
+}
+
 function Settings() {
   const {apiKey,saveApiKey,clientName,saveClientName,policies,savePolicy,deletePolicy} = useContext(AppCtx);
   const [geminiKey, setGeminiKey] = useState('');
@@ -10955,6 +11223,13 @@ function Settings() {
         <h3 style={{fontSize:14,fontWeight:600,marginBottom:4}}>🔓 PDF Unlock Passwords</h3>
         <p style={{fontSize:11,color:'var(--text3)',marginBottom:10}}>Preset passwords to auto-unlock protected policy documents. Common: NRIC number, DOB (DDMMYYYY). Client NRIC and DOB from My Profile are tried automatically.</p>
         <PdfPasswordEditor />
+      </div>
+
+      {/* ═══ EXTRACT CACHE ═══ */}
+      <div className="card" style={{marginBottom:16}}>
+        <h3 style={{fontSize:14,fontWeight:600,marginBottom:4}}>📦 Scan Cache</h3>
+        <p style={{fontSize:11,color:'var(--text3)',marginBottom:10}}>PolicyLens caches extraction results by file content hash, so rescanning the same document is instant and free. Clear this if you changed the extraction prompt and want fresh results.</p>
+        <ExtractCacheEditor />
       </div>
 
       <div className="card">
