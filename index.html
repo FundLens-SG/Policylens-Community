@@ -1032,7 +1032,7 @@ async function pdfToImages(pdfDoc, maxPages=12) {
 // Extraction pipeline version stamp — bump this whenever EXTRACT_PROMPT, post-processing
 // logic, or schema changes. All previously-cached results become invalid, forcing a fresh
 // AI call. Protects users from seeing stale extractions after upgrades.
-const EXTRACT_PIPELINE_VERSION = 'v5-2026-04-06-structured-output';
+const EXTRACT_PIPELINE_VERSION = 'v6-2026-04-06-premium-required';
 
 // SHA-256 hash of a File's bytes — used as content-addressable cache key.
 async function hashFile(file) {
@@ -4511,17 +4511,32 @@ function Header() {
             ?
           </button>
           <button onClick={async()=>{
-            if(!confirm('⚠️ WIPE ALL DATA?\n\nThis will permanently delete:\n• All policies\n• Client profile\n• All settings & API keys\n• Saved drafts\n\nThis cannot be undone.')) return;
-            if(!confirm('Are you SURE? Type thinking time...\n\nOK = Yes, wipe everything\nCancel = Keep my data')) return;
+            if(!confirm('⚠️ WIPE PORTFOLIO DATA?\n\nThis will permanently delete:\n• All policies\n• Client profile (name, NRIC, dependants)\n• Saved drafts\n• Scan cache\n\nYour API keys and sign-in will be preserved.\n\nThis cannot be undone.')) return;
+            if(!confirm('Are you SURE?\n\nOK = Yes, wipe portfolio data\nCancel = Keep my data')) return;
             try {
-              const db = await openDB();
-              for(const store of ['policies','settings','repository']) {
-                try { const tx = db.transaction(store,'readwrite'); tx.objectStore(store).clear(); } catch(e){}
-              }
-            } catch(e){ console.warn('Wipe DB error:', e); }
-            window.location.reload();
+              // 1. Delete every policy via the context — updates React state in place
+              for(const pol of policies) await deletePolicy(pol.id);
+              // 2. Clear client profile + name via the context
+              await saveProfile({name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[]});
+              // 3. Clear scan cache (safe — just recomputed on next scan)
+              try {
+                const db = await openDB();
+                const tx = db.transaction('extractCache','readwrite');
+                tx.objectStore('extractCache').clear();
+                await new Promise((res,rej)=>{ tx.oncomplete=res; tx.onerror=()=>rej(tx.error); });
+              } catch(e){}
+              // 4. Clear any sessionStorage drafts
+              try { sessionStorage.removeItem('policylens_pendingExtract'); } catch(e){}
+              // NOTE: We deliberately do NOT clear the `settings` IndexedDB store — that
+              // would remove API keys + advisor info, which is friction for no benefit.
+              // We also deliberately do NOT call window.location.reload() — on some
+              // mobile browsers (observed on Huawei stock) reload causes a SIGNED_OUT
+              // event in the Supabase auth listener. State setters above propagate
+              // all visual changes without needing a reload.
+              toast('Portfolio wiped. API keys and sign-in preserved.','success');
+            } catch(e){ console.warn('Wipe error:', e); toast('Wipe error: '+e.message,'error'); }
           }}
-            title="Wipe All Data"
+            title="Wipe Portfolio Data"
             style={{background:'rgba(239,83,80,.08)',color:'var(--red)',border:'1px solid rgba(239,83,80,.15)',width:28,height:28,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:11,fontWeight:700,flexShrink:0}}>
             🗑
           </button>
@@ -4674,13 +4689,12 @@ const POLICY_EXTRACTION_SCHEMA = {
       sumAssured: { type: 'NUMBER', nullable: true, description: 'Primary sum assured / death benefit' },
       premiumAmount: {
         type: 'NUMBER',
-        nullable: true,
-        description: 'Premium AS PAID at its stated frequency. CRITICAL: do NOT annualize or convert. If document shows "$1,000 Monthly", return 1000. If "$12,000 Annually", return 12000. The frequency is captured separately below.'
+        description: 'Premium AS PAID at its stated frequency. REQUIRED — always provide a number. CRITICAL: do NOT annualize or convert. If document shows "$1,000 Monthly", return 1000. If "$12,000 Annually", return 12000. If "$50,000 Single Premium", return 50000. If genuinely no premium visible anywhere, return 0 (NOT null). The frequency is captured separately below.'
       },
       premFrequency: {
         type: 'STRING',
         enum: ['annual','monthly','single','unknown'],
-        description: 'Period of premiumAmount. MUST match the period shown on the document. "How Often You Pay: Monthly" → monthly.'
+        description: 'REQUIRED — period of premiumAmount. MUST match the period shown on the document. "How Often You Pay: Monthly" → monthly. "Annually" → annual. "Single Premium" → single. Only use "unknown" as an absolute last resort when the document is completely silent on payment frequency.'
       },
       premiumStructure: {
         type: 'STRING',
@@ -4806,22 +4820,7 @@ const POLICY_EXTRACTION_SCHEMA = {
       // ── Indexed UL (IUL) specific ──
       faAllocationPct: { type: 'NUMBER', nullable: true, description: 'Fixed Account allocation %' },
       iaAllocationPct: { type: 'NUMBER', nullable: true, description: 'Indexed Account allocation %' },
-      indexSubAccounts: {
-        type: 'ARRAY',
-        nullable: true,
-        description: 'Each indexed sub-account with its cap/floor/participation parameters',
-        items: {
-          type: 'OBJECT',
-          properties: {
-            name: { type: 'STRING', description: 'e.g. "S&P 500 1-Year Point-to-Point"' },
-            cap: { type: 'NUMBER', nullable: true, description: 'Cap rate % p.a.' },
-            floor: { type: 'NUMBER', nullable: true, description: 'Floor rate % p.a. (typically 0)' },
-            participationRate: { type: 'NUMBER', nullable: true, description: 'Participation rate %' },
-            allocation: { type: 'NUMBER', nullable: true, description: 'Allocation % to this sub-account' }
-          },
-          required: ['name']
-        }
-      },
+      indexSubAccountsText: { type: 'STRING', nullable: true, description: 'Free-text summary of indexed sub-accounts if any, e.g. "S&P 500 1-Year PTP: cap 9%, floor 0%, participation 100%; Russell 2000: cap 10%, participation 100%"' },
 
       // ── Variable UL (VUL) specific ──
       solvedPremium: { type: 'NUMBER', nullable: true, description: 'Solved/target premium level' },
@@ -4843,7 +4842,7 @@ const POLICY_EXTRACTION_SCHEMA = {
       ilpBidOfferSpread: { type: 'NUMBER', nullable: true, description: 'Bid-offer spread %' },
       ilpReinvestFlag: { type: 'BOOLEAN', nullable: true, description: 'true if dividends auto-reinvest' }
     },
-    required: ['insurer','productName','category']
+    required: ['insurer','productName','category','premiumAmount','premFrequency']
   }
 };
 
@@ -8280,6 +8279,28 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       console.log('[Extract] ✓ Reconciled:', arr.length, '≥', expectedCount, 'expected');
       try { toast('✓ Extracted all '+arr.length+' policies (expected '+expectedCount+')','success',3000); } catch(e){}
     }
+
+    // ── ZERO-PREMIUM HEALTH CHECK ──
+    // If the structured path returns a batch where almost nothing has a premium,
+    // something is systemically wrong (schema mismatch, Gemini emitting nulls for
+    // nullable fields, etc). Surface a loud warning rather than silently caching
+    // a broken result. Only triggers on batches large enough to be statistically
+    // meaningful and where we expect real premium data (not pure investment/FD).
+    const premiumBearing = arr.filter(p => p && p.category !== 'cash_investments' && p.category !== 'other_assets');
+    const withPremium = premiumBearing.filter(p => {
+      const v = p.premiumAmount ?? p.annualPremium;
+      return v != null && parseFloat(v) > 0;
+    });
+    if(premiumBearing.length >= 3 && withPremium.length === 0) {
+      console.error('[Extract] ❌ ALL '+premiumBearing.length+' premium-bearing policies came back with 0/null premiumAmount. Schema compliance issue — NOT caching.');
+      try { toast('❌ Extraction anomaly: all '+premiumBearing.length+' policies returned $0 premium. This is a pipeline bug — please screenshot the browser console and report. Results NOT cached.', 'error', 15000); } catch(e){}
+      // Don't cache broken results — user can re-scan after a fix
+      return arr;
+    } else if(premiumBearing.length >= 5 && withPremium.length < premiumBearing.length * 0.3) {
+      console.warn('[Extract] ⚠️ Only '+withPremium.length+'/'+premiumBearing.length+' policies have a premium. Possible partial schema compliance issue.');
+      try { toast('⚠️ Only '+withPremium.length+' of '+premiumBearing.length+' policies came back with a premium amount. Some may need manual entry.', 'warning', 8000); } catch(e){}
+    }
+
     // ── SAVE TO CACHE ──
     // Only cache on successful, non-empty extractions that met reconciliation target.
     if(cacheKey && arr.length > 0 && (!expectedCount || arr.length >= expectedCount)) {
@@ -12632,13 +12653,17 @@ function Settings() {
 
   // ── Save portfolio as JSON file ──
   const handleReset = async () => {
-    if(!confirm('⚠️ RESET EVERYTHING?\n\nThis will permanently delete:\n• All policies\n• Client profile (name, NRIC, dependants)\n• All local settings\n\nThis CANNOT be undone. Are you sure?')) return;
-    if(!confirm('Final confirmation: Type "RESET" mentally and click OK to proceed.')) return;
+    if(!confirm('⚠️ RESET EVERYTHING?\n\nThis will permanently delete:\n• All policies\n• Client profile (name, NRIC, dependants)\n\nYou will stay signed in.\n\nThis CANNOT be undone. Are you sure?')) return;
+    if(!confirm('Final confirmation: click OK to proceed.')) return;
+    // Delete each policy via the context (updates React state in place)
     for(const p of policies) await deletePolicy(p.id);
-    saveClientName('');
-    saveProfile({name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[]});
-    toast('Portfolio reset complete','success');
-    window.location.reload();
+    // Clear client profile + name — these state setters propagate automatically
+    await saveClientName('');
+    await saveProfile({name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[]});
+    toast('Portfolio reset complete. You are still signed in.','success');
+    // NO window.location.reload() — reloading can trigger a SIGNED_OUT event on some
+    // mobile browsers (observed on Huawei stock browser). State setters above already
+    // propagate all changes to the UI.
   };
 
   const handleSave = () => {
