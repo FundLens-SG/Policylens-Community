@@ -9322,7 +9322,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
   const isAnnuity = isRetirement;
   const noRiderCategories = isISP || isCSL || isCashInvestment;
   const hasCoverageSection = !noRiderCategories;
-  const hasCV = (isProtection||isSavings||isInvestment||isRetirement) && form.subType!=='Term Life' && !isISP && !isCSL && !isDI && !isPA && !isCashInvestment;
+  const hasCV = (isProtection||isInvestment||isRetirement) && form.subType!=='Term Life' && !isISP && !isCSL && !isDI && !isPA && !isCashInvestment;
   // Matured check for FD/T-bills
   const fdMatured = isFD && form.fdMaturityDate && new Date(form.fdMaturityDate) < new Date();
 
@@ -9670,38 +9670,66 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                 <option value="lifetime">Lifetime Endowment</option>
               </select>
             </div>
-            {form.endSubtype!=='lifetime' && (
-              <div className="grid-3" style={{marginBottom:8}}>
-                <div className="field"><label>Premium Payment Years</label><input type="number" value={form.endPayYrs||form.premTerm||''} onChange={e=>set('endPayYrs',e.target.value)} /></div>
-                {form.endSubtype==='limited' && <div className="field"><label>Wait Period (yrs)</label><input type="number" value={form.endWaitYrs||''} onChange={e=>set('endWaitYrs',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Yrs between last premium & maturity</div></div>}
-                <div className="field"><label>Policy Term (yrs)</label><input type="number" value={form.endPolicyTerm||''} onChange={e=>set('endPolicyTerm',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Maturity age: {(parseInt(form.premStartAge)||30)+(parseInt(form.endPolicyTerm)||0)}</div></div>
-                <div className="field"><label>Est. Yield % p.a.</label><input type="number" step="0.1" value={form.endYield||'4'} onChange={e=>set('endYield',e.target.value)} /></div>
+            {/* ── Term row: Policy Term only shows where it adds information ──
+                 Full Pay:  policy term = premium term (already entered above) → hide
+                 Limited Pay: policy term > premium term → show + helper wait period
+                 Lifetime:  policy runs to age 99 → show as read-only */}
+            {form.endSubtype === 'limited' && (
+              <div className="grid-2" style={{marginBottom:8}}>
+                <div className="field">
+                  <label>Policy Term (yrs)</label>
+                  <input type="number" value={form.endPolicyTerm||''} onChange={e=>set('endPolicyTerm',e.target.value)} placeholder={'≥ premium term ('+(parseInt(form.premTerm)||'—')+')'} />
+                  <div style={{fontSize:10,color:'var(--text3)'}}>Total years to maturity · Maturity age: {(parseInt(form.premStartAge)||parseInt(form.ageAtEntry)||30)+(parseInt(form.endPolicyTerm)||0)}</div>
+                </div>
+                <div className="field">
+                  <label>Wait Period (yrs)</label>
+                  <input type="number" value={form.endWaitYrs||''} onChange={e=>set('endWaitYrs',e.target.value)} placeholder={'auto: '+Math.max(0,(parseInt(form.endPolicyTerm)||0)-(parseInt(form.premTerm)||0))} />
+                  <div style={{fontSize:10,color:'var(--text3)'}}>Years between last premium & maturity</div>
+                </div>
               </div>
             )}
-            {form.endSubtype==='lifetime' && (
-              <div className="grid-3" style={{marginBottom:8}}>
-                <div className="field"><label>Premium Payment Years</label><input type="number" value={form.endPayYrs||form.premTerm||''} onChange={e=>set('endPayYrs',e.target.value)} /></div>
-                <div className="field"><label>Est. Yield % p.a.</label><input type="number" step="0.1" value={form.endYield||'4'} onChange={e=>set('endYield',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Growth after premiums paid</div></div>
-                <div className="field"><label>Kept Till</label><input disabled value="Age 99 (Lifetime)" style={{background:'var(--bg2)'}} /></div>
+            {form.endSubtype === 'fullpay' && (
+              <div style={{marginBottom:8,padding:'8px 12px',background:'var(--bg2)',borderRadius:6,fontSize:11,color:'var(--text3)'}}>
+                Full Pay: policy term equals premium term ({parseInt(form.premTerm)||'—'} yrs from Premium Term above). Maturity age: <strong style={{color:'var(--text2)'}}>{(parseInt(form.premStartAge)||parseInt(form.ageAtEntry)||30)+(parseInt(form.premTerm)||0)}</strong>
               </div>
             )}
+            {form.endSubtype === 'lifetime' && (
+              <div style={{marginBottom:8,padding:'8px 12px',background:'var(--bg2)',borderRadius:6,fontSize:11,color:'var(--text3)'}}>
+                Lifetime endowment: plan runs until <strong style={{color:'var(--text2)'}}>age 99</strong>. Premiums paid for {parseInt(form.premTerm)||'—'} years (from Premium Term above).
+              </div>
+            )}
+            {/* ── Maturity value: guaranteed + non-guaranteed → total ── */}
             <div className="grid-3">
-              <div className="field"><label>Guaranteed Maturity Value ($)</label><input type="number" value={form.endGuaranteedCV||''} onChange={e=>set('endGuaranteedCV',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>0 = use yield calculation</div></div>
-              <div className="field"><label>Non-Guaranteed Bonus ($)</label><input type="number" value={form.endNonGuarBonus||''} onChange={e=>set('endNonGuarBonus',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Reversionary + terminal bonus</div></div>
+              <div className="field">
+                <label>Guaranteed Maturity Value ($)</label>
+                <input type="number" value={form.endGuaranteedCV||''} onChange={e=>set('endGuaranteedCV',e.target.value)} placeholder="from BI / policy schedule" />
+                <div style={{fontSize:10,color:'var(--text3)'}}>Contractual guaranteed amount at maturity</div>
+              </div>
+              <div className="field">
+                <label>Non-Guaranteed Bonus ($)</label>
+                <input type="number" value={form.endNonGuarBonus||''} onChange={e=>set('endNonGuarBonus',e.target.value)} placeholder="reversionary + terminal" />
+                <div style={{fontSize:10,color:'var(--text3)'}}>Illustrated at current par-fund rate</div>
+              </div>
               {(() => {
-                const payYrs = parseInt(form.endPayYrs||form.premTerm)||10;
-                const r = (parseFloat(form.endYield)||4)/100;
-                const prem = parseFloat(form.annualPremium)||0;
-                const calcCV = form.endGuaranteedCV > 0 ? parseFloat(form.endGuaranteedCV) : Math.round(prem * (Math.pow(1+r, payYrs)-1)/r);
+                const guar = parseFloat(form.endGuaranteedCV)||0;
                 const bonus = parseFloat(form.endNonGuarBonus)||0;
-                const total = calcCV + bonus;
-                const totalPrem = prem * payYrs;
-                const effYield = totalPrem > 0 && payYrs > 0 ? ((Math.pow(total/totalPrem, 1/((parseInt(form.endPolicyTerm)||payYrs)))-1)*100).toFixed(1) : '—';
+                const total = guar + bonus;
+                // Maturity age depends on sub-type
+                const startAge = parseInt(form.premStartAge)||parseInt(form.ageAtEntry)||30;
+                const premTermYrs = parseInt(form.premTerm)||0;
+                let matAge;
+                if(form.endSubtype==='lifetime') matAge = 99;
+                else if(form.endSubtype==='fullpay') matAge = startAge + premTermYrs;
+                else matAge = startAge + (parseInt(form.endPolicyTerm)||premTermYrs);
+                const prem = parseFloat(form.annualPremium)||0;
+                const totalPrem = form.premSingle ? prem : prem * premTermYrs;
+                const yearsToMat = Math.max(1, matAge - startAge);
+                const effYield = total > 0 && totalPrem > 0 ? ((Math.pow(total/totalPrem, 1/yearsToMat)-1)*100).toFixed(1) : '—';
                 return (
                   <div style={{background:'var(--bg2)',borderRadius:8,padding:10,border:'1px solid var(--border)',textAlign:'center'}}>
-                    <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',marginBottom:3}}>Total at Maturity</div>
+                    <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',marginBottom:3}}>Total at Maturity (Age {matAge})</div>
                     <div style={{fontSize:16,fontWeight:700,color:'var(--blue2)'}}>${total.toLocaleString()}</div>
-                    <div style={{fontSize:10,color:'var(--text3)'}}>Effective yield ~{effYield}% p.a.</div>
+                    <div style={{fontSize:10,color:'var(--text3)'}}>{total>0&&totalPrem>0?'Effective yield ~'+effYield+'% p.a. on $'+totalPrem.toLocaleString()+' premiums':'Enter guaranteed + bonus above'}</div>
                   </div>
                 );
               })()}
@@ -10142,7 +10170,6 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                 </div>
               )}
               {form.subType==='ILP (Protection)' && <div><div style={{fontSize:10,color:'var(--text3)',textTransform:'uppercase'}}>Protection % of Fund</div><input type="number" value={form.ilpProtPct||'101'} onChange={e=>set('ilpProtPct',e.target.value)} style={{width:70,fontSize:14,fontWeight:600}} /><div style={{fontSize:10,color:'var(--text3)'}}>Typically 101% — amend as per policy</div></div>}
-              <div><div style={{fontSize:10,color:'var(--text3)',textTransform:'uppercase'}}>Payment Years</div><input type="number" value={form.ilpPaymentYrs||'10'} onChange={e=>set('ilpPaymentYrs',e.target.value)} style={{width:60,fontSize:14,fontWeight:600}} /></div>
             </div>
           </div>
         )}
@@ -10216,31 +10243,50 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                 {form.cvKnown!==false && <input type="number" value={form.cashValue||''} onChange={e=>set('cashValue',e.target.value)} placeholder="From latest statement" style={{marginTop:4}} />}
                 {form.cvKnown===false && <div style={{fontSize:10,color:'var(--gold)',marginTop:4}}>Auto-estimated from premiums × effective rate × time</div>}
               </div>
-              <div className="field"><label>Surrender Charge Period (yrs)</label><input type="number" value={form.surrenderPeriod||''} onChange={e=>set('surrenderPeriod',e.target.value)} placeholder="e.g. 15" /><div style={{fontSize:10,color:'var(--text3)'}}>Year when surrender charges drop to 0% (insurer's schedule). Breakeven year is auto-computed below — they're different concepts.</div></div>
+              <div className="field"><label>Surrender Charge Period (yrs)</label><input type="number" value={form.surrenderPeriod||''} onChange={e=>set('surrenderPeriod',e.target.value)} placeholder="e.g. 15" /><div style={{fontSize:10,color:'var(--text3)'}}>Year when the insurer's surrender charges drop to 0%.</div></div>
             </div>
-            {/* ── Auto-estimated CV, projection, and breakeven ── */}
+            {/* Non-ILP policies need an explicit yield input (WL, CI, ECI, retirement/annuity).
+                ILP policies already get their rate from the ILP panel above.  */}
+            {!isILP && (
+              <div className="grid-2" style={{marginTop:8}}>
+                <div className="field">
+                  <label>Est. Yield % p.a.</label>
+                  <input type="number" step="0.1" value={form.cvGrowthRate||'3.0'} onChange={e=>set('cvGrowthRate',e.target.value)} placeholder="e.g. 3.0" />
+                  <div style={{fontSize:10,color:'var(--text3)'}}>Par WL / CI / retirement plans: typical 2–4.5% guaranteed + non-guaranteed bonus</div>
+                </div>
+              </div>
+            )}
+            {/* ── Auto-estimated CV and projection ── */}
             {(() => {
               const prem = parseFloat(form.annualPremium)||0;
               const startAge = parseInt(form.premStartAge)||parseInt(form.ageAtEntry)||0;
               const premTerm = form.premSingle ? 1 : (parseInt(form.premTerm)||0);
               // ── EFFECTIVE COMPOUNDING RATE ──
-              // If dividends reinvest: they compound into the fund → rate = growth + div − fee
-              // If dividends pay out: fund grows on price only → rate = growth − fee
-              //                       (dividends are a separate income stream, not compounding)
-              const fundGrowth = (form.fundAllocations||[]).length > 0 ? 
-                (()=>{const tp=(form.fundAllocations||[]).reduce((s,a)=>s+(parseFloat(a.pct)||0),0);return tp>0?(form.fundAllocations||[]).reduce((s,a)=>s+(parseFloat(a.pct)||0)*(parseFloat(a.growth)||0),0)/tp:0})() : 0;
-              const growthPct = fundGrowth > 0 ? fundGrowth : (parseFloat(form.ilpGrowth)||parseFloat(form.cvGrowthRate)||3);
-              const divPct = parseFloat(form.ilpDivYield)||0;
-              const feePct = parseFloat(form.ilpMgmtFee)||(isILP?1.5:0);
-              const effRate = form.divReinvest ? (growthPct + divPct - feePct) : (growthPct - feePct);
-              const r = Math.max(-0.1, effRate / 100); // floor at -10% to avoid insane negatives
+              // ILP policies: rate = growth ± div − fee (depends on reinvest flag)
+              // Non-ILP (WL, CI, retirement): rate = user-supplied est yield
+              let effRate, rateBreakdown;
+              if(isILP) {
+                const fundGrowth = (form.fundAllocations||[]).length > 0 ? 
+                  (()=>{const tp=(form.fundAllocations||[]).reduce((s,a)=>s+(parseFloat(a.pct)||0),0);return tp>0?(form.fundAllocations||[]).reduce((s,a)=>s+(parseFloat(a.pct)||0)*(parseFloat(a.growth)||0),0)/tp:0})() : 0;
+                const growthPct = fundGrowth > 0 ? fundGrowth : (parseFloat(form.ilpGrowth)||3);
+                const divPct = parseFloat(form.ilpDivYield)||0;
+                const feePct = parseFloat(form.ilpMgmtFee)||1.5;
+                effRate = form.divReinvest ? (growthPct + divPct - feePct) : (growthPct - feePct);
+                rateBreakdown = form.divReinvest
+                  ? growthPct.toFixed(1)+'% growth + '+divPct.toFixed(1)+'% dividend − '+feePct.toFixed(1)+'% fee (dividends reinvest)'
+                  : growthPct.toFixed(1)+'% growth − '+feePct.toFixed(1)+'% fee (dividends paid out, not compounding)';
+              } else {
+                effRate = parseFloat(form.cvGrowthRate)||3;
+                rateBreakdown = 'User-specified est. yield for par plan';
+              }
+              const r = Math.max(-0.1, effRate / 100);
               const retAge = parseInt(_cp?.retirementAge)||65;
               const age = clientAge;
               const yearsInForce = Math.max(0, age - startAge);
               const totalPaid = form.premSingle ? prem : prem * Math.min(premTerm, Math.max(premTerm, retAge-startAge));
               const yrsToRet = Math.max(0, retAge - age);
 
-              // Auto-estimate current CV if unknown (uses effective rate)
+              // Auto-estimate current CV if unknown
               let estCV;
               if(form.cvKnown!==false && parseFloat(form.cashValue) > 0) {
                 estCV = parseFloat(form.cashValue);
@@ -10249,7 +10295,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                 estCV = form.premSingle ? prem * Math.pow(1+r, yearsInForce) : prem*(Math.pow(1+r,paid)-1)/r * Math.pow(1+r, Math.max(0,yearsInForce-paid));
               } else { estCV = 0; }
 
-              // Project to retirement age (uses effective rate)
+              // Project to retirement age
               const paidRemaining = Math.max(0, premTerm - yearsInForce);
               let retCV;
               if(estCV > 0) {
@@ -10261,48 +10307,12 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                 retCV = form.premSingle ? prem * Math.pow(1+r, totalYrs) : prem*(Math.pow(1+r,paid)-1)/r * Math.pow(1+r, Math.max(0,totalYrs-paid));
               } else { retCV = 0; }
 
-              // ── AUTO-COMPUTED BREAKEVEN YEAR ──
-              // Walk forward year by year from inception. Track cumulative premiums paid
-              // vs cumulative fund value. Breakeven = first year where fundValue ≥ premiumsPaid.
-              // For non-reinvest mode, we also compute a "total wealth" breakeven that counts
-              // dividend income received as if banked at 0% (conservative).
-              let breakevenFund = null, breakevenTotal = null;
-              if(prem > 0 && premTerm > 0) {
-                let fund = 0;
-                let paidSoFar = 0;
-                let divBanked = 0;
-                const maxScan = form.premSingle ? 40 : Math.min(60, premTerm + 40);
-                for(let y = 1; y <= maxScan; y++) {
-                  // Contribute premium this year if still in pay period
-                  if(form.premSingle) {
-                    if(y === 1) { fund += prem; paidSoFar += prem; }
-                  } else if(y <= premTerm) {
-                    fund += prem; paidSoFar += prem;
-                  }
-                  // Grow fund by effective rate
-                  fund *= (1 + r);
-                  // If dividends don't reinvest, they're taken out of the fund and banked separately
-                  if(!form.divReinvest && divPct > 0) {
-                    const divThisYear = fund * (divPct / 100);
-                    fund -= divThisYear;
-                    divBanked += divThisYear;
-                  }
-                  if(breakevenFund == null && fund >= paidSoFar && y > 1) breakevenFund = y;
-                  if(breakevenTotal == null && (fund + divBanked) >= paidSoFar && y > 1) breakevenTotal = y;
-                  if(breakevenFund && breakevenTotal) break;
-                }
-              }
-
               const netGain = retCV - totalPaid;
               if(prem === 0 && estCV === 0) return null;
               return (
                 <div style={{marginTop:10}}>
                   <div style={{fontSize:10,color:'var(--teal)',marginBottom:6,padding:'4px 8px',background:'rgba(91,168,160,.06)',borderRadius:6}}>
-                    <strong>Effective compounding rate:</strong> {effRate.toFixed(2)}% p.a.{' '}
-                    {form.divReinvest
-                      ? '= '+growthPct.toFixed(1)+'% growth + '+divPct.toFixed(1)+'% dividend − '+feePct.toFixed(1)+'% fee (dividends reinvest → compound)'
-                      : '= '+growthPct.toFixed(1)+'% growth − '+feePct.toFixed(1)+'% fee (dividends paid out, not compounding)'}
-                    {fundGrowth > 0 && <span style={{color:'var(--purple)'}}> · Growth weighted from {(form.fundAllocations||[]).length} fund{(form.fundAllocations||[]).length===1?'':'s'}</span>}
+                    <strong>Effective compounding rate:</strong> {effRate.toFixed(2)}% p.a. — {rateBreakdown}
                   </div>
                   <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1fr',gap:10}}>
                     <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
@@ -10320,26 +10330,6 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                       <div style={{fontSize:16,fontWeight:700,color:netGain>=0?'var(--green2)':'var(--red)'}}>{netGain>=0?'+':''}${Math.round(netGain).toLocaleString()}</div>
                       <div style={{fontSize:9,color:'var(--text3)'}}>total premiums: ${Math.round(totalPaid).toLocaleString()}</div>
                     </div>
-                  </div>
-                  {/* ── Breakeven row ── */}
-                  <div style={{marginTop:8,display:'grid',gridTemplateColumns: !form.divReinvest && divPct > 0 ? '1fr 1fr 1fr' : '1fr 1fr', gap:10}}>
-                    <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
-                      <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Surrender Charge Ends</div>
-                      <div style={{fontSize:16,fontWeight:700,color:'var(--text2)'}}>{form.surrenderPeriod ? 'Year '+form.surrenderPeriod : '—'}</div>
-                      <div style={{fontSize:9,color:'var(--text3)'}}>Insurer's charge schedule</div>
-                    </div>
-                    <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
-                      <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>{!form.divReinvest && divPct > 0 ? 'Fund-Value Breakeven' : 'Breakeven Year'}</div>
-                      <div style={{fontSize:16,fontWeight:700,color:breakevenFund?'var(--green2)':'var(--text3)'}}>{breakevenFund ? 'Year '+breakevenFund : 'Never at this rate'}</div>
-                      <div style={{fontSize:9,color:'var(--text3)'}}>Fund ≥ total premiums paid</div>
-                    </div>
-                    {!form.divReinvest && divPct > 0 && (
-                      <div style={{background:'var(--bg2)',borderRadius:8,padding:10,textAlign:'center',border:'1px solid var(--border)'}}>
-                        <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase'}}>Total Wealth Breakeven</div>
-                        <div style={{fontSize:16,fontWeight:700,color:breakevenTotal?'var(--gold)':'var(--text3)'}}>{breakevenTotal ? 'Year '+breakevenTotal : 'Never'}</div>
-                        <div style={{fontSize:9,color:'var(--text3)'}}>Fund + dividends received</div>
-                      </div>
-                    )}
                   </div>
                 </div>
               );
@@ -10466,10 +10456,9 @@ function FundAllocationEditor({allocations,onChange,reinvest,onSyncWeighted,poli
   };
 
   // ── AUTO-FETCH SINCE-INCEPTION RETURN ──
-  // Calls callAI with a targeted prompt to look up the fund's historical performance.
-  // The AI returns JSON with growth (unit price annualised return) and dividend yield.
-  // Populates the row's growth + dividend fields. Uses a strict prompt and asks the AI
-  // to return "unknown" rather than hallucinate if it can't identify the fund.
+  // Calls the AI pipeline directly (Claude or Gemini) with a strict JSON-only prompt.
+  // Robust to markdown wrappers, prose preamble, and partial/trailing text.
+  // Populates the row's growth and dividend fields on success.
   const autoFetchReturn = async (i) => {
     const fund = allocations[i];
     if(!fund?.fundName || fund.fundName.trim().length < 3) {
@@ -10477,24 +10466,48 @@ function FundAllocationEditor({allocations,onChange,reinvest,onSyncWeighted,poli
       return;
     }
     setFetchingRow(i);
+    console.log('[FundFetch] Starting fetch for:', fund.fundName);
     try {
-      const prompt = 'You are a Singapore-licensed fund analyst. For the fund named below, provide its SINCE-INCEPTION ANNUALISED RETURN (unit price appreciation % p.a.) and its CURRENT DIVIDEND YIELD % p.a. Only respond based on factual knowledge — if you are not highly confident about the specific fund, return {"unknown":true,"reason":"..."}. Return ONLY valid JSON, no commentary.';
-      const content = [{type:'text', text:'Fund name: "'+fund.fundName+'"\n\nReturn JSON in this exact shape:\n{\n  "growth": <number, since-inception annualised unit-price return %, e.g. 5.8>,\n  "dividend": <number, current distribution yield %, 0 if accumulation/non-distributing>,\n  "inceptionDate": "<YYYY-MM-DD or null if unknown>",\n  "confidence": "high" | "medium" | "low",\n  "source": "<brief note, e.g. factsheet, Morningstar, fund prospectus>"\n}\n\nIf you cannot identify the fund with reasonable confidence, return: {"unknown":true,"reason":"..."}'}];
-      const text = await callAI(prompt, content, 500);
-      const cleaned = (text||'').replace(/```json\s*|```\s*/g,'').trim();
-      const parsed = JSON.parse(cleaned);
-      if(parsed.unknown) {
-        try { toast('Fund not recognized: '+(parsed.reason||'unknown fund'),'warning',5000); } catch(e){}
-      } else {
-        const g = parseFloat(parsed.growth);
-        const d = parseFloat(parsed.dividend);
-        if(isFinite(g) && g >= -50 && g <= 50) update(i,'growth',String(g.toFixed(1)));
-        if(isFinite(d) && d >= 0 && d <= 30) update(i,'dividend',String(d.toFixed(1)));
-        try { toast('Fetched: '+(isFinite(g)?g.toFixed(1)+'% growth':'')+(isFinite(d)?' · '+d.toFixed(1)+'% div':'')+(parsed.confidence?' ('+parsed.confidence+' confidence)':''),'success',5000); } catch(e){}
+      const sysPrompt = 'You are a Singapore fund research assistant. Respond with a SINGLE JSON object and NOTHING ELSE — no markdown, no code fences, no prose, no explanation. Start with { and end with }.';
+      const userPrompt = 'Fund name: "'+fund.fundName+'"\n\nProvide the fund\'s SINCE-INCEPTION annualised return and current dividend yield. If you cannot identify the fund with reasonable confidence, make a conservative estimate based on the fund name (global equity fund ~7%, global bond fund ~3%, balanced fund ~5%, Asian equity ~6%, US equity ~8%).\n\nReturn this exact JSON shape:\n{"growth": <number, unit price annualised return % since inception, e.g. 5.8>, "dividend": <number, current dividend yield %, 0 if accumulation>, "inceptionDate": "<YYYY-MM-DD or null>", "confidence": "high" | "medium" | "low", "source": "<brief note>"}';
+      const text = await callAI(sysPrompt, [{type:'text', text:userPrompt}], 600);
+      console.log('[FundFetch] Raw response:', text);
+      if(!text) throw new Error('Empty AI response');
+      // Extract JSON block from possibly-wrapped response
+      let cleaned = text.replace(/```json\s*|```\s*/g,'').trim();
+      // Find first { and last } — handles leading/trailing prose
+      const firstBrace = cleaned.indexOf('{');
+      const lastBrace = cleaned.lastIndexOf('}');
+      if(firstBrace < 0 || lastBrace <= firstBrace) throw new Error('No JSON object in response: '+cleaned.slice(0,120));
+      cleaned = cleaned.slice(firstBrace, lastBrace+1);
+      let parsed;
+      try { parsed = JSON.parse(cleaned); }
+      catch(pe) {
+        console.warn('[FundFetch] JSON parse failed:', pe.message, 'Trying repairJSON…');
+        parsed = repairJSON(cleaned);
+        if(!parsed || typeof parsed !== 'object') throw new Error('Could not parse response as JSON: '+pe.message);
       }
+      console.log('[FundFetch] Parsed:', parsed);
+      const g = parseFloat(parsed.growth);
+      const d = parseFloat(parsed.dividend);
+      if(!isFinite(g)) throw new Error('AI response missing valid "growth" number: '+JSON.stringify(parsed).slice(0,120));
+      if(g < -50 || g > 50) throw new Error('Growth value '+g+'% is out of plausible range');
+      const n = [...allocations];
+      n[i] = {
+        ...n[i],
+        growth: String(g.toFixed(1)),
+        dividend: isFinite(d) && d >= 0 && d <= 30 ? String(d.toFixed(1)) : (n[i].dividend||'0'),
+        _fetchedConfidence: parsed.confidence || 'medium',
+        _fetchedSource: parsed.source || '',
+        _inception: parsed.inceptionDate || n[i]._inception || ''
+      };
+      onChange(n);
+      const conf = parsed.confidence || 'medium';
+      const confIcon = conf==='high'?'✓':conf==='low'?'⚠':'≈';
+      try { toast(confIcon+' '+fund.fundName.slice(0,40)+': '+g.toFixed(1)+'% growth'+(isFinite(d)&&d>0?' · '+d.toFixed(1)+'% div':'')+' ('+conf+' conf.)', conf==='low'?'warning':'success', 5000); } catch(e){}
     } catch(e) {
-      console.warn('[AutoFetch] Error:', e);
-      try { toast('Auto-fetch failed: '+(e.message||'AI error')+'. Try typing values manually.','error',5000); } catch(err){}
+      console.error('[FundFetch] Failed:', e);
+      try { toast('Fetch failed: '+(e.message||'unknown error')+'. Check browser console for details.','error',6000); } catch(err){}
     }
     setFetchingRow(-1);
   };
@@ -10516,43 +10529,93 @@ function FundAllocationEditor({allocations,onChange,reinvest,onSyncWeighted,poli
 
   return (
     <div>
-      {/* Header row — 6 cols: Fund, Alloc, Growth, Div, Risk, Actions (↻ + ×) */}
-      {allocations.length > 0 && (
-        <div style={{display:'grid',gridTemplateColumns:'1fr 58px 64px 64px 36px 56px',gap:6,marginBottom:4,padding:'0 2px'}}>
-          <div style={{fontSize:9,color:'var(--text3)',fontWeight:600,textTransform:'uppercase'}}>Fund Name</div>
-          <div style={{fontSize:9,color:'var(--text3)',fontWeight:600,textTransform:'uppercase',textAlign:'center'}}>Alloc %</div>
-          <div style={{fontSize:9,color:'var(--green2)',fontWeight:600,textTransform:'uppercase',textAlign:'center'}}>Growth</div>
-          <div style={{fontSize:9,color:'#9d8abf',fontWeight:600,textTransform:'uppercase',textAlign:'center'}}>Div %</div>
-          <div style={{fontSize:9,color:'var(--text3)',fontWeight:600,textTransform:'uppercase',textAlign:'center'}}>Risk</div>
-          <div style={{fontSize:9,color:'var(--text3)',fontWeight:600,textTransform:'uppercase',textAlign:'center'}}>Actions</div>
-        </div>
-      )}
+      {/* ── Card-per-fund layout (mobile-friendly, no horizontal overflow) ── */}
       {allocations.map((a,i) => (
-        <div key={i} style={{position:'relative'}}>
-          <div style={{display:'grid',gridTemplateColumns:'1fr 58px 64px 64px 36px 56px',gap:6,marginBottom:4,alignItems:'center'}}>
-            <input value={a.fundName} onChange={e=>{update(i,'fundName',e.target.value);lookup(i,e.target.value)}} onFocus={()=>lookup(i,a.fundName)} onBlur={()=>setTimeout(()=>{setShowSuggestions(-1);setSuggestions([])},200)} placeholder="Search fund…" style={{fontSize:12}} />
-            {a._newFund && <div style={{display:'flex',alignItems:'center',gap:4,marginTop:2,gridColumn:'1'}}>
-              <span style={{fontSize:8,padding:'1px 5px',borderRadius:3,background:'rgba(212,169,106,.12)',color:'var(--gold)',fontWeight:600}}>🆕 New Fund</span>
-              <a href={'https://www.google.com/search?q='+encodeURIComponent((a.fundName||'')+' factsheet Singapore')} target="_blank" rel="noopener" style={{fontSize:8,color:'var(--teal)',textDecoration:'underline'}}>Search Factsheet</a>
-            </div>}
-            <input value={a.pct} onChange={e=>update(i,'pct',e.target.value)} placeholder="%" type="number" style={{textAlign:'center',fontSize:12}} />
-            <input value={a.growth||''} onChange={e=>update(i,'growth',e.target.value)} placeholder="auto" type="number" step="0.5" style={{textAlign:'center',fontSize:12,color:'var(--green2)'}} />
-            <input value={a.dividend||''} onChange={e=>update(i,'dividend',e.target.value)} placeholder="auto" type="number" step="0.5" style={{textAlign:'center',fontSize:12,color:'#9d8abf'}} />
-            <span className="mono" style={{textAlign:'center',fontSize:11,fontWeight:600,color:riskColor(a.riskRating)}}>{a.riskRating||'-'}</span>
-            <div style={{display:'flex',gap:3,justifyContent:'center'}}>
-              <button
-                title="Auto-fetch since-inception return from AI"
-                onClick={()=>autoFetchReturn(i)}
-                disabled={fetchingRow===i || !a.fundName}
-                style={{background:fetchingRow===i?'var(--gold-dim)':'var(--bg2)',color:fetchingRow===i?'var(--gold)':'var(--teal)',border:'1px solid var(--border2)',borderRadius:4,padding:'2px 5px',fontSize:11,cursor:(fetchingRow===i||!a.fundName)?'default':'pointer',opacity:!a.fundName?.4:1}}>
-                {fetchingRow===i ? '⏳' : '↻'}
-              </button>
-              <button className="btn-danger btn-sm" onClick={()=>remove(i)} style={{padding:'2px 5px',fontSize:11}}>×</button>
+        <div key={i} style={{background:'var(--bg2)',borderRadius:8,padding:10,marginBottom:8,border:'1px solid var(--border)',position:'relative'}}>
+          {/* Row 1: Fund name (flex:1) + Alloc% (fixed) + Delete */}
+          <div style={{display:'flex',gap:6,alignItems:'center',marginBottom:6}}>
+            <div style={{flex:1,minWidth:0,position:'relative'}}>
+              <input
+                value={a.fundName}
+                onChange={e=>{update(i,'fundName',e.target.value);lookup(i,e.target.value)}}
+                onFocus={()=>lookup(i,a.fundName)}
+                onBlur={()=>setTimeout(()=>{setShowSuggestions(-1);setSuggestions([])},200)}
+                placeholder="Search fund…"
+                style={{width:'100%',fontSize:12}} />
             </div>
+            <div style={{display:'flex',alignItems:'center',gap:3,flexShrink:0}}>
+              <input
+                value={a.pct}
+                onChange={e=>update(i,'pct',e.target.value)}
+                placeholder="%"
+                type="number"
+                style={{width:52,textAlign:'center',fontSize:12,fontWeight:600}} />
+              <span style={{fontSize:10,color:'var(--text3)'}}>%</span>
+            </div>
+            <button className="btn-danger btn-sm" onClick={()=>remove(i)} style={{padding:'4px 8px',fontSize:12,flexShrink:0}}>×</button>
           </div>
+          {/* Row 2: Growth / Div / Risk / Fetch — inline with mini-labels */}
+          <div style={{display:'flex',gap:8,alignItems:'center',fontSize:10,flexWrap:'wrap'}}>
+            <label style={{display:'flex',alignItems:'center',gap:4}}>
+              <span style={{color:'var(--green2)',fontWeight:600,textTransform:'uppercase'}}>Growth</span>
+              <input
+                value={a.growth||''}
+                onChange={e=>update(i,'growth',e.target.value)}
+                placeholder="—"
+                type="number"
+                step="0.5"
+                style={{width:48,textAlign:'center',fontSize:11,color:'var(--green2)',padding:'4px 4px'}} />
+              <span style={{color:'var(--text3)'}}>%</span>
+            </label>
+            <label style={{display:'flex',alignItems:'center',gap:4}}>
+              <span style={{color:'#9d8abf',fontWeight:600,textTransform:'uppercase'}}>Div</span>
+              <input
+                value={a.dividend||''}
+                onChange={e=>update(i,'dividend',e.target.value)}
+                placeholder="0"
+                type="number"
+                step="0.5"
+                style={{width:48,textAlign:'center',fontSize:11,color:'#9d8abf',padding:'4px 4px'}} />
+              <span style={{color:'var(--text3)'}}>%</span>
+            </label>
+            <div style={{display:'flex',alignItems:'center',gap:4}}>
+              <span style={{color:'var(--text3)',fontWeight:600,textTransform:'uppercase'}}>Risk</span>
+              <span className="mono" style={{fontWeight:700,color:a.riskRating?riskColor(a.riskRating):'var(--text3)',fontSize:12}}>{a.riskRating||'—'}</span>
+            </div>
+            <button
+              title="Auto-fetch since-inception return from AI"
+              onClick={()=>autoFetchReturn(i)}
+              disabled={fetchingRow===i || !a.fundName || a.fundName.length < 3}
+              style={{
+                marginLeft:'auto',
+                background: fetchingRow===i ? 'var(--gold-dim)' : 'rgba(91,168,160,.08)',
+                color: fetchingRow===i ? 'var(--gold)' : 'var(--teal)',
+                border: '1px solid '+(fetchingRow===i?'var(--gold)':'rgba(91,168,160,.3)'),
+                borderRadius:6,
+                padding:'4px 10px',
+                fontSize:10,
+                fontWeight:600,
+                cursor:(fetchingRow===i||!a.fundName||a.fundName.length<3)?'default':'pointer',
+                opacity:(!a.fundName||a.fundName.length<3)?.4:1
+              }}>
+              {fetchingRow===i ? '⏳ fetching…' : '↻ Fetch Return'}
+            </button>
+          </div>
+          {/* Fetched source caption */}
+          {a._fetchedConfidence && (
+            <div style={{fontSize:9,color:'var(--text3)',marginTop:4,fontStyle:'italic'}}>
+              AI-fetched ({a._fetchedConfidence} confidence){a._fetchedSource?' · '+a._fetchedSource:''}
+            </div>
+          )}
+          {a._newFund && (
+            <div style={{display:'flex',alignItems:'center',gap:6,marginTop:4}}>
+              <span style={{fontSize:9,padding:'1px 6px',borderRadius:3,background:'rgba(212,169,106,.12)',color:'var(--gold)',fontWeight:600}}>🆕 Not in local DB</span>
+              <a href={'https://www.google.com/search?q='+encodeURIComponent((a.fundName||'')+' factsheet Singapore')} target="_blank" rel="noopener" style={{fontSize:9,color:'var(--teal)',textDecoration:'underline'}}>Search Factsheet</a>
+            </div>
+          )}
           {/* Autocomplete dropdown */}
           {showSuggestions===i && suggestions.length > 0 && (
-            <div style={{position:'absolute',top:'100%',left:0,right:200,background:'var(--bg2)',border:'1px solid var(--border2)',borderRadius:8,maxHeight:180,overflowY:'auto',zIndex:20,boxShadow:'0 8px 24px rgba(0,0,0,.3)'}}>
+            <div style={{position:'absolute',top:40,left:10,right:80,background:'var(--bg)',border:'1px solid var(--border2)',borderRadius:8,maxHeight:180,overflowY:'auto',zIndex:20,boxShadow:'0 8px 24px rgba(0,0,0,.5)'}}>
               {suggestions.map((f,j) => (
                 <div key={j} onMouseDown={()=>selectFund(i,f)} style={{padding:'6px 10px',cursor:'pointer',borderBottom:'1px solid var(--border)',fontSize:11,display:'flex',justifyContent:'space-between',alignItems:'center'}}
                   onMouseOver={e=>e.currentTarget.style.background='var(--bg3)'} onMouseOut={e=>e.currentTarget.style.background='transparent'}>
@@ -10612,7 +10675,7 @@ function FundAllocationEditor({allocations,onChange,reinvest,onSyncWeighted,poli
           )}
         </div>
       )}
-      <div style={{fontSize:10,color:'var(--text3)',marginTop:4}}>Risk ratings auto-looked up from {FUND_DB.length.toLocaleString()} instruments (iFAST universe). ↻ auto-fetches since-inception return from AI. Management fee is set once at policy level above.</div>
+      <div style={{fontSize:10,color:'var(--text3)',marginTop:4}}>Risk ratings auto-looked up from {FUND_DB.length.toLocaleString()} instruments (iFAST universe). ↻ Fetch Return uses AI to look up since-inception performance. Management fee is set once at policy level above.</div>
     </div>
   );
 }
