@@ -45,8 +45,11 @@ if(!navigator.locks){navigator.locks={request:function(name,opts,cb){if(typeof o
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{overflow-x:hidden;width:100%}
-/* ══════ LANDSCAPE LOCK — show rotate prompt instead of broken transform ══════ */
-@media screen and (orientation:landscape) and (max-height:500px) {
+/* ══════ LANDSCAPE LOCK — only activate on real mobile touchscreens in landscape ══════ */
+/* Requires: landscape orientation + coarse pointer (touchscreen) + narrow viewport.
+   This correctly excludes desktops (fine pointer), tablets (wider than 950px when landscape),
+   and desktops with dev tools open (which can compress viewport height below 500px). */
+@media screen and (orientation:landscape) and (pointer:coarse) and (max-width:950px) {
   #root{display:none!important}
   #landscape-lock{display:flex!important}
 }
@@ -1029,7 +1032,7 @@ async function pdfToImages(pdfDoc, maxPages=12) {
 // Extraction pipeline version stamp — bump this whenever EXTRACT_PROMPT, post-processing
 // logic, or schema changes. All previously-cached results become invalid, forcing a fresh
 // AI call. Protects users from seeing stale extractions after upgrades.
-const EXTRACT_PIPELINE_VERSION = 'v4-2026-04-06-premiumAmount-dedup';
+const EXTRACT_PIPELINE_VERSION = 'v5-2026-04-06-structured-output';
 
 // SHA-256 hash of a File's bytes — used as content-addressable cache key.
 async function hashFile(file) {
@@ -4541,6 +4544,160 @@ function repairJSON(raw) {
 // Fallback: Gemini-only if no Anthropic key
 // ═══════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════
+// TYPED POLICY EXTRACTION SCHEMA — single source of truth
+// ───────────────────────────────────────────────────────────────
+// This schema is passed to Gemini as `generationConfig.responseSchema` to get
+// guaranteed-valid, type-safe JSON output. Uses the OpenAPI 3.0 subset that
+// Gemini 2.5 Flash supports (type, description, enum, properties, required,
+// items, nullable). No oneOf, anyOf, additionalProperties, or $ref.
+//
+// Fields NOT in this schema will be missing in the structured-output path:
+//   - UL/IUL/VUL: creditingRates, loyaltyBonus, surrender_charge_schedule,
+//     feature_flags, ELP_premium, QSI_flag, FA/IA_allocation, index_sub_accounts
+//   - Premium financing: financed, finLoan, finRate, finTenure
+//   - Short-term endowment yields: endYield, endGuaranteedCV
+//   - Detailed ILP: fund bid/offer spread, reinvest flag, growth/dividend rates
+// These are still captured by the dual-AI fallback pipeline. Future sessions
+// can widen this schema as needed.
+// ═══════════════════════════════════════════════════════════════
+
+const POLICY_EXTRACTION_SCHEMA = {
+  type: 'ARRAY',
+  items: {
+    type: 'OBJECT',
+    properties: {
+      // ── Core identity ──
+      insurer: { type: 'STRING', description: 'Issuer company name, e.g. "Manulife", "AIA", "Singlife", "Great Eastern", "Prudential"' },
+      productName: { type: 'STRING', description: 'Official product name exactly as written on document' },
+      policyName: { type: 'STRING', nullable: true, description: 'Display name if different from productName' },
+      policyNumber: { type: 'STRING', nullable: true, description: 'Policy/contract number as-is from document' },
+      // ── Classification ──
+      category: {
+        type: 'STRING',
+        enum: ['protection','savings','health','investment','retirement','maternity','cash_investments','other_assets'],
+        description: 'Top-level category'
+      },
+      subType: { type: 'STRING', description: 'Product subtype, e.g. "Whole Life", "Term Life", "Integrated Shield Plan", "ILP (Investment)", "Retirement", "Endowment"' },
+      currency: { type: 'STRING', nullable: true, description: '3-letter ISO code, defaults to SGD' },
+      // ── Coverage & premium ──
+      sumAssured: { type: 'NUMBER', nullable: true, description: 'Primary sum assured / death benefit' },
+      premiumAmount: {
+        type: 'NUMBER',
+        nullable: true,
+        description: 'Premium AS PAID at its stated frequency. CRITICAL: do NOT annualize or convert. If document shows "$1,000 Monthly", return 1000. If "$12,000 Annually", return 12000. The frequency is captured separately below.'
+      },
+      premFrequency: {
+        type: 'STRING',
+        enum: ['annual','monthly','single','unknown'],
+        description: 'Period of premiumAmount. MUST match the period shown on the document. "How Often You Pay: Monthly" → monthly.'
+      },
+      premiumStructure: {
+        type: 'STRING',
+        enum: ['Single Premium','Regular Premium','Limited Pay','Flexible Premium','unknown'],
+        nullable: true
+      },
+      paymentMethod: {
+        type: 'STRING',
+        enum: ['Cash','MediSave','SRS','MediSave+Cash','CPF OA','CPF SA','unknown'],
+        nullable: true
+      },
+      // ── Client info ──
+      policyOwner: { type: 'STRING', nullable: true, description: 'Name of policy owner/purchaser' },
+      lifeInsured: { type: 'STRING', nullable: true, description: 'Name of life assured (may differ from owner)' },
+      gender: { type: 'STRING', enum: ['Male','Female','unknown'], nullable: true },
+      dob: { type: 'STRING', nullable: true, description: 'YYYY-MM-DD' },
+      ageAtEntry: { type: 'INTEGER', nullable: true },
+      smoker: { type: 'STRING', enum: ['Smoker','Non-smoker','unknown'], nullable: true },
+      nationality: { type: 'STRING', enum: ['SC','PR','Foreigner','unknown'], nullable: true },
+      occupation: { type: 'STRING', nullable: true },
+      // ── Premium term ──
+      premStartAge: { type: 'INTEGER', nullable: true },
+      premTerm: { type: 'INTEGER', nullable: true, description: 'Premium payment years (NOT policy term)' },
+      premEndAge: { type: 'INTEGER', nullable: true, description: 'Age when premium payments stop' },
+      // ── Dates & status ──
+      inceptionDate: { type: 'STRING', nullable: true, description: 'YYYY-MM-DD' },
+      maturityDate: { type: 'STRING', nullable: true, description: 'YYYY-MM-DD' },
+      status: { type: 'STRING', enum: ['inforce','lapsed','paid-up','surrendered','matured'], nullable: true },
+      // ── Riders (array of objects) ──
+      riders: {
+        type: 'ARRAY',
+        nullable: true,
+        description: 'CAPTURE-FIRST: one entry per benefit listed in the document. Always fill riderName with the exact name.',
+        items: {
+          type: 'OBJECT',
+          properties: {
+            type: {
+              type: 'STRING',
+              enum: ['death','tpd','ci','eci','di','accidental','acc_medical','acc_tcm','acc_dismember','premium_waiver','other'],
+              description: 'Classification. Use "other" if the benefit name does not clearly match.'
+            },
+            riderName: { type: 'STRING', description: 'Exact name as written on document' },
+            sa: { type: 'NUMBER', nullable: true, description: 'Sum assured for this rider' },
+            premium: { type: 'NUMBER', nullable: true, description: '0 if bundled, actual if separate add-on' },
+            expiryAge: { type: 'INTEGER', nullable: true },
+            bundled: { type: 'BOOLEAN', nullable: true, description: 'true if part of base plan, false if separate add-on' }
+          },
+          required: ['type','riderName']
+        }
+      },
+      // ── Sum assured multiplier (for multiplier plans like LifeReady Plus) ──
+      saMultiplier: { type: 'NUMBER', nullable: true, description: 'e.g. 5 for 5× SA' },
+      multiplierEndAge: { type: 'INTEGER', nullable: true },
+      // ── ISP specific ──
+      ispClass: { type: 'STRING', nullable: true, description: 'A, B1, B2+, Private, etc.' },
+      hasRider: { type: 'BOOLEAN', nullable: true, description: 'true if ISP has an associated rider (TotalCare, PRUExtra, etc.)' },
+      riderList: { type: 'STRING', nullable: true, description: 'Comma-separated list of ISP rider names' },
+      riderPremium: { type: 'NUMBER', nullable: true, description: 'Combined rider premium' },
+      ispDeductible: { type: 'NUMBER', nullable: true },
+      ispCoinsurance: { type: 'NUMBER', nullable: true },
+      // ── Cash value ──
+      cashValue: { type: 'NUMBER', nullable: true },
+      cvGrowthRate: { type: 'NUMBER', nullable: true, description: 'Projected % p.a.' },
+      surrenderPeriod: { type: 'INTEGER', nullable: true, description: 'Years until zero surrender charge' },
+      // ── ILP ──
+      ilpGrowth: { type: 'NUMBER', nullable: true, description: 'Projected growth % p.a.' },
+      ilpDivYield: { type: 'NUMBER', nullable: true, description: 'Dividend yield % p.a.' },
+      ilpMgmtFee: { type: 'NUMBER', nullable: true, description: 'Management fee % p.a.' },
+      fundAllocations: {
+        type: 'ARRAY',
+        nullable: true,
+        items: {
+          type: 'OBJECT',
+          properties: {
+            fundName: { type: 'STRING' },
+            allocation: { type: 'NUMBER', description: 'Percentage, e.g. 80 for 80%' }
+          },
+          required: ['fundName']
+        }
+      },
+      // ── Retirement / annuity / income plans ──
+      annuityPayout: { type: 'NUMBER', nullable: true, description: 'Annual income payout amount' },
+      annuityMonthly: { type: 'NUMBER', nullable: true, description: 'Monthly income payout amount' },
+      annuityStartAge: { type: 'INTEGER', nullable: true, description: 'Age income payouts begin' },
+      annuityEndAge: { type: 'INTEGER', nullable: true, description: 'Age income payouts end (if finite term)' },
+      retMaturitySum: { type: 'NUMBER', nullable: true, description: 'Maturity/terminal value' },
+      // ── Fixed deposits / T-bills / SSB ──
+      fdPrincipal: { type: 'NUMBER', nullable: true, description: 'Deposit amount for FD/T-bill/SSB' },
+      fdYieldPct: { type: 'NUMBER', nullable: true, description: 'Yield % p.a.' },
+      fdStartDate: { type: 'STRING', nullable: true, description: 'YYYY-MM-DD' },
+      fdMaturityDate: { type: 'STRING', nullable: true, description: 'YYYY-MM-DD' },
+      fdTenureMonths: { type: 'INTEGER', nullable: true },
+      fdAutoRenew: { type: 'BOOLEAN', nullable: true },
+      // ── Summary & review ──
+      highlights: {
+        type: 'ARRAY',
+        nullable: true,
+        description: '5-8 concise key policy details (death payout, CI payout, bonus rates, breakeven year, unique features, etc.)',
+        items: { type: 'STRING' }
+      },
+      notes: { type: 'STRING', nullable: true, description: 'Concise 3-5 sentence FC review summary' },
+      userRemarks: { type: 'STRING', nullable: true, description: 'Handwritten notes or informal annotations preserved verbatim' }
+    },
+    required: ['insurer','productName','category']
+  }
+};
+
 // Step 1: Gemini reads PDFs/images → returns raw text
 async function geminiRead(geminiKey, contentBlocks) {
   const parts = [];
@@ -4597,6 +4754,61 @@ async function claudeExtract(anthropicKey, systemPrompt, rawText, maxTokens) {
   return raw.replace(/```json\s*|```\s*/g,'').trim();
 }
 
+// Gemini with typed responseSchema — guaranteed-valid, type-safe structured output.
+// This is the PREFERRED path for policy extraction when a schema is provided.
+// Benefits vs the dual-AI (Gemini reads → Claude extracts) pipeline:
+//   • Half the tokens (one API call instead of two)
+//   • Guaranteed valid JSON (no repairJSON needed)
+//   • Guaranteed correct types (numbers stay numbers, enums stay enums)
+//   • Eliminates field-name drift between prompt and code
+// The systemPrompt still carries all domain rules (ISP merging, Singapore
+// product knowledge, income plan classification, etc.); only the OUTPUT shape
+// is constrained by the schema.
+async function geminiStructuredExtract(geminiKey, systemPrompt, contentBlocks, maxTokens, responseSchema) {
+  const parts = [];
+  for(const block of contentBlocks) {
+    if(block.type==='text') parts.push({text:block.text});
+    else if(block.type==='image') parts.push({inlineData:{mimeType:block.source.media_type,data:block.source.data}});
+    else if(block.type==='document') parts.push({inlineData:{mimeType:block.source.media_type||'application/pdf',data:block.source.data}});
+  }
+  if(parts.length === 0) throw new Error('No content to extract from');
+  const mediaCount = parts.filter(p=>p.inlineData).length;
+  console.log('[Gemini Structured] Sending:', mediaCount, 'files +', parts.length-mediaCount, 'text blocks. Schema has', Object.keys(responseSchema?.items?.properties||{}).length, 'top-level fields.');
+  let resp;
+  try {
+    resp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='+geminiKey,{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({
+        contents:[{parts}],
+        systemInstruction:{parts:[{text:systemPrompt}]},
+        generationConfig:{
+          maxOutputTokens:maxTokens||32000,
+          responseMimeType:'application/json',
+          responseSchema:responseSchema
+        }
+      })
+    });
+  } catch(fetchErr) {
+    throw new Error('Gemini: NetworkError when attempting to fetch resource.');
+  }
+  if(!resp.ok) {
+    const errData = await resp.json().catch(()=>({}));
+    throw new Error('Gemini structured API error ('+resp.status+'): '+(errData.error?.message||resp.statusText));
+  }
+  const data = await resp.json();
+  if(data.error) throw new Error('Gemini: '+data.error.message);
+  if(!data.candidates || !data.candidates.length) {
+    const blockReason = data.promptFeedback?.blockReason;
+    throw new Error('Gemini returned no response'+(blockReason?' (blocked: '+blockReason+')':''));
+  }
+  const raw = data.candidates[0]?.content?.parts?.[0]?.text||'';
+  if(!raw || raw.length < 2) throw new Error('Gemini structured returned empty response.');
+  console.log('[Gemini Structured] Response:', raw.length, 'chars. finishReason:', data.candidates[0]?.finishReason);
+  // With responseMimeType:'application/json' + responseSchema, the output is guaranteed
+  // valid JSON matching the schema. No repairJSON needed.
+  return raw;
+}
+
 // Gemini-only fallback (if no Anthropic key)
 async function geminiExtract(geminiKey, systemPrompt, contentBlocks, maxTokens) {
   const parts = [];
@@ -4635,9 +4847,12 @@ async function geminiExtract(geminiKey, systemPrompt, contentBlocks, maxTokens) 
   return raw.replace(/```json\s*|```\s*/g,'').trim();
 }
 
-// Main entry point — uses dual pipeline if both keys exist, Gemini-only otherwise
-async function callAI(systemPrompt, contentBlocks, maxTokens) {
-  console.log('[callAI] Starting. Blocks:', contentBlocks.length, 'types:', contentBlocks.map(b=>b.type).join(','));
+// Main entry point — uses dual pipeline if both keys exist, Gemini-only otherwise.
+// If a responseSchema is provided AND Gemini is available, the structured-output path
+// is preferred (one call, guaranteed-valid JSON). Falls back through the dual-AI and
+// Gemini-only paths if the structured path fails.
+async function callAI(systemPrompt, contentBlocks, maxTokens, responseSchema) {
+  console.log('[callAI] Starting. Blocks:', contentBlocks.length, 'types:', contentBlocks.map(b=>b.type).join(','), 'schema:', responseSchema?'yes':'no');
   const uid = window._user?.id || '';
   const gk = ((await dbGet('settings','geminiKey_'+uid).catch(()=>null))?.value || (await dbGet('settings','geminiKey').catch(()=>null))?.value || '').trim();
   const ck = ((await dbGet('settings','anthropicKey_'+uid).catch(()=>null))?.value || (await dbGet('settings','anthropicKey').catch(()=>null))?.value || '').trim();
@@ -4648,7 +4863,22 @@ async function callAI(systemPrompt, contentBlocks, maxTokens) {
   const hasMedia = contentBlocks.some(b=>b.type==='image'||b.type==='document');
   const forceAnthropic = contentBlocks.some(b=>b._forceAnthropic);
   const textParts = contentBlocks.filter(b=>b.type==='text').map(b=>b.text).join('\n');
-  
+
+  // ── PREFERRED PATH: Gemini with structured output (responseSchema) ──
+  // Used when the caller provides a schema — guaranteed-valid, type-safe JSON
+  // in a single API call. Skips this for docx files (Gemini can't read them).
+  if(responseSchema && gk && !forceAnthropic) {
+    console.log('[AI] 🎯 Preferred: Gemini structured output (single call, guaranteed schema)');
+    try {
+      const result = await geminiStructuredExtract(gk, systemPrompt, contentBlocks, maxTokens, responseSchema);
+      try { toast('🎯 Structured extraction succeeded (one-shot, schema-validated)','success',2500); } catch(e){}
+      return result;
+    } catch(structuredErr) {
+      console.warn('[AI] Structured extract failed:', structuredErr.message, '→ falling back to dual-AI pipeline');
+      // Fall through to the legacy paths below — don't throw yet
+    }
+  }
+
   // ── Text-only → Claude directly (cheapest), fallback to Gemini ──
   if(ck && !hasMedia) {
     console.log('[AI] Text-only → Claude direct');
@@ -7716,7 +7946,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
     if(expectedCount) console.log('[Extract] Document hints at', expectedCount, 'policies');
 
     content.push({type:'text',text:'Extract ALL insurance policies AND financial instruments from these documents. CRITICAL RULES:\n1. Multiple photos may show DIFFERENT PAGES of the SAME policy — correlate them by policy number, insurer+product name, or context clues. Merge information from multiple pages into ONE policy entry.\n2. Multiple photos may also show DIFFERENT policies — extract each as a separate entry.\n3. NEVER skip or merge genuinely different policies. Two policies from the same insurer with different product names = 2 entries.\n4. If the same fund (e.g. "Allianz Global High Payout") appears under DIFFERENT accounts (CPFIS-OA vs Cash), these are SEPARATE entries — differentiate by appending the account type in policyName.\n5. Look across ALL images for related data — page 1 might have the policy name while page 3 has the premium details.\nReturn ONLY valid JSON array or object.'});
-    const text = await callAI(EXTRACT_PROMPT, content, 32000);
+    const text = await callAI(EXTRACT_PROMPT, content, 32000, POLICY_EXTRACTION_SCHEMA);
     console.log('[Extract] Raw response:', text.length, 'chars. Tail:', text.slice(-120));
     // ── TRUNCATION DETECTION ──
     // If response doesn't end with a closing bracket, it was cut mid-stream.
@@ -10412,10 +10642,770 @@ function FundLookup() {
 function ReportTab() {
   const {policies,clientName,clientProfile} = useContext(AppCtx);
   const [generating, setGenerating] = useState(false);
+  const [generatingVisual, setGeneratingVisual] = useState(false);
   const p = clientProfile || {};
   const age = p.dob ? Math.floor((Date.now()-new Date(p.dob).getTime())/31557600000) : 35;
   const retAge = parseInt(p.retirementAge)||65;
   const annualIncome = parseFloat(p.annualIncome)||0;
+
+  // ═══════════════════════════════════════════════════════════════
+  // VISUAL REPORT — hero cover, Chart.js dashboard, policy cards
+  // Creates ephemeral Chart.js instances on hidden canvases, exports as PNG,
+  // and composes them into a jsPDF document with navy/gold design language.
+  // ═══════════════════════════════════════════════════════════════
+  const generateVisualReport = async () => {
+    setGeneratingVisual(true);
+    try {
+      const advisorName = ((await dbGet('settings','advisorName').catch(()=>null))?.value||'').trim();
+      const advisorCompany = ((await dbGet('settings','advisorCompany').catch(()=>null))?.value||'').trim();
+      const {jsPDF} = window.jspdf;
+      const doc = new jsPDF('p','mm','a4');
+      const W=210, H=297, M=14, CW=W-2*M;
+      const NAVY=[11,15,26], NAVY2=[23,31,46], NAVY3=[35,45,65], GOLD=[212,169,106], GOLD_DIM=[180,147,90], CREAM=[232,220,200], LIGHT=[247,243,236], MID=[180,175,165], MUTED=[140,140,140], DARK=[60,60,60], WHITE=[255,255,255], GREEN=[110,200,150], RED=[220,90,80];
+      const today = new Date().toLocaleDateString('en-SG',{day:'numeric',month:'long',year:'numeric'});
+
+      // ─── Chart.js offscreen render helper ───
+      // Creates a hidden canvas, instantiates Chart.js with animation disabled,
+      // waits for layout to settle, then extracts a PNG data URL. Tries
+      // chart.toBase64Image() first (Chart.js-aware) and falls back to
+      // canvas.toDataURL() if that fails. Returns null on any error rather
+      // than throwing so the caller can render a placeholder.
+      const renderChartToPNG = (config, width, height, label) => new Promise((resolve) => {
+        const tag = label || config.type || 'chart';
+        try {
+          if(!window.Chart) {
+            console.warn('[Visual PDF] Chart.js not loaded — skipping '+tag);
+            resolve(null); return;
+          }
+          const canvas = document.createElement('canvas');
+          canvas.width = width;
+          canvas.height = height;
+          // Position offscreen but with concrete dimensions so layout engines render it.
+          canvas.style.position = 'fixed';
+          canvas.style.left = '-99999px';
+          canvas.style.top = '0';
+          canvas.style.width = width+'px';
+          canvas.style.height = height+'px';
+          document.body.appendChild(canvas);
+          let chart;
+          try {
+            chart = new window.Chart(canvas, {
+              ...config,
+              options: {
+                ...(config.options||{}),
+                responsive: false,
+                maintainAspectRatio: false,
+                animation: false,
+                devicePixelRatio: 2
+              }
+            });
+          } catch(ctorErr) {
+            console.warn('[Visual PDF] Chart constructor failed for '+tag+':', ctorErr.message);
+            canvas.remove();
+            resolve(null); return;
+          }
+          // Give Chart.js time to lay out + paint. 250ms is conservative; non-animated
+          // charts usually settle in <50ms but some browsers delay offscreen canvas paints.
+          setTimeout(() => {
+            let dataUrl = null;
+            // Path A: Chart.js-native extraction
+            try {
+              dataUrl = chart.toBase64Image('image/png', 1);
+            } catch(e) { /* fall through */ }
+            // Path B: raw canvas extraction (if Chart.js path failed or returned empty)
+            if(!dataUrl || dataUrl.length < 200) {
+              try {
+                dataUrl = canvas.toDataURL('image/png');
+              } catch(e) { /* fall through */ }
+            }
+            // Cleanup
+            try { chart.destroy(); } catch(e) {}
+            canvas.remove();
+            // Validate — a real PNG data URL is at least a few hundred chars
+            if(!dataUrl || !dataUrl.startsWith('data:image/png') || dataUrl.length < 200) {
+              console.warn('[Visual PDF] '+tag+' render produced invalid data URL (length='+((dataUrl||'').length)+')');
+              resolve(null);
+            } else {
+              console.log('[Visual PDF] '+tag+' rendered ('+Math.round(dataUrl.length/1024)+'KB)');
+              resolve(dataUrl);
+            }
+          }, 250);
+        } catch(err) {
+          console.warn('[Visual PDF] renderChartToPNG outer error for '+tag+':', err.message);
+          resolve(null);
+        }
+      });
+
+      // ─── jsPDF arc drawing helper (for gauge) ───
+      // Approximates an arc with ~50 line segments since jsPDF has no native arc primitive.
+      // setLineCap may not exist on older jsPDF builds, so it's wrapped defensively.
+      const drawArc = (cx, cy, radius, startAng, endAng, color, width) => {
+        doc.setDrawColor(...color);
+        doc.setLineWidth(width);
+        try { if(doc.setLineCap) doc.setLineCap('round'); } catch(e) {}
+        const steps = 50;
+        const angRange = endAng - startAng;
+        if(Math.abs(angRange) < 0.001) return;
+        let px = cx + Math.cos(startAng) * radius;
+        let py = cy + Math.sin(startAng) * radius;
+        for(let i=1; i<=steps; i++) {
+          const ang = startAng + (angRange * i / steps);
+          const nx = cx + Math.cos(ang) * radius;
+          const ny = cy + Math.sin(ang) * radius;
+          doc.line(px, py, nx, ny);
+          px = nx; py = ny;
+        }
+      };
+
+      // ═══ DATA AGGREGATION ═══
+      const activePolicies = policies.filter(pol => pol.status!=='matured'&&pol.status!=='surrendered'&&pol.status!=='lapsed'&&pol.category!=='cash_investments'&&pol.category!=='other_assets');
+      const activeNonSingle = activePolicies.filter(pol => !pol.premSingle&&pol.premiumStructure!=='Single Premium'&&pol.premFrequency!=='single');
+      const totalAnnualPrem = activeNonSingle.reduce((s,pol)=>s+(pol.premFrequency==='monthly'?(parseFloat(pol.annualPremium)||0)*12:(parseFloat(pol.annualPremium)||0)),0);
+      const totalSinglePrem = activePolicies.filter(pol=>pol.premSingle||pol.premiumStructure==='Single Premium'||pol.premFrequency==='single').reduce((s,pol)=>s+(parseFloat(pol.annualPremium)||0),0);
+      const totalCoverage = policies.filter(pol=>pol.status!=='matured'&&pol.status!=='surrendered').reduce((s,pol)=>s+(parseFloat(pol.sumAssured)||0),0);
+
+      // Coverage by type
+      let cDeath=0,cTPD=0,cCI=0,cECI=0,cDI=0,hasISP=false;
+      policies.forEach(pol => {
+        (pol.riders||[]).forEach(rd => {
+          const sa=parseFloat(rd.sa)||0;
+          if(rd.type==='death')cDeath+=sa;
+          if(rd.type==='tpd')cTPD+=sa;
+          if(rd.type==='ci')cCI+=sa;
+          if(rd.type==='eci')cECI+=sa;
+          if(rd.type==='di')cDI+=sa;
+        });
+        if(pol.category==='protection'&&!['Personal Accident','Critical Illness'].includes(pol.subType)){const sa=parseFloat(pol.sumAssured)||0;const mult=parseFloat(pol.saMultiplier)||1;const multEnd=parseInt(pol.multiplierEndAge)||70;const effSA=age<multEnd?sa*mult:sa;cDeath+=effSA;cTPD+=effSA;}
+        if(pol.subType==='Critical Illness')cCI+=parseFloat(pol.sumAssured)||0;
+        if(pol.subType==='Integrated Shield Plan')hasISP=true;
+        if(pol.subType==='Disability Income')cDI+=parseFloat(pol.diMonthlyBenefit)||0;
+      });
+
+      // LIA gap benchmarks
+      const pMonthlyExp = parseFloat(p.monthlyExpenses)||0;
+      const pMortgage = parseFloat(p.mortgagePayment)||0;
+      const pMedical = parseFloat(p.medicalBudget)||0;
+      const pTotalMonthly = pMonthlyExp+pMortgage+pMedical;
+      const pMonthlyForCI = pTotalMonthly>0?pTotalMonthly:(annualIncome>0?annualIncome/12:4000);
+      const rDeath = annualIncome>0?annualIncome*10:500000;
+      const rTPD = annualIncome>0?annualIncome*10:500000;
+      const rCI = pMonthlyForCI*12*5;
+      const rECI = pMonthlyForCI*12*2;
+      const rDI = annualIncome>0?Math.round(annualIncome/12*0.75):3000;
+      const gapData = [
+        {label:'Death & Total Invalidity', have:cDeath, need:rDeath, weight:20, icon:'Life'},
+        {label:'Total Permanent Disability', have:cTPD, need:rTPD, weight:20, icon:'TPD'},
+        {label:'Critical Illness', have:cCI, need:rCI, weight:25, icon:'CI'},
+        {label:'Early Critical Illness', have:cECI, need:rECI, weight:10, icon:'ECI'},
+        {label:'Disability Income / month', have:cDI, need:rDI, weight:10, icon:'DI', isMonthly:true},
+      ];
+      let weightedScore = gapData.reduce((s,g) => s + Math.min(100, g.have/Math.max(1,g.need)*100)*g.weight/100, 0);
+      if(hasISP) weightedScore += 15;
+      const score = Math.round(weightedScore);
+
+      // Insurer concentration (by annual premium)
+      const byInsurer = {};
+      activePolicies.forEach(pol => {
+        const ins = pol.insurer||'Unknown';
+        const prem = pol.premFrequency==='monthly'?(parseFloat(pol.annualPremium)||0)*12:(parseFloat(pol.annualPremium)||0);
+        if(prem > 0) byInsurer[ins] = (byInsurer[ins]||0) + prem;
+      });
+      const insurerEntries = Object.entries(byInsurer).sort((a,b)=>b[1]-a[1]);
+      const insurerLabels = insurerEntries.map(([k])=>k);
+      const insurerValues = insurerEntries.map(([,v])=>v);
+
+      // 20-year premium cashflow projection
+      const years = [];
+      const cashflowValues = [];
+      for(let yr=0; yr<20; yr++) {
+        const curAge = age + yr;
+        years.push(curAge);
+        let yearPrem = 0;
+        activeNonSingle.forEach(pol => {
+          const sAge = parseInt(pol.premStartAge)||parseInt(pol.ageAtEntry)||age;
+          const eAge = parseInt(pol.premEndAge) || (parseInt(pol.premTerm)?sAge+parseInt(pol.premTerm):sAge+25);
+          if(curAge >= sAge && curAge < eAge) {
+            yearPrem += pol.premFrequency==='monthly'?(parseFloat(pol.annualPremium)||0)*12:(parseFloat(pol.annualPremium)||0);
+          }
+        });
+        cashflowValues.push(Math.round(yearPrem));
+      }
+
+      // ═══ RENDER CHARTS IN PARALLEL ═══
+      console.log('[Visual PDF] Starting chart render. Insurers:', insurerLabels.length, 'Cashflow years with premium:', cashflowValues.filter(v=>v>0).length);
+      const insurerPalette = ['#d4a96a','#5b8fd9','#5ba8a0','#c97b9a','#9d8abf','#b8935a','#7daaec','#6ec0b8','#d89cb8','#a89dcf'];
+      const [donutPNG, cashflowPNG] = await Promise.all([
+        insurerValues.length > 0 ? renderChartToPNG({
+          type:'doughnut',
+          data:{
+            labels:insurerLabels,
+            datasets:[{
+              data:insurerValues,
+              backgroundColor:insurerLabels.map((_,i)=>insurerPalette[i%insurerPalette.length]),
+              borderWidth:2,
+              borderColor:'#ffffff'
+            }]
+          },
+          options:{
+            plugins:{
+              legend:{
+                position:'right',
+                labels:{color:'#2a3548',font:{size:11,family:'sans-serif',weight:'500'},padding:10,boxWidth:14,boxHeight:14,usePointStyle:false}
+              }
+            },
+            cutout:'58%',
+            layout:{padding:8}
+          }
+        }, 800, 450, 'insurer-donut') : Promise.resolve(null),
+        cashflowValues.some(v=>v>0) ? renderChartToPNG({
+          type:'line',
+          data:{
+            labels:years.map(y=>'Age '+y),
+            datasets:[{
+              label:'Annual Premium',
+              data:cashflowValues,
+              borderColor:'#b8935a',
+              backgroundColor:'rgba(212,169,106,0.25)',
+              borderWidth:2.5,
+              fill:true,
+              tension:0.35,
+              pointRadius:2,
+              pointBackgroundColor:'#b8935a'
+            }]
+          },
+          options:{
+            plugins:{legend:{display:false}},
+            scales:{
+              x:{grid:{color:'rgba(60,60,60,0.08)'},ticks:{color:'#6b6050',font:{size:10},maxTicksLimit:8}},
+              y:{grid:{color:'rgba(60,60,60,0.08)'},ticks:{color:'#6b6050',font:{size:10},callback:v=>'$'+(v>=1000?(v/1000).toFixed(0)+'k':v)}}
+            },
+            layout:{padding:{top:8,right:12,bottom:4,left:4}}
+          }
+        }, 900, 450, 'cashflow-line') : Promise.resolve(null)
+      ]);
+      console.log('[Visual PDF] Chart render complete. donutPNG:', !!donutPNG, 'cashflowPNG:', !!cashflowPNG);
+
+      // ═══ PAGE FOOTER HELPER (skip cover) ═══
+      const addFooters = () => {
+        const pageCount = doc.getNumberOfPages();
+        for(let i=2; i<=pageCount; i++) {
+          doc.setPage(i);
+          doc.setFillColor(...GOLD); doc.rect(M,H-12,CW,0.4,'F');
+          doc.setFont('helvetica','normal'); doc.setFontSize(7); doc.setTextColor(...MUTED);
+          doc.text('PolicyLens · Confidential · For Financial Consultant Use', M, H-7);
+          if(advisorName) doc.text(advisorName+(advisorCompany?' · '+advisorCompany:''), W/2, H-7, {align:'center'});
+          doc.setTextColor(...GOLD_DIM); doc.setFont('helvetica','bold');
+          doc.text(String(i)+' / '+pageCount, W-M, H-7, {align:'right'});
+        }
+      };
+
+      // ═══════════════════════════════════════════════════════════════
+      // ═══ PAGE 1: HERO COVER ═══
+      // ═══════════════════════════════════════════════════════════════
+      doc.setFillColor(...NAVY); doc.rect(0,0,W,H,'F');
+      // Decorative radial gold overlay (top-right corner)
+      doc.setFillColor(25,33,52); doc.circle(W+15, -15, 95, 'F');
+      doc.setFillColor(30,38,58); doc.circle(W+15, -15, 75, 'F');
+      doc.setFillColor(38,46,68); doc.circle(W+15, -15, 55, 'F');
+      doc.setFillColor(45,55,78); doc.circle(W+15, -15, 35, 'F');
+      // Bottom radial
+      doc.setFillColor(20,28,45); doc.circle(-20, H+20, 100, 'F');
+      doc.setFillColor(25,32,50); doc.circle(-20, H+20, 75, 'F');
+      // Gold left edge
+      doc.setFillColor(...GOLD); doc.rect(0,0,5,H,'F');
+      // Gold bottom band
+      doc.setFillColor(...GOLD); doc.rect(0,H-10,W,10,'F');
+      // Top eyebrow bar
+      doc.setFillColor(...GOLD_DIM); doc.rect(M+15,32,3,14,'F');
+      doc.setFont('helvetica','bold'); doc.setFontSize(8); doc.setTextColor(...GOLD);
+      doc.text('POLICYLENS', M+22, 38);
+      doc.setFont('helvetica','normal'); doc.setFontSize(7); doc.setTextColor(...MID);
+      doc.text('INSURANCE PORTFOLIO REVIEW', M+22, 44);
+      // HUGE client name
+      doc.setFont('helvetica','bold'); doc.setFontSize(34); doc.setTextColor(...WHITE);
+      const clientUpper = (clientName||'Client Portfolio').toUpperCase();
+      doc.text(clientUpper.length>22?clientUpper.slice(0,22):clientUpper, M+15, 92);
+      // Gold underline
+      doc.setDrawColor(...GOLD); doc.setLineWidth(1.2); doc.line(M+15, 98, M+80, 98);
+      // Client meta
+      doc.setFont('helvetica','normal'); doc.setFontSize(10); doc.setTextColor(...CREAM);
+      const meta = [];
+      if(age) meta.push('Age '+age);
+      if(p.gender) meta.push(p.gender);
+      if(p.occupation) meta.push(p.occupation);
+      if(p.nationality) meta.push(p.nationality);
+      if(meta.length) doc.text(meta.join('  ·  '), M+15, 107);
+
+      // ─── THREE LARGE KPI TILES ───
+      const tileY = 132;
+      const tileH = 62;
+      const tileGap = 5;
+      const tileW = (CW - 2*tileGap)/3;
+      const tiles = [
+        {
+          eyebrow:'TOTAL COVERAGE',
+          value: totalCoverage>=1e6 ? '$'+(totalCoverage/1e6).toFixed(1)+'M' : '$'+Math.round(totalCoverage/1000)+'k',
+          caption: String(policies.filter(pol=>pol.status!=='matured'&&pol.status!=='surrendered').length)+' active policies',
+          valueColor: WHITE
+        },
+        {
+          eyebrow:'ANNUAL PREMIUMS',
+          value: totalAnnualPrem>=1000 ? '$'+(totalAnnualPrem/1000).toFixed(1)+'k' : '$'+Math.round(totalAnnualPrem),
+          caption: '$'+Math.round(totalAnnualPrem/12).toLocaleString()+' / month',
+          valueColor: GOLD
+        },
+        {
+          eyebrow:'PROTECTION SCORE',
+          value: score+' / 100',
+          caption: score>=80?'STRONG COVERAGE':(score>=50?'ADEQUATE':'NEEDS REVIEW'),
+          valueColor: score>=80?GREEN:(score>=50?GOLD:RED)
+        }
+      ];
+      tiles.forEach((t, i) => {
+        const tx = M + i*(tileW+tileGap);
+        doc.setFillColor(24,32,50); doc.roundedRect(tx, tileY, tileW, tileH, 3, 3, 'F');
+        // Gold top accent
+        doc.setFillColor(...GOLD); doc.rect(tx, tileY, tileW, 0.8, 'F');
+        // Eyebrow
+        doc.setFont('helvetica','bold'); doc.setFontSize(7); doc.setTextColor(...GOLD);
+        doc.text(t.eyebrow, tx+5, tileY+10);
+        // Big value
+        doc.setFont('helvetica','bold'); doc.setFontSize(22); doc.setTextColor(...t.valueColor);
+        doc.text(t.value, tx+5, tileY+33);
+        // Caption
+        doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(...MID);
+        doc.text(t.caption, tx+5, tileY+48);
+      });
+
+      // ─── BOTTOM METADATA STRIP ───
+      const metaY = H-45;
+      doc.setDrawColor(...GOLD_DIM); doc.setLineWidth(0.3);
+      doc.line(M+15, metaY-5, W-M-15, metaY-5);
+      doc.setFont('helvetica','bold'); doc.setFontSize(7); doc.setTextColor(...GOLD);
+      doc.text('REPORT DATE', M+15, metaY+2);
+      doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(...CREAM);
+      doc.text(today, M+15, metaY+9);
+      if(advisorName) {
+        doc.setFont('helvetica','bold'); doc.setFontSize(7); doc.setTextColor(...GOLD);
+        doc.text('PREPARED BY', W-M-15, metaY+2, {align:'right'});
+        doc.setFont('helvetica','normal'); doc.setFontSize(9); doc.setTextColor(...CREAM);
+        doc.text(advisorName, W-M-15, metaY+9, {align:'right'});
+        if(advisorCompany) {
+          doc.setFontSize(7); doc.setTextColor(...MID);
+          doc.text(advisorCompany, W-M-15, metaY+15, {align:'right'});
+        }
+      }
+
+      // ═══════════════════════════════════════════════════════════════
+      // ═══ PAGE 2: DASHBOARD SNAPSHOT (2x2 grid) ═══
+      // ═══════════════════════════════════════════════════════════════
+      doc.addPage();
+      // Page header strip
+      doc.setFillColor(...NAVY); doc.rect(0,0,W,18,'F');
+      doc.setFillColor(...GOLD); doc.rect(0,17.5,W,0.6,'F');
+      doc.setFont('helvetica','bold'); doc.setFontSize(12); doc.setTextColor(...GOLD);
+      doc.text('PORTFOLIO DASHBOARD', M, 11);
+      doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(...MID);
+      doc.text(clientName||'Client', M, 15);
+      doc.setFontSize(7); doc.setTextColor(...MID);
+      doc.text(today, W-M, 11, {align:'right'});
+
+      // 2x2 cell grid
+      const gridY = 25;
+      const cellW = (CW-5)/2;
+      const cellH = 120;
+      const cellPositions = [
+        {x:M, y:gridY, label:'INSURER CONCENTRATION', subtitle:'Annual premium allocation by issuer'},
+        {x:M+cellW+5, y:gridY, label:'PROTECTION SCORE', subtitle:'Weighted LIA framework'},
+        {x:M, y:gridY+cellH+5, label:'20-YEAR PREMIUM OUTLOOK', subtitle:'Projected annual commitments'},
+        {x:M+cellW+5, y:gridY+cellH+5, label:'COVERAGE BY PERIL', subtitle:'Have vs LIA-recommended'}
+      ];
+      // Draw cell frames
+      cellPositions.forEach(c => {
+        doc.setFillColor(...LIGHT); doc.roundedRect(c.x, c.y, cellW, cellH, 2.5, 2.5, 'F');
+        doc.setDrawColor(...GOLD_DIM); doc.setLineWidth(0.2); doc.roundedRect(c.x, c.y, cellW, cellH, 2.5, 2.5, 'S');
+        doc.setFillColor(...GOLD); doc.rect(c.x, c.y, cellW, 0.6, 'F');
+        doc.setFont('helvetica','bold'); doc.setFontSize(7.5); doc.setTextColor(...NAVY);
+        doc.text(c.label, c.x+4, c.y+7);
+        doc.setFont('helvetica','normal'); doc.setFontSize(6); doc.setTextColor(...MUTED);
+        doc.text(c.subtitle, c.x+4, c.y+11);
+      });
+
+      // ── Cell 1: Insurer donut ──
+      if(donutPNG) {
+        try {
+          doc.addImage(donutPNG, 'PNG', cellPositions[0].x+3, cellPositions[0].y+14, cellW-6, cellH-18);
+        } catch(imgErr) {
+          console.warn('[Visual PDF] Donut addImage failed:', imgErr.message);
+          doc.setFont('helvetica','italic'); doc.setFontSize(9); doc.setTextColor(...MUTED);
+          doc.text('Chart render failed', cellPositions[0].x+cellW/2, cellPositions[0].y+cellH/2, {align:'center'});
+        }
+      } else {
+        doc.setFont('helvetica','italic'); doc.setFontSize(9); doc.setTextColor(...MUTED);
+        doc.text('No premium data', cellPositions[0].x+cellW/2, cellPositions[0].y+cellH/2, {align:'center'});
+      }
+
+      // ── Cell 2: Protection score gauge ──
+      const g = cellPositions[1];
+      const gcx = g.x + cellW/2;
+      const gcy = g.y + cellH/2 + 8;
+      const gr = 32;
+      // Track (half circle, top semi-ring)
+      drawArc(gcx, gcy, gr, Math.PI, 2*Math.PI, [225,220,210], 7);
+      // Fill by score
+      const fillEnd = Math.PI + (Math.PI * Math.max(0.01, Math.min(1, score/100)));
+      const gaugeColor = score>=80?GREEN:(score>=50?GOLD:RED);
+      drawArc(gcx, gcy, gr, Math.PI, fillEnd, gaugeColor, 7);
+      // Score text
+      doc.setFont('helvetica','bold'); doc.setFontSize(38); doc.setTextColor(...gaugeColor);
+      doc.text(String(score), gcx, gcy+5, {align:'center'});
+      doc.setFont('helvetica','normal'); doc.setFontSize(10); doc.setTextColor(...DARK);
+      doc.text('/ 100', gcx, gcy+14, {align:'center'});
+      doc.setFont('helvetica','bold'); doc.setFontSize(8); doc.setTextColor(...gaugeColor);
+      doc.text(score>=80?'STRONG':(score>=50?'ADEQUATE':'REVIEW NEEDED'), gcx, gcy+23, {align:'center'});
+      // Gauge ticks at 50 and 80
+      doc.setDrawColor(...MUTED); doc.setLineWidth(0.3);
+      const tick = (pct) => {
+        const ang = Math.PI + Math.PI*pct;
+        const x1 = gcx + Math.cos(ang)*(gr+4);
+        const y1 = gcy + Math.sin(ang)*(gr+4);
+        const x2 = gcx + Math.cos(ang)*(gr+7);
+        const y2 = gcy + Math.sin(ang)*(gr+7);
+        doc.line(x1,y1,x2,y2);
+        doc.setFontSize(6); doc.setTextColor(...MUTED);
+        doc.text(String(pct*100), gcx + Math.cos(ang)*(gr+11), gcy + Math.sin(ang)*(gr+11)+1, {align:'center'});
+      };
+      tick(0); tick(0.5); tick(0.8); tick(1);
+
+      // ── Cell 3: Premium cashflow line ──
+      if(cashflowPNG) {
+        try {
+          doc.addImage(cashflowPNG, 'PNG', cellPositions[2].x+3, cellPositions[2].y+14, cellW-6, cellH-18);
+        } catch(imgErr) {
+          console.warn('[Visual PDF] Cashflow addImage failed:', imgErr.message);
+          doc.setFont('helvetica','italic'); doc.setFontSize(9); doc.setTextColor(...MUTED);
+          doc.text('Chart render failed', cellPositions[2].x+cellW/2, cellPositions[2].y+cellH/2, {align:'center'});
+        }
+      } else {
+        doc.setFont('helvetica','italic'); doc.setFontSize(9); doc.setTextColor(...MUTED);
+        doc.text('No recurring premiums', cellPositions[2].x+cellW/2, cellPositions[2].y+cellH/2, {align:'center'});
+      }
+
+      // ── Cell 4: Coverage by peril (native bars) ──
+      const barRows = [
+        {label:'Death & TI', have:cDeath, need:rDeath, fmt:'money'},
+        {label:'TPD', have:cTPD, need:rTPD, fmt:'money'},
+        {label:'Critical Illness', have:cCI, need:rCI, fmt:'money'},
+        {label:'Early CI', have:cECI, need:rECI, fmt:'money'},
+        {label:'Disability/mo', have:cDI, need:rDI, fmt:'money'},
+      ];
+      const barAreaY = cellPositions[3].y + 20;
+      const barAreaX = cellPositions[3].x + 4;
+      const labelW = 28;
+      const barW = cellW - labelW - 22;
+      const rowH = 16;
+      barRows.forEach((br, i) => {
+        const ry = barAreaY + i*rowH;
+        // Label
+        doc.setFont('helvetica','bold'); doc.setFontSize(7); doc.setTextColor(...NAVY);
+        doc.text(br.label, barAreaX, ry+3);
+        // Track
+        doc.setFillColor(232,228,220); doc.roundedRect(barAreaX+labelW, ry, barW, 4, 0.8, 0.8, 'F');
+        // Fill
+        const pct = Math.min(1, br.have/Math.max(1, br.need));
+        const barColor = pct >= 0.9 ? GREEN : (pct >= 0.5 ? GOLD : RED);
+        if(pct > 0.005) {
+          doc.setFillColor(...barColor);
+          doc.roundedRect(barAreaX+labelW, ry, Math.max(1.5, barW*pct), 4, 0.8, 0.8, 'F');
+        }
+        // % text
+        doc.setFont('helvetica','bold'); doc.setFontSize(6.5); doc.setTextColor(...barColor);
+        doc.text(Math.round(pct*100)+'%', barAreaX+labelW+barW+2, ry+3);
+        // Have/need subtext
+        const fmtVal = (v) => v>=1e6?'$'+(v/1e6).toFixed(1)+'M':(v>=1000?'$'+Math.round(v/1000)+'k':'$'+Math.round(v));
+        doc.setFont('helvetica','normal'); doc.setFontSize(5.5); doc.setTextColor(...MUTED);
+        doc.text(fmtVal(br.have)+' / '+fmtVal(br.need), barAreaX+labelW, ry+9);
+      });
+
+      // ═══════════════════════════════════════════════════════════════
+      // ═══ PAGE 3: PROTECTION GAP DETAIL ═══
+      // ═══════════════════════════════════════════════════════════════
+      doc.addPage();
+      doc.setFillColor(...NAVY); doc.rect(0,0,W,18,'F');
+      doc.setFillColor(...GOLD); doc.rect(0,17.5,W,0.6,'F');
+      doc.setFont('helvetica','bold'); doc.setFontSize(12); doc.setTextColor(...GOLD);
+      doc.text('PROTECTION GAP ANALYSIS', M, 11);
+      doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(...MID);
+      doc.text('LIA Singapore framework · weighted against '+(annualIncome>0?'stated income':'default assumptions'), M, 15);
+
+      // Intro context block
+      let gy = 28;
+      doc.setFillColor(...LIGHT); doc.roundedRect(M, gy, CW, 22, 2, 2, 'F');
+      doc.setFillColor(...GOLD); doc.rect(M, gy, 2.5, 22, 'F');
+      doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.setTextColor(...NAVY);
+      doc.text('Overall Protection Score: '+score+'/100  ·  '+(score>=80?'STRONG':(score>=50?'ADEQUATE':'NEEDS REVIEW')), M+6, gy+8);
+      doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(...DARK);
+      const scoreContext = score>=80 ? 'Coverage meets or exceeds LIA recommendations across all perils. Focus on premium efficiency and retirement planning.' : (score>=50 ? 'Core coverage is in place but one or more perils are under-insured. Review the gaps below and prioritize shortfalls.' : 'Significant coverage gaps detected. Immediate review recommended across highlighted perils.');
+      const contextLines = doc.splitTextToSize(scoreContext, CW-12);
+      doc.text(contextLines.slice(0,2), M+6, gy+14);
+      gy += 28;
+
+      // Gap rows — each row is a detailed visualisation
+      gapData.forEach(row => {
+        const rowY = gy;
+        const rowH2 = 24;
+        // Background
+        doc.setFillColor(252,250,246); doc.roundedRect(M, rowY, CW, rowH2, 1.5, 1.5, 'F');
+        doc.setDrawColor(...GOLD_DIM); doc.setLineWidth(0.15); doc.roundedRect(M, rowY, CW, rowH2, 1.5, 1.5, 'S');
+        // Label column
+        doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.setTextColor(...NAVY);
+        doc.text(row.label, M+5, rowY+8);
+        const pct = Math.min(1, row.have/Math.max(1, row.need));
+        const pctColor = pct >= 0.9 ? GREEN : (pct >= 0.5 ? GOLD : RED);
+        doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.setTextColor(...pctColor);
+        doc.text(Math.round(pct*100)+'%', M+5, rowY+16);
+        // Bar visualization
+        const barX = M+56;
+        const barMax = CW - 62 - 45; // leave room for right-side number
+        const barHt = 5;
+        const barY = rowY+6;
+        // Track
+        doc.setFillColor(235,230,220); doc.roundedRect(barX, barY, barMax, barHt, 1, 1, 'F');
+        // Fill
+        if(pct > 0.005) {
+          doc.setFillColor(...pctColor); doc.roundedRect(barX, barY, Math.max(1.5, barMax*pct), barHt, 1, 1, 'F');
+        }
+        // Need marker (vertical line at 100%)
+        doc.setDrawColor(...DARK); doc.setLineWidth(0.6);
+        doc.line(barX+barMax, barY-1, barX+barMax, barY+barHt+1);
+        // Bar labels
+        doc.setFont('helvetica','normal'); doc.setFontSize(6.5); doc.setTextColor(...MUTED);
+        doc.text('YOU HAVE', barX, barY+barHt+4);
+        const fmtBig = (v) => v>=1e6?'$'+(v/1e6).toFixed(2)+'M':(v>=1000?'$'+Math.round(v/1000)+'k':'$'+Math.round(v));
+        doc.setFont('helvetica','bold'); doc.setFontSize(7); doc.setTextColor(...NAVY);
+        doc.text(fmtBig(row.have)+(row.isMonthly?'/mo':''), barX+16, barY+barHt+4);
+        doc.setFont('helvetica','normal'); doc.setFontSize(6.5); doc.setTextColor(...MUTED);
+        doc.text('  ·  LIA NEEDS', barX+34, barY+barHt+4);
+        doc.setFont('helvetica','bold'); doc.setFontSize(7); doc.setTextColor(...NAVY);
+        doc.text(fmtBig(row.need)+(row.isMonthly?'/mo':''), barX+53, barY+barHt+4);
+        // Right side: shortfall amount
+        const gap = Math.max(0, row.need - row.have);
+        if(gap > 0) {
+          doc.setFont('helvetica','bold'); doc.setFontSize(8); doc.setTextColor(...RED);
+          doc.text('-'+fmtBig(gap), M+CW-5, rowY+12, {align:'right'});
+          doc.setFont('helvetica','normal'); doc.setFontSize(6); doc.setTextColor(...MUTED);
+          doc.text('shortfall', M+CW-5, rowY+17, {align:'right'});
+        } else {
+          doc.setFont('helvetica','bold'); doc.setFontSize(8); doc.setTextColor(...GREEN);
+          doc.text('COVERED', M+CW-5, rowY+12, {align:'right'});
+        }
+        gy += rowH2+3;
+      });
+      // Hospitalisation row (boolean)
+      gy += 3;
+      doc.setFillColor(252,250,246); doc.roundedRect(M, gy, CW, 18, 1.5, 1.5, 'F');
+      doc.setDrawColor(...GOLD_DIM); doc.setLineWidth(0.15); doc.roundedRect(M, gy, CW, 18, 1.5, 1.5, 'S');
+      doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.setTextColor(...NAVY);
+      doc.text('Hospitalisation', M+5, gy+8);
+      doc.setFont('helvetica','normal'); doc.setFontSize(7); doc.setTextColor(...MUTED);
+      doc.text('Integrated Shield Plan (private or restructured hospital)', M+5, gy+14);
+      doc.setFont('helvetica','bold'); doc.setFontSize(10); doc.setTextColor(...(hasISP?GREEN:RED));
+      doc.text(hasISP?'IN PLACE':'NO ISP DETECTED', M+CW-5, gy+11, {align:'right'});
+
+      // ═══════════════════════════════════════════════════════════════
+      // ═══ PAGE 4+: POLICY CARDS (3 per page) ═══
+      // ═══════════════════════════════════════════════════════════════
+      const cardPolicies = policies.filter(pol => pol.status!=='matured' && pol.category!=='cash_investments' && pol.category!=='other_assets');
+      const CARDS_PER_PAGE = 3;
+      for(let pageIdx = 0; pageIdx < Math.ceil(cardPolicies.length/CARDS_PER_PAGE); pageIdx++) {
+        doc.addPage();
+        // Header
+        doc.setFillColor(...NAVY); doc.rect(0,0,W,18,'F');
+        doc.setFillColor(...GOLD); doc.rect(0,17.5,W,0.6,'F');
+        doc.setFont('helvetica','bold'); doc.setFontSize(12); doc.setTextColor(...GOLD);
+        doc.text('POLICY DETAILS', M, 11);
+        doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(...MID);
+        doc.text('Card '+((pageIdx*CARDS_PER_PAGE)+1)+'–'+Math.min((pageIdx+1)*CARDS_PER_PAGE, cardPolicies.length)+' of '+cardPolicies.length, M, 15);
+        // Insurer color map (reuse existing INSURERS registry)
+        const insurerColorHex = (name) => {
+          const i = (typeof INSURERS !== 'undefined' && INSURERS[name]) ? INSURERS[name] : null;
+          if(i && i.color) {
+            const hex = i.color.replace('#','');
+            if(hex.length===6) return [parseInt(hex.slice(0,2),16), parseInt(hex.slice(2,4),16), parseInt(hex.slice(4,6),16)];
+          }
+          return GOLD;
+        };
+        const cardStart = pageIdx*CARDS_PER_PAGE;
+        const cardSlice = cardPolicies.slice(cardStart, cardStart+CARDS_PER_PAGE);
+        const cardH = 82;
+        cardSlice.forEach((pol, ci) => {
+          const cy = 26 + ci*(cardH+4);
+          // Card background
+          doc.setFillColor(252,250,246); doc.roundedRect(M, cy, CW, cardH, 3, 3, 'F');
+          doc.setDrawColor(...GOLD_DIM); doc.setLineWidth(0.2); doc.roundedRect(M, cy, CW, cardH, 3, 3, 'S');
+          // Insurer color bar (left edge)
+          const iColor = insurerColorHex(pol.insurer||'');
+          doc.setFillColor(...iColor); doc.roundedRect(M, cy, 3, cardH, 1.5, 1.5, 'F');
+          doc.setFillColor(...iColor); doc.rect(M+2, cy, 2, cardH, 'F');
+          // Insurer name + category badge
+          doc.setFont('helvetica','bold'); doc.setFontSize(7); doc.setTextColor(...iColor);
+          doc.text((pol.insurer||'UNKNOWN').toUpperCase(), M+8, cy+8);
+          // Category pill (right side of header)
+          const catLabel = (pol.category||'').toUpperCase();
+          if(catLabel) {
+            const pillW = doc.getTextWidth(catLabel)+6;
+            doc.setFillColor(...NAVY); doc.roundedRect(M+CW-pillW-5, cy+4, pillW, 5.5, 1, 1, 'F');
+            doc.setFont('helvetica','bold'); doc.setFontSize(6); doc.setTextColor(...GOLD);
+            doc.text(catLabel, M+CW-pillW/2-5, cy+8, {align:'center'});
+          }
+          // Product name (big)
+          doc.setFont('helvetica','bold'); doc.setFontSize(12); doc.setTextColor(...NAVY);
+          const prodName = (pol.productName||pol.policyName||'Policy').slice(0, 48);
+          doc.text(prodName, M+8, cy+17);
+          // SubType + policy#
+          doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(...MUTED);
+          const sub = [pol.subType||'', pol.policyNumber?'#'+pol.policyNumber:''].filter(Boolean).join('  ·  ');
+          doc.text(sub, M+8, cy+23);
+          // Separator
+          doc.setDrawColor(...GOLD_DIM); doc.setLineWidth(0.15); doc.line(M+8, cy+28, M+CW-8, cy+28);
+          // 3-column mini-grid of key facts
+          const gridCols = [
+            {label:'SUM ASSURED', value: pol.fdPrincipal?'$'+Math.round(parseFloat(pol.fdPrincipal)).toLocaleString():(parseFloat(pol.sumAssured)>0?'$'+(parseFloat(pol.sumAssured)>=1e6?(parseFloat(pol.sumAssured)/1e6).toFixed(1)+'M':Math.round(parseFloat(pol.sumAssured)/1000)+'k'):'—')},
+            {label:'PREMIUM', value: (()=>{
+              const pAmt = parseFloat(pol.annualPremium)||0;
+              if(pAmt<=0) return '—';
+              if(pol.premSingle||pol.premiumStructure==='Single Premium'||pol.premFrequency==='single') return '$'+Math.round(pAmt).toLocaleString()+' SP';
+              if(pol.premFrequency==='monthly') return '$'+Math.round(pAmt).toLocaleString()+'/mo';
+              return '$'+Math.round(pAmt).toLocaleString()+'/yr';
+            })()},
+            {label:'TERM', value: (()=>{
+              if(pol.premSingle) return 'Single';
+              const s = parseInt(pol.premStartAge)||parseInt(pol.ageAtEntry)||'';
+              const e = parseInt(pol.premEndAge)||'';
+              const t = parseInt(pol.premTerm)||'';
+              if(t) return t+' yrs';
+              if(s && e) return s+'–'+e;
+              return pol.premiumStructure==='Limited Pay'?'Limited':(pol.premiumStructure||'—');
+            })()},
+            {label:'STATUS', value: (pol.status||'inforce').toUpperCase()},
+            {label:'RIDERS', value: ((pol.riders||[]).filter(r=>r.riderName).length || 0) + ' attached'},
+            {label:'METHOD', value: pol.paymentMethod||'Cash'},
+          ];
+          const colW = (CW-16)/3;
+          gridCols.forEach((col, idx) => {
+            const gx = M+8 + (idx%3)*colW;
+            const gyy = cy+36 + Math.floor(idx/3)*17;
+            doc.setFont('helvetica','bold'); doc.setFontSize(6); doc.setTextColor(...MUTED);
+            doc.text(col.label, gx, gyy);
+            doc.setFont('helvetica','bold'); doc.setFontSize(9.5); doc.setTextColor(...NAVY);
+            doc.text(String(col.value).slice(0,22), gx, gyy+6);
+          });
+          // Riders strip at bottom of card
+          const riders = (pol.riders||[]).filter(r => r.riderName);
+          if(riders.length > 0) {
+            doc.setFont('helvetica','normal'); doc.setFontSize(6); doc.setTextColor(...MUTED);
+            doc.text('COVERAGE:', M+8, cy+cardH-5);
+            doc.setFont('helvetica','normal'); doc.setFontSize(6.5); doc.setTextColor(...DARK);
+            const riderTypes = [...new Set(riders.map(r => (r.type||'other').toUpperCase()))].slice(0,8);
+            doc.text(riderTypes.join(' · '), M+25, cy+cardH-5);
+          }
+        });
+      }
+
+      // ═══════════════════════════════════════════════════════════════
+      // ═══ FINAL PAGE: RECOMMENDATIONS & NEXT STEPS ═══
+      // ═══════════════════════════════════════════════════════════════
+      doc.addPage();
+      doc.setFillColor(...NAVY); doc.rect(0,0,W,18,'F');
+      doc.setFillColor(...GOLD); doc.rect(0,17.5,W,0.6,'F');
+      doc.setFont('helvetica','bold'); doc.setFontSize(12); doc.setTextColor(...GOLD);
+      doc.text('RECOMMENDATIONS & NEXT STEPS', M, 11);
+      doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(...MID);
+      doc.text('Prioritized action items based on this review', M, 15);
+
+      // Build recommendation list based on computed gaps
+      const recs = [];
+      gapData.forEach(g => {
+        const pct = g.have/Math.max(1, g.need);
+        const gap = Math.max(0, g.need - g.have);
+        if(pct < 0.5 && gap > 0) {
+          const priority = 'HIGH';
+          const fmtG = g.have>=1e6?'$'+(g.have/1e6).toFixed(1)+'M':'$'+Math.round(g.have/1000)+'k';
+          const fmtN = g.need>=1e6?'$'+(g.need/1e6).toFixed(1)+'M':'$'+Math.round(g.need/1000)+'k';
+          recs.push({
+            priority,
+            title: g.label+' — critical gap',
+            detail: 'Current coverage '+fmtG+(g.isMonthly?'/mo':'')+' is well below LIA recommendation of '+fmtN+(g.isMonthly?'/mo':'')+'. Prioritize topping up'+(g.label.includes('Critical Illness')?' via standalone CI or multi-pay rider':(g.label.includes('Disability')?' via disability income product':' via term life top-up'))+'.'
+          });
+        } else if(pct < 0.9 && gap > 0) {
+          recs.push({
+            priority:'MEDIUM',
+            title: g.label+' — partial gap',
+            detail: 'Coverage at '+Math.round(pct*100)+'% of LIA recommendation. Consider incremental top-up at next policy review.'
+          });
+        }
+      });
+      if(!hasISP) {
+        recs.unshift({priority:'HIGH', title:'No Integrated Shield Plan detected', detail:'Hospital bills can exceed $100k for major procedures. Add an Integrated Shield Plan plus co-pay rider to protect against catastrophic medical costs.'});
+      }
+      // Additional structural recs
+      const monthlyPrem = totalAnnualPrem/12;
+      const incomeRatio = annualIncome>0 ? (totalAnnualPrem/annualIncome*100) : 0;
+      if(incomeRatio > 20) {
+        recs.push({priority:'MEDIUM', title:'Premium efficiency review', detail:'Annual premiums represent '+incomeRatio.toFixed(0)+'% of annual income — above the recommended 10-15% range. Review for restructuring opportunities (ILP fees, overlapping coverage, limited pay options).'});
+      }
+      if(insurerLabels.length === 1 && activePolicies.length > 3) {
+        recs.push({priority:'MEDIUM', title:'Insurer concentration risk', detail:'All policies are with a single insurer. Consider diversifying across 2-3 insurers to reduce counterparty exposure and access broader product features.'});
+      }
+      if(score >= 80) {
+        recs.push({priority:'LOW', title:'Coverage is strong — focus on optimization', detail:'Core protection is in place. Shift focus to retirement income planning, cash value accumulation, and tax-efficient wealth transfer structures.'});
+      }
+      if(recs.length === 0) {
+        recs.push({priority:'LOW', title:'No critical gaps identified', detail:'Based on stated income and expenses, current coverage meets or exceeds LIA framework recommendations. Continue annual reviews.'});
+      }
+
+      // Render recommendation cards
+      let ry = 26;
+      const priColors = {HIGH:RED, MEDIUM:GOLD, LOW:GREEN};
+      recs.slice(0,6).forEach((rec, i) => {
+        if(ry > 245) return;
+        const rh = 30;
+        // Card
+        doc.setFillColor(252,250,246); doc.roundedRect(M, ry, CW, rh, 2, 2, 'F');
+        // Priority stripe
+        const pc = priColors[rec.priority] || GOLD;
+        doc.setFillColor(...pc); doc.roundedRect(M, ry, 3, rh, 1, 1, 'F');
+        doc.setFillColor(...pc); doc.rect(M+2, ry, 2, rh, 'F');
+        // Priority badge
+        doc.setFillColor(...pc); doc.roundedRect(M+8, ry+4, 18, 5, 1, 1, 'F');
+        doc.setFont('helvetica','bold'); doc.setFontSize(6); doc.setTextColor(...WHITE);
+        doc.text(rec.priority, M+17, ry+7.5, {align:'center'});
+        // Title
+        doc.setFont('helvetica','bold'); doc.setFontSize(10); doc.setTextColor(...NAVY);
+        doc.text(rec.title, M+30, ry+8);
+        // Detail
+        doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(...DARK);
+        const detailLines = doc.splitTextToSize(rec.detail, CW-12);
+        doc.text(detailLines.slice(0,3), M+8, ry+15);
+        ry += rh + 3;
+      });
+
+      // Disclaimer
+      ry = Math.max(ry+5, 255);
+      doc.setDrawColor(...GOLD_DIM); doc.setLineWidth(0.2); doc.line(M, ry, W-M, ry);
+      doc.setFont('helvetica','italic'); doc.setFontSize(6.5); doc.setTextColor(...MUTED);
+      doc.text('This report is for illustrative purposes and does not constitute financial advice. All projections are estimates based on stated assumptions.', M, ry+5);
+      doc.text('Coverage gaps are calculated against the LIA Singapore framework. Please consult your financial advisor for personalised recommendations.', M, ry+9);
+      doc.text('Generated by PolicyLens · '+today, M, ry+13);
+
+      addFooters();
+      doc.save('PolicyLens_Visual_Report_'+(clientName||'Client').replace(/\s+/g,'_')+'_'+new Date().toISOString().slice(0,10)+'.pdf');
+    } catch(e) {
+      console.error('[Visual PDF] Error:', e);
+      toast('Visual report generation error: '+e.message, 'error', 6000);
+    }
+    setGeneratingVisual(false);
+  };
 
   const generate = async () => {
     setGenerating(true);
@@ -10939,18 +11929,36 @@ function ReportTab() {
   };
 
   return (
-    <div className="fade-in" style={{maxWidth:600}}>
+    <div className="fade-in" style={{maxWidth:640}}>
       <h2 style={{fontSize:18,fontWeight:600,marginBottom:12}}>Generate PDF Report</h2>
-      <div className="card">
-        <p style={{fontSize:13,color:'var(--text2)',marginBottom:16}}>
-          Professional multi-page PDF report including: executive summary with coverage score, protection gap analysis (LIA framework),
-          rider coverage matrix, premium schedule, per-policy detail blocks with riders & CV projections, cash value timeline at retirement,
-          and recommended next steps. Set advisor name in Settings to brand the report.
+
+      {/* ═══ VISUAL REPORT — new premium layout ═══ */}
+      <div className="card" style={{marginBottom:14,background:'linear-gradient(135deg,var(--bg2),var(--bg3))',border:'1px solid var(--gold-dim)'}}>
+        <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}>
+          <span style={{fontSize:18}}>✨</span>
+          <h3 style={{fontSize:15,fontWeight:700,color:'var(--gold)'}}>Visual Premium Report</h3>
+          <span style={{fontSize:9,background:'var(--gold)',color:'var(--bg)',padding:'2px 6px',borderRadius:4,fontWeight:700}}>NEW</span>
+        </div>
+        <p style={{fontSize:12,color:'var(--text2)',marginBottom:14,lineHeight:1.5}}>
+          Premium visual layout with hero cover page, dashboard snapshot with interactive charts (insurer donut, premium cashflow line, protection gauge, coverage bars),
+          protection gap detail page, compact per-policy cards with insurer branding, and prioritized recommendations. Best for client-facing presentations.
         </p>
-        <button className="btn-primary" onClick={generate} disabled={generating || policies.length===0}>
-          {generating ? '⏳ Building Report…' : '📄 Generate Full Report'}
+        <button className="btn-primary" onClick={generateVisualReport} disabled={generatingVisual || generating || policies.length===0}>
+          {generatingVisual ? '⏳ Rendering charts & building report…' : '✨ Generate Visual Report'}
         </button>
         {policies.length===0 && <div style={{fontSize:11,color:'var(--text3)',marginTop:8}}>Add at least one policy to generate a report.</div>}
+      </div>
+
+      {/* ═══ CLASSIC REPORT — original text-dense layout ═══ */}
+      <div className="card">
+        <h3 style={{fontSize:13,fontWeight:600,marginBottom:6,color:'var(--text2)'}}>Classic Report</h3>
+        <p style={{fontSize:11,color:'var(--text3)',marginBottom:12,lineHeight:1.5}}>
+          Original text-dense layout with executive summary, protection gap analysis, rider coverage matrix, premium schedule,
+          per-policy detail blocks, cash value timeline, and next steps. Best for analytical deep-dives and archive copies.
+        </p>
+        <button className="btn-secondary" onClick={generate} disabled={generating || generatingVisual || policies.length===0}>
+          {generating ? '⏳ Building Report…' : '📄 Generate Classic Report'}
+        </button>
       </div>
     </div>
   );
