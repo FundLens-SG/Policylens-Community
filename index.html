@@ -8099,6 +8099,106 @@ function Dashboard() {
             const totalSGDCov = ccys.reduce((s,[ccy,d]) => s + toSGD(d.coverage,ccy), 0);
             const usdPct = currencyBreakdown.USD ? Math.round(toSGD(currencyBreakdown.USD.premium,'USD')/totalSGDPrem*100) : 0;
             const earnsCcy = 'SGD'; // Assumption: SG-based client earns in SGD
+            // ── WEIGHTED PORTFOLIO YIELD ──
+            // Premium-weighted average yield across all yield-bearing policies.
+            // Weight = total committed capital in SGD equivalent (single premium
+            // OR annual premium × premium term). Protection products (term, ISP,
+            // CI, DI, PA, etc) are excluded since they have no yield concept.
+            //
+            // Yield source per category:
+            //   retirement → pol.retAccumYield (from IRR auto-calc + "Use" button)
+            //   savings    → pol.endYield       (from IRR auto-calc + "Use" button)
+            //   investment → ilpGrowth + ilpDivYield − ilpMgmtFee (user-entered)
+            //   Unit Trust → IRR from cost basis, distributions, market value
+            //   cash_instr → pol.fdYieldPct     (user-entered)
+            //   Whole Life → pol.cvGrowthRate   (CV projection proxy; optimistic)
+            //
+            // This is an APPROXIMATION. A true portfolio IRR would require
+            // consolidating every policy's cashflow series into one, which is a
+            // bigger computation. The premium-weighted average is the standard
+            // FC quote and matches how portfolio return is discussed in practice.
+            const yieldBreakdown = {};
+            let wYieldNum = 0, wYieldDen = 0, yieldPolCount = 0, yieldSkipped = 0;
+            policies.forEach(pol => {
+              if(pol.status === 'lapsed' || pol.status === 'surrendered' || pol.status === 'matured') return;
+              const cat = pol.category;
+              const sub = pol.subType;
+              const ccy = pol.currency || 'SGD';
+              const prem = parseFloat(pol.annualPremium) || 0;
+              const premTerm = parseInt(pol.premTerm) || 0;
+              const isSingle = !!pol.premSingle || pol.premFrequency === 'single';
+              // Total committed capital (SGD)
+              let committed = 0;
+              if(cat === 'cash_investments') {
+                committed = toSGD(parseFloat(pol.fdPrincipal) || prem, ccy);
+              } else if(sub === 'Unit Trust') {
+                committed = toSGD(prem, ccy); // cost basis stored in annualPremium
+              } else if(prem > 0) {
+                committed = toSGD(isSingle ? prem : prem * Math.max(1, premTerm), ccy);
+              }
+              if(committed <= 0) return;
+              // Yield for this policy
+              let y = null;
+              let bucket = null;
+              if(cat === 'cash_investments') {
+                y = parseFloat(pol.fdYieldPct);
+                bucket = 'Cash';
+              } else if(sub === 'Unit Trust') {
+                const cost = parseFloat(pol.annualPremium) || 0;
+                const mv = parseFloat(pol.cashValue) || 0;
+                const dist = parseFloat(pol.utDistributions) || 0;
+                const sd = pol.inceptionDate ? new Date(pol.inceptionDate) : null;
+                const yrs = sd ? Math.max(0.1, (Date.now() - sd.getTime()) / 31557600000) : 0;
+                if(cost > 0 && mv > 0 && yrs > 0) {
+                  if(yrs < 1 || dist === 0) {
+                    y = (Math.pow((mv+dist)/cost, 1/yrs) - 1) * 100;
+                  } else {
+                    const nYears = Math.max(1, Math.round(yrs));
+                    const distPerYear = dist / nYears;
+                    const cf = [-cost];
+                    for(let i = 1; i <= nYears; i++) cf.push(i === nYears ? distPerYear + mv : distPerYear);
+                    try {
+                      const irr = computeIRR(cf);
+                      if(irr !== null && isFinite(irr)) y = irr * 100;
+                    } catch(e) {}
+                  }
+                }
+                bucket = 'Unit Trust';
+              } else if(cat === 'investment') {
+                const growth = parseFloat(pol.ilpGrowth) || 0;
+                const div = parseFloat(pol.ilpDivYield) || 0;
+                const fee = parseFloat(pol.ilpMgmtFee) || 0;
+                if(growth > 0) y = Math.max(0, growth + div - fee);
+                bucket = 'ILP';
+              } else if(cat === 'retirement') {
+                y = parseFloat(pol.retAccumYield);
+                bucket = 'Retirement';
+              } else if(cat === 'savings') {
+                y = parseFloat(pol.endYield);
+                bucket = 'Endowment';
+              } else if(sub === 'Whole Life' && parseFloat(pol.cvGrowthRate) > 0) {
+                y = parseFloat(pol.cvGrowthRate);
+                bucket = 'Whole Life*';
+              }
+              // Exclude protection products silently (they have no yield concept)
+              const isYieldBearing = bucket !== null;
+              if(!isYieldBearing) return;
+              if(y !== null && !isNaN(y) && y > 0) {
+                wYieldNum += y * committed;
+                wYieldDen += committed;
+                yieldPolCount++;
+                if(!yieldBreakdown[bucket]) yieldBreakdown[bucket] = {sum:0, wt:0, n:0};
+                yieldBreakdown[bucket].sum += y * committed;
+                yieldBreakdown[bucket].wt += committed;
+                yieldBreakdown[bucket].n++;
+              } else {
+                yieldSkipped++;
+              }
+            });
+            const weightedYield = wYieldDen > 0 ? (wYieldNum / wYieldDen) : null;
+            const breakdownTitle = Object.entries(yieldBreakdown)
+              .map(([k,v]) => k+': '+(v.sum/v.wt).toFixed(2)+'% (n='+v.n+')')
+              .join('\n');
             return (
               <div>
                 <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fill,minmax(140px,1fr))',gap:8,marginBottom:10}}>
@@ -8119,13 +8219,33 @@ function Dashboard() {
                     );
                   })}
                 </div>
-                {/* SGD-equivalent totals */}
-                <div style={{display:'flex',gap:16,padding:'8px 12px',background:'var(--bg3)',borderRadius:8}}>
-                  <div style={{flex:1}}><div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',fontWeight:600}}>Total Premium (SGD equiv.)</div><div style={{fontSize:16,fontWeight:700}}>{fmt(Math.round(totalSGDPrem))}/yr</div></div>
-                  <div style={{flex:1}}><div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',fontWeight:600}}>Total Coverage (SGD equiv.)</div><div style={{fontSize:16,fontWeight:700}}>{fmt(Math.round(totalSGDCov))}</div></div>
-                  <div style={{flex:1}}><div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',fontWeight:600}}>FX Exposure</div><div style={{fontSize:16,fontWeight:700,color:usdPct>50?'var(--orange)':'var(--green2)'}}>{100-(currencyBreakdown.SGD?Math.round(toSGD(currencyBreakdown.SGD.premium,'SGD')/totalSGDPrem*100):0)}% foreign</div></div>
+                {/* SGD-equivalent totals + weighted yield */}
+                <div style={{display:'flex',gap:12,padding:'8px 12px',background:'var(--bg3)',borderRadius:8,flexWrap:'wrap'}}>
+                  <div style={{flex:'1 1 140px'}}><div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',fontWeight:600}}>Total Premium (SGD equiv.)</div><div style={{fontSize:16,fontWeight:700}}>{fmt(Math.round(totalSGDPrem))}/yr</div></div>
+                  <div style={{flex:'1 1 140px'}}><div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',fontWeight:600}}>Total Coverage (SGD equiv.)</div><div style={{fontSize:16,fontWeight:700}}>{fmt(Math.round(totalSGDCov))}</div></div>
+                  <div style={{flex:'1 1 140px'}}><div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',fontWeight:600}}>FX Exposure</div><div style={{fontSize:16,fontWeight:700,color:usdPct>50?'var(--orange)':'var(--green2)'}}>{100-(currencyBreakdown.SGD?Math.round(toSGD(currencyBreakdown.SGD.premium,'SGD')/totalSGDPrem*100):0)}% foreign</div></div>
+                  <div style={{flex:'1 1 140px'}} title={breakdownTitle || 'No yield-bearing policies'}>
+                    <div style={{fontSize:9,color:'var(--text3)',textTransform:'uppercase',fontWeight:600}}>Weighted Yield</div>
+                    {weightedYield !== null ? (
+                      <>
+                        <div style={{fontSize:16,fontWeight:700,color:'var(--gold)'}}>{weightedYield.toFixed(2)}% p.a.</div>
+                        <div style={{fontSize:9,color:'var(--text3)',marginTop:1}}>{yieldPolCount} polic{yieldPolCount===1?'y':'ies'}{yieldSkipped>0?' · '+yieldSkipped+' missing yield':''}</div>
+                      </>
+                    ) : (
+                      <>
+                        <div style={{fontSize:16,fontWeight:700,color:'var(--text3)'}}>—</div>
+                        <div style={{fontSize:9,color:'var(--text3)',marginTop:1}}>No yield-bearing policies{yieldSkipped>0?' · '+yieldSkipped+' missing yield':''}</div>
+                      </>
+                    )}
+                  </div>
                 </div>
                 {usdPct > 60 && <div style={{marginTop:8,padding:'6px 10px',background:'rgba(212,169,106,.06)',borderRadius:6,fontSize:10,color:'var(--gold)'}}>⚠ {usdPct}% of premiums are USD-denominated but income is earned in SGD — consider FX hedging or rebalancing</div>}
+                {weightedYield !== null && Object.keys(yieldBreakdown).length > 0 && (
+                  <div style={{marginTop:6,fontSize:9,color:'var(--text3)',paddingLeft:12}}>
+                    Breakdown: {Object.entries(yieldBreakdown).map(([k,v]) => k+' '+(v.sum/v.wt).toFixed(2)+'%').join(' · ')}
+                    {yieldBreakdown['Whole Life*'] && <span style={{color:'var(--gold)',marginLeft:4}}>· *WL uses CV projection assumption (optimistic — excludes charges)</span>}
+                  </div>
+                )}
               </div>
             );
           })()}
