@@ -4395,41 +4395,96 @@ function scoreFundMatch(query, dbName) {
   if(qWords.length === 0 || dWordsLower.length === 0) return 0;
 
   // ── DISCRIMINATOR TOKEN GUARD ──
-  // Geographic and thematic tokens are non-fungible — "India" cannot silently
-  // match "Elite" or "Asia". If the query contains a token from any family below
-  // and the DB name has NO token from the same family, this is NOT a match.
-  // Prevents the bug where "AIA India Balanced" was matching "AIA Elite Balanced"
-  // because India was being dropped under the 60% threshold.
+  // Geographic, asset-class, style, theme, and currency tokens are non-fungible.
+  // "India" cannot silently match "Elite". "Balanced" cannot match "Equity".
+  // If the query contains a token from any family below and the DB name has NO
+  // token from the same family, this is NOT a match. Prevents the bug where
+  // legitimate AI-extracted fund names get force-matched to wrong DB entries
+  // because a few generic words happen to overlap.
   const DISCRIMINATOR_FAMILIES = [
-    ['us','usa','america','american'],
+    // ── Geographic / region ──
+    ['us','usa','america','american','u.s.','united-states'],
     ['uk','britain','british','gb','england'],
-    ['eu','europe','european'],
-    ['china','chinese','prc','greater-china'],
-    ['india','indian'],
-    ['japan','japanese'],
+    ['eu','europe','european','eurozone'],
+    ['china','chinese','prc','greater-china','china-a','chinaa'],
+    ['india','indian','bharat'],
+    ['japan','japanese','nippon'],
     ['korea','korean'],
-    ['asia','asian','apac','asia-pacific'],
+    ['asia','asian','apac','asia-pacific','asiapacific','pan-asia'],
     ['emerging','em','frontier'],
-    ['global','world','worldwide','international'],
-    ['singapore','sg','sgp'],
+    ['developed','dm'],
+    ['global','world','worldwide','international','intl'],
+    ['singapore','sg','sgp','spore'],
     ['hk','hongkong','hong-kong'],
     ['taiwan','taiwanese'],
     ['vietnam','vn','vietnamese'],
     ['thailand','thai'],
     ['indonesia','indonesian'],
     ['malaysia','malaysian'],
-    ['australia','australian','oz'],
-    ['regional'], // "AIA Regional Equity" must match "Regional"
-    ['technology','tech'],
-    ['healthcare','health'],
-    ['energy','oil','gas'],
-    ['property','reit','reits','realestate'],
+    ['philippines','filipino'],
+    ['australia','australian','oz','aussie'],
+    ['nz','newzealand'],
+    ['canada','canadian'],
+    ['brazil','brazilian','latam','latin'],
+    ['russia','russian'],
+    ['africa','african'],
+    ['mena','middle-east'],
+    ['regional'],
+    // ── Asset class ──
+    ['equity','equities','stock','stocks','shares'],
+    ['bond','bonds','fixed','fixed-income','income','credit','duration'],
+    ['balanced','multi-asset','multiasset','mixed','diversified','allocation'],
+    ['cash','money-market','mm','liquidity'],
+    ['property','reit','reits','real-estate','realestate'],
+    ['commodity','commodities','gold','silver','metals','natural-resources'],
+    ['alternative','alternatives','hedge'],
+    ['private-equity','pe','private-credit'],
+    ['infrastructure','infra'],
+    // ── Style / cap / strategy ──
+    ['growth'],
+    ['value'],
+    ['dividend','div','yield','high-yield','hy'],
+    ['quality','core','blend'],
+    ['small-cap','smallcap','small','smid'],
+    ['large-cap','largecap','large','mega'],
+    ['mid-cap','midcap','mid'],
+    ['active','passive','index','indexed','etf','tracker','smart-beta'],
+    ['concentrated','focused','flexible'],
+    ['absolute-return','total-return','target-date'],
+    // ── Theme / sector ──
+    ['technology','tech','it','digital','semiconductor','semi'],
+    ['healthcare','health','pharma','biotech','medical'],
+    ['energy','oil','gas','renewable','clean-energy'],
+    ['financial','financials','bank','banks','banking','fintech'],
+    ['consumer','staples','discretionary','retail'],
+    ['industrial','industrials','materials'],
+    ['utility','utilities'],
+    ['ai','artificial-intelligence','robotics','automation'],
+    ['esg','sustainable','sri','impact','green','climate'],
+    ['halal','sharia','islamic','syariah'],
+    ['luxury'],
+    ['gaming','esports'],
+    ['water'],
+    ['infrastructure'],
+    // ── Currency hedge ──
+    ['hedged','unhedged','currency-hedged'],
+    ['sgd-hedged','usd-hedged'],
+    // ── Maturity / duration ──
+    ['short','short-term','short-duration'],
+    ['long','long-term','long-duration','ultra-long'],
+    ['intermediate','medium'],
+    // ── Credit quality ──
+    ['investment-grade','ig','high-grade'],
+    ['high-yield','hy','junk','speculative'],
+    ['government','govt','sovereign','treasury','treasuries','gilts'],
+    ['corporate','corp'],
+    ['municipal','muni'],
   ];
   for(const family of DISCRIMINATOR_FAMILIES) {
     const inQ = qWords.some(w => family.includes(w));
     if(!inQ) continue;
     const inD = dWordsLower.some(w => family.includes(w));
-    if(!inD) return 0; // query asserts a region/theme, DB doesn't — reject
+    if(!inD) return 0; // query asserts a region/class/style/theme, DB doesn't — reject
   }
 
   // Word match — exact match for all lengths; prefix match only when both tokens ≥3 chars
@@ -4483,11 +4538,13 @@ function scoreFundMatch(query, dbName) {
 
 function findBestFund(query, minScore) {
   if(!query || typeof FUND_DB === 'undefined' || !FUND_DB.length) return null;
-  // Threshold raised from 55 to 75 to reduce false matches. With the discriminator
-  // guard above, legitimate matches still score well above 75 (typically 130+),
-  // while ambiguous partial matches now correctly fail and the caller keeps the
-  // AI-extracted text as-is.
-  const threshold = (typeof minScore === 'number') ? minScore : 75;
+  // Threshold raised to 100 for metadata enrichment only. Since we no longer
+  // substitute fund names, this threshold gates risk-rating attribution. A
+  // false positive here gives the wrong risk rating, which is still bad but
+  // less visible than a wrong fund name. Real matches typically score 130+
+  // with the discriminator guard in place; 100 leaves a safety margin while
+  // still rejecting weak partial matches.
+  const threshold = (typeof minScore === 'number') ? minScore : 100;
   let bestScore = 0;
   let best = null;
   for(const f of FUND_DB) {
@@ -4495,6 +4552,40 @@ function findBestFund(query, minScore) {
     if(s > bestScore) { bestScore = s; best = f; if(s >= 1000) break; }
   }
   return bestScore >= threshold ? best : null;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// FUND NAME VALIDATOR — sanity-check AI-extracted fund names
+// ═══════════════════════════════════════════════════════════════
+// The AI sometimes mistakes a product description, sentence, or marketing
+// tagline for a "fund name". This validator catches the obvious garbage
+// before it gets stored. Returns true ONLY if the string structurally
+// looks like a real fund name. Conservative — defaults to true on edge
+// cases so we don't filter legitimate funds.
+function isLikelyFundName(name) {
+  if(!name || typeof name !== 'string') return false;
+  const n = name.trim();
+  // Length: real fund names are typically 10-80 characters
+  if(n.length < 4 || n.length > 80) return false;
+  // Word count: 2-12 words covers virtually all real fund names
+  const words = n.split(/\s+/).filter(Boolean);
+  if(words.length < 2 || words.length > 12) return false;
+  // Reject if contains policy/product terminology (these are insurance terms,
+  // never fund names). Captures the "AIA Platinum Wealth Venture ILP is a
+  // limited premium investment-linked insurance policy" failure mode and
+  // payment-structure labels like "Single Premium".
+  const productTerms = /\b(insurance policy|insurance plan|investment-linked|investment linked|\bILP\b|whole life|term life|critical illness|sum assured|premium term|single premium|limited pay|regular premium|coverage|policyholder|underwriter|maturity benefit|surrender value|cash value|annuity payout)\b/i;
+  if(productTerms.test(n)) return false;
+  // Reject if contains sentence-construction verbs (real fund names don't have
+  // verbs — they're noun phrases like "Manulife Global Multi-Asset Fund").
+  const sentenceWords = /\b(is a|is an|are a|are an|offers|offering|provides|features|allows|enables|ensures|designed|guaranteed for|payable|invested in|consisting of|comprises|comprising)\b/i;
+  if(sentenceWords.test(n)) return false;
+  // Reject if it ends with a preposition + word (sentence fragment indicator,
+  // e.g. "...insurance policy in Singapore" or "...fund for retirement")
+  if(/\b(in|to|for|with|of|on|at|by|from|into|onto|upon)\s+\w+\s*\.?$/i.test(n)) return false;
+  // Reject if it contains a sentence-ending period mid-string (multi-sentence prose)
+  if(/\.\s+[A-Z]/.test(n)) return false;
+  return true;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -8987,12 +9078,45 @@ CASH VALUE: cashValue (number), cvGrowthRate (% p.a.), surrenderPeriod (years)
 UL/IUL/VUL: creditingMechanism, creditingRates {current, guaranteed}, loyaltyBonus {rate, startYear}
 ILP: ilpGrowth, ilpDivYield, ilpMgmtFee, fundAllocations (JSON array of {fundName:string, allocation:number (percentage e.g. 80)}).
 
-═══ CRITICAL ANTI-HALLUCINATION RULE FOR fundAllocations ═══
-ONLY extract fund names that appear LITERALLY in the source document. If the document does not explicitly name any funds, return fundAllocations:[] — an empty array. NEVER invent fund names. NEVER guess what funds an insurer typically uses. NEVER fill in plausible-sounding fund names from your training data. NEVER infer fund names from the product name (e.g. seeing "AIA Platinum Wealth Venture" does NOT mean any specific fund). NEVER substitute a country/region with a different one (e.g. if the source says "India Balanced Fund", do NOT extract "Elite Balanced Fund" or "Asia Balanced Fund"). Geographic/country tokens (India, Japan, China, US, Europe, Asia, Emerging Markets, Global, etc.) are DISCRIMINATORS — copy them exactly as written or omit the fund entirely.
+═══ FUND ALLOCATION EXTRACTION — READ CAREFULLY ═══
 
-If the document mentions fund names with percentages like "80% Manulife Global Multi Asset 20% Neuberger Berman", extract as fundAllocations:[{fundName:"Manulife Global Multi Asset",allocation:80},{fundName:"Neuberger Berman",allocation:20}]. If only ONE fund is mentioned (e.g. "PRULink US Dividend Wealth Fund"), set allocation to 100. Look in remarks, notes columns, and any fund composition fields.
+A "fund name" is the name of a specific investment fund/sub-fund that the policy holds. Fund names have a recognizable structure:
+  [Manager] [Geography or Theme] [Asset Class] "Fund"
+or sometimes a strategy name with a fund-house prefix.
 
-If unsure whether a piece of text is a fund name or general policy text, OMIT IT. An empty fundAllocations array is correct and useful — a hallucinated fund is harmful. The FC will fill in the fund details manually if needed.
+✓ EXTRACT — these are real fund names:
+  • "AIA India Balanced Fund"
+  • "AIA Japan Balanced Fund"
+  • "AIA Emerging Markets Balanced Fund"
+  • "Manulife Global Multi Asset Fund"
+  • "PRULink US Dividend Wealth Fund"
+  • "Neuberger Berman US Real Estate Securities Fund"
+  • "Schroder Asian Income Fund"
+  • "BlackRock Global Funds World Healthscience"
+  • "Eastspring Investments Asian Equity Income Fund"
+  • "First Sentier Bridge"
+
+✗ DO NOT EXTRACT — these are NOT fund names:
+  • "AIA Platinum Wealth Venture" — this is the PRODUCT name, not a fund
+  • "AIA Platinum Wealth Venture ILP is a limited premium investment-linked insurance policy in Singapore" — this is a product DESCRIPTION sentence, never a fund name
+  • "Investment-Linked Insurance Plan" — generic product type, not a fund
+  • "Sub-fund" / "underlying fund" / "selected fund" — placeholder language, not a fund name
+  • "Single Premium" / "Limited Pay" — premium structure, not a fund
+  • "Equity Fund" / "Bond Fund" alone (with no manager prefix) — too generic, almost certainly not a real fund
+  • Any string longer than ~80 characters
+  • Any string containing verbs like "is", "are", "offers", "provides", "designed for"
+  • Any string containing the words "policy", "premium term", "insured", "coverage"
+
+═══ ANTI-HALLUCINATION RULES ═══
+1. ONLY extract fund names that appear in the source document. DO extract them confidently when they're clearly listed (with or without percentages).
+2. If the source document does NOT name any specific funds, return fundAllocations:[]. Empty is acceptable and correct.
+3. NEVER invent fund names from training data. Seeing the product name "AIA Platinum Wealth Venture" does NOT mean any specific fund.
+4. NEVER substitute country/region tokens. If source says "India Balanced Fund", extract "India Balanced Fund" — never "Elite", "Asia", "Asian", "Global", etc.
+5. NEVER extract a sentence or product description as a fund name. Fund names are 2-10 words, typically 20-60 characters, with no verbs.
+6. If you see a list like "AIA India Balanced Fund (30%) AIA Japan Balanced Fund (30%) AIA Emerging Markets Balanced Fund (40%)", extract ALL three with their respective allocations.
+7. If you see "80% Manulife Global Multi Asset, 20% Neuberger Berman US Real Estate", extract both with their allocations.
+8. Look in: fund composition tables, allocation sections, "Invested In" fields, remarks columns mentioning fund names with percentages.
+9. The goal is to capture ALL real fund holdings with HIGH precision. Confidently extract real funds; confidently skip non-fund text.
 
 RETIREMENT/ANNUITY/INCOME PLANS: annuityPayout (annual payout amount, number), annuityMonthly (monthly payout, number), annuityStartAge (number), annuityEndAge (number), retMaturitySum (maturity/terminal value at end)
 
@@ -9791,6 +9915,12 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         }
 
         // ── AUTO-POPULATE fundAllocations from remarks ──
+        // Only runs when the AI didn't extract any funds. Uses a strict
+        // percentage pattern (e.g. "80% Manulife Global Multi Asset") because
+        // explicit allocations are reliable. The brittle "knownFundPatterns"
+        // scan that assumed any insurer-name mention was a fund has been
+        // REMOVED — it caused hallucinations by grabbing whatever text
+        // followed an insurer name.
         if(result.category === 'investment' && (!result.fundAllocations || result.fundAllocations.length === 0)) {
           const remarkText = (result.userRemarks||'') + ' ' + (result.notes||'');
           if(remarkText.trim()) {
@@ -9803,45 +9933,67 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
               const name = m[2].trim().replace(/\s+/g,' ');
               if(pct > 0 && pct <= 100 && name.length > 3) fundAllocs.push({fundName:name, allocation:pct});
             }
-            // If only one fund name found without percentage, assume 100%
-            if(fundAllocs.length === 0) {
-              const knownFundPatterns = ['PRULink','Manulife','AIA','Great Eastern','NTUC','Allianz','BlackRock','Neuberger','Fidelity','Schroder','Aberdeen','Franklin','JPMorgan','PIMCO'];
-              for(const pat of knownFundPatterns) {
-                const idx = remarkText.indexOf(pat);
-                if(idx >= 0) {
-                  const rest = remarkText.slice(idx).split(/[,\.\[\]\(\)]/)[0].trim();
-                  if(rest.length > 5) { fundAllocs.push({fundName:rest, allocation:100}); break; }
-                }
+            // ── VALIDATOR FILTER ──
+            // Drop entries that aren't structurally fund names before enrichment.
+            const fundAllocsValid = fundAllocs.filter(fa => {
+              if(!isLikelyFundName(fa.fundName)) {
+                console.warn('[Extract] REJECTED non-fund-name from remarks:', JSON.stringify(fa.fundName));
+                return false;
               }
-            }
-            // Scored match — collects all candidates, ranks them, picks the best above threshold.
-            // Previous naive .find() substring match returned the first alphabetical hit and
-            // misidentified many funds. See findBestFund helper above FUND_DB.
-            if(fundAllocs.length > 0 && typeof FUND_DB !== 'undefined') {
-              fundAllocs.forEach((fa,i) => {
+              return true;
+            });
+            // ── METADATA-ONLY ENRICHMENT ──
+            // Use the local FUND_DB to look up risk rating, but NEVER overwrite
+            // the fund name. The AI's extracted text (or the remarks text) is
+            // the source of truth for the user — substituting with a possibly-
+            // wrong DB name is the bug we're fixing.
+            if(fundAllocsValid.length > 0 && typeof FUND_DB !== 'undefined') {
+              fundAllocsValid.forEach((fa,i) => {
                 const best = findBestFund(fa.fundName);
                 if(best) {
-                  console.log('[Extract] Matched fund "'+fa.fundName+'" → "'+best[0]+'"');
-                  fundAllocs[i].fundName = best[0];
-                  fundAllocs[i].riskRating = best[4];
-                } else {
-                  console.log('[Extract] No confident DB match for fund "'+fa.fundName+'" — keeping as-is');
+                  console.log('[Extract] Enriched fund "'+fa.fundName+'" with risk rating from DB match "'+best[0]+'"');
+                  fundAllocsValid[i].riskRating = best[4];
+                  // NOTE: fundName intentionally NOT replaced
                 }
               });
-              result.fundAllocations = fundAllocs;
-              console.log('[Extract] Auto-populated fundAllocations:', fundAllocs);
+              result.fundAllocations = fundAllocsValid;
+              console.log('[Extract] Auto-populated fundAllocations from remarks:', fundAllocsValid);
             }
           }
         }
-        // Also process AI-returned fundAllocations — scored match to DB
-        if(result.fundAllocations && result.fundAllocations.length > 0 && typeof FUND_DB !== 'undefined') {
-          result.fundAllocations.forEach((fa,i) => {
-            if(!fa.fundName) return;
-            const best = findBestFund(fa.fundName);
-            if(best) {
-              result.fundAllocations[i] = {...fa, fundName:best[0], riskRating:best[4]};
+        // Also process AI-returned fundAllocations — METADATA enrichment only,
+        // never substitute the fundName. The AI is the source of truth for the
+        // name; the local DB is only consulted for risk rating.
+        if(result.fundAllocations && result.fundAllocations.length > 0) {
+          // ── VALIDATOR FILTER ──
+          // Drop entries that aren't structurally fund names. Catches the failure
+          // mode where the AI extracts a product description sentence as a fund.
+          const before = result.fundAllocations.length;
+          result.fundAllocations = result.fundAllocations.filter(fa => {
+            if(!fa || !fa.fundName) return false;
+            if(!isLikelyFundName(fa.fundName)) {
+              console.warn('[Extract] REJECTED non-fund-name from AI:', JSON.stringify(fa.fundName));
+              return false;
             }
+            return true;
           });
+          if(result.fundAllocations.length < before) {
+            console.warn('[Extract] Filtered '+(before - result.fundAllocations.length)+' invalid fund entries');
+          }
+          // Metadata enrichment for the survivors
+          if(result.fundAllocations.length > 0 && typeof FUND_DB !== 'undefined') {
+            result.fundAllocations.forEach((fa,i) => {
+              if(!fa.fundName) return;
+              const best = findBestFund(fa.fundName);
+              if(best) {
+                console.log('[Extract] Enriched AI-extracted fund "'+fa.fundName+'" with risk rating from DB match "'+best[0]+'"');
+                result.fundAllocations[i] = {...fa, riskRating: best[4]};
+                // NOTE: fundName intentionally NOT overwritten
+              } else {
+                console.log('[Extract] No DB match for AI-extracted fund "'+fa.fundName+'" — keeping as-is, no risk rating');
+              }
+            });
+          }
         }
 
         return result;
@@ -10618,7 +10770,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         const blocks = await processFile(file);
         content.push(...blocks);
       }
-      const formExtractPrompt = 'Extract insurance policy details. Return a JSON object with ALL fields: insurer, productName, policyNumber, category (protection/savings/health/investment/retirement/maternity), subType, currency, sumAssured (number), premiumAmount (number — the premium AS PAID at its stated frequency. "$1,000/mth" → premiumAmount=1000 premFrequency="monthly". "$12,000/yr" → premiumAmount=12000 premFrequency="annual". Do NOT convert between periods), premFrequency (annual/monthly/single/unknown — must match the period of premiumAmount. If unclear, use unknown), premiumStructure, paymentMethod, policyOwner, lifeInsured, gender, dob, ageAtEntry, smoker, nationality, occupation, inceptionDate, maturityDate, status, premStartAge, premTerm, premEndAge. Riders: riders (array) — CAPTURE-FIRST: for EVERY benefit listed, set riderName to EXACT name from document, THEN classify type from death/tpd/ci/eci/di/accidental/acc_medical/acc_tcm/acc_dismember/premium_waiver/other. If unsure, use type:"other". NEVER duplicate types for different benefits — use riderName to distinguish. Each: {type, riderName (ALWAYS filled), sa:number, premium:0 if bundled, expiryAge, bundled:boolean, multiClaim, totalClaimPct}. SA: saMultiplier, multiplierEndAge. ISP: ispClass, hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance. ILP: ilpGrowth, ilpDivYield, ilpMgmtFee, fundAllocations (array of {fundName:string, allocation:number}). ANTI-HALLUCINATION RULE FOR fundAllocations: only extract fund names that appear LITERALLY in the document. If no funds are named, return fundAllocations:[]. NEVER invent fund names from the product name or insurer. NEVER substitute country/region tokens (India ≠ Asia ≠ Elite). Cash: cashValue, cvGrowthRate, surrenderPeriod. Notes: notes (FC review headline). Return ONLY valid JSON starting with { ending with }.';
+      const formExtractPrompt = 'Extract insurance policy details. Return a JSON object with ALL fields: insurer, productName, policyNumber, category (protection/savings/health/investment/retirement/maternity), subType, currency, sumAssured (number), premiumAmount (number — the premium AS PAID at its stated frequency. "$1,000/mth" → premiumAmount=1000 premFrequency="monthly". "$12,000/yr" → premiumAmount=12000 premFrequency="annual". Do NOT convert between periods), premFrequency (annual/monthly/single/unknown — must match the period of premiumAmount. If unclear, use unknown), premiumStructure, paymentMethod, policyOwner, lifeInsured, gender, dob, ageAtEntry, smoker, nationality, occupation, inceptionDate, maturityDate, status, premStartAge, premTerm, premEndAge. Riders: riders (array) — CAPTURE-FIRST: for EVERY benefit listed, set riderName to EXACT name from document, THEN classify type from death/tpd/ci/eci/di/accidental/acc_medical/acc_tcm/acc_dismember/premium_waiver/other. If unsure, use type:"other". NEVER duplicate types for different benefits — use riderName to distinguish. Each: {type, riderName (ALWAYS filled), sa:number, premium:0 if bundled, expiryAge, bundled:boolean, multiClaim, totalClaimPct}. SA: saMultiplier, multiplierEndAge. ISP: ispClass, hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance. ILP: ilpGrowth, ilpDivYield, ilpMgmtFee, fundAllocations (array of {fundName:string, allocation:number}). FUND RULES: extract real fund holdings confidently — names like "AIA India Balanced Fund", "Manulife Global Multi Asset Fund", "PRULink US Dividend Wealth Fund". DO NOT extract product descriptions or sentences (e.g. NEVER extract "AIA Platinum Wealth Venture ILP is a limited premium investment-linked insurance policy" as a fund). Fund names are 2-10 words, contain no verbs, no "policy"/"premium"/"insurance"/"ILP" tokens, and are typically <80 chars. If no specific funds are named, return fundAllocations:[]. NEVER substitute geographic tokens (India ≠ Asia ≠ Elite). Cash: cashValue, cvGrowthRate, surrenderPeriod. Notes: notes (FC review headline). Return ONLY valid JSON starting with { ending with }.';
       content.push({type:'text',text:'Extract all policy information from these documents/images.'});
       const rawText2 = await callAI(formExtractPrompt, content, 4000);
       const parsed = repairJSON(rawText2);
