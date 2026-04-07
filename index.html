@@ -4393,6 +4393,45 @@ function scoreFundMatch(query, dbName) {
   const qWords = q.split(/[\s\-&,\.\/]+/).filter(w => w.length >= 2 && !stopWords.has(w));
   const dWordsLower = d.split(/[\s\-&,\.\/]+/).filter(w => w.length >= 2 && !stopWords.has(w));
   if(qWords.length === 0 || dWordsLower.length === 0) return 0;
+
+  // ── DISCRIMINATOR TOKEN GUARD ──
+  // Geographic and thematic tokens are non-fungible — "India" cannot silently
+  // match "Elite" or "Asia". If the query contains a token from any family below
+  // and the DB name has NO token from the same family, this is NOT a match.
+  // Prevents the bug where "AIA India Balanced" was matching "AIA Elite Balanced"
+  // because India was being dropped under the 60% threshold.
+  const DISCRIMINATOR_FAMILIES = [
+    ['us','usa','america','american'],
+    ['uk','britain','british','gb','england'],
+    ['eu','europe','european'],
+    ['china','chinese','prc','greater-china'],
+    ['india','indian'],
+    ['japan','japanese'],
+    ['korea','korean'],
+    ['asia','asian','apac','asia-pacific'],
+    ['emerging','em','frontier'],
+    ['global','world','worldwide','international'],
+    ['singapore','sg','sgp'],
+    ['hk','hongkong','hong-kong'],
+    ['taiwan','taiwanese'],
+    ['vietnam','vn','vietnamese'],
+    ['thailand','thai'],
+    ['indonesia','indonesian'],
+    ['malaysia','malaysian'],
+    ['australia','australian','oz'],
+    ['regional'], // "AIA Regional Equity" must match "Regional"
+    ['technology','tech'],
+    ['healthcare','health'],
+    ['energy','oil','gas'],
+    ['property','reit','reits','realestate'],
+  ];
+  for(const family of DISCRIMINATOR_FAMILIES) {
+    const inQ = qWords.some(w => family.includes(w));
+    if(!inQ) continue;
+    const inD = dWordsLower.some(w => family.includes(w));
+    if(!inD) return 0; // query asserts a region/theme, DB doesn't — reject
+  }
+
   // Word match — exact match for all lengths; prefix match only when both tokens ≥3 chars
   // (prevents "us" from prefix-matching "usa" or "AI" from matching "Asia").
   const wordIn = (w, arr) => arr.some(a => a === w || (w.length >= 3 && a.length >= 3 && a.startsWith(w)) || (w.length >= 3 && a.length >= 3 && w.startsWith(a)));
@@ -4419,8 +4458,9 @@ function scoreFundMatch(query, dbName) {
       if(match) { acronymBonus += 80; matchedQ++; break; }
     }
   }
-  // Require at least 60% of query words (including expanded acronyms) to match.
-  if(matchedQ < Math.ceil(qWords.length * 0.6)) return 0;
+  // Require at least 70% of query words (including expanded acronyms) to match.
+  // Raised from 60% to reduce false matches like "AIA India Balanced" → "AIA Elite Balanced".
+  if(matchedQ < Math.ceil(qWords.length * 0.7)) return 0;
   // For very short queries (1 word), reject unless it's the exact match case handled above.
   // A single-token query like "Allianz" or "PRULink" is inherently ambiguous because many
   // DB entries contain it — picking one would mis-identify the fund. Force NO MATCH so
@@ -4443,7 +4483,11 @@ function scoreFundMatch(query, dbName) {
 
 function findBestFund(query, minScore) {
   if(!query || typeof FUND_DB === 'undefined' || !FUND_DB.length) return null;
-  const threshold = (typeof minScore === 'number') ? minScore : 55;
+  // Threshold raised from 55 to 75 to reduce false matches. With the discriminator
+  // guard above, legitimate matches still score well above 75 (typically 130+),
+  // while ambiguous partial matches now correctly fail and the caller keeps the
+  // AI-extracted text as-is.
+  const threshold = (typeof minScore === 'number') ? minScore : 75;
   let bestScore = 0;
   let best = null;
   for(const f of FUND_DB) {
@@ -5514,6 +5558,7 @@ const POLICY_EXTRACTION_SCHEMA = {
       fundAllocations: {
         type: 'ARRAY',
         nullable: true,
+        description: 'Fund holdings inside an ILP/UL. ANTI-HALLUCINATION: only populate when fund names appear LITERALLY in the source document. If no funds are named, return an empty array []. NEVER invent fund names. Geographic tokens (India, Japan, Asia, Global, US, etc.) must match the source exactly — copy verbatim or omit the fund.',
         items: {
           type: 'OBJECT',
           properties: {
@@ -7533,7 +7578,10 @@ function Dashboard() {
           const isReinvest = pol.divReinvest;
           // Reinvest: total yield compounds into fund. Payout: only growth-fee compounds, div paid separately.
           const netRate = isReinvest ? (growth + div - fee) : (growth - fee);
-          const drawdownAge = parseInt(pol.ilpDivDrawdownAge)||retAge;
+          // Drawdown age: if user ticked "Draw now", treat current age as the
+          // drawdown trigger so dividends start flowing into the cashflow timeline
+          // immediately rather than waiting for retirement.
+          const drawdownAge = pol.ilpDivDrawFromNow ? (age||startAge) : (parseInt(pol.ilpDivDrawdownAge)||retAge);
           // ── CV PROJECTION HORIZON CAP ──
           // Investment policies should not compound all the way to age 100+ in projections.
           // After drawdown age (default = retAge), assume the fund is realised/cashed out
@@ -8937,7 +8985,14 @@ SA MULTIPLIER: saMultiplier (number), multiplierEndAge (number)
 ISP: ispClass (A/B1/B2+), hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance, ispCoInsCap (annual co-pay cap; $3000 for legacy riders pre-27Nov2025, $6000 for new-design riders from 1Apr2026), ispRiderInceptionDate (YYYY-MM-DD — the date the rider started; critical for MOH 2026 reform classification. Fall back to policy inception if the rider share a date with the ISP), ispRiderGeneration (one of legacy/transitional/new-2026 — legacy=rider inception before 27 Nov 2025; transitional=27 Nov 2025 to 31 Mar 2026; new-2026=from 1 Apr 2026. If the document doesn't specify, leave blank and the app will auto-compute from ispRiderInceptionDate), ispPanelRequired (boolean — true if co-pay cap only applies with panel/pre-authorised doctors)
 CASH VALUE: cashValue (number), cvGrowthRate (% p.a.), surrenderPeriod (years)
 UL/IUL/VUL: creditingMechanism, creditingRates {current, guaranteed}, loyaltyBonus {rate, startYear}
-ILP: ilpGrowth, ilpDivYield, ilpMgmtFee, fundAllocations (JSON array of {fundName:string, allocation:number (percentage e.g. 80)}). CRITICAL ILP FUND EXTRACTION: If the document mentions fund names with percentages like "80% Manulife Global Multi Asset 20% Neuberger Berman", extract as fundAllocations:[{fundName:"Manulife Global Multi Asset",allocation:80},{fundName:"Neuberger Berman",allocation:20}]. If only ONE fund is mentioned (e.g. "PRULink US Dividend Wealth Fund"), set allocation to 100. Look in remarks, notes columns, and any fund composition fields.
+ILP: ilpGrowth, ilpDivYield, ilpMgmtFee, fundAllocations (JSON array of {fundName:string, allocation:number (percentage e.g. 80)}).
+
+═══ CRITICAL ANTI-HALLUCINATION RULE FOR fundAllocations ═══
+ONLY extract fund names that appear LITERALLY in the source document. If the document does not explicitly name any funds, return fundAllocations:[] — an empty array. NEVER invent fund names. NEVER guess what funds an insurer typically uses. NEVER fill in plausible-sounding fund names from your training data. NEVER infer fund names from the product name (e.g. seeing "AIA Platinum Wealth Venture" does NOT mean any specific fund). NEVER substitute a country/region with a different one (e.g. if the source says "India Balanced Fund", do NOT extract "Elite Balanced Fund" or "Asia Balanced Fund"). Geographic/country tokens (India, Japan, China, US, Europe, Asia, Emerging Markets, Global, etc.) are DISCRIMINATORS — copy them exactly as written or omit the fund entirely.
+
+If the document mentions fund names with percentages like "80% Manulife Global Multi Asset 20% Neuberger Berman", extract as fundAllocations:[{fundName:"Manulife Global Multi Asset",allocation:80},{fundName:"Neuberger Berman",allocation:20}]. If only ONE fund is mentioned (e.g. "PRULink US Dividend Wealth Fund"), set allocation to 100. Look in remarks, notes columns, and any fund composition fields.
+
+If unsure whether a piece of text is a fund name or general policy text, OMIT IT. An empty fundAllocations array is correct and useful — a hallucinated fund is harmful. The FC will fill in the fund details manually if needed.
 
 RETIREMENT/ANNUITY/INCOME PLANS: annuityPayout (annual payout amount, number), annuityMonthly (monthly payout, number), annuityStartAge (number), annuityEndAge (number), retMaturitySum (maturity/terminal value at end)
 
@@ -10330,7 +10385,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
     cashValue:'', cvGrowthRate:'3.0', cvKnown:true, surrenderPeriod:'',
     // ILP (RetireWell)
     ilpGrowth:'6', ilpDivYield:'2', ilpMgmtFee:'1.5', ilpPaymentYrs:'10', ilpProtPct:'101',
-    divReinvest:false, ilpDivDrawdownAge:'',
+    divReinvest:false, ilpDivDrawdownAge:'', ilpDivDrawFromNow:false,
     // UL fields
     ulSubType:'', creditingMechanism:'', creditingRates:{current:'',guaranteed:''},
     loyaltyBonus:{rate:'',startYear:'',endDesc:''}, loanRate:'', elpPremium:'', qsiFlag:false,
@@ -10563,7 +10618,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         const blocks = await processFile(file);
         content.push(...blocks);
       }
-      const formExtractPrompt = 'Extract insurance policy details. Return a JSON object with ALL fields: insurer, productName, policyNumber, category (protection/savings/health/investment/retirement/maternity), subType, currency, sumAssured (number), premiumAmount (number — the premium AS PAID at its stated frequency. "$1,000/mth" → premiumAmount=1000 premFrequency="monthly". "$12,000/yr" → premiumAmount=12000 premFrequency="annual". Do NOT convert between periods), premFrequency (annual/monthly/single/unknown — must match the period of premiumAmount. If unclear, use unknown), premiumStructure, paymentMethod, policyOwner, lifeInsured, gender, dob, ageAtEntry, smoker, nationality, occupation, inceptionDate, maturityDate, status, premStartAge, premTerm, premEndAge. Riders: riders (array) — CAPTURE-FIRST: for EVERY benefit listed, set riderName to EXACT name from document, THEN classify type from death/tpd/ci/eci/di/accidental/acc_medical/acc_tcm/acc_dismember/premium_waiver/other. If unsure, use type:"other". NEVER duplicate types for different benefits — use riderName to distinguish. Each: {type, riderName (ALWAYS filled), sa:number, premium:0 if bundled, expiryAge, bundled:boolean, multiClaim, totalClaimPct}. SA: saMultiplier, multiplierEndAge. ISP: ispClass, hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance. ILP: ilpGrowth, ilpDivYield, ilpMgmtFee, fundAllocations (array of {fundName:string, allocation:number}). Cash: cashValue, cvGrowthRate, surrenderPeriod. Notes: notes (FC review headline). Return ONLY valid JSON starting with { ending with }.';
+      const formExtractPrompt = 'Extract insurance policy details. Return a JSON object with ALL fields: insurer, productName, policyNumber, category (protection/savings/health/investment/retirement/maternity), subType, currency, sumAssured (number), premiumAmount (number — the premium AS PAID at its stated frequency. "$1,000/mth" → premiumAmount=1000 premFrequency="monthly". "$12,000/yr" → premiumAmount=12000 premFrequency="annual". Do NOT convert between periods), premFrequency (annual/monthly/single/unknown — must match the period of premiumAmount. If unclear, use unknown), premiumStructure, paymentMethod, policyOwner, lifeInsured, gender, dob, ageAtEntry, smoker, nationality, occupation, inceptionDate, maturityDate, status, premStartAge, premTerm, premEndAge. Riders: riders (array) — CAPTURE-FIRST: for EVERY benefit listed, set riderName to EXACT name from document, THEN classify type from death/tpd/ci/eci/di/accidental/acc_medical/acc_tcm/acc_dismember/premium_waiver/other. If unsure, use type:"other". NEVER duplicate types for different benefits — use riderName to distinguish. Each: {type, riderName (ALWAYS filled), sa:number, premium:0 if bundled, expiryAge, bundled:boolean, multiClaim, totalClaimPct}. SA: saMultiplier, multiplierEndAge. ISP: ispClass, hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance. ILP: ilpGrowth, ilpDivYield, ilpMgmtFee, fundAllocations (array of {fundName:string, allocation:number}). ANTI-HALLUCINATION RULE FOR fundAllocations: only extract fund names that appear LITERALLY in the document. If no funds are named, return fundAllocations:[]. NEVER invent fund names from the product name or insurer. NEVER substitute country/region tokens (India ≠ Asia ≠ Elite). Cash: cashValue, cvGrowthRate, surrenderPeriod. Notes: notes (FC review headline). Return ONLY valid JSON starting with { ending with }.';
       content.push({type:'text',text:'Extract all policy information from these documents/images.'});
       const rawText2 = await callAI(formExtractPrompt, content, 4000);
       const parsed = repairJSON(rawText2);
@@ -11981,7 +12036,17 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
               <div className="field"><label>Growth % p.a.{(form.fundAllocations||[]).length>0?' ⚡':''}  </label><input type="number" step="0.5" value={form.ilpGrowth||'6'} onChange={e=>set('ilpGrowth',e.target.value)} style={(form.fundAllocations||[]).length>0?{borderColor:'var(--purple)',background:'rgba(157,138,191,.06)'}:{}} /><div style={{fontSize:10,color:(form.fundAllocations||[]).length>0?'var(--purple)':'var(--text3)'}}>{(form.fundAllocations||[]).length>0?'Weighted from fund allocations':'Fund return before fees'}</div></div>
               <div className="field"><label>Dividend % p.a.{(form.fundAllocations||[]).length>0?' ⚡':''}</label><input type="number" step="0.5" value={form.ilpDivYield||'2'} onChange={e=>set('ilpDivYield',e.target.value)} style={(form.fundAllocations||[]).length>0?{borderColor:'var(--purple)',background:'rgba(157,138,191,.06)'}:{}} /><div style={{fontSize:10,color:(form.fundAllocations||[]).length>0?'var(--purple)':'var(--text3)'}}>{form.divReinvest?'Reinvested into fund value':'Paid out as income'}</div></div>
               <div className="field"><label>Reinvest Dividends?</label><select value={form.divReinvest?'yes':'no'} onChange={e=>set('divReinvest',e.target.value==='yes')}><option value="no">No — draw down as income</option><option value="yes">Yes — compound into fund</option></select><div style={{fontSize:10,color:form.divReinvest?'var(--green2)':'#9d8abf'}}>{form.divReinvest?'Total yield = Growth + Div − Fee':'Growth compounds; Div paid separately'}</div></div>
-              {!form.divReinvest && <div className="field"><label>Div. Drawdown Age</label><input type="number" value={form.ilpDivDrawdownAge||''} onChange={e=>set('ilpDivDrawdownAge',e.target.value)} placeholder="Default: retirement age" /><div style={{fontSize:10,color:'var(--text3)'}}>When to start drawing dividends as income</div></div>}
+              {!form.divReinvest && (
+                <div className="field">
+                  <label>Div. Drawdown</label>
+                  <div style={{display:'flex',gap:6,marginBottom:4}}>
+                    <button type="button" onClick={()=>set('ilpDivDrawFromNow',false)} style={{flex:1,padding:'6px 8px',fontSize:11,borderRadius:6,border:'1px solid var(--border)',background:!form.ilpDivDrawFromNow?'var(--gold)':'var(--bg2)',color:!form.ilpDivDrawFromNow?'var(--bg)':'var(--text2)',fontWeight:!form.ilpDivDrawFromNow?700:500,cursor:'pointer'}}>Later</button>
+                    <button type="button" onClick={()=>{set('ilpDivDrawFromNow',true);set('ilpDivDrawdownAge','');}} style={{flex:1,padding:'6px 8px',fontSize:11,borderRadius:6,border:'1px solid var(--border)',background:form.ilpDivDrawFromNow?'var(--gold)':'var(--bg2)',color:form.ilpDivDrawFromNow?'var(--bg)':'var(--text2)',fontWeight:form.ilpDivDrawFromNow?700:500,cursor:'pointer'}}>Draw now</button>
+                  </div>
+                  {!form.ilpDivDrawFromNow && <input type="number" value={form.ilpDivDrawdownAge||''} onChange={e=>set('ilpDivDrawdownAge',e.target.value)} placeholder="Default: retirement age" />}
+                  <div style={{fontSize:10,color:form.ilpDivDrawFromNow?'var(--green2)':'var(--text3)'}}>{form.ilpDivDrawFromNow?'Dividends flow into cashflow now':'When to start drawing dividends'}</div>
+                </div>
+              )}
               <div className="field"><label>Mgmt Fee % p.a.{(form.fundAllocations||[]).length>0?' ⚡':''}</label><input type="number" step="0.1" value={form.ilpMgmtFee||'1.5'} onChange={e=>set('ilpMgmtFee',e.target.value)} style={(form.fundAllocations||[]).length>0?{borderColor:'var(--purple)',background:'rgba(157,138,191,.06)'}:{}} /><div style={{fontSize:10,color:'var(--red)'}}>Deducted from fund</div></div>
             </div>
             <div style={{marginTop:8,padding:10,background:'var(--bg2)',borderRadius:8,display:'flex',gap:20,flexWrap:'wrap'}}>
@@ -11994,7 +12059,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                 <div>
                   <div style={{fontSize:10,color:'var(--text3)',textTransform:'uppercase'}}>Dividend Income</div>
                   <div style={{fontSize:16,fontWeight:700,color:'#9d8abf'}}>{parseFloat(form.ilpDivYield||0).toFixed(2)}% p.a.</div>
-                  <div style={{fontSize:10,color:'var(--text3)'}}>Paid out from age {form.ilpDivDrawdownAge||'retirement'}</div>
+                  <div style={{fontSize:10,color:'var(--text3)'}}>{form.ilpDivDrawFromNow ? 'Drawing now (in cashflow)' : 'Paid out from age '+(form.ilpDivDrawdownAge||'retirement')}</div>
                 </div>
               )}
               {!form.divReinvest && parseFloat(form.ilpDivYield||0)>0 && (
@@ -14520,7 +14585,10 @@ function ReportTab() {
           const nr=pol.divReinvest?(growth+div-fee):(growth-fee);
           const paid=Math.min(pt,yif+1);
           const fv=pol.premSingle?prem*Math.pow(1+nr,yif):(nr>0?prem*(Math.pow(1+nr,paid)-1)/nr*Math.pow(1+nr,Math.max(0,yif-paid)):prem*paid);
-          if(!pol.divReinvest&&retAge>=(parseInt(pol.ilpDivDrawdownAge)||retAge)&&div>0)retDiv+=Math.round(fv*div);
+          // Drawdown age: respect "draw from now" toggle. If user is drawing
+          // now, dividends are always included in retirement projection.
+          const ddAge = pol.ilpDivDrawFromNow ? (age||0) : (parseInt(pol.ilpDivDrawdownAge)||retAge);
+          if(!pol.divReinvest && retAge >= ddAge && div > 0) retDiv += Math.round(fv*div);
           retCV+=Math.round(fv);
         }
       });
