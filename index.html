@@ -7799,6 +7799,15 @@ function Dashboard() {
     return { desiredMonthly, baseDesired, inflationRate: inflationRate*100, cpfPayout, policyMonthlyIncome, policyDividends, lumpSum, otherMonthly, otherSources, timeline, cpfScheme, cpfStartAge };
   }, [p, cvTimeline, retAge, age, monthlyIncome]);
 
+  // ── PUBLISH TO WINDOW CACHE ──
+  // The Visual PDF generator (in ReportTab, a different component) needs
+  // access to this timeline to render its retirement income chart. Rather
+  // than pipe it through props/context, we expose it on window so the PDF
+  // generator can read it on demand. Updated whenever retirementLite changes.
+  useEffect(() => {
+    try { window.__retirementLiteCache = retirementLite; } catch(e) {}
+  }, [retirementLite]);
+
   // CV timeline chart
   const chartRef2 = useRef(null);
   const chartInst2 = useRef(null);
@@ -13556,11 +13565,18 @@ function ReportTab() {
       const score = Math.round(weightedScore);
 
       // ── Retirement Income Projection (actual vs desired) ──
-      // Pulls the timeline from retirementLite — same data the dashboard chart
-      // uses. Filters to retirement window so the chart isn't dominated by
-      // pre-retirement zeros.
-      const retTimeline = (retirementLite && retirementLite.timeline) ? retirementLite.timeline : [];
-      const retFiltered = retTimeline.filter(r => r.age >= Math.max(55, retAge-2) && r.age <= 90);
+      // Pulls the timeline from window.__retirementLiteCache, which the
+      // Dashboard component publishes whenever it computes its retirement
+      // projection. If the cache isn't populated (user hasn't visited the
+      // dashboard since loading the app, or hasn't entered profile data),
+      // the chart cell shows a friendly placeholder instead of crashing.
+      let retTimeline = [];
+      try {
+        if(typeof window !== 'undefined' && window.__retirementLiteCache && Array.isArray(window.__retirementLiteCache.timeline)) {
+          retTimeline = window.__retirementLiteCache.timeline;
+        }
+      } catch(e) { console.warn('[Visual PDF] retirementLite cache read failed:', e); }
+      const retFiltered = retTimeline.filter(r => r && r.age >= Math.max(55, retAge-2) && r.age <= 90);
       const retLabels = retFiltered.map(r => r.age);
       const retCpfData = retFiltered.map(r => r.cpf || 0);
       const retPolicyData = retFiltered.map(r => r.policy || 0);
