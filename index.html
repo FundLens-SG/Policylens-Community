@@ -5101,9 +5101,97 @@ function App() {
         {tab==='report' && <ErrorBoundary key="report"><ReportTab /></ErrorBoundary>}
         {tab==='settings' && <Settings />}
       </div>
+      <OrientationLock />
     </AppCtx.Provider>
   );
 }
+
+// ═══════════════════════════════════════════════════════════════
+// MODULE: ORIENTATION LOCK — floating toggle for screen rotation
+// ═══════════════════════════════════════════════════════════════
+// A small floating button that lets the user lock the screen orientation
+// to portrait or landscape, or leave it on auto. Persists to localStorage.
+//
+// Why this exists: mobile users have complained that the dashboard rotates
+// too easily on a casual tilt — especially while reading the life-stage
+// projection table on a couch. The lock gives them explicit control.
+//
+// Behavior:
+//   tap → cycles auto → portrait → landscape → auto
+//   uses screen.orientation.lock() API where available (requires fullscreen
+//   on most browsers, so we attempt it but degrade gracefully)
+//   without API: still tracks the preference for visual feedback and CSS
+//   When in 'auto' mode, the OS decides — no override.
+const OrientationLock = memo(function OrientationLock() {
+  const [mode, setMode] = useState(() => {
+    try { return localStorage.getItem('policylens-orientation-lock') || 'auto'; }
+    catch(e) { return 'auto'; }
+  });
+  const [supported, setSupported] = useState(true);
+
+  // Apply the lock when mode changes
+  useEffect(() => {
+    try { localStorage.setItem('policylens-orientation-lock', mode); } catch(e) {}
+    const so = (typeof screen !== 'undefined') && screen.orientation;
+    if(!so) { setSupported(false); return; }
+    const apply = async () => {
+      try {
+        if(mode === 'auto') {
+          if(so.unlock) so.unlock();
+        } else if(so.lock) {
+          // Lock API requires fullscreen on most browsers — try and swallow errors.
+          await so.lock(mode === 'portrait' ? 'portrait-primary' : 'landscape-primary');
+        }
+      } catch(e) {
+        // Lock failed (typically: NotSupportedError or "fullscreen required").
+        // We still keep the user's preference saved so the button reflects it,
+        // and CSS / layout responds via media queries.
+        console.log('[Orientation] lock unavailable:', e?.message || e);
+      }
+    };
+    apply();
+  }, [mode]);
+
+  const cycle = () => {
+    setMode(m => m === 'auto' ? 'portrait' : m === 'portrait' ? 'landscape' : 'auto');
+  };
+
+  const labels = {auto: 'AUTO', portrait: 'PORTRAIT', landscape: 'LANDSCAPE'};
+  const icons = {auto: '↻', portrait: '▯', landscape: '▭'};
+  const colors = {auto: 'var(--text3)', portrait: 'var(--gold)', landscape: 'var(--gold)'};
+
+  return (
+    <button
+      onClick={cycle}
+      title={`Orientation: ${labels[mode]} (tap to change)${supported?'':' — lock API unavailable on this browser'}`}
+      aria-label={`Orientation lock: ${labels[mode]}`}
+      style={{
+        position:'fixed',
+        bottom:14,
+        right:14,
+        zIndex:1000,
+        width:42,
+        height:42,
+        borderRadius:'50%',
+        background:'var(--bg2)',
+        border:`1.5px solid ${colors[mode]}`,
+        color:colors[mode],
+        fontSize:18,
+        fontWeight:700,
+        cursor:'pointer',
+        boxShadow:'0 2px 10px rgba(0,0,0,.25)',
+        display:'flex',
+        alignItems:'center',
+        justifyContent:'center',
+        padding:0,
+        opacity:mode==='auto'?0.55:1,
+        transition:'opacity .2s, border-color .2s, color .2s'
+      }}
+    >
+      {icons[mode]}
+    </button>
+  );
+});
 
 // ═══════════════════════════════════════════════════════════════
 // MODULE: HEADER — Navigation tabs
@@ -7862,16 +7950,27 @@ function Dashboard() {
             const gap = g.isFlag ? 0 : Math.max(0, g.need - g.cur);
             const dotColor = pct>=80?'var(--green2)':pct>=50?'var(--gold)':'var(--red)';
             return (
-              <div key={i} style={{display:'flex',alignItems:'center',padding:'5px 0',borderTop:i>0?'1px solid var(--border)':'none',fontSize:11}}>
-                <span style={{width:6,height:6,borderRadius:'50%',background:dotColor,marginRight:8,flexShrink:0}}></span>
-                <div style={{flex:1}}>
-                  <span style={{fontWeight:600}}>{g.label}</span>
-                  {!g.isFlag && gap > 0 && <span style={{color:'var(--red)',marginLeft:6,fontSize:10}}>Gap {fmt(gap)}</span>}
-                  {g.isFlag && <span style={{color:dotColor,marginLeft:6,fontSize:10}}>{g.note}</span>}
+              <div key={i} style={{padding:'10px 0',borderTop:i>0?'1px solid var(--border)':'none'}}>
+                {/* Row 1: dot + label + percentage */}
+                <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:4}}>
+                  <span style={{width:8,height:8,borderRadius:'50%',background:dotColor,flexShrink:0}}></span>
+                  <span style={{fontWeight:600,fontSize:13,flex:1,minWidth:0,wordBreak:'break-word'}}>{g.label}</span>
+                  <span style={{fontWeight:700,color:dotColor,fontSize:15,flexShrink:0}}>{Math.round(pct)}%</span>
                 </div>
-                <div style={{textAlign:'right',flexShrink:0}}>
-                  <span style={{fontWeight:700,color:dotColor}}>{Math.round(pct)}%</span>
-                  {!g.isFlag && <span style={{color:'var(--text3)',fontSize:10,marginLeft:4}}>{fmt(g.cur)} / {fmt(g.need)}</span>}
+                {/* Row 2: cur/need amounts + gap badge */}
+                <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8,paddingLeft:16,fontSize:11}}>
+                  {!g.isFlag ? (
+                    <>
+                      <span style={{color:'var(--text3)'}}>
+                        <span style={{color:'var(--text2)',fontWeight:600}}>{fmt(g.cur)}</span>
+                        <span style={{margin:'0 4px'}}>/</span>
+                        <span>{fmt(g.need)}</span>
+                      </span>
+                      {gap > 0 && <span style={{color:'var(--red)',fontWeight:600,padding:'2px 8px',background:'rgba(220,90,80,.1)',borderRadius:10,fontSize:10}}>Gap {fmt(gap)}</span>}
+                    </>
+                  ) : (
+                    <span style={{color:dotColor,fontStyle:'italic'}}>{g.note}</span>
+                  )}
                 </div>
               </div>
             );
@@ -7980,46 +8079,11 @@ function Dashboard() {
         </div>
       )}
 
-      {/* ═══ TIER 1: INSURER CONCENTRATION ═══ */}
-      {(() => {
-        const byInsurer = {};
-        policies.forEach(pol => {
-          const ins = pol.insurer||'Unknown';
-          byInsurer[ins] = (byInsurer[ins]||0) + annualizedPremium(pol);
-        });
-        const entries = Object.entries(byInsurer).sort((a,b)=>b[1]-a[1]);
-        const total = entries.reduce((s,e)=>s+e[1],0);
-        const topPct = total > 0 ? Math.round(entries[0][1]/total*100) : 0;
-        const concentrated = topPct >= 70 && entries.length > 1;
-        if(entries.length < 2) return null;
-        return (
-          <div className="card" style={{marginBottom:16}}>
-            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
-              <h3 style={{fontSize:13,fontWeight:600}}>Insurer Concentration</h3>
-              {entries.length > 1 && <span style={{fontSize:10,padding:'3px 10px',borderRadius:12,background:'rgba(91,168,160,.08)',color:'var(--teal)',fontWeight:500}}>{entries.length} insurers</span>}
-            </div>
-            <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
-              {entries.map(([ins,amt],i) => {
-                const pct = total > 0 ? Math.round(amt/total*100) : 0;
-                const colors = ['#5b8fd9','#5ba8a0','#d4a96a','#c97b9a','#9d8abf','#7ca87c'];
-                return (
-                  <div key={ins} style={{flex:'1 0 120px',maxWidth:200,background:'var(--bg3)',borderRadius:8,padding:10,borderLeft:`3px solid ${colors[i%colors.length]}`}}>
-                    <div style={{fontSize:11,fontWeight:600,marginBottom:2}}>{ins}</div>
-                    <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline'}}>
-                      <span style={{fontSize:16,fontWeight:700}}>{pct}%</span>
-                      <span style={{fontSize:10,color:'var(--text3)'}}>{fmt(amt)}/yr</span>
-                    </div>
-                    <div style={{height:4,background:'var(--bg4)',borderRadius:2,marginTop:4}}>
-                      <div style={{height:4,borderRadius:2,background:colors[i%colors.length],width:`${pct}%`,transition:'width .3s'}}></div>
-                    </div>
-                    <div style={{fontSize:9,color:'var(--text3)',marginTop:2}}>{policies.filter(p=>(p.insurer||'Unknown')===ins).length} policies</div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        );
-      })()}
+      {/* ═══ TIER 1: INSURER CONCENTRATION — REMOVED ═══
+          Deleted per CK request 2026-04-07. Was visually similar to the
+          retirement income chart and the data is still available in the
+          PDF report (now retirement income chart instead). The dashboard
+          is cleaner without it. ~40 lines removed. */}
 
       {/* ═══ TIER 1: RETIREMENT READINESS METER — REMOVED ═══
           Deleted per CK request 2026-04-07. The Retirement Income Dashboard below
@@ -8116,17 +8180,17 @@ function Dashboard() {
               How your portfolio evolves with you. Each column is your total coverage / cash value / passive income at that age, aggregated across all in-force policies. Current age highlighted.
             </div>
             <div style={{overflowX:'auto',borderRadius:8,border:'1px solid var(--border)'}}>
-              <table style={{width:'100%',fontSize:11,borderCollapse:'collapse',minWidth:Math.max(400, ages.length * 70)}}>
+              <table style={{width:'100%',fontSize:12,borderCollapse:'collapse',minWidth:Math.max(440, ages.length * 78)}}>
                 <thead>
                   <tr style={{background:'var(--bg3)'}}>
-                    <th style={{textAlign:'left',padding:'8px 10px',fontSize:10,fontWeight:700,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.5px',minWidth:130,position:'sticky',left:0,background:'var(--bg3)',zIndex:1}}>Metric</th>
+                    <th style={{textAlign:'left',padding:'10px 12px',fontSize:11,fontWeight:700,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.5px',minWidth:150,position:'sticky',left:0,background:'var(--bg2)',zIndex:2,borderRight:'1px solid var(--border)'}}>Metric</th>
                     {ages.map((a, i) => {
                       const isNow = i === 0;
                       return (
                         <th key={a} style={{
                           textAlign:'center',
-                          padding:'8px 6px',
-                          fontSize:isNow?11:10,
+                          padding:'10px 8px',
+                          fontSize:isNow?13:12,
                           fontWeight:isNow?700:600,
                           color:isNow?'var(--gold)':'var(--text2)',
                           background:isNow?'rgba(212,169,106,.12)':'var(--bg3)',
@@ -8134,7 +8198,7 @@ function Dashboard() {
                           whiteSpace:'nowrap'
                         }}>
                           {a}{isNow?' ●':''}
-                          <div style={{fontSize:8,color:'var(--text3)',fontWeight:400,marginTop:1}}>{isNow?'now':'+'+(a-currentAge)+'y'}</div>
+                          <div style={{fontSize:9,color:'var(--text3)',fontWeight:400,marginTop:2}}>{isNow?'now':'+'+(a-currentAge)+'y'}</div>
                         </th>
                       );
                     })}
@@ -8146,9 +8210,11 @@ function Dashboard() {
                     if(!hasAnyValue) return null;
                     return (
                       <tr key={m.key} style={{borderTop:'1px solid var(--border)'}}>
-                        <td style={{padding:'8px 10px',fontWeight:600,color:m.color,background:m.bg,position:'sticky',left:0,zIndex:1,borderRight:'1px solid var(--border)'}}>
-                          {m.label}
-                          {peaks[m.key] > 0 && <div style={{fontSize:8,color:'var(--text3)',fontWeight:400,marginTop:1}}>peak {m.key === 'income' ? fmtExact(peaks[m.key]) + '/mo' : fmtShort(peaks[m.key])}</div>}
+                        {/* Sticky label cell — SOLID background (was .06 transparency causing
+                            data cells to bleed through). Uses left border accent for color. */}
+                        <td style={{padding:'10px 12px',fontWeight:600,color:m.color,background:'var(--bg2)',borderLeft:'3px solid '+m.color,position:'sticky',left:0,zIndex:2,borderRight:'1px solid var(--border)',minWidth:150}}>
+                          <div style={{fontSize:12,lineHeight:1.2}}>{m.label}</div>
+                          {peaks[m.key] > 0 && <div style={{fontSize:9,color:'var(--text3)',fontWeight:400,marginTop:3}}>peak {m.key === 'income' ? fmtExact(peaks[m.key]) + '/mo' : fmtShort(peaks[m.key])}</div>}
                         </td>
                         {rows.map((r, i) => {
                           const val = r[m.key];
@@ -8157,7 +8223,8 @@ function Dashboard() {
                           return (
                             <td key={r.age} style={{
                               textAlign:'center',
-                              padding:'8px 6px',
+                              padding:'10px 8px',
+                              fontSize:12,
                               fontWeight:isNow?700:500,
                               color:val > 0 ? (isNow?'var(--gold)':'var(--text2)') : 'var(--text3)',
                               background:isNow?'rgba(212,169,106,.08)':'transparent',
@@ -13271,16 +13338,19 @@ function ReportTab() {
       if(hasISP) weightedScore += 15;
       const score = Math.round(weightedScore);
 
-      // Insurer concentration (by annual premium)
-      const byInsurer = {};
-      activePolicies.forEach(pol => {
-        const ins = pol.insurer||'Unknown';
-        const prem = pol.premFrequency==='monthly'?(parseFloat(pol.annualPremium)||0)*12:(parseFloat(pol.annualPremium)||0);
-        if(prem > 0) byInsurer[ins] = (byInsurer[ins]||0) + prem;
-      });
-      const insurerEntries = Object.entries(byInsurer).sort((a,b)=>b[1]-a[1]);
-      const insurerLabels = insurerEntries.map(([k])=>k);
-      const insurerValues = insurerEntries.map(([,v])=>v);
+      // ── Retirement Income Projection (actual vs desired) ──
+      // Pulls the timeline from retirementLite — same data the dashboard chart
+      // uses. Filters to retirement window so the chart isn't dominated by
+      // pre-retirement zeros.
+      const retTimeline = (retirementLite && retirementLite.timeline) ? retirementLite.timeline : [];
+      const retFiltered = retTimeline.filter(r => r.age >= Math.max(55, retAge-2) && r.age <= 90);
+      const retLabels = retFiltered.map(r => r.age);
+      const retCpfData = retFiltered.map(r => r.cpf || 0);
+      const retPolicyData = retFiltered.map(r => r.policy || 0);
+      const retDividendsData = retFiltered.map(r => r.dividends || 0);
+      const retOtherData = retFiltered.map(r => r.other || 0);
+      const retDesiredData = retFiltered.map(r => r.desired || 0);
+      const hasRetIncomeData = retFiltered.some(r => (r.cpf||0)+(r.policy||0)+(r.dividends||0)+(r.other||0) > 0 || (r.desired||0) > 0);
 
       // 20-year premium cashflow projection
       const years = [];
@@ -13300,31 +13370,31 @@ function ReportTab() {
       }
 
       // ═══ RENDER CHARTS IN PARALLEL ═══
-      console.log('[Visual PDF] Starting chart render. Insurers:', insurerLabels.length, 'Cashflow years with premium:', cashflowValues.filter(v=>v>0).length);
-      const insurerPalette = ['#d4a96a','#5b8fd9','#5ba8a0','#c97b9a','#9d8abf','#b8935a','#7daaec','#6ec0b8','#d89cb8','#a89dcf'];
-      const [donutPNG, cashflowPNG] = await Promise.all([
-        insurerValues.length > 0 ? renderChartToPNG({
-          type:'doughnut',
+      console.log('[Visual PDF] Starting chart render. Retirement income years:', retFiltered.length, 'Cashflow years with premium:', cashflowValues.filter(v=>v>0).length);
+      const [retIncomePNG, cashflowPNG] = await Promise.all([
+        hasRetIncomeData ? renderChartToPNG({
+          type:'bar',
           data:{
-            labels:insurerLabels,
-            datasets:[{
-              data:insurerValues,
-              backgroundColor:insurerLabels.map((_,i)=>insurerPalette[i%insurerPalette.length]),
-              borderWidth:2,
-              borderColor:'#ffffff'
-            }]
+            labels:retLabels,
+            datasets:[
+              {label:'CPF LIFE',     data:retCpfData,       backgroundColor:'rgba(91,168,160,0.85)',  borderRadius:2, stack:'income'},
+              {label:'Policy',       data:retPolicyData,    backgroundColor:'rgba(212,169,106,0.85)', borderRadius:2, stack:'income'},
+              {label:'Dividends',    data:retDividendsData, backgroundColor:'rgba(157,138,191,0.85)', borderRadius:2, stack:'income'},
+              {label:'Other',        data:retOtherData,     backgroundColor:'rgba(91,143,217,0.65)',  borderRadius:2, stack:'income'},
+              {label:'Desired',      data:retDesiredData,   type:'line', borderColor:'rgba(220,90,80,0.85)', borderWidth:2.5, borderDash:[6,3], pointRadius:0, fill:false},
+            ]
           },
           options:{
             plugins:{
-              legend:{
-                position:'bottom',
-                labels:{color:'#2a3548',font:{size:13,family:'sans-serif',weight:'500'},padding:10,boxWidth:14,boxHeight:14,usePointStyle:false}
-              }
+              legend:{position:'bottom', labels:{color:'#2a3548',font:{size:12,family:'sans-serif',weight:'500'},padding:8,boxWidth:12,boxHeight:12}}
             },
-            cutout:'58%',
+            scales:{
+              x:{stacked:true, grid:{color:'rgba(60,60,60,0.06)'}, ticks:{color:'#6b6050',font:{size:11},maxTicksLimit:10}},
+              y:{stacked:true, grid:{color:'rgba(60,60,60,0.08)'}, ticks:{color:'#6b6050',font:{size:11},callback:v=>'$'+(v>=1000?(v/1000).toFixed(0)+'k':v)}, beginAtZero:true}
+            },
             layout:{padding:10}
           }
-        }, 700, 860, 'insurer-donut') : Promise.resolve(null),
+        }, 700, 860, 'retirement-income') : Promise.resolve(null),
         cashflowValues.some(v=>v>0) ? renderChartToPNG({
           type:'line',
           data:{
@@ -13483,7 +13553,7 @@ function ReportTab() {
       const cellW = (CW-5)/2;
       const cellH = 120;
       const cellPositions = [
-        {x:M, y:gridY, label:'INSURER CONCENTRATION', subtitle:'Annual premium allocation by issuer'},
+        {x:M, y:gridY, label:'RETIREMENT INCOME', subtitle:'Projected vs desired (CPF + policies)'},
         {x:M+cellW+5, y:gridY, label:'PROTECTION SCORE', subtitle:'Weighted LIA framework'},
         {x:M, y:gridY+cellH+5, label:'20-YEAR PREMIUM OUTLOOK', subtitle:'Projected annual commitments'},
         {x:M+cellW+5, y:gridY+cellH+5, label:'COVERAGE BY PERIL', subtitle:'Have vs LIA-recommended'}
@@ -13499,19 +13569,19 @@ function ReportTab() {
         doc.text(c.subtitle, c.x+4, c.y+11);
       });
 
-      // ── Cell 1: Insurer donut ──
-      if(donutPNG) {
+      // ── Cell 1: Retirement Income (actual vs desired) ──
+      if(retIncomePNG) {
         try {
-          // Use aspect-preserving fit so the donut isn't squished into the tall cell
-          placeImageFit(donutPNG, 700, 600, cellPositions[0].x+3, cellPositions[0].y+14, cellW-6, cellH-18);
+          // Use aspect-preserving fit so the chart fills the cell cleanly
+          placeImageFit(retIncomePNG, 700, 860, cellPositions[0].x+3, cellPositions[0].y+14, cellW-6, cellH-18);
         } catch(imgErr) {
-          console.warn('[Visual PDF] Donut addImage failed:', imgErr.message);
+          console.warn('[Visual PDF] Retirement income addImage failed:', imgErr.message);
           doc.setFont('helvetica','italic'); doc.setFontSize(9); doc.setTextColor(...MUTED);
           doc.text('Chart render failed', cellPositions[0].x+cellW/2, cellPositions[0].y+cellH/2, {align:'center'});
         }
       } else {
         doc.setFont('helvetica','italic'); doc.setFontSize(9); doc.setTextColor(...MUTED);
-        doc.text('No premium data', cellPositions[0].x+cellW/2, cellPositions[0].y+cellH/2, {align:'center'});
+        doc.text('No retirement income data', cellPositions[0].x+cellW/2, cellPositions[0].y+cellH/2, {align:'center'});
       }
 
       // ── Cell 2: Protection score gauge ──
