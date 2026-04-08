@@ -5777,7 +5777,29 @@ const POLICY_EXTRACTION_SCHEMA = {
 
       // ── ILP granular (per-fund details beyond fundAllocations) ──
       ilpBidOfferSpread: { type: 'NUMBER', nullable: true, description: 'Bid-offer spread %' },
-      ilpReinvestFlag: { type: 'BOOLEAN', nullable: true, description: 'true if dividends auto-reinvest' }
+      ilpReinvestFlag: { type: 'BOOLEAN', nullable: true, description: 'true if dividends auto-reinvest' },
+
+      // ═══════════════════════════════════════════════════════════════
+      // EXTRACTION CONFIDENCE (Quick Verify feature)
+      // ═══════════════════════════════════════════════════════════════
+      // The AI opts IN to flag uncertain fields. Default behaviour:
+      // assume you are confident — omit this array or leave empty if
+      // every value was extracted cleanly. Only populate entries for
+      // fields where there's a real reason to doubt the value.
+      _confidence: {
+        type: 'ARRAY',
+        nullable: true,
+        description: 'OPTIONAL. List ONLY fields you are NOT highly confident about. Omit or leave empty if every field was clearly extracted from the source. Each entry flags one uncertain field.',
+        items: {
+          type: 'OBJECT',
+          properties: {
+            field: { type: 'STRING', description: 'JSON field name from this schema being flagged, e.g. "premiumAmount", "policyNumber", "sumAssured"' },
+            level: { type: 'STRING', enum: ['low','medium'], description: 'medium = inferred from context or table layout; low = best guess from weak signal or near-default' },
+            reason: { type: 'STRING', nullable: true, description: 'Brief reason for uncertainty, e.g. "two amounts shown", "OCR partial number", "frequency not stated"' }
+          },
+          required: ['field','level']
+        }
+      }
     },
     required: ['insurer','productName','category','premiumAmount','premFrequency']
   }
@@ -8787,6 +8809,182 @@ function mergeToProfile(extracted, currentProfile, saveProfile) {
 // ═══════════════════════════════════════════════════════════════
 // MODULE: BULK_VERIFY — Extraction review modal
 // ═══════════════════════════════════════════════════════════════
+
+// Human-readable labels for every field that can show up in Quick Verify mode.
+// Used by both the compact "needs your eye" list and any inline confidence
+// badges. Add new entries here whenever the schema grows.
+const FIELD_LABELS = {
+  // Core identity
+  insurer: 'Insurer',
+  productName: 'Product Name',
+  policyName: 'Display Name',
+  policyNumber: 'Policy Number',
+  category: 'Category',
+  subType: 'Sub-type',
+  currency: 'Currency',
+  // Coverage & premium
+  sumAssured: 'Sum Assured',
+  premiumAmount: 'Premium',
+  annualPremium: 'Premium',
+  premFrequency: 'Premium Frequency',
+  premiumStructure: 'Premium Structure',
+  paymentMethod: 'Payment Method',
+  // Client info
+  policyOwner: 'Policy Owner',
+  lifeInsured: 'Life Insured',
+  gender: 'Gender',
+  dob: 'Date of Birth',
+  ageAtEntry: 'Age at Entry',
+  smoker: 'Smoker',
+  nationality: 'Nationality',
+  occupation: 'Occupation',
+  // Premium term
+  premStartAge: 'Premium Start Age',
+  premTerm: 'Premium Term (yrs)',
+  premEndAge: 'Premium End Age',
+  // Dates & status
+  inceptionDate: 'Inception Date',
+  maturityDate: 'Maturity Date',
+  status: 'Status',
+  // Riders & multiplier
+  riders: 'Riders',
+  saMultiplier: 'SA Multiplier',
+  multiplierEndAge: 'Multiplier End Age',
+  // ISP
+  ispClass: 'ISP Class',
+  hasRider: 'Has ISP Rider',
+  riderList: 'ISP Rider List',
+  riderPremium: 'ISP Rider Premium',
+  ispDeductible: 'ISP Deductible',
+  ispCoinsurance: 'ISP Co-insurance %',
+  ispCoInsCap: 'ISP Co-pay Cap',
+  ispRiderInceptionDate: 'ISP Rider Inception',
+  ispRiderGeneration: 'ISP Rider Generation',
+  ispPanelRequired: 'ISP Panel Required',
+  // Cash value
+  cashValue: 'Cash Value',
+  cvGrowthRate: 'CV Growth Rate %',
+  surrenderPeriod: 'Surrender Period (yrs)',
+  // ILP
+  ilpGrowth: 'ILP Growth Rate %',
+  ilpDivYield: 'ILP Dividend Yield %',
+  ilpMgmtFee: 'ILP Management Fee %',
+  fundAllocations: 'Fund Allocations',
+  // Retirement / annuity
+  annuityPayout: 'Annual Payout',
+  annuityMonthly: 'Monthly Payout',
+  annuityStartAge: 'Payout Start Age',
+  annuityEndAge: 'Payout End Age',
+  retMaturitySum: 'Maturity Sum',
+  // Endowment
+  endYield: 'Endowment Yield %',
+  endGuaranteedCV: 'Guaranteed CV',
+  endNonGuarBonus: 'Non-Guaranteed Bonus',
+  // FD/T-bill/SSB
+  fdPrincipal: 'Principal',
+  fdYieldPct: 'Yield %',
+  fdStartDate: 'Start Date',
+  fdMaturityDate: 'Maturity Date',
+  fdTenureMonths: 'Tenure (months)',
+  fdAutoRenew: 'Auto-renew',
+  // UL family
+  creditingMechanism: 'Crediting Mechanism',
+  creditingRates: 'Crediting Rates',
+  loyaltyBonus: 'Loyalty Bonus',
+  loanRate: 'Loan Rate',
+  // Premium financing
+  financed: 'Premium Financing',
+  finLoan: 'Loan Amount',
+  finRate: 'Loan Rate %',
+  finTenure: 'Loan Tenure (yrs)',
+  // Notes
+  notes: 'Notes',
+  userRemarks: 'Remarks',
+};
+
+// Header fields are ALWAYS shown in the policy card header (insurer, product
+// name, premium summary). They're never offered in the Quick Verify "needs your
+// eye" list because they're already prominently displayed up top — the FC can
+// see at a glance whether they look right.
+const QUICK_VERIFY_HEADER_FIELDS = new Set([
+  'insurer','productName','category','subType','currency',
+  'annualPremium','premiumAmount','premFrequency','sumAssured'
+]);
+
+// Returns the array of [field, level] pairs that should appear in the
+// Quick Verify "needs your eye" list for a given policy. Filters out:
+//   • header fields (already visible)
+//   • fields with no actual value (empty / null / 0 / "")
+//   • fields the AI didn't flag (confidence map only contains low/medium)
+function getVerifiableFields(item) {
+  const conf = item._extractConfidence || {};
+  const out = [];
+  for(const [field, level] of Object.entries(conf)) {
+    if(QUICK_VERIFY_HEADER_FIELDS.has(field)) continue;
+    const v = item[field];
+    // Skip if there's no value to verify
+    if(v == null || v === '' || v === 0 || (Array.isArray(v) && v.length === 0)) continue;
+    out.push([field, level, conf]);
+  }
+  // Sort: low confidence first, then medium
+  out.sort((a,b) => (a[1] === 'low' ? 0 : 1) - (b[1] === 'low' ? 0 : 1));
+  return out;
+}
+
+// Small inline component: a coloured dot + level word for a confidence level.
+function ConfidenceDot({level}) {
+  if(level !== 'low' && level !== 'medium') return null;
+  const colour = level === 'low' ? 'var(--red)' : 'var(--gold)';
+  const label = level === 'low' ? 'low' : 'medium';
+  return (
+    <span style={{display:'inline-flex',alignItems:'center',gap:3,fontSize:9,color:colour,fontWeight:600}}>
+      <span style={{width:6,height:6,borderRadius:'50%',background:colour,display:'inline-block'}}></span>
+      {label}
+    </span>
+  );
+}
+
+// ── Field-type metadata for the Quick Verify compact editor ──
+// These sets/maps drive renderCompactEditor() inside BulkVerifyModal so it
+// knows what kind of input to render for each verifiable field. If a new
+// schema field is added that should be editable in Quick Verify, add it to
+// the appropriate set here.
+const QV_NUMERIC_FIELDS = new Set([
+  'annualPremium','sumAssured','ageAtEntry','premStartAge','premTerm','premEndAge',
+  'ispDeductible','ispCoinsurance','ispCoInsCap','riderPremium',
+  'cashValue','cvGrowthRate','ilpGrowth','ilpDivYield','ilpMgmtFee','ilpBidOfferSpread',
+  'annuityPayout','annuityMonthly','annuityStartAge','annuityEndAge','retMaturitySum',
+  'fdPrincipal','fdYieldPct','fdTenureMonths','finLoan','finRate','finTenure',
+  'endYield','endGuaranteedCV','endNonGuarBonus','saMultiplier','multiplierEndAge',
+  'surrenderPeriod','loanRate','solvedPremium','assumedReturnPct','minInitialPremium','minLiquidity','elpPremium',
+  'creditingRateCurrent','creditingRateGuaranteed','loyaltyBonusRate','loyaltyBonusStartYear','loyaltyBonusEndYear',
+  'faAllocationPct','iaAllocationPct'
+]);
+const QV_DATE_FIELDS = new Set([
+  'inceptionDate','maturityDate','dob','fdStartDate','fdMaturityDate','ispRiderInceptionDate'
+]);
+const QV_BOOL_FIELDS = new Set([
+  'hasRider','financed','fdAutoRenew','ispPanelRequired','qsiFlag','ilpReinvestFlag'
+]);
+const QV_SELECT_OPTIONS = {
+  gender: ['Male','Female','unknown'],
+  smoker: ['Non-smoker','Smoker','unknown'],
+  nationality: ['SC','PR','Foreigner','unknown'],
+  status: ['inforce','lapsed','paid-up','surrendered','matured'],
+  premFrequency: ['annual','monthly','single','unknown'],
+  premiumStructure: ['Single Premium','Regular Premium','Limited Pay','Flexible Premium','unknown'],
+  paymentMethod: ['Cash','MediSave','SRS','MediSave+Cash','CPF OA','CPF SA','unknown'],
+  ispClass: ['A','B1','B2+','Private','unknown'],
+  ispRiderGeneration: ['legacy','transitional','new-2026','unknown'],
+  creditingMechanism: ['fixed','indexed','client-directed','unknown'],
+};
+// Complex / nested fields that can't be rendered as a single inline input.
+// In Quick Verify mode we just show a one-line summary and a button to expand
+// the card to full review for that one policy.
+const QV_COMPLEX_FIELDS = new Set([
+  'riders','fundAllocations','creditingRates','loyaltyBonus','fa_ia_allocation','highlights','indexSubAccountsText'
+]);
+
 function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePolicy, onAccept, onClose, scanProgress}) {
   const [items, setItems] = useState(() => {
     const mapped = extracted.map((p,i) => ({
@@ -8798,6 +8996,21 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
     return mapped;
   });
   const [activeTab, setActiveTab] = useState('all');
+  // ── QUICK VERIFY VIEW MODE ──
+  // 'quick' = compact card showing only fields the AI flagged as low/medium
+  //           confidence; everything else auto-trusted (the speed mode)
+  // 'full'  = original behaviour, every field editable inline
+  // Persisted in localStorage so the FC's preference sticks across sessions.
+  const [viewMode, setViewMode] = useState(() => {
+    try {
+      const stored = localStorage.getItem('policylens-bulkverify-viewmode');
+      return stored === 'full' ? 'full' : 'quick';
+    } catch(e) { return 'quick'; }
+  });
+  const setViewModeAndPersist = (mode) => {
+    setViewMode(mode);
+    try { localStorage.setItem('policylens-bulkverify-viewmode', mode); } catch(e){}
+  };
   const batches = [...new Set(items.map(it => it._batch))].sort((a,b)=>a-b);
   const filtered = activeTab === 'all' ? items : items.filter(it => it._batch === activeTab);
 
@@ -8844,7 +9057,21 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
   }, [repo]);
 
   const toggleSelect = (idx) => setItems(prev => prev.map(it => it._idx===idx ? {...it, _selected:!it._selected} : it));
-  const updateField = (idx, field, value) => setItems(prev => prev.map(it => it._idx===idx ? {...it, [field]:value} : it));
+  // updateField: when the FC edits a field, that field is implicitly verified.
+  // Clear its entry from _extractConfidence so the Quick Verify view stops
+  // showing it as needing review. The verified-at timestamp is set on first
+  // touch so we can preserve the audit trail through to the saved policy.
+  const updateField = (idx, field, value) => setItems(prev => prev.map(it => {
+    if(it._idx !== idx) return it;
+    const next = {...it, [field]: value};
+    if(it._extractConfidence && (field in it._extractConfidence)) {
+      const newConf = {...it._extractConfidence};
+      delete newConf[field];
+      next._extractConfidence = newConf;
+      if(!next._extractVerifiedAt) next._extractVerifiedAt = Date.now();
+    }
+    return next;
+  }));
   const toggleRider = (pIdx, rIdx) => setItems(prev => prev.map(it => {
     if(it._idx!==pIdx) return it;
     const riders = [...(it.riders||[])];
@@ -8857,6 +9084,28 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
     return {...it, productName:r.productName, insurer:r.insurer, category:r.category, subType:r.subType, currency:r.currency||it.currency, _appliedRepo:true};
   }));
 
+  // ── QUICK VERIFY HELPERS ──
+  // viewMode is declared earlier in the component (default 'quick', sticky in
+  // localStorage). The helpers below operate on individual policies inside
+  // the modal:
+  //   markVerified — clears all confidence flags on a policy in one click,
+  //                  used by the "Looks good" button. Records timestamp.
+  //   toggleExpanded — per-card expand/collapse for switching one card from
+  //                    compact to full-detail without flipping global view.
+
+  // markVerified: clear all confidence flags on a policy in one click.
+  // Used by the "Looks good" button on a compact card. Records the timestamp
+  // so the saved policy carries an audit trail of when the FC reviewed it.
+  const markVerified = (idx) => setItems(prev => prev.map(it => it._idx===idx ? {
+    ...it,
+    _extractConfidence: {},
+    _extractVerifiedAt: it._extractVerifiedAt || Date.now()
+  } : it));
+
+  // toggleExpanded: per-card expand/collapse for switching one card from
+  // compact to full-detail without changing the global view mode.
+  const toggleExpanded = (idx) => setItems(prev => prev.map(it => it._idx===idx ? {...it, _expanded: !it._expanded} : it));
+
   const handleAccept = async () => {
     const standalone = [];
     const ilpMerges = {}; // {policyId: [fund1, fund2, ...]}
@@ -8864,7 +9113,22 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
     items.filter(it => it._selected).forEach(it => {
       const p = {...it};
       const provider = p._provider;
-      delete p._idx; delete p._selected; delete p._corrections; delete p._repoMatch; delete p._appliedRepo; delete p._destination; delete p._provider;
+      // Strip UI state. Preserve _extractConfidence, _extractConfidenceReasons,
+      // and _extractVerifiedAt — these form the audit trail of what the AI
+      // flagged and when the FC reviewed it.
+      delete p._idx; delete p._selected; delete p._corrections; delete p._repoMatch;
+      delete p._appliedRepo; delete p._destination; delete p._provider;
+      delete p._expanded; delete p._dupOf;
+      // Belt and braces: drop the AI-facing alias if it ever leaked through
+      delete p._confidence;
+      // If the FC reviewed every flag the AI raised, the map is empty —
+      // prune it from the saved record to keep IndexedDB tidy.
+      if(p._extractConfidence && Object.keys(p._extractConfidence).length === 0) {
+        delete p._extractConfidence;
+      }
+      if(p._extractConfidenceReasons && Object.keys(p._extractConfidenceReasons).length === 0) {
+        delete p._extractConfidenceReasons;
+      }
       if(p.riders) p.riders = p.riders.filter(r => r._selected !== false).map(r => { const c={...r}; delete c._selected; return c; });
 
       if(it._destination && it._destination.startsWith('ilp_')) {
@@ -8917,15 +9181,57 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
     onAccept(standalone);
   };
 
+  // Compute counts for the header subtitle
+  const totalCount = items.length;
+  const needsReviewCount = items.filter(it => getVerifiableFields(it).length > 0 && !it._extractVerifiedAt).length;
+  const verifiedCount = items.filter(it => it._extractVerifiedAt || (getVerifiableFields(it).length === 0 && it._extractConfidence !== undefined)).length;
+
   return (
     <div className="modal-overlay" onClick={e=>{if(e.target===e.currentTarget)onClose()}}>
       <div className="modal" style={{maxWidth:900,maxHeight:'90vh'}}>
-        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:16}}>
-          <div>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:12,gap:10,flexWrap:'wrap'}}>
+          <div style={{flex:'1 1 240px',minWidth:0}}>
             <h3 style={{fontSize:16,fontWeight:700}}>Verify Extracted Policies</h3>
-            <p style={{fontSize:11,color:'var(--text3)'}}>Review, correct, and select which policies to import. Uncheck to skip.</p>
+            <p style={{fontSize:11,color:'var(--text3)',marginTop:2}}>
+              {viewMode === 'quick' ? (
+                needsReviewCount > 0
+                  ? <>AI extracted <strong style={{color:'var(--text2)'}}>{totalCount}</strong> polic{totalCount===1?'y':'ies'}. <strong style={{color:'var(--gold)'}}>{needsReviewCount}</strong> need your eye — the rest are auto-trusted.</>
+                  : <>AI extracted <strong style={{color:'var(--text2)'}}>{totalCount}</strong> polic{totalCount===1?'y':'ies'}. <strong style={{color:'var(--green2)'}}>All fields high confidence</strong> — review and import.</>
+              ) : (
+                <>Review every field on every policy. Uncheck to skip.</>
+              )}
+            </p>
           </div>
-          <button onClick={onClose} style={{background:'none',color:'var(--text3)',fontSize:20,padding:4}}>×</button>
+          <div style={{display:'flex',alignItems:'center',gap:8,flexShrink:0}}>
+            {/* ── VIEW MODE TOGGLE — Quick Verify vs Full Review ── */}
+            <div style={{display:'inline-flex',background:'var(--bg2)',borderRadius:8,padding:2,border:'1px solid var(--border)'}}>
+              <button
+                onClick={()=>setViewModeAndPersist('quick')}
+                style={{
+                  padding:'5px 11px',fontSize:10,fontWeight:600,borderRadius:6,border:'none',cursor:'pointer',
+                  background: viewMode==='quick' ? 'var(--gold)' : 'transparent',
+                  color: viewMode==='quick' ? 'var(--bg)' : 'var(--text3)',
+                  transition:'all .15s'
+                }}
+                title="Show only fields the AI flagged as low or medium confidence"
+              >
+                ⚡ Quick Verify
+              </button>
+              <button
+                onClick={()=>setViewModeAndPersist('full')}
+                style={{
+                  padding:'5px 11px',fontSize:10,fontWeight:600,borderRadius:6,border:'none',cursor:'pointer',
+                  background: viewMode==='full' ? 'var(--blue2)' : 'transparent',
+                  color: viewMode==='full' ? '#fff' : 'var(--text3)',
+                  transition:'all .15s'
+                }}
+                title="Show every field for every policy — original review behaviour"
+              >
+                Full Review
+              </button>
+            </div>
+            <button onClick={onClose} style={{background:'none',color:'var(--text3)',fontSize:20,padding:'4px 8px'}}>×</button>
+          </div>
         </div>
 
         {/* Live extraction progress */}
@@ -9005,8 +9311,206 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
           )}
 
           {/* ── MOBILE-FRIENDLY CARD GRID ── */}
-          {filtered.map((item,i) => (
+          {filtered.map((item,i) => {
+            // Quick Verify uses the compact card UNLESS:
+            //   • the FC has manually expanded this card (_expanded), OR
+            //   • the card is a duplicate (always show full so the FC can compare), OR
+            //   • the policy is missing required header fields entirely (we
+            //     fall back to full so the FC can fix everything in one place)
+            const hasMinimumHeader = !!(item.productName || item.insurer);
+            const useCompact = viewMode === 'quick' && !item._expanded && !item._dupOf && hasMinimumHeader;
+
+            if(useCompact) {
+              const verifiable = getVerifiableFields(item);
+              const reasons = item._extractConfidenceReasons || {};
+              const allClean = verifiable.length === 0;
+              const freqLabel = item.premFrequency==='monthly'?'/mth':item.premFrequency==='single'?' single':'/yr';
+              const ridersOn = (item.riders||[]).filter(r => r._selected !== false);
+
+              // Inline editor renderer for one verifiable field. Picks input
+              // type from QV_NUMERIC/DATE/BOOL/SELECT_OPTIONS sets above.
+              const renderEditor = (field) => {
+                const val = item[field];
+                if(QV_COMPLEX_FIELDS.has(field)) {
+                  // Complex (riders, fundAllocations, nested objects) — show
+                  // a one-line summary and offer to expand to full view.
+                  let summary = '';
+                  if(field === 'riders' && Array.isArray(val)) summary = val.length+' rider'+(val.length===1?'':'s');
+                  else if(field === 'fundAllocations' && Array.isArray(val)) summary = val.length+' fund'+(val.length===1?'':'s');
+                  else if(typeof val === 'object' && val) summary = Object.keys(val).length+' field'+(Object.keys(val).length===1?'':'s');
+                  else summary = '(complex)';
+                  return (
+                    <button onClick={()=>toggleExpanded(item._idx)}
+                      style={{fontSize:10,padding:'3px 8px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:4,color:'var(--text2)',cursor:'pointer'}}>
+                      {summary} — edit in full view →
+                    </button>
+                  );
+                }
+                if(QV_BOOL_FIELDS.has(field)) {
+                  return (
+                    <select value={val ? 'true' : 'false'}
+                      onChange={e=>updateField(item._idx, field, e.target.value === 'true')}
+                      style={{width:'100%',fontSize:11,padding:'3px 6px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:4}}>
+                      <option value="false">No</option>
+                      <option value="true">Yes</option>
+                    </select>
+                  );
+                }
+                if(QV_SELECT_OPTIONS[field]) {
+                  return (
+                    <select value={val || ''}
+                      onChange={e=>updateField(item._idx, field, e.target.value)}
+                      style={{width:'100%',fontSize:11,padding:'3px 6px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:4}}>
+                      <option value="">—</option>
+                      {QV_SELECT_OPTIONS[field].map(o => <option key={o} value={o}>{o}</option>)}
+                    </select>
+                  );
+                }
+                if(QV_DATE_FIELDS.has(field)) {
+                  return (
+                    <input type="date" value={val || ''}
+                      onChange={e=>updateField(item._idx, field, e.target.value)}
+                      style={{width:'100%',fontSize:11,padding:'3px 6px',background:'transparent',border:'1px solid var(--border)',borderRadius:4}} />
+                  );
+                }
+                if(QV_NUMERIC_FIELDS.has(field)) {
+                  return (
+                    <input type="number" value={val == null ? '' : val}
+                      onChange={e=>updateField(item._idx, field, parseFloat(e.target.value)||0)}
+                      style={{width:'100%',fontSize:11,padding:'3px 6px',background:'transparent',border:'1px solid var(--border)',borderRadius:4}} />
+                  );
+                }
+                // Default: text
+                return (
+                  <input type="text" value={val == null ? '' : String(val)}
+                    onChange={e=>updateField(item._idx, field, e.target.value)}
+                    style={{width:'100%',fontSize:11,padding:'3px 6px',background:'transparent',border:'1px solid var(--border)',borderRadius:4}} />
+                );
+              };
+
+              return (
+                <div key={item._idx} style={{
+                  background: item._selected ? 'var(--bg3)' : 'var(--bg)',
+                  borderRadius:8, padding:10, marginBottom:6,
+                  border:'1px solid '+(allClean ? 'rgba(91,168,160,.25)' : item._selected ? 'var(--border2)' : 'var(--border)'),
+                  opacity: item._selected ? 1 : .4
+                }}>
+                  {/* ── HEADER ROW (always visible) ── */}
+                  <div style={{display:'flex',gap:8,alignItems:'flex-start'}}>
+                    <input type="checkbox" checked={item._selected} onChange={()=>toggleSelect(item._idx)}
+                      style={{width:16,height:16,accentColor:'var(--gold)',flexShrink:0,marginTop:2}} />
+                    <div style={{flex:1,minWidth:0}}>
+                      <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
+                        {item.insurer && <InsurerBadge name={item.insurer} />}
+                        <span style={{fontSize:13,fontWeight:600,color:'var(--text2)',overflow:'hidden',textOverflow:'ellipsis'}}>
+                          {item.productName||'Untitled policy'}
+                        </span>
+                      </div>
+                      <div style={{fontSize:10,color:'var(--text3)',marginTop:2}}>
+                        {item.subType || item.category || '?'} · {item.currency || 'SGD'} {(parseFloat(item.annualPremium)||0).toLocaleString()}{freqLabel}
+                        {parseFloat(item.sumAssured) > 0 && ' · SA '+parseFloat(item.sumAssured).toLocaleString()}
+                      </div>
+                    </div>
+                    {allClean ? (
+                      <span style={{fontSize:9,fontWeight:700,color:'var(--green2)',padding:'2px 7px',borderRadius:4,background:'rgba(91,168,160,.1)',whiteSpace:'nowrap',flexShrink:0}}>
+                        ✓ CLEAN
+                      </span>
+                    ) : (
+                      <span style={{fontSize:9,fontWeight:700,color:'var(--gold)',padding:'2px 7px',borderRadius:4,background:'rgba(212,169,106,.12)',whiteSpace:'nowrap',flexShrink:0}}>
+                        {verifiable.length} TO CHECK
+                      </span>
+                    )}
+                  </div>
+
+                  {/* ── BODY: verifiable fields list OR clean message ── */}
+                  {allClean ? (
+                    <div style={{marginTop:8,padding:'6px 10px',background:'rgba(91,168,160,.04)',borderRadius:6,fontSize:10,color:'var(--text3)'}}>
+                      ✅ All fields look good — {item._extractVerifiedAt ? 'verified' : 'AI extracted with high confidence'}.
+                    </div>
+                  ) : (
+                    <div style={{marginTop:8}}>
+                      {verifiable.map(([field, level]) => (
+                        <div key={field} style={{display:'flex',gap:6,alignItems:'center',padding:'4px 0',borderBottom:'1px solid var(--border)'}}>
+                          <div style={{width:110,fontSize:10,color:'var(--text3)',flexShrink:0,fontWeight:500}}>
+                            {FIELD_LABELS[field] || field}
+                          </div>
+                          <div style={{flex:1,minWidth:0}}>
+                            {renderEditor(field)}
+                          </div>
+                          <div style={{flexShrink:0,display:'flex',alignItems:'center',gap:4}}>
+                            <ConfidenceDot level={level} />
+                            {reasons[field] && (
+                              <span title={reasons[field]} style={{fontSize:11,color:'var(--text3)',cursor:'help'}}>ⓘ</span>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* ── RIDERS (carry over from full card) ── */}
+                  {ridersOn.length > 0 && (
+                    <div style={{display:'flex',gap:3,flexWrap:'wrap',marginTop:6}}>
+                      {(item.riders||[]).map((rd,ri) => (
+                        <span key={ri} onClick={()=>toggleRider(item._idx,ri)} style={{
+                          fontSize:8,padding:'2px 5px',borderRadius:4,cursor:'pointer',
+                          background: rd._selected!==false ? ({death:'#5b8fd922',ci:'#c97b9a22',tpd:'#9d8abf22',di:'#5ba8a022',acc_medical:'#5ba8a022',acc_tcm:'#5ba8a022',acc_dismember:'#d4a96a22'}[rd.type]||'var(--bg2)') : 'var(--bg)',
+                          color: rd._selected!==false ? ({death:'#5b8fd9',ci:'#c97b9a',tpd:'#9d8abf',di:'#5ba8a0',acc_medical:'#5ba8a0',acc_tcm:'#5ba8a0',acc_dismember:'#d4a96a'}[rd.type]||'var(--text3)') : 'var(--text3)',
+                          textDecoration: rd._selected===false ? 'line-through' : 'none'
+                        }}>
+                          {rd.riderName || (({death:'Death',tpd:'TPD',ci:'CI',eci:'ECI',di:'DI',accidental:'ADD',acc_medical:'Med',acc_tcm:'TCM',acc_dismember:'Dismem',premium_waiver:'Waiver',other:'Other'})[rd.type] || rd.type)} ${(+rd.sa||0).toLocaleString()}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* ── FOOTER: action buttons ── */}
+                  <div style={{display:'flex',gap:6,marginTop:8,paddingTop:6,borderTop:'1px solid var(--border)'}}>
+                    {!allClean && (
+                      <button onClick={()=>markVerified(item._idx)} style={{
+                        flex:1,padding:'6px 10px',fontSize:11,fontWeight:600,borderRadius:6,
+                        background:'var(--green2)',color:'#0b0f1a',border:'none',cursor:'pointer'
+                      }}>
+                        ✓ Looks good
+                      </button>
+                    )}
+                    <button onClick={()=>toggleExpanded(item._idx)} style={{
+                      flex: allClean ? 1 : '0 0 auto',
+                      padding:'6px 12px',fontSize:11,fontWeight:500,borderRadius:6,
+                      background:'var(--bg2)',color:'var(--text2)',border:'1px solid var(--border)',cursor:'pointer'
+                    }}>
+                      {allClean ? 'Show all fields' : 'Edit full details →'}
+                    </button>
+                  </div>
+
+                  {/* ── REPO MATCH (if any) ── */}
+                  {item._repoMatch && !item._appliedRepo && (
+                    <div style={{marginTop:6,padding:'4px 8px',background:'rgba(91,168,160,.08)',borderRadius:4,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+                      <span style={{fontSize:9,color:'var(--teal)'}}>📚 Repo match: {item._repoMatch.productName}</span>
+                      <button onClick={()=>applyRepo(item._idx)} style={{fontSize:9,padding:'2px 6px',background:'var(--teal)',color:'#fff',border:'none',borderRadius:3,cursor:'pointer'}}>Apply</button>
+                    </div>
+                  )}
+
+                  {/* ── TAGS ── */}
+                  {(item._batch > 1 || item.notes) && (
+                    <div style={{display:'flex',gap:4,marginTop:4,alignItems:'center'}}>
+                      {item._batch > 1 && <span style={{fontSize:8,padding:'1px 5px',borderRadius:3,background:'rgba(91,168,160,.08)',color:'var(--teal)'}}>Batch {item._batch}</span>}
+                      {item.notes && <span style={{fontSize:8,color:'var(--text3)',fontStyle:'italic',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',flex:1}}>📝 {item.notes}</span>}
+                    </div>
+                  )}
+                </div>
+              );
+            }
+
+            // ── FULL CARD (legacy / Full Review mode / expanded compact) ──
+            return (
             <div key={item._idx} style={{background:item._selected?'var(--bg3)':'var(--bg)',borderRadius:8,padding:10,marginBottom:6,border:'1px solid '+(item._dupOf?'var(--gold3)':item._selected?'var(--border2)':'var(--border)'),opacity:item._selected?1:.4}}>
+              {/* Collapse-back button when an expanded card is shown in Quick mode */}
+              {viewMode === 'quick' && item._expanded && (
+                <div style={{marginBottom:6,paddingBottom:6,borderBottom:'1px solid var(--border)'}}>
+                  <button onClick={()=>toggleExpanded(item._idx)} style={{fontSize:10,padding:'3px 8px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:4,color:'var(--text2)',cursor:'pointer'}}>← Back to compact</button>
+                </div>
+              )}
               {/* Row 1: Checkbox + Name + Insurer */}
               <div style={{display:'flex',gap:6,alignItems:'center',marginBottom:6}}>
                 <input type="checkbox" checked={item._selected} onChange={()=>toggleSelect(item._idx)} style={{width:16,height:16,accentColor:'var(--gold)',flexShrink:0}} />
@@ -9073,7 +9577,8 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
                 {item.notes && <span style={{fontSize:8,color:'var(--text3)',fontStyle:'italic',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',maxWidth:200}}>📝 {item.notes}</span>}
               </div>
             </div>
-          ))}
+            );
+          })}
         </div>
 
         <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginTop:16,paddingTop:12,borderTop:'1px solid var(--border)'}}>
@@ -9428,6 +9933,49 @@ FIXED DEPOSITS / WEALTH SHEET HANDLING:
 - Rows under "Short Term Endowments" → category: "savings", subType: "Short-term Endowment"
 - Rows under "Long Term Endowments" → category: "savings", subType: "Endowment"
 - Look for section headings in spreadsheets to determine category context
+
+═══ EXTRACTION CONFIDENCE — POPULATE THE _confidence ARRAY ═══
+
+For each policy, OPTIONALLY include a "_confidence" array listing ONLY fields you are NOT highly confident about. Default behaviour: assume you are confident — omit _confidence or set to [] for clean policies. The goal is to flag fields a human reviewer should double-check, not to rate every field.
+
+Each entry: {"field": "<json field name>", "level": "<low|medium>", "reason": "<brief reason>"}
+
+Use these levels:
+- "medium" = inferred from context, table layout, or partial text (likely correct, but worth a glance)
+- "low" = best guess based on weak signal, default value, or heavy ambiguity (probably needs the FC's eye)
+
+EXAMPLES OF FIELDS TO FLAG (only when actually uncertain):
+- premiumAmount when document shows multiple amounts and the main one is ambiguous
+- premFrequency when source doesn't explicitly state monthly/annual/single (you guessed from context)
+- policyNumber when only a partial number or OCR-degraded text is visible
+- sumAssured when source uses "notional amount" or "coupon base" (which may differ from death benefit)
+- ageAtEntry when computed from a partially-visible date
+- premTerm/premEndAge when not explicitly stated and inferred from product name patterns
+- ispDeductible/ispCoinsurance when not directly stated
+- annuityPayout when shown as a range or projected (not contractual)
+- subType when product name doesn't clearly fit any category
+- riders[].sa when a rider's individual SA isn't broken out
+
+EXAMPLES OF FIELDS NOT TO FLAG (these are typically high confidence):
+- insurer when company name is clearly printed
+- productName when stated verbatim in the document
+- category when obvious from product type
+- A clearly stated single premium with explicit "$640,000.00 Single Premium" label
+- Verbatim values copied straight from a labeled cell
+
+GOOD _confidence example for an ambiguous policy:
+"_confidence": [
+  {"field": "premiumAmount", "level": "medium", "reason": "two amounts shown, used the larger one"},
+  {"field": "policyNumber", "level": "low", "reason": "OCR partial: POL12???45"},
+  {"field": "premFrequency", "level": "medium", "reason": "frequency not stated, inferred annual from context"}
+]
+
+GOOD _confidence example for a clean policy:
+"_confidence": []
+
+(or omit the field entirely)
+
+Be honest about uncertainty. A few flagged fields per policy is normal for handwritten or photocopied documents. Zero flagged fields is normal for clean PDFs from insurer portals. Do NOT flag every field — that defeats the purpose.
 
 Return ONLY valid JSON. Start with { end with }. No markdown.`;
 
@@ -9889,6 +10437,41 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         };
         // AI-facing alias cleanup — don't persist it
         delete result.premiumAmount;
+        // ── EXTRACTION CONFIDENCE NORMALIZATION (Quick Verify feature) ──
+        // The AI returns _confidence as an OPT-IN array of {field, level, reason}
+        // entries — only flagging fields it's NOT highly confident about. We
+        // normalize that into a flat map for quick lookup, and remap any field
+        // names that differ between the AI schema and the internal storage
+        // schema (e.g. premiumAmount → annualPremium).
+        //
+        // Default behaviour: if the AI omits _confidence or returns [], we
+        // store an empty map, which downstream code interprets as "all fields
+        // high confidence — no Quick Verify items needed".
+        {
+          const aiConfidence = Array.isArray(p._confidence) ? p._confidence : [];
+          const confMap = {};
+          const reasonMap = {};
+          // Field-name remapping: AI schema → internal storage schema
+          const fieldRemap = {
+            premiumAmount: 'annualPremium',
+            // Add others here if AI<->storage names diverge
+          };
+          for(const entry of aiConfidence) {
+            if(!entry || !entry.field || !entry.level) continue;
+            const lvl = entry.level === 'low' || entry.level === 'medium' ? entry.level : null;
+            if(!lvl) continue;
+            const targetField = fieldRemap[entry.field] || entry.field;
+            // Skip if the field doesn't actually exist on the result (AI flagged
+            // a field it didn't extract) — would be confusing to show in UI
+            if(!(targetField in result) && !(entry.field in result)) continue;
+            confMap[targetField] = lvl;
+            if(entry.reason) reasonMap[targetField] = entry.reason;
+          }
+          result._extractConfidence = confMap;
+          if(Object.keys(reasonMap).length > 0) result._extractConfidenceReasons = reasonMap;
+          // Strip the AI-facing alias
+          delete result._confidence;
+        }
         // ── SPECIALTY FIELDS: flat → nested mapping shim ──
         // The schema uses flat fields (creditingRateCurrent, loyaltyBonusRate…) because
         // Gemini structured output handles flat properties more reliably than nested
@@ -10952,7 +11535,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         const blocks = await processFile(file);
         content.push(...blocks);
       }
-      const formExtractPrompt = 'Extract insurance policy details. Return a JSON object with ALL fields: insurer, productName, policyNumber, category (protection/savings/health/investment/retirement/maternity), subType, currency, sumAssured (number), premiumAmount (number — the premium AS PAID at its stated frequency. "$1,000/mth" → premiumAmount=1000 premFrequency="monthly". "$12,000/yr" → premiumAmount=12000 premFrequency="annual". Do NOT convert between periods), premFrequency (annual/monthly/single/unknown — must match the period of premiumAmount. If unclear, use unknown), premiumStructure, paymentMethod, policyOwner, lifeInsured, gender, dob, ageAtEntry, smoker, nationality, occupation, inceptionDate, maturityDate, status, premStartAge, premTerm, premEndAge. Riders: riders (array) — CAPTURE-FIRST: for EVERY benefit listed, set riderName to EXACT name from document, THEN classify type from death/tpd/ci/eci/di/accidental/acc_medical/acc_tcm/acc_dismember/premium_waiver/other. If unsure, use type:"other". NEVER duplicate types for different benefits — use riderName to distinguish. Each: {type, riderName (ALWAYS filled), sa:number, premium:0 if bundled, expiryAge, bundled:boolean, multiClaim, totalClaimPct}. SA: saMultiplier, multiplierEndAge. ISP: ispClass, hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance. ILP: ilpGrowth, ilpDivYield, ilpMgmtFee, fundAllocations (array of {fundName:string, allocation:number}). FUND RULES: extract real fund holdings confidently — names like "AIA India Balanced Fund", "Manulife Global Multi Asset Fund", "PRULink US Dividend Wealth Fund". DO NOT extract product descriptions or sentences (e.g. NEVER extract "AIA Platinum Wealth Venture ILP is a limited premium investment-linked insurance policy" as a fund). Fund names are 2-10 words, contain no verbs, no "policy"/"premium"/"insurance"/"ILP" tokens, and are typically <80 chars. If no specific funds are named, return fundAllocations:[]. NEVER substitute geographic tokens (India ≠ Asia ≠ Elite). Cash: cashValue, cvGrowthRate, surrenderPeriod. Notes: notes (FC review headline). Return ONLY valid JSON starting with { ending with }.';
+      const formExtractPrompt = 'Extract insurance policy details. Return a JSON object with ALL fields: insurer, productName, policyNumber, category (protection/savings/health/investment/retirement/maternity), subType, currency, sumAssured (number), premiumAmount (number — the premium AS PAID at its stated frequency. "$1,000/mth" → premiumAmount=1000 premFrequency="monthly". "$12,000/yr" → premiumAmount=12000 premFrequency="annual". Do NOT convert between periods), premFrequency (annual/monthly/single/unknown — must match the period of premiumAmount. If unclear, use unknown), premiumStructure, paymentMethod, policyOwner, lifeInsured, gender, dob, ageAtEntry, smoker, nationality, occupation, inceptionDate, maturityDate, status, premStartAge, premTerm, premEndAge. Riders: riders (array) — CAPTURE-FIRST: for EVERY benefit listed, set riderName to EXACT name from document, THEN classify type from death/tpd/ci/eci/di/accidental/acc_medical/acc_tcm/acc_dismember/premium_waiver/other. If unsure, use type:"other". NEVER duplicate types for different benefits — use riderName to distinguish. Each: {type, riderName (ALWAYS filled), sa:number, premium:0 if bundled, expiryAge, bundled:boolean, multiClaim, totalClaimPct}. SA: saMultiplier, multiplierEndAge. ISP: ispClass, hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance. ILP: ilpGrowth, ilpDivYield, ilpMgmtFee, fundAllocations (array of {fundName:string, allocation:number}). FUND RULES: extract real fund holdings confidently — names like "AIA India Balanced Fund", "Manulife Global Multi Asset Fund", "PRULink US Dividend Wealth Fund". DO NOT extract product descriptions or sentences (e.g. NEVER extract "AIA Platinum Wealth Venture ILP is a limited premium investment-linked insurance policy" as a fund). Fund names are 2-10 words, contain no verbs, no "policy"/"premium"/"insurance"/"ILP" tokens, and are typically <80 chars. If no specific funds are named, return fundAllocations:[]. NEVER substitute geographic tokens (India ≠ Asia ≠ Elite). Cash: cashValue, cvGrowthRate, surrenderPeriod. Notes: notes (FC review headline). EXTRACTION CONFIDENCE: ALSO include an optional _confidence array listing ONLY fields you are NOT highly confident about (default = confident). Each entry: {field, level (low|medium), reason}. Flag premiumAmount when ambiguous, policyNumber when OCR partial, premFrequency when not stated, etc. Do NOT flag fields stated verbatim. Empty array [] or omit entirely when all fields are clean. Return ONLY valid JSON starting with { ending with }.';
       content.push({type:'text',text:'Extract all policy information from these documents/images.'});
       const rawText2 = await callAI(formExtractPrompt, content, 4000);
       const parsed = repairJSON(rawText2);
