@@ -14600,7 +14600,11 @@ function ReportTab() {
             },
             layout:{padding:{top:8,right:12,bottom:4,left:4}}
           }
-        }, 700, 860, 'cashflow-line') : Promise.resolve(null)
+          // Canvas: 900×900 → roughly square, matches the cell aspect (92mm×102mm ≈ 0.9).
+          // Previously this was 700×860 with placeImageFit told 800×550, which caused
+          // the rendered PNG to be stretched horizontally and squashed vertically inside
+          // the cell. Now the canvas aspect matches the cell so the chart fills cleanly.
+        }, 900, 900, 'cashflow-line') : Promise.resolve(null)
       ]);
       console.log('[Visual PDF] Chart render complete. retIncomePNG:', !!retIncomePNG, 'cashflowPNG:', !!cashflowPNG);
 
@@ -14800,7 +14804,10 @@ function ReportTab() {
       // ── Cell 3: Premium cashflow line ──
       if(cashflowPNG) {
         try {
-          placeImageFit(cashflowPNG, 800, 550, cellPositions[2].x+3, cellPositions[2].y+14, cellW-6, cellH-18);
+          // srcW/srcH must match the canvas dimensions in the renderChartToPNG call
+          // above (900×900). Mismatched values cause jsPDF to stretch the image into
+          // the wrong aspect ratio — that was the "vertically squashed" bug.
+          placeImageFit(cashflowPNG, 900, 900, cellPositions[2].x+3, cellPositions[2].y+14, cellW-6, cellH-18);
         } catch(imgErr) {
           console.warn('[Visual PDF] Cashflow addImage failed:', imgErr.message);
           doc.setFont('helvetica','italic'); doc.setFontSize(9); doc.setTextColor(...MUTED);
@@ -15002,6 +15009,60 @@ function ReportTab() {
       startNewPage();
 
       // Render category header strip — slim navy band with gold accent
+      // ── drawCategoryIcon ──
+      // Vector icon glyphs for each policy category. jsPDF has no emoji support,
+      // so each icon is composed from primitives (lines, circles, rectangles).
+      // Drawn into a small square area centred at (cx, cy) with bounding box of
+      // 'size' mm. Uses the supplied colour for fills and strokes.
+      function drawCategoryIcon(doc, key, cx, cy, size, color) {
+        const r = size / 2;
+        doc.setDrawColor(...color);
+        doc.setFillColor(...color);
+        doc.setLineWidth(0.35);
+        if(key === 'protection') {
+          // Shield: rounded top + triangular bottom
+          doc.roundedRect(cx - r*0.75, cy - r*0.85, r*1.5, r*0.9, r*0.4, r*0.4, 'F');
+          doc.triangle(cx - r*0.75, cy - r*0.05, cx + r*0.75, cy - r*0.05, cx, cy + r*0.95, 'F');
+        } else if(key === 'health') {
+          // Medical cross (plus sign)
+          const armW = r * 0.42;
+          const armL = r * 1.55;
+          doc.rect(cx - armW/2, cy - armL/2, armW, armL, 'F');
+          doc.rect(cx - armL/2, cy - armW/2, armL, armW, 'F');
+        } else if(key === 'savings') {
+          // Coin stack — three discs
+          doc.ellipse(cx, cy + r*0.55, r*0.95, r*0.27, 'F');
+          doc.ellipse(cx, cy,          r*0.95, r*0.27, 'F');
+          doc.ellipse(cx, cy - r*0.55, r*0.95, r*0.27, 'F');
+        } else if(key === 'investment') {
+          // Bar chart — three ascending bars
+          const bw = r * 0.36;
+          const baseY = cy + r * 0.85;
+          doc.rect(cx - r*0.95, baseY - r*0.55, bw, r*0.55, 'F');
+          doc.rect(cx - r*0.18, baseY - r*0.95, bw, r*0.95, 'F');
+          doc.rect(cx + r*0.59, baseY - r*1.45, bw, r*1.45, 'F');
+        } else if(key === 'retirement') {
+          // Clock face — circle outline + two hands (time = retirement metaphor)
+          doc.setLineWidth(0.5);
+          doc.circle(cx, cy, r*0.95, 'S');
+          // Hour hand pointing to ~10 o'clock (up-left)
+          doc.line(cx, cy, cx - r*0.45, cy - r*0.55);
+          // Minute hand pointing to 12 (straight up)
+          doc.line(cx, cy, cx, cy - r*0.75);
+          // Centre dot
+          doc.circle(cx, cy, r*0.12, 'F');
+        } else if(key === 'maternity') {
+          // Heart — two circles + triangle bottom
+          doc.circle(cx - r*0.4, cy - r*0.2, r*0.45, 'F');
+          doc.circle(cx + r*0.4, cy - r*0.2, r*0.45, 'F');
+          doc.triangle(cx - r*0.82, cy + r*0.05, cx + r*0.82, cy + r*0.05, cx, cy + r*0.95, 'F');
+        } else {
+          // Other / fallback — a simple document outline (page with corner fold)
+          const dw = r * 1.2, dh = r * 1.6;
+          doc.rect(cx - dw/2, cy - dh/2, dw, dh, 'F');
+        }
+      }
+
       const renderCategoryHeader = (cat, count, totalSA, totalPrem) => {
         // Check we have room for header + at least one slim card
         if(curY + 12 + 30 > BOTTOM) startNewPage();
@@ -15010,9 +15071,21 @@ function ReportTab() {
         doc.setFillColor(...NAVY); doc.roundedRect(M, hY, CW, 9, 1.5, 1.5, 'F');
         // Gold underline
         doc.setFillColor(...GOLD); doc.rect(M, hY+8.4, CW, 0.4, 'F');
-        // Label
+        // ── Category icon (small vector glyph in a circle on the left) ──
+        // jsPDF + helvetica has no emoji glyphs, so each icon is hand-drawn
+        // from primitives (lines, circles, rects). Icons live in a small
+        // circular badge at the left edge of the header band, sized to fit
+        // the 9mm header height.
+        const ICON_CX = M + 5;
+        const ICON_CY = hY + 4.5;
+        const ICON_R = 2.6;
+        const ICON_S = 3.8; // glyph drawing area
+        // Draw the badge background
+        doc.setFillColor(...GOLD); doc.circle(ICON_CX, ICON_CY, ICON_R, 'F');
+        drawCategoryIcon(doc, cat.key, ICON_CX, ICON_CY, ICON_S, NAVY);
+        // Label (shifted right to clear the icon)
         doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.setTextColor(...GOLD);
-        doc.text(cat.label, M+4, hY+6);
+        doc.text(cat.label, M+10, hY+6);
         // Count + totals (right side)
         doc.setFont('helvetica','normal'); doc.setFontSize(7); doc.setTextColor(...CREAM);
         const parts = [count + (count===1?' policy':' policies')];
