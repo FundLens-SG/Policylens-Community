@@ -5169,10 +5169,17 @@ function App() {
   // working notes or spreadsheet-style forms.
   const [presentMode, setPresentMode] = useState(false);
 
+  // ── HOUSE-VIEW DEFAULTS ──
+  // Firm-level baseline planning assumptions (retirement age, inflation rate,
+  // gap multipliers, etc). Loaded from IndexedDB on mount with DEFAULT_HOUSE_VALUES
+  // as fallback. The FC can edit these in Settings → House Defaults; changes
+  // apply to new clients going forward, never retroactively.
+  const [houseDefaults, setHouseDefaults] = useState(DEFAULT_HOUSE_VALUES);
+
   useEffect(() => {
     (async () => {
       // PERFORMANCE: Batch load — single DB open, parallel reads for policies + all settings
-      const {policies: ps, settings: stg} = await dbBatchLoad(['apiKey','clientName','clientProfile']);
+      const {policies: ps, settings: stg} = await dbBatchLoad(['apiKey','clientName','clientProfile','houseDefaults']);
       // ── ONE-SHOT CLEANUP: fix stale status='matured' on policies with FUTURE maturity dates ──
       // Previously the AI/importer could set status='matured' on policies that clearly hadn't
       // matured yet (e.g. AIA Gen3 with maturity 2088 flagged as matured). The display-layer
@@ -5206,6 +5213,11 @@ function App() {
       if(stg.apiKey) setApiKey(stg.apiKey.value||'');
       if(stg.clientName) setClientName(stg.clientName.value||'');
       if(stg.clientProfile?.value) setClientProfile(stg.clientProfile.value);
+      // Merge stored house defaults with baseline — so new shipped fields
+      // get picked up automatically without losing existing overrides.
+      if(stg.houseDefaults?.value) {
+        setHouseDefaults({...DEFAULT_HOUSE_VALUES, ...stg.houseDefaults.value});
+      }
 
       // Load repository from Supabase (primary) with local fallback
       // Only try Supabase if user is authenticated (session exists)
@@ -5373,7 +5385,17 @@ function App() {
     }
   };
 
-  const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,deletePolicy,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,tab,setTab,presentMode,setPresentMode};
+  // saveHouseDefaults: persists firm-level planning defaults to IndexedDB and
+  // updates local state. Accepts a partial object — missing fields are kept
+  // from the current in-memory houseDefaults (not DEFAULT_HOUSE_VALUES) so
+  // individual toggles in Settings don't clobber other overrides.
+  const saveHouseDefaults = async (patch) => {
+    const next = {...houseDefaults, ...patch};
+    setHouseDefaults(next);
+    await dbPut('settings', {key:'houseDefaults', value:next});
+  };
+
+  const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,deletePolicy,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,tab,setTab,presentMode,setPresentMode,houseDefaults,saveHouseDefaults};
 
   if(loading) return <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh'}}>
     <div style={{textAlign:'center'}}><LogoMark size={36} /><div style={{color:'var(--text2)',fontSize:14,marginTop:8}}>Loading PolicyLens…</div></div>
@@ -6361,6 +6383,69 @@ const POLICY_EXTRACTION_SCHEMA = {
   }
 };
 
+// ═══════════════════════════════════════════════════════════════
+// NETWORK / LIFECYCLE HELPERS — timeout wrapper + wake lock
+// ═══════════════════════════════════════════════════════════════
+// Mobile Chrome aggressively throttles background tabs: in-flight fetch()
+// calls can hang forever if the user tabs out during a long AI extraction.
+// These helpers fix three symptoms:
+//   1. Bare fetch() with no timeout → request silently hangs → setScanning
+//      never resets → UI stuck in "Extracting..." forever
+//   2. Screen sleeps → Chrome suspends the tab entirely → no progress
+//   3. User has no idea why extraction "failed"
+//
+// fetchWithTimeout wraps fetch with an AbortController so any call that
+// exceeds the timeout throws a clear "timed out" error instead of hanging.
+// Default 120s is generous enough for Gemini on large multi-page portfolios
+// but short enough that a hung request surfaces within two minutes.
+async function fetchWithTimeout(url, options = {}, timeoutMs = 120000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const resp = await fetch(url, {...options, signal: controller.signal});
+    return resp;
+  } catch(err) {
+    if(err.name === 'AbortError') {
+      throw new Error('Request timed out after '+Math.round(timeoutMs/1000)+'s. If you tabbed out of the app during extraction, mobile Chrome may have suspended the request. Please try again and keep the app in the foreground.');
+    }
+    throw err;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// acquireWakeLock requests a screen wake lock via the Screen Wake Lock API.
+// Prevents the screen from dimming/locking during a long extraction, which
+// in turn keeps Chrome from suspending the tab and killing the in-flight
+// fetches. Returns a release function (or a no-op if wake lock isn't
+// supported on this browser — e.g. iOS Safari < 16.4).
+async function acquireWakeLock(tag) {
+  try {
+    if(!('wakeLock' in navigator)) {
+      console.log('[WakeLock] Not supported on this browser');
+      return () => {};
+    }
+    const sentinel = await navigator.wakeLock.request('screen');
+    console.log('[WakeLock] Acquired for '+(tag||'task'));
+    // If the lock is released early (user backgrounds the tab), try to
+    // re-acquire when they come back.
+    const onVis = async () => {
+      if(document.visibilityState === 'visible' && sentinel.released) {
+        try { await navigator.wakeLock.request('screen'); } catch(e) {}
+      }
+    };
+    document.addEventListener('visibilitychange', onVis);
+    return () => {
+      document.removeEventListener('visibilitychange', onVis);
+      try { sentinel.release(); } catch(e) {}
+      console.log('[WakeLock] Released for '+(tag||'task'));
+    };
+  } catch(err) {
+    console.warn('[WakeLock] Failed:', err.message);
+    return () => {};
+  }
+}
+
 // Step 1: Gemini reads PDFs/images → returns raw text
 async function geminiRead(geminiKey, contentBlocks) {
   const parts = [];
@@ -6372,7 +6457,7 @@ async function geminiRead(geminiKey, contentBlocks) {
   console.log('[Gemini Read] Sending:', parts.filter(p=>p.inlineData).length, 'files');
   let resp;
   try {
-    resp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='+geminiKey,{
+    resp = await fetchWithTimeout('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='+geminiKey,{
       method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({
         contents:[{parts}],
@@ -6381,6 +6466,7 @@ async function geminiRead(geminiKey, contentBlocks) {
       })
     });
   } catch(fetchErr) {
+    if(fetchErr.message && fetchErr.message.includes('timed out')) throw fetchErr;
     throw new Error('Gemini: NetworkError when attempting to fetch resource.');
   }
   if(!resp.ok) {
@@ -6399,7 +6485,7 @@ async function claudeExtract(anthropicKey, systemPrompt, rawText, maxTokens) {
   console.log('[Claude Extract] Sending:', rawText.length, 'chars to Claude');
   let resp;
   try {
-    resp = await fetch('https://api.anthropic.com/v1/messages',{
+    resp = await fetchWithTimeout('https://api.anthropic.com/v1/messages',{
       method:'POST',
       headers:{'Content-Type':'application/json','x-api-key':anthropicKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
       body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:maxTokens||8000,
@@ -6408,6 +6494,7 @@ async function claudeExtract(anthropicKey, systemPrompt, rawText, maxTokens) {
       })
     });
   } catch(fetchErr) {
+    if(fetchErr.message && fetchErr.message.includes('timed out')) throw fetchErr;
     throw new Error('Claude: NetworkError when attempting to fetch resource.');
   }
   const data = await resp.json();
@@ -6439,7 +6526,7 @@ async function geminiStructuredExtract(geminiKey, systemPrompt, contentBlocks, m
   console.log('[Gemini Structured] Sending:', mediaCount, 'files +', parts.length-mediaCount, 'text blocks. Schema has', Object.keys(responseSchema?.items?.properties||{}).length, 'top-level fields.');
   let resp;
   try {
-    resp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='+geminiKey,{
+    resp = await fetchWithTimeout('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='+geminiKey,{
       method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({
         contents:[{parts}],
@@ -6452,6 +6539,7 @@ async function geminiStructuredExtract(geminiKey, systemPrompt, contentBlocks, m
       })
     });
   } catch(fetchErr) {
+    if(fetchErr.message && fetchErr.message.includes('timed out')) throw fetchErr;
     throw new Error('Gemini: NetworkError when attempting to fetch resource.');
   }
   if(!resp.ok) {
@@ -6632,7 +6720,7 @@ async function geminiExtract(geminiKey, systemPrompt, contentBlocks, maxTokens) 
   if(parts.length === 0) throw new Error('No content to extract from');
   let resp;
   try {
-    resp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='+geminiKey,{
+    resp = await fetchWithTimeout('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='+geminiKey,{
       method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({
         contents:[{parts}],
@@ -6641,6 +6729,7 @@ async function geminiExtract(geminiKey, systemPrompt, contentBlocks, maxTokens) 
       })
     });
   } catch(fetchErr) {
+    if(fetchErr.message && fetchErr.message.includes('timed out')) throw fetchErr;
     throw new Error('Gemini: NetworkError when attempting to fetch resource.');
   }
   if(!resp.ok) {
@@ -6720,7 +6809,7 @@ async function callAI(systemPrompt, contentBlocks, maxTokens, responseSchema) {
         if(b.type === 'document') return {type:'document', source:b.source};
         return null;
       }).filter(Boolean);
-      const resp = await fetch('https://api.anthropic.com/v1/messages', {
+      const resp = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
         method:'POST',
         headers:{'Content-Type':'application/json','x-api-key':ck,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
         body:JSON.stringify({
@@ -6846,7 +6935,7 @@ function DropZone({onFiles, label, active}) {
 // ═══════════════════════════════════════════════════════════════
 
 function ProfileTab() {
-  const {clientProfile,saveProfile,apiKey} = useContext(AppCtx);
+  const {clientProfile,saveProfile,apiKey,houseDefaults} = useContext(AppCtx);
   const [p, setP] = useState(clientProfile);
   const [scanning, setScanning] = useState(false);
   const camRef = useRef(null);
@@ -6918,7 +7007,21 @@ function ProfileTab() {
           <button style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',fontSize:11,padding:'5px 10px',borderRadius:8,cursor:'pointer',fontWeight:500}} onClick={()=>uploadRef.current?.click()} disabled={scanning}>{scanning?'…':'📄 Upload'}</button>
           <button className="btn-sm" style={{background:'rgba(239,83,80,.08)',color:'var(--red)',border:'1px solid rgba(239,83,80,.15)',fontSize:10,padding:'5px 10px',borderRadius:8,cursor:'pointer'}} onClick={()=>{
             if(!confirm('Delete all client profile data?\n\nClears name, NRIC, DOB, income, expenses, CPF settings, dependants.\n\nPolicies will NOT be deleted.')) return;
-            const blank = {name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[],annualIncome:'',retirementAge:'65',monthlyExpenses:'',mortgagePayment:'',dependantSupport:'',medicalBudget:'',desiredRetIncome:'',inflationRate:'2.8',cpfScheme:'FRS',cpfPlan:'standard',cpfStartAge:'65',cpfTopUp:'',cpfCurrentMonthly:'',otherRetIncome:[]};
+            // Blank profile seeds from firm-level house defaults — so a fresh
+            // client starts with the firm's baseline planning assumptions, not
+            // hardcoded values. The FC can still override any field.
+            const blank = {
+              name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[],
+              annualIncome:'',
+              retirementAge: String(houseDefaults.retirementAge),
+              monthlyExpenses:'',mortgagePayment:'',dependantSupport:'',medicalBudget:'',desiredRetIncome:'',
+              inflationRate: String(houseDefaults.inflationRate),
+              cpfScheme: houseDefaults.cpfScheme,
+              cpfPlan: houseDefaults.cpfPlan,
+              cpfStartAge: String(houseDefaults.cpfStartAge),
+              cpfTopUp:'',cpfCurrentMonthly:'',
+              otherRetIncome:[]
+            };
             setP(blank); saveProfile(blank); toast('Profile cleared','success');
           }}>🗑 Clear Profile</button>
         </div>
@@ -6956,9 +7059,9 @@ function ProfileTab() {
           <div style={{background:'var(--bg3)',borderRadius:8,padding:12,border:'1px solid var(--border)'}}>
             <div style={{fontSize:10,fontWeight:700,color:'var(--gold)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8}}>Income & Retirement</div>
             <div className="field"><label>Gross Annual Income ($)</label><input type="number" value={p.annualIncome||''} onChange={e=>set('annualIncome',e.target.value)} placeholder="e.g. 120000" /><div style={{fontSize:10,color:'var(--text3)'}}>{p.annualIncome ? '$'+(Math.round(p.annualIncome/12)).toLocaleString()+'/mth' : ''}</div></div>
-            <div className="field"><label>Target Retirement Age</label><input type="number" value={p.retirementAge||65} onChange={e=>set('retirementAge',e.target.value)} /></div>
+            <div className="field"><label>Target Retirement Age</label><input type="number" value={p.retirementAge||houseDefaults.retirementAge} onChange={e=>set('retirementAge',e.target.value)} /></div>
             <div className="field"><label>Desired Monthly Income in Retirement</label><input type="number" value={p.desiredRetIncome||''} onChange={e=>set('desiredRetIncome',e.target.value)} placeholder="e.g. 5000" /><div style={{fontSize:10,color:'var(--text3)'}}>Target lifestyle expense in today's dollars</div></div>
-            <div className="field"><label>Inflation Rate (% p.a.)</label><input type="number" step="0.1" value={p.inflationRate||'2.8'} onChange={e=>set('inflationRate',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Default 2.8% — used for retirement target inflation adjustment</div></div>
+            <div className="field"><label>Inflation Rate (% p.a.)</label><input type="number" step="0.1" value={p.inflationRate||String(houseDefaults.inflationRate)} onChange={e=>set('inflationRate',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Default {houseDefaults.inflationRate}% (house view) — used for retirement target inflation adjustment</div></div>
           </div>
           <div style={{background:'var(--bg3)',borderRadius:8,padding:12,border:'1px solid var(--border)'}}>
             <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8}}>Monthly Outgoings</div>
@@ -7995,10 +8098,10 @@ function ReviewSession({onClose}) {
 // MODULE: UPLOAD_PORTAL — Client document collection link
 // ═══════════════════════════════════════════════════════════════
 function Dashboard() {
-  const {policies,setTab,apiKey,clientProfile,saveProfile} = useContext(AppCtx);
+  const {policies,setTab,apiKey,clientProfile,saveProfile,houseDefaults} = useContext(AppCtx);
   const p = clientProfile || {};
   const age = p.dob ? Math.floor((Date.now()-new Date(p.dob).getTime())/31557600000) : 35;
-  const retAge = parseInt(p.retirementAge)||65;
+  const retAge = parseInt(p.retirementAge)||houseDefaults.retirementAge;
   const annualIncome = parseFloat(p.annualIncome)||0;
   const monthlyIncome = annualIncome/12;
   const monthlyExpenses = parseFloat(p.monthlyExpenses)||0;
@@ -8010,12 +8113,16 @@ function Dashboard() {
   const [eciOverride,setEciOverride] = useState('');
   const [diOverride,setDiOverride] = useState('');
 
-  // LIA parameters
-  const [deathYrs,setDeathYrs] = useState(10);
-  const [tpdYrs,setTpdYrs] = useState(10);
-  const [ciYrs,setCiYrs] = useState(5);
-  const [eciYrs,setEciYrs] = useState(2);
-  const [diPct,setDiPct] = useState(75);
+  // LIA parameters — initialize from firm-level house defaults on mount.
+  // Using lazy initialization so the default is read ONCE when Dashboard
+  // mounts; mid-session slider edits persist across re-renders. If the FC
+  // changes house defaults in Settings, they take effect next time Dashboard
+  // mounts (i.e. on next tab switch back) — not retroactively.
+  const [deathYrs,setDeathYrs] = useState(() => houseDefaults.deathYrs);
+  const [tpdYrs,setTpdYrs] = useState(() => houseDefaults.tpdYrs);
+  const [ciYrs,setCiYrs] = useState(() => houseDefaults.ciYrs);
+  const [eciYrs,setEciYrs] = useState(() => houseDefaults.eciYrs);
+  const [diPct,setDiPct] = useState(() => houseDefaults.diPct);
   const [ciMethod,setCiMethod] = useState('expenses'); // 'income' or 'expenses'
   const [ciIncExp,setCiIncExp] = useState(true);
   const [ciIncMort,setCiIncMort] = useState(true);
@@ -8379,12 +8486,15 @@ function Dashboard() {
   // ── RETIREMENT LITE COMPUTATION ──
   const retirementLite = useMemo(() => {
     const baseDesired = parseFloat(p.desiredRetIncome) || parseFloat(p.monthlyExpenses) || monthlyIncome * 0.7 || 5000;
-    const inflationRate = (parseFloat(p.inflationRate) || 2.8) / 100;
+    // Fallbacks read from firm-level house defaults (Settings → House Defaults)
+    // so a new or partially-filled profile starts from the firm's baseline
+    // assumptions rather than hardcoded values.
+    const inflationRate = (parseFloat(p.inflationRate) || houseDefaults.inflationRate) / 100;
     const yearsToRet = Math.max(0, retAge - (age||35));
     const desiredMonthly = Math.round(baseDesired * Math.pow(1 + inflationRate, yearsToRet));
-    const cpfScheme = p.cpfScheme || 'FRS';
-    const cpfPlan = p.cpfPlan || 'standard';
-    const cpfStartAge = parseInt(p.cpfStartAge) || 65;
+    const cpfScheme = p.cpfScheme || houseDefaults.cpfScheme;
+    const cpfPlan = p.cpfPlan || houseDefaults.cpfPlan;
+    const cpfStartAge = parseInt(p.cpfStartAge) || houseDefaults.cpfStartAge;
     // Age-aware CPF LIFE payout
     let cpfPayout = {low:0, mid:0, high:0};
     if(cpfScheme !== 'none') {
@@ -8621,14 +8731,25 @@ function Dashboard() {
 
       {showReview && <ReviewSession onClose={()=>setShowReview(false)} />}
 
-      {/* Action bar */}
+      {/* Action bar — capture tools on left, workflow tools on right.
+          Previously had three overlapping "show the client" buttons (Preview &
+          Share, Review, Present). Consolidated to:
+            • Present (gold, in Header) — client-facing full-screen view
+            • Review (secondary, here) — FC workflow for stepping through policies
+          Preview & Share was removed: its retirement HTML export duplicated
+          what Present mode and the PDF report both do better. */}
       <div style={{display:'flex',gap:6,marginBottom:12,flexWrap:'wrap',alignItems:'center'}}>
         <button style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',fontSize:11,padding:'5px 10px',borderRadius:8,cursor:'pointer',fontWeight:500}} onClick={async()=>{const files=await openCameraModal();if(files&&files.length) handleDashDrop(files);}}>📷 Camera</button>
         <button style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',fontSize:11,padding:'5px 10px',borderRadius:8,cursor:'pointer',fontWeight:500}} onClick={()=>{const inp=document.createElement('input');inp.type='file';inp.accept='image/*';inp.multiple=true;inp.onchange=e=>{if(e.target.files.length)handleDashDrop(e.target.files);};inp.click();}}>🖼 Gallery</button>
         <button style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',fontSize:11,padding:'5px 10px',borderRadius:8,cursor:'pointer',fontWeight:500}} onClick={()=>{const inp=document.createElement('input');inp.type='file';inp.accept='image/*,.pdf,.xlsx,.xls,.csv,.doc,.docx';inp.multiple=true;inp.onchange=e=>{if(e.target.files.length)handleDashDrop(e.target.files);};inp.click();}}>📄 Upload</button>
         <div style={{flex:1}} />
-        <button style={{background:'rgba(91,143,217,.12)',color:'var(--blue2)',border:'1px solid rgba(91,143,217,.25)',fontSize:11,padding:'5px 12px',borderRadius:8,cursor:'pointer',fontWeight:600}} onClick={()=>{const el=document.getElementById('retirement-lite-section');if(el){el.scrollIntoView({behavior:'smooth'});setTimeout(()=>{const btn=el.querySelector('[data-action=preview]');if(btn)btn.click();},400);}else toast('Add retirement details in Profile first','info');}}>👁 Preview & Share</button>
-        {policies.length >= 2 && <button className="btn-primary btn-sm" onClick={()=>setShowReview(true)} style={{fontSize:11}}>📋 Review</button>}
+        {policies.length >= 2 && (
+          <button onClick={()=>setShowReview(true)}
+            title="Step through each policy with talking points (FC-only workflow tool)"
+            style={{background:'var(--bg3)',color:'var(--text2)',border:'1px solid var(--border2)',fontSize:11,padding:'5px 10px',borderRadius:8,cursor:'pointer',fontWeight:500}}>
+            📋 Review
+          </button>
+        )}
       </div>
 
       {/* ═══ SUMMARY CARDS ═══ */}
@@ -9434,6 +9555,11 @@ function GettingStartedChecklist({ compact = false }) {
           : !hasDob
             ? 'Add date of birth and income'
             : 'Add annual income',
+      // Secondary hint surfaced only when step 1 is active — reminds the FC
+      // they don't have to type everything by hand. Scanning a policy document
+      // auto-populates name, DOB, gender, smoker, nationality, and occupation
+      // from the policy owner info via mergeToProfile.
+      hint: hasProfile ? null : '💡 Scanning a policy also auto-fills name, DOB, and more',
       action: () => setTab('profile'),
       actionLabel: 'Set up profile'
     },
@@ -9444,6 +9570,7 @@ function GettingStartedChecklist({ compact = false }) {
       desc: hasPolicies
         ? `${policies.length} polic${policies.length === 1 ? 'y' : 'ies'} added`
         : 'Scan a document or enter manually',
+      hint: hasPolicies ? null : '📷 Camera · 🖼 Gallery · 📄 PDF / Excel / Word',
       action: () => setTab('policies'),
       actionLabel: 'Add a policy',
       locked: false
@@ -9455,6 +9582,7 @@ function GettingStartedChecklist({ compact = false }) {
       desc: activeStep === 3
         ? 'Scroll down to see your dashboard'
         : 'Unlocks after steps 1 and 2',
+      hint: null,
       locked: activeStep !== 3
     },
   ];
@@ -9487,9 +9615,6 @@ function GettingStartedChecklist({ compact = false }) {
         const isActive = activeStep === step.n && !step.done;
         return (
           <div key={step.n} style={{
-            display:'flex',
-            alignItems:'center',
-            gap:12,
             padding: '10px 12px',
             marginBottom: i < steps.length - 1 ? 6 : 0,
             background: isActive ? 'rgba(212,169,106,0.08)' : 'transparent',
@@ -9498,51 +9623,63 @@ function GettingStartedChecklist({ compact = false }) {
             opacity: step.locked ? 0.5 : 1,
             transition: 'all 0.2s',
           }}>
-            {/* Step number / check */}
-            <div style={{
-              width:26, height:26, borderRadius:'50%',
-              display:'flex', alignItems:'center', justifyContent:'center',
-              background: step.done ? GREEN : isActive ? GOLD : 'var(--bg3)',
-              color: step.done || isActive ? '#0b0f1a' : 'var(--text3)',
-              fontSize: step.done ? 14 : 12,
-              fontWeight: 700,
-              flexShrink: 0,
-              border: step.done ? 'none' : isActive ? 'none' : '1px solid var(--border2)',
-            }}>
-              {step.done ? '✓' : step.n}
-            </div>
-
-            {/* Title + description */}
-            <div style={{flex:1, minWidth:0}}>
+            {/* Row 1: circle + title + description — full-width so title
+                doesn't wrap when the action button would otherwise squeeze it */}
+            <div style={{display:'flex', alignItems:'center', gap:12}}>
+              {/* Step number / check */}
               <div style={{
-                fontSize:13,
-                fontWeight:600,
-                color: step.done ? 'var(--text3)' : isActive ? 'var(--text)' : 'var(--text2)',
-                textDecoration: step.done ? 'line-through' : 'none',
+                width:26, height:26, borderRadius:'50%',
+                display:'flex', alignItems:'center', justifyContent:'center',
+                background: step.done ? GREEN : isActive ? GOLD : 'var(--bg3)',
+                color: step.done || isActive ? '#0b0f1a' : 'var(--text3)',
+                fontSize: step.done ? 14 : 12,
+                fontWeight: 700,
+                flexShrink: 0,
+                border: step.done ? 'none' : isActive ? 'none' : '1px solid var(--border2)',
               }}>
-                {step.title}
+                {step.done ? '✓' : step.n}
               </div>
-              <div style={{fontSize:10, color:'var(--text3)', marginTop:1}}>
-                {step.desc}
+              {/* Title + description */}
+              <div style={{flex:1, minWidth:0}}>
+                <div style={{
+                  fontSize:13,
+                  fontWeight:600,
+                  color: step.done ? 'var(--text3)' : isActive ? 'var(--text)' : 'var(--text2)',
+                  textDecoration: step.done ? 'line-through' : 'none',
+                }}>
+                  {step.title}
+                </div>
+                <div style={{fontSize:10, color:'var(--text3)', marginTop:1}}>
+                  {step.desc}
+                </div>
               </div>
             </div>
-
-            {/* Action button (active step only) */}
-            {isActive && step.action && (
-              <button onClick={step.action} style={{
-                background: `linear-gradient(135deg, ${GOLD}, #b8935a)`,
-                color:'#0b0f1a',
-                border:'none',
-                padding:'7px 14px',
-                borderRadius:8,
-                fontSize:11,
-                fontWeight:700,
-                cursor:'pointer',
-                flexShrink:0,
-                whiteSpace:'nowrap',
-              }}>
-                {step.actionLabel} →
-              </button>
+            {/* Row 2 (active step only): CTA button + hint. Own row so it
+                never fights the title row for horizontal space. */}
+            {isActive && (step.action || step.hint) && (
+              <div style={{display:'flex', alignItems:'center', gap:10, marginTop:10, marginLeft:38, flexWrap:'wrap'}}>
+                {step.action && (
+                  <button onClick={step.action} style={{
+                    background: `linear-gradient(135deg, ${GOLD}, #b8935a)`,
+                    color:'#0b0f1a',
+                    border:'none',
+                    padding:'7px 14px',
+                    borderRadius:8,
+                    fontSize:11,
+                    fontWeight:700,
+                    cursor:'pointer',
+                    flexShrink:0,
+                    whiteSpace:'nowrap',
+                  }}>
+                    {step.actionLabel} →
+                  </button>
+                )}
+                {step.hint && (
+                  <div style={{fontSize:10, color:'var(--gold2)', fontStyle:'italic', flex:1, minWidth:0}}>
+                    {step.hint}
+                  </div>
+                )}
+              </div>
             )}
           </div>
         );
@@ -10379,6 +10516,17 @@ function Policies() {
   const [scanProgress, setScanProgress] = useState(null); // {batch, totalBatches, totalFiles, status, pctComplete}
   const [draftBanner, setDraftBanner] = useState(false);
   const [bulkExtracted, setBulkExtracted] = useState(null); // for verification modal
+  // ── SCAN FAILURE BANNER ──
+  // Persistent banner shown at the top of Policies when extraction dies mid-flight.
+  // Unlike a toast, this sticks around until the user dismisses or retries —
+  // critical on mobile where toasts can be missed when the user tabs back in
+  // after a background suspension killed the fetch.
+  //
+  // shape: { reason: string, files: File[] | null, at: number }
+  // files is kept in-memory (not persisted) so Retry can re-invoke handleExtract
+  // without forcing the FC to re-pick from the file dialog. Set to null on
+  // catch paths where files came from a stale source and can't be retried.
+  const [scanFailure, setScanFailure] = useState(null);
 
   // ── Draft auto-save/restore ──
   const DRAFT_KEY = 'policylens_draft';
@@ -11122,6 +11270,46 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
 
   const handleExtract = async (files) => {
     if(!files||!files.length) return;
+
+    // Clear any lingering failure banner from a previous attempt
+    setScanFailure(null);
+
+    // Snapshot the files array for potential retry. We convert to a real
+    // Array so a retry invocation still works even if the caller's source
+    // (e.g. a FileList from an input[type=file]) gets garbage-collected.
+    const filesSnapshot = Array.from(files);
+
+    // ── beforeunload warning ──
+    // If the FC tries to navigate away / close the tab while extraction is
+    // running, the browser shows "Leave site? Changes you made may not be
+    // saved" — a hard stop against accidental interruption.
+    const beforeUnloadHandler = (e) => { e.preventDefault(); e.returnValue = ''; return ''; };
+    window.addEventListener('beforeunload', beforeUnloadHandler);
+
+    // ── MOBILE EXTRACTION RELIABILITY ──
+    // On Android Chrome (and iOS Safari), backgrounding the tab or letting
+    // the screen sleep during a long fetch causes the browser to suspend
+    // the request, which then fails with a NetworkError. Two mitigations:
+    //   1. Acquire a screen wake lock so the display doesn't turn off
+    //      → prevents the tab from being backgrounded by the OS.
+    //   2. Listen for visibilitychange events — if the FC manually tabs
+    //      away, flag it and surface a tailored error message so they
+    //      understand exactly what went wrong instead of blaming the app.
+    // Both are best-effort. Wake lock is unsupported on older iOS. The
+    // flag-and-messaging layer works everywhere.
+    const releaseWakeLock = await acquireWakeLock('policy-extraction');
+    let wasBackgrounded = false;
+    const onVisibilityChange = () => {
+      if(document.visibilityState === 'hidden') {
+        wasBackgrounded = true;
+        console.warn('[Extract] Tab backgrounded during extraction — request may fail');
+      } else if(document.visibilityState === 'visible' && wasBackgrounded) {
+        // User came back — warn them their extraction may have died
+        try { toast('⚠️ You tabbed away during extraction — the API call may have been killed by the browser. Check for an error below.', 'warning', 8000); } catch(e) {}
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibilityChange);
+
     setScanning(true);
     const allFiles = Array.from(files).slice(0,300);
     const batches = [];
@@ -11142,8 +11330,22 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
 
         const arr = await extractBatch(batches[b]);
         if(arr.length === 0 && b === 0 && batches.length === 1) {
-          toast('Could not extract policies — try clearer images','warning',4500);
-          clearStaged(); setScanning(false); setScanProgress(null); return;
+          // Zero results from a single batch — could mean:
+          //   1. The AI genuinely couldn't extract anything from a blank/garbage image
+          //   2. A silent tab-backgrounded fetch failure that returned empty instead of throwing
+          //   3. Schema or API key drift
+          // In ALL cases, preserve the files for retry (don't call clearStaged)
+          // and surface a persistent banner so the FC notices.
+          setScanning(false);
+          setScanProgress(null);
+          setScanFailure({
+            reason: wasBackgrounded
+              ? 'Extraction returned empty — you tabbed away while it was running, which kills Chrome background fetches on mobile. Try again with PolicyLens in the foreground.'
+              : 'AI could not extract policies from the uploaded documents. This usually means the images are unclear, the document is too short, or the AI hit a transient error. Try clearer photos or retry.',
+            files: filesSnapshot,
+            at: Date.now()
+          });
+          return;
         }
 
       // Process all policies uniformly
@@ -11605,14 +11807,19 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       const hasAnthropicKey = !!(await dbGet('settings','anthropicKey').catch(()=>null))?.value;
       let msg = 'Extraction error: ' + e.message;
       const errMsg = (e.message||'').toLowerCase();
-      if(errMsg.includes('networkerror') || errMsg.includes('failed to fetch') || errMsg.includes('network') || e instanceof TypeError) {
-        msg = '🚫 Network Error — API calls are being blocked.\n\nThis is usually caused by:\n\n';
-        msg += '1. Firefox Enhanced Tracking Protection — click the shield 🛡️ icon in URL bar → turn OFF for this site\n';
-        msg += '2. Ad blocker (Adblock Plus, uBlock, etc.) — disable for this site\n';
-        msg += '3. Browser privacy extensions blocking API requests\n';
-        msg += '4. Corporate firewall/proxy blocking external API calls\n\n';
-        msg += 'Fix: Click 🛡️ shield icon → disable protection for this site\n';
-        msg += 'Or: Settings → Privacy → Enhanced Tracking Protection → add exception for fundlens-sg.github.io';
+      // Check tab-backgrounded case FIRST — most common mobile failure mode.
+      // If the user tabbed away at any point and we ended up with a network-ish
+      // error, it's almost certainly the browser suspending the fetch.
+      if(wasBackgrounded && (errMsg.includes('networkerror') || errMsg.includes('failed to fetch') || errMsg.includes('network') || errMsg.includes('timed out') || errMsg.includes('abort') || e instanceof TypeError)) {
+        msg = '🚫 Extraction interrupted — you tabbed away from PolicyLens while files were still uploading.\n\nMobile Chrome suspends background tabs to save battery, which kills in-flight API calls to Gemini/Claude.\n\nFix: Tap Upload again and keep PolicyLens in the foreground until extraction completes. The screen wake lock should prevent this, but it was either unsupported or overridden.';
+      } else if(errMsg.includes('networkerror') || errMsg.includes('failed to fetch') || errMsg.includes('network') || e instanceof TypeError) {
+        msg = '🚫 Network Error — API calls are being blocked.\n\nCommon causes:\n\n';
+        msg += '1. You tabbed away during extraction (mobile Chrome suspends background tabs)\n';
+        msg += '2. Firefox Enhanced Tracking Protection — click the shield 🛡️ icon → turn OFF for this site\n';
+        msg += '3. Ad blocker (Adblock Plus, uBlock, etc.) — disable for this site\n';
+        msg += '4. Browser privacy extensions blocking API requests\n';
+        msg += '5. Corporate firewall/proxy blocking external API calls\n\n';
+        msg += 'Fix: Try again and keep PolicyLens in the foreground. If still failing, check browser shield/ad-blocker settings.';
       } else if(errMsg.includes('cors') || errMsg.includes('origin')) {
         msg = '🚫 CORS Error — Browser is blocking API requests.\n\nDisable ad blocker or try Incognito mode.';
       } else if(errMsg.includes('parse') || errMsg.includes('json')) {
@@ -11621,14 +11828,35 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         else msg += '\n\nTry uploading a clearer image or fewer documents at once.';
       } else if(errMsg.includes('api key') || errMsg.includes('key')) {
         msg += '\n\nCheck your API keys in Settings.';
+      } else if(errMsg.includes('timed out') || errMsg.includes('timeout')) {
+        msg = '⏱ Extraction timed out.\n\nThis usually happens when:\n\n1. The tab was backgrounded (mobile Chrome suspends fetches)\n2. The files are very large and the AI is slow to respond\n3. Network connection is unstable\n\nFix: Try again with the app in foreground, or upload fewer files per batch.';
       }
-      toast(msg,'warning',5000);
+      toast(msg,'warning',7000);
       // If some batches succeeded, show partial results
       if(allExtracted.length > 0) {
         setBulkExtracted([...allExtracted]);
         toast(allExtracted.length + ' policies extracted before error — review now','warning',5000);
       }
       setScanning(false); setScanProgress(null);
+      // ── PERSISTENT FAILURE BANNER ──
+      // The toast above will time out in 7s and on mobile is easy to miss
+      // (especially if the FC returns from a background tab). The banner
+      // sticks until the FC explicitly dismisses or retries.
+      setScanFailure({
+        reason: wasBackgrounded
+          ? 'Chrome killed the extraction when you tabbed away. PolicyLens needs to stay in the foreground while scanning. Tap Retry to start over.'
+          : msg.split('\n')[0] || 'Extraction failed. See details in the error toast.',
+        files: filesSnapshot,
+        at: Date.now()
+      });
+    } finally {
+      // Always clean up the wake lock, visibility listener, and
+      // beforeunload guard — whether extraction succeeded, failed, or was
+      // interrupted. Without this the screen would stay on and the
+      // "Leave site?" warning would fire on any subsequent navigation.
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+      window.removeEventListener('beforeunload', beforeUnloadHandler);
+      try { releaseWakeLock(); } catch(e) { console.warn('[Extract] Wake lock release failed:', e); }
     }
   };
 
@@ -11716,6 +11944,68 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
           {scanProgress.pctComplete > 0 && scanProgress.pctComplete < 100 && (
             <div style={{fontSize:9,color:'var(--text3)',marginTop:4}}>You can review extracted policies below while remaining batches process</div>
           )}
+          {/* ── KEEP IN FOREGROUND WARNING ── */}
+          {/* This is the biggest source of flaky extractions on mobile: the FC
+              tabs away to WhatsApp or the lock screen kicks in, Chrome suspends
+              the in-flight fetch, and the request dies silently. A persistent
+              banner is clearer than a one-shot toast. */}
+          {scanning && (
+            <div style={{
+              marginTop:8,padding:'8px 10px',
+              background:'rgba(239,83,80,0.08)',
+              border:'1px solid rgba(239,83,80,0.25)',
+              borderRadius:6,
+              display:'flex',alignItems:'center',gap:8
+            }}>
+              <span style={{fontSize:14}}>⚠️</span>
+              <div style={{fontSize:10,color:'var(--red)',fontWeight:600,lineHeight:1.35}}>
+                Keep PolicyLens in the foreground. Tabbing away or letting the screen sleep will kill the extraction.
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ── SCAN FAILURE BANNER ── */}
+      {/* Shown after handleExtract catches an error or returns zero results.
+          Sticks around until the FC dismisses or retries. The retry reuses
+          the in-memory files snapshot so the FC doesn't have to re-pick
+          from the file dialog. */}
+      {scanFailure && !scanning && (
+        <div className="card" style={{
+          marginBottom:12,padding:14,
+          borderLeft:'3px solid var(--red)',
+          background:'rgba(239,83,80,0.04)'
+        }}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:10,marginBottom:8}}>
+            <div style={{flex:1,minWidth:0}}>
+              <div style={{fontSize:12,fontWeight:700,color:'var(--red)',marginBottom:4}}>
+                ⚠️ Extraction Interrupted
+              </div>
+              <div style={{fontSize:11,color:'var(--text2)',lineHeight:1.5}}>
+                {scanFailure.reason}
+              </div>
+              {scanFailure.files && scanFailure.files.length > 0 && (
+                <div style={{fontSize:9,color:'var(--text3)',marginTop:6}}>
+                  {scanFailure.files.length} file{scanFailure.files.length===1?'':'s'} ready for retry · no need to reselect
+                </div>
+              )}
+            </div>
+          </div>
+          <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+            {scanFailure.files && scanFailure.files.length > 0 && (
+              <button className="btn-primary btn-sm" onClick={()=>{
+                const files = scanFailure.files;
+                setScanFailure(null);
+                handleExtract(files);
+              }} style={{fontSize:11}}>
+                🔄 Retry Extraction
+              </button>
+            )}
+            <button className="btn-secondary btn-sm" onClick={()=>setScanFailure(null)} style={{fontSize:11}}>
+              Dismiss
+            </button>
+          </div>
         </div>
       )}
 
@@ -17010,7 +17300,7 @@ function ExtractCacheEditor() {
 }
 
 function Settings() {
-  const {apiKey,saveApiKey,clientName,saveClientName,policies,savePolicy,deletePolicy} = useContext(AppCtx);
+  const {apiKey,saveApiKey,clientName,saveClientName,policies,savePolicy,deletePolicy,houseDefaults,saveHouseDefaults} = useContext(AppCtx);
   const [geminiKey, setGeminiKey] = useState('');
   const [anthropicKey, setAnthropicKey] = useState('');
   const [name, setName] = useState(clientName);
@@ -17124,6 +17414,75 @@ function Settings() {
           }}>🗑️ Reset Repository</button>
         </div>
       )}
+
+      {/* ═══ HOUSE DEFAULTS ═══ */}
+      {/* Firm-level planning assumptions. Applied only to new clients (via
+          the "Clear Profile" reset and when blank fields fall back during
+          retirement/gap analysis). Changing a value here never alters any
+          existing client's stored profile — it's a baseline, not a mandate. */}
+      <div className="card" style={{marginBottom:16, borderColor:'rgba(212,169,106,0.2)'}}>
+        <div style={{display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:4, gap:8, flexWrap:'wrap'}}>
+          <div style={{flex:1, minWidth:200}}>
+            <h3 style={{fontSize:14, fontWeight:600, marginBottom:4}}>🏛️ House Defaults</h3>
+            <p style={{fontSize:11, color:'var(--text3)', marginBottom:0}}>
+              Firm-level planning baselines. Applied to new clients and as fallbacks when profile fields are blank. Changing a value here never alters existing client profiles — only future ones.
+            </p>
+          </div>
+          <button onClick={()=>{
+            if(confirm('Reset all House Defaults to their shipped baseline values?\n\nThis does not affect any existing client profiles.')) {
+              saveHouseDefaults(DEFAULT_HOUSE_VALUES);
+              toast('House defaults reset to baseline','success');
+            }
+          }} style={{
+            background:'var(--bg3)', color:'var(--text2)', border:'1px solid var(--border2)',
+            padding:'5px 10px', borderRadius:6, fontSize:10, cursor:'pointer', whiteSpace:'nowrap', flexShrink:0
+          }}>↺ Reset to baseline</button>
+        </div>
+        <div style={{marginTop:12, display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(220px, 1fr))', gap:10}}>
+          {HOUSE_DEFAULT_FIELDS.map(field => {
+            const current = houseDefaults[field.key];
+            const baseline = DEFAULT_HOUSE_VALUES[field.key];
+            const isOverridden = current !== baseline;
+            return (
+              <div key={field.key} style={{
+                padding:10, background:'var(--bg3)', borderRadius:8,
+                border: '1px solid ' + (isOverridden ? 'rgba(212,169,106,0.35)' : 'var(--border)'),
+              }}>
+                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:4}}>
+                  <label style={{fontSize:10, fontWeight:600, color:'var(--text2)', textTransform:'uppercase', letterSpacing:'0.4px'}}>
+                    {field.label}
+                  </label>
+                  {isOverridden && (
+                    <span title={`Baseline: ${baseline}`} style={{fontSize:8, color:'var(--gold)', fontWeight:700, padding:'1px 5px', background:'rgba(212,169,106,0.12)', borderRadius:3}}>
+                      CUSTOM
+                    </span>
+                  )}
+                </div>
+                {field.type === 'select' ? (
+                  <select value={current} onChange={e=>saveHouseDefaults({[field.key]: e.target.value})}
+                    style={{width:'100%', fontSize:12, padding:'5px 6px', background:'var(--bg2)', border:'1px solid var(--border)', borderRadius:5, color:'var(--text)'}}>
+                    {field.options.map(o => <option key={o} value={o}>{o}</option>)}
+                  </select>
+                ) : (
+                  <div style={{display:'flex', alignItems:'center', gap:4}}>
+                    <input type="number" value={current}
+                      min={field.min} max={field.max} step={field.step}
+                      onChange={e=>{
+                        const v = parseFloat(e.target.value);
+                        if(isNaN(v)) return;
+                        saveHouseDefaults({[field.key]: v});
+                      }}
+                      style={{flex:1, fontSize:12, padding:'5px 6px', background:'var(--bg2)', border:'1px solid var(--border)', borderRadius:5, color:'var(--text)'}}
+                    />
+                    {field.unit && <span style={{fontSize:9, color:'var(--text3)', flexShrink:0}}>{field.unit}</span>}
+                  </div>
+                )}
+                {field.hint && <div style={{fontSize:9, color:'var(--text3)', marginTop:4, lineHeight:1.3}}>{field.hint}</div>}
+              </div>
+            );
+          })}
+        </div>
+      </div>
 
       {/* ═══ AI KEYS ═══ */}
       <div className="card" style={{marginBottom:16}}>
