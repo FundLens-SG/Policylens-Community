@@ -1486,6 +1486,60 @@ async function pdfToImages(pdfDoc, maxPages=12) {
 // one-time cleanup in App init purges the stale entries from IndexedDB.
 const EXTRACT_PIPELINE_VERSION = 'v8-2026-04-08-quick-verify-confidence';
 
+// ═══════════════════════════════════════════════════════════════
+// HOUSE-VIEW DEFAULTS — Firm-level baseline values
+// ═══════════════════════════════════════════════════════════════
+// "House view" is insurance-industry terminology for the firm's default
+// planning assumptions. Every FC at the firm starts new clients from these
+// baselines — retirement age, inflation rate, gap-analysis multipliers, etc.
+// — so the firm speaks with one voice and the FC doesn't have to retype the
+// same values on every new client.
+//
+// DEFAULT_HOUSE_VALUES is the shipped baseline. The FC can override any of
+// these in Settings; overrides are stored in IndexedDB under the 'houseDefaults'
+// settings key, loaded into App state on mount, and exposed via AppCtx.
+//
+// Applied at (and only at):
+//   1. Blank profile creation — fills retirementAge, inflationRate, cpfScheme,
+//      cpfPlan, cpfStartAge
+//   2. Dashboard gap-analysis — initializes deathYrs, tpdYrs, ciYrs, eciYrs,
+//      diPct on component mount (user can still override in-session via sliders)
+//   3. Retirement projection — default retirement age and inflation rate
+//
+// House defaults NEVER override existing client data. Changing a default
+// value in Settings does not retroactively affect any existing client's
+// profile — only new clients. This is deliberate: defaults are a starting
+// position, not a firm-wide mandate.
+const DEFAULT_HOUSE_VALUES = {
+  retirementAge: 65,
+  inflationRate: 2.8,
+  cpfScheme: 'FRS',
+  cpfPlan: 'standard',
+  cpfStartAge: 65,
+  deathYrs: 10,       // death benefit multiplier (years of income)
+  tpdYrs: 10,         // TPD multiplier
+  ciYrs: 5,           // CI multiplier (years of expenses)
+  eciYrs: 2,          // Early CI multiplier
+  diPct: 75,          // Disability income % of monthly income
+  premiumPctWarn: 15, // warn in Dashboard if total prem > this % of income
+};
+
+// Metadata for rendering the editor in Settings. Keyed by field name.
+// Keep the order stable — it drives the order rows appear in the UI.
+const HOUSE_DEFAULT_FIELDS = [
+  { key: 'retirementAge', label: 'Retirement Age', unit: 'yrs', type: 'number', min: 50, max: 80, step: 1, hint: 'Default retirement age for new clients' },
+  { key: 'inflationRate', label: 'Inflation Rate', unit: '%/yr', type: 'number', min: 0, max: 10, step: 0.1, hint: 'Used to inflate retirement income targets year-on-year' },
+  { key: 'cpfScheme', label: 'CPF Scheme', type: 'select', options: ['BRS','FRS','ERS','none'], hint: 'Default CPF payout tier' },
+  { key: 'cpfPlan', label: 'CPF LIFE Plan', type: 'select', options: ['standard','escalating','basic'], hint: 'Default CPF LIFE plan (escalating adds 2%/yr)' },
+  { key: 'cpfStartAge', label: 'CPF Payout Start', unit: 'age', type: 'number', min: 65, max: 75, step: 1, hint: '65–70 (+7%/yr deferred)' },
+  { key: 'deathYrs', label: 'Death Cover Multiplier', unit: '× income', type: 'number', min: 1, max: 30, step: 1, hint: 'LIA guideline: 9–11× annual income' },
+  { key: 'tpdYrs', label: 'TPD Multiplier', unit: '× income', type: 'number', min: 1, max: 30, step: 1, hint: 'Typically same as death cover' },
+  { key: 'ciYrs', label: 'CI Multiplier', unit: '× expenses', type: 'number', min: 1, max: 20, step: 1, hint: 'Years of expenses to cover during CI recovery' },
+  { key: 'eciYrs', label: 'Early CI Multiplier', unit: '× expenses', type: 'number', min: 1, max: 10, step: 1, hint: 'Typically 2–3× expenses' },
+  { key: 'diPct', label: 'DI Coverage', unit: '% of income', type: 'number', min: 0, max: 100, step: 5, hint: 'MAS cap is 75% of monthly income' },
+  { key: 'premiumPctWarn', label: 'Premium Warning', unit: '% of income', type: 'number', min: 0, max: 50, step: 1, hint: 'Flag if total premium exceeds this % of annual income' },
+];
+
 // SHA-256 hash of a File's bytes — used as content-addressable cache key.
 async function hashFile(file) {
   const buf = await file.arrayBuffer();
@@ -7131,13 +7185,37 @@ function ProfileTab() {
             </div>
             {(p.otherRetIncome||[]).length === 0 && <div style={{fontSize:10,color:'var(--text3)',textAlign:'center',padding:8}}>Rental, dividends, part-time work, spousal support…</div>}
             {(p.otherRetIncome||[]).map((inc,i) => (
-              <div key={inc.id||i} style={{display:'grid',gridTemplateColumns:'1fr 70px 50px 45px 45px 24px',gap:4,marginBottom:4,alignItems:'end'}}>
-                <div className="field" style={{marginBottom:0}}>{i===0 && <label style={{fontSize:8}}>Source</label>}<input value={inc.source} onChange={e=>{const a=[...(p.otherRetIncome||[])];a[i]={...a[i],source:e.target.value};set('otherRetIncome',a);}} placeholder="Rental" style={{fontSize:11}} /></div>
-                <div className="field" style={{marginBottom:0}}>{i===0 && <label style={{fontSize:8}}>$/mth</label>}<input type="number" value={inc.amount} onChange={e=>{const a=[...(p.otherRetIncome||[])];a[i]={...a[i],amount:e.target.value};set('otherRetIncome',a);}} placeholder="2000" style={{fontSize:11}} /></div>
-                <div className="field" style={{marginBottom:0}}>{i===0 && <label style={{fontSize:8}}>↑%/yr</label>}<input type="number" value={inc.appreciation} onChange={e=>{const a=[...(p.otherRetIncome||[])];a[i]={...a[i],appreciation:e.target.value};set('otherRetIncome',a);}} style={{fontSize:11}} /></div>
-                <div className="field" style={{marginBottom:0}}>{i===0 && <label style={{fontSize:8}}>From</label>}<input type="number" value={inc.fromAge} onChange={e=>{const a=[...(p.otherRetIncome||[])];a[i]={...a[i],fromAge:e.target.value};set('otherRetIncome',a);}} style={{fontSize:11}} /></div>
-                <div className="field" style={{marginBottom:0}}>{i===0 && <label style={{fontSize:8}}>To</label>}<input type="number" value={inc.toAge} onChange={e=>{const a=[...(p.otherRetIncome||[])];a[i]={...a[i],toAge:e.target.value};set('otherRetIncome',a);}} style={{fontSize:11}} /></div>
-                <button className="btn-danger" onClick={()=>{const a=[...(p.otherRetIncome||[])];a.splice(i,1);set('otherRetIncome',a);}} style={{padding:'2px 4px',fontSize:10,marginBottom:0,height:28}}>×</button>
+              // Two-row layout — single-row grid overflowed on narrow mobile viewports
+              // (360-400px wide), cutting off the "To" field and delete button. Now:
+              //   Row 1: Source (full width) + delete button
+              //   Row 2: 4 numeric fields in an even grid
+              // Every entry gets its own labels for clarity.
+              <div key={inc.id||i} style={{marginBottom:8,padding:8,background:'var(--bg2)',borderRadius:6,border:'1px solid var(--border)'}}>
+                <div style={{display:'grid',gridTemplateColumns:'1fr 32px',gap:6,marginBottom:6,alignItems:'end'}}>
+                  <div className="field" style={{marginBottom:0}}>
+                    <label style={{fontSize:9}}>Source</label>
+                    <input value={inc.source} onChange={e=>{const a=[...(p.otherRetIncome||[])];a[i]={...a[i],source:e.target.value};set('otherRetIncome',a);}} placeholder="Rental" style={{fontSize:12}} />
+                  </div>
+                  <button className="btn-danger" onClick={()=>{const a=[...(p.otherRetIncome||[])];a.splice(i,1);set('otherRetIncome',a);}} style={{padding:0,fontSize:12,marginBottom:0,height:30,lineHeight:1}}>×</button>
+                </div>
+                <div style={{display:'grid',gridTemplateColumns:'repeat(4, 1fr)',gap:6}}>
+                  <div className="field" style={{marginBottom:0}}>
+                    <label style={{fontSize:9}}>$/mth</label>
+                    <input type="number" value={inc.amount} onChange={e=>{const a=[...(p.otherRetIncome||[])];a[i]={...a[i],amount:e.target.value};set('otherRetIncome',a);}} placeholder="2000" style={{fontSize:12}} />
+                  </div>
+                  <div className="field" style={{marginBottom:0}}>
+                    <label style={{fontSize:9}}>↑%/yr</label>
+                    <input type="number" value={inc.appreciation} onChange={e=>{const a=[...(p.otherRetIncome||[])];a[i]={...a[i],appreciation:e.target.value};set('otherRetIncome',a);}} style={{fontSize:12}} />
+                  </div>
+                  <div className="field" style={{marginBottom:0}}>
+                    <label style={{fontSize:9}}>From age</label>
+                    <input type="number" value={inc.fromAge} onChange={e=>{const a=[...(p.otherRetIncome||[])];a[i]={...a[i],fromAge:e.target.value};set('otherRetIncome',a);}} style={{fontSize:12}} />
+                  </div>
+                  <div className="field" style={{marginBottom:0}}>
+                    <label style={{fontSize:9}}>To age</label>
+                    <input type="number" value={inc.toAge} onChange={e=>{const a=[...(p.otherRetIncome||[])];a[i]={...a[i],toAge:e.target.value};set('otherRetIncome',a);}} style={{fontSize:12}} />
+                  </div>
+                </div>
               </div>
             ))}
           </div>
@@ -8472,9 +8550,11 @@ function Dashboard() {
       }} />
       <LogoMark size={56} />
       <h2 style={{fontSize:22,fontWeight:600,marginBottom:8}}>Welcome to PolicyLens V1.0</h2>
-      <p style={{color:'var(--text2)',maxWidth:480,margin:'0 auto 20px'}}>
-        AI-powered policy analysis • Protection gap scoring • Cash value projections • PDF reports
-      </p>
+
+      {/* Getting-started checklist — replaces the generic tagline with an action-oriented flow */}
+      <div style={{maxWidth:560, margin:'16px auto 20px', textAlign:'left'}}>
+        <GettingStartedChecklist />
+      </div>
 
       {/* ── Camera CTA ── */}
       <div style={{maxWidth:420,margin:'0 auto 20px'}}>
@@ -8532,6 +8612,11 @@ function Dashboard() {
 
   return (
     <div className="fade-in">
+      {/* Getting-started checklist — shows only when profile or policies are
+          incomplete. Auto-hides once the FC has set up the client and added
+          at least one policy. */}
+      <GettingStartedChecklist compact />
+
       <DropZone active={true} onFiles={handleDashDrop} label="📎 Drop or paste any document — client profile, policy contracts, benefit illustrations" />
 
       {showReview && <ReviewSession onClose={()=>setShowReview(false)} />}
@@ -9284,28 +9369,186 @@ function mergeToProfile(extracted, currentProfile, saveProfile) {
     }
   }
 
-  // ── Auto-add Life Assured as dependant if different from Policy Owner ──
-  const liName = (extracted.lifeInsured||'').trim();
-  const ownerName = (extracted.policyOwner||currentProfile.name||'').trim();
-  if(liName && ownerName && !isNameMatch(liName, ownerName)) {
-    const deps = currentProfile.dependants || [];
-    const alreadyExists = deps.some(d => isNameMatch(d.name, liName));
-    if(!alreadyExists) {
-      const newDep = {
-        id: 'dep_' + Date.now() + Math.random().toString(36).slice(2,4),
-        name: liName,
-        relationship: 'Life Assured',
-        dob: extracted.dob || '',
-        gender: extracted.gender || '',
-        smoker: extracted.smoker || '',
-        nationality: extracted.nationality || '',
-        occupation: extracted.occupation || '',
-      };
-      const updatedProfile = {...currentProfile, ...adds, dependants: [...deps, newDep]};
-      saveProfile(updatedProfile);
-      console.log('[Profile Merge] Auto-added life assured as dependant:', liName);
-    }
-  }
+  // ── Auto-add Life Assured as dependant: DISABLED HERE ──
+  // Previously this function silently added the life assured to the profile
+  // dependants list whenever lifeInsured ≠ policyOwner. That caused two
+  // issues: (1) it only ran for the first policy in the first batch because
+  // mergeToProfile is only called once per import, and (2) it never asked the
+  // FC for confirmation, so unrelated life-assured names (e.g. the FC's
+  // demo entry) silently polluted the profile.
+  //
+  // The new behaviour lives in the onAccept flow of BulkVerifyModal in
+  // Policies: after the FC clicks Import, we collect unique lifeInsured names
+  // across ALL accepted policies (where lifeInsured ≠ policyOwner and isn't
+  // already a dependant) and show a single confirmation prompt listing them.
+  // That way the FC sees every candidate from the batch in one place and can
+  // accept or reject them all in one decision.
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MODULE: GETTING_STARTED_CHECKLIST — First-action onboarding prompt
+// ═══════════════════════════════════════════════════════════════
+// Shows at the top of the Dashboard (and replaces the intro tagline on the
+// fully-empty welcome screen) whenever the FC hasn't finished the three
+// critical onboarding steps:
+//   1. Client details (name + DOB + income)
+//   2. First policy (at least one saved policy)
+//   3. Review protection gap (auto-completes when 1 and 2 are done)
+//
+// Once all three are complete, this component renders nothing. It's a pure
+// derived banner — no local state, no persistence. Every reload recomputes
+// from the current policies + clientProfile.
+//
+// The design goal is "tap, tap, done" — the active step is visually
+// emphasized with a gold border and a single primary CTA button. Completed
+// steps show a green check and dim out. Locked steps show a neutral outline.
+function GettingStartedChecklist({ compact = false }) {
+  const { clientProfile, policies, setTab } = useContext(AppCtx);
+
+  // Step completion logic
+  const hasName = !!(clientProfile?.name && String(clientProfile.name).trim());
+  const hasDob = !!(clientProfile?.dob && String(clientProfile.dob).trim());
+  const hasIncome = !!(parseFloat(clientProfile?.annualIncome) > 0 || parseFloat(clientProfile?.monthlyIncome) > 0);
+  const hasProfile = hasName && hasDob && hasIncome;
+  const hasPolicies = policies.length >= 1;
+  const allDone = hasProfile && hasPolicies;
+
+  // If fully onboarded, render nothing
+  if(allDone) return null;
+
+  // First incomplete step is "active" — gets the prominent styling and CTA
+  const activeStep = !hasProfile ? 1 : !hasPolicies ? 2 : 3;
+
+  const GOLD = '#d4a96a';
+  const GREEN = '#5ba8a0';
+
+  const steps = [
+    {
+      n: 1,
+      done: hasProfile,
+      title: 'Client details',
+      desc: hasProfile
+        ? 'Profile complete'
+        : !hasName
+          ? 'Add name, date of birth, income'
+          : !hasDob
+            ? 'Add date of birth and income'
+            : 'Add annual income',
+      action: () => setTab('profile'),
+      actionLabel: 'Set up profile'
+    },
+    {
+      n: 2,
+      done: hasPolicies,
+      title: 'Your first policy',
+      desc: hasPolicies
+        ? `${policies.length} polic${policies.length === 1 ? 'y' : 'ies'} added`
+        : 'Scan a document or enter manually',
+      action: () => setTab('policies'),
+      actionLabel: 'Add a policy',
+      locked: false
+    },
+    {
+      n: 3,
+      done: false, // only true when allDone, in which case we've returned null above
+      title: 'Review protection gap',
+      desc: activeStep === 3
+        ? 'Scroll down to see your dashboard'
+        : 'Unlocks after steps 1 and 2',
+      locked: activeStep !== 3
+    },
+  ];
+
+  return (
+    <div style={{
+      background: 'linear-gradient(135deg, rgba(212,169,106,0.08), rgba(212,169,106,0.02))',
+      border: `1px solid rgba(212,169,106,0.28)`,
+      borderRadius: 14,
+      padding: compact ? '14px 16px' : '18px 20px',
+      marginBottom: compact ? 14 : 20,
+      position: 'relative',
+      overflow: 'hidden',
+    }}>
+      {/* Top accent bar */}
+      <div style={{position:'absolute', top:0, left:0, right:0, height:2, background:`linear-gradient(90deg, ${GOLD}, transparent)`}}></div>
+
+      <div style={{display:'flex', alignItems:'center', gap:8, marginBottom:12}}>
+        <span style={{fontSize:16}}>🚀</span>
+        <div style={{fontSize:11, fontWeight:700, color:GOLD, letterSpacing:'1px', textTransform:'uppercase'}}>
+          Getting Started
+        </div>
+        <div style={{flex:1}}/>
+        <div style={{fontSize:10, color:'var(--text3)'}}>
+          {(hasProfile ? 1 : 0) + (hasPolicies ? 1 : 0)} / 3
+        </div>
+      </div>
+
+      {steps.map((step, i) => {
+        const isActive = activeStep === step.n && !step.done;
+        return (
+          <div key={step.n} style={{
+            display:'flex',
+            alignItems:'center',
+            gap:12,
+            padding: '10px 12px',
+            marginBottom: i < steps.length - 1 ? 6 : 0,
+            background: isActive ? 'rgba(212,169,106,0.08)' : 'transparent',
+            border: isActive ? `1px solid rgba(212,169,106,0.32)` : `1px solid transparent`,
+            borderRadius: 8,
+            opacity: step.locked ? 0.5 : 1,
+            transition: 'all 0.2s',
+          }}>
+            {/* Step number / check */}
+            <div style={{
+              width:26, height:26, borderRadius:'50%',
+              display:'flex', alignItems:'center', justifyContent:'center',
+              background: step.done ? GREEN : isActive ? GOLD : 'var(--bg3)',
+              color: step.done || isActive ? '#0b0f1a' : 'var(--text3)',
+              fontSize: step.done ? 14 : 12,
+              fontWeight: 700,
+              flexShrink: 0,
+              border: step.done ? 'none' : isActive ? 'none' : '1px solid var(--border2)',
+            }}>
+              {step.done ? '✓' : step.n}
+            </div>
+
+            {/* Title + description */}
+            <div style={{flex:1, minWidth:0}}>
+              <div style={{
+                fontSize:13,
+                fontWeight:600,
+                color: step.done ? 'var(--text3)' : isActive ? 'var(--text)' : 'var(--text2)',
+                textDecoration: step.done ? 'line-through' : 'none',
+              }}>
+                {step.title}
+              </div>
+              <div style={{fontSize:10, color:'var(--text3)', marginTop:1}}>
+                {step.desc}
+              </div>
+            </div>
+
+            {/* Action button (active step only) */}
+            {isActive && step.action && (
+              <button onClick={step.action} style={{
+                background: `linear-gradient(135deg, ${GOLD}, #b8935a)`,
+                color:'#0b0f1a',
+                border:'none',
+                padding:'7px 14px',
+                borderRadius:8,
+                fontSize:11,
+                fontWeight:700,
+                cursor:'pointer',
+                flexShrink:0,
+                whiteSpace:'nowrap',
+              }}>
+                {step.actionLabel} →
+              </button>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -11742,6 +11985,70 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         }
         setBulkExtracted(null);
         toast('Imported '+count+' policies','success');
+
+        // ── DEPENDANT CANDIDATE DETECTION ──
+        // After policies are saved, scan the accepted batch for Life Insured
+        // names that appear consistently and don't match the policy owner or
+        // the existing client profile. Group by normalized name, count the
+        // number of policies each name appears on, and surface a single
+        // confirmation prompt listing all candidates. The FC gets one decision
+        // for the whole batch instead of a prompt per policy.
+        try {
+          const normalize = (s) => String(s||'').trim().toLowerCase().replace(/\s+/g,' ');
+          const clientName = normalize(clientProfile?.name);
+          const existingDeps = (clientProfile?.dependants || []).map(d => normalize(d.name)).filter(Boolean);
+          // Map of normalized name → { display, count, sample }
+          const candidates = new Map();
+          for(const p of selected) {
+            const liRaw = (p.lifeInsured || '').trim();
+            const ownerRaw = (p.policyOwner || '').trim();
+            if(!liRaw) continue;
+            const liNorm = normalize(liRaw);
+            const ownerNorm = normalize(ownerRaw);
+            // Skip if life insured equals policy owner (same person)
+            if(ownerNorm && liNorm === ownerNorm) continue;
+            // Skip if life insured is the client themselves
+            if(clientName && liNorm === clientName) continue;
+            // Skip if already in dependants
+            if(existingDeps.includes(liNorm)) continue;
+            // Track
+            if(candidates.has(liNorm)) {
+              candidates.get(liNorm).count++;
+            } else {
+              candidates.set(liNorm, {
+                display: liRaw,
+                count: 1,
+                sample: p, // keep one policy as source for dob/gender/etc
+              });
+            }
+          }
+          if(candidates.size > 0) {
+            const list = Array.from(candidates.values()).sort((a,b) => b.count - a.count);
+            const lines = list.map(c => `• ${c.display}  (on ${c.count} polic${c.count===1?'y':'ies'})`);
+            const plural = list.length === 1 ? 'name' : 'names';
+            const msg = 'Found ' + list.length + ' life assured ' + plural + ' not in your dependants:\n\n' + lines.join('\n') + '\n\nAdd ' + (list.length === 1 ? 'as a dependant' : 'them all as dependants') + '?\n\n(You can edit relationship, DOB, and other details in My Profile afterwards.)';
+            // setTimeout so the toast from the import lands first
+            setTimeout(() => {
+              if(confirm(msg)) {
+                const newDeps = list.map(c => ({
+                  id: 'dep_' + Date.now() + '_' + Math.random().toString(36).slice(2,5),
+                  name: c.display,
+                  relationship: 'Life Assured', // placeholder — FC edits later
+                  dob: c.sample.dob || '',
+                  gender: c.sample.gender || '',
+                  smoker: c.sample.smoker || '',
+                  nationality: c.sample.nationality || '',
+                  occupation: c.sample.occupation || '',
+                }));
+                const updated = {...clientProfile, dependants: [...(clientProfile?.dependants || []), ...newDeps]};
+                saveProfile(updated);
+                toast('Added ' + newDeps.length + ' dependant' + (newDeps.length===1?'':'s') + ' — edit relationship in My Profile', 'success', 5000);
+              }
+            }, 300);
+          }
+        } catch(depErr) {
+          console.warn('[Dependant prompt] Error (non-fatal):', depErr);
+        }
       }} />}
 
       {showForm && <ErrorBoundary onReset={()=>setShowForm(false)}><PolicyFormModal policy={editing||scanResult} onSave={handleFormSave} onClose={handleFormClose} repo={repo} onSaveRepo={saveRepo} onDraftChange={saveDraft} onDraftClear={clearDraft} /></ErrorBoundary>}
