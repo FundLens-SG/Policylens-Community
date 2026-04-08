@@ -1477,7 +1477,14 @@ async function pdfToImages(pdfDoc, maxPages=12) {
 // Extraction pipeline version stamp — bump this whenever EXTRACT_PROMPT, post-processing
 // logic, or schema changes. All previously-cached results become invalid, forcing a fresh
 // AI call. Protects users from seeing stale extractions after upgrades.
-const EXTRACT_PIPELINE_VERSION = 'v7-2026-04-06-income-classification';
+//
+// v8 bump: Quick Verify feature. The EXTRACT_PROMPT now asks the AI to populate
+// a _confidence array, and post-processing normalizes it into _extractConfidence.
+// Pre-v8 cached extractions don't have this field, so every card would appear
+// CLEAN even if the FC never actually reviewed anything. Bumping the version
+// forces a re-extraction next time those same files are uploaded, and the
+// one-time cleanup in App init purges the stale entries from IndexedDB.
+const EXTRACT_PIPELINE_VERSION = 'v8-2026-04-08-quick-verify-confidence';
 
 // SHA-256 hash of a File's bytes — used as content-addressable cache key.
 async function hashFile(file) {
@@ -5101,6 +5108,12 @@ function App() {
   const [clientProfile, setClientProfile] = useState({name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[]});
   const [loading, setLoading] = useState(true);
   const [repoSource, setRepoSource] = useState('loading'); // 'supabase' | 'local' | 'loading'
+  // ── PRESENT MODE ──
+  // When true, the whole app swaps to a presentation-grade UI: big numbers,
+  // stripped navigation, no editing surfaces. Designed for use during live
+  // client meetings so the FC can show portfolio summaries without exposing
+  // working notes or spreadsheet-style forms.
+  const [presentMode, setPresentMode] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -5188,6 +5201,44 @@ function App() {
     return () => window.removeEventListener('policylens-keys-synced', handler);
   }, []);
 
+  // ── ONE-TIME CLEANUP: purge stale extractCache entries from old pipeline versions ──
+  // The extractCache uses EXTRACT_PIPELINE_VERSION as a key prefix, so when the
+  // version is bumped (e.g. for the Quick Verify confidence rollout) all old
+  // entries become unreachable — they'll never match a new cache key lookup.
+  // Without this sweep they'd sit in IndexedDB forever consuming storage.
+  //
+  // Runs in the background on app mount. Fire-and-forget: never blocks UI,
+  // never shows an error to the user. If it fails, the stale entries just stay
+  // until the next cleanup pass or storage pressure forces them out.
+  useEffect(() => {
+    (async () => {
+      try {
+        const all = await dbGetAll('extractCache').catch(()=>[]);
+        if(!Array.isArray(all) || all.length === 0) return;
+        const stale = all.filter(e => {
+          const k = e && e.key;
+          if(typeof k !== 'string') return true; // bad entry — purge
+          // Keys are shaped: "<version>:<hash1>|<hash2>|…"
+          // If the prefix doesn't match the current version, it's stale.
+          return !k.startsWith(EXTRACT_PIPELINE_VERSION + ':');
+        });
+        if(stale.length === 0) return;
+        console.log('[ExtractCache] Purging', stale.length, 'stale entries from old pipeline versions');
+        const db = await openDB();
+        const tx = db.transaction('extractCache', 'readwrite');
+        const store = tx.objectStore('extractCache');
+        for(const entry of stale) {
+          try { store.delete(entry.key); } catch(e) {}
+        }
+        tx.oncomplete = () => console.log('[ExtractCache] ✓ Purged', stale.length, 'stale entries');
+        tx.onerror = e => console.warn('[ExtractCache] Purge transaction error:', e);
+      } catch(err) {
+        // Never surface cleanup errors — stale entries will be retried next load
+        console.warn('[ExtractCache] Cleanup skipped:', err?.message || err);
+      }
+    })();
+  }, []);
+
   // Repo reload triggered manually via refreshRepo or on initial load
 
   const savePolicy = async (p) => {
@@ -5268,11 +5319,27 @@ function App() {
     }
   };
 
-  const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,deletePolicy,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,tab,setTab};
+  const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,deletePolicy,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,tab,setTab,presentMode,setPresentMode};
 
   if(loading) return <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh'}}>
     <div style={{textAlign:'center'}}><LogoMark size={36} /><div style={{color:'var(--text2)',fontSize:14,marginTop:8}}>Loading PolicyLens…</div></div>
   </div>;
+
+  // ── PRESENT MODE: full-screen presentation UI ──
+  // Replaces the entire normal app shell (Header + tab bar + content) with
+  // a stripped-down presentation view showing only summary cards. ToastContainer
+  // stays mounted so background notifications still work if they fire. Modals
+  // are unmounted so no edit surfaces can surprise-pop during a meeting.
+  if(presentMode) {
+    return (
+      <AppCtx.Provider value={ctx}>
+        <ToastContainer />
+        <ErrorBoundary key="present" onReset={()=>setPresentMode(false)}>
+          <PresentMode />
+        </ErrorBoundary>
+      </AppCtx.Provider>
+    );
+  }
 
   return (
     <AppCtx.Provider value={ctx}>
@@ -5291,6 +5358,436 @@ function App() {
       </div>
       <OrientationLock />
     </AppCtx.Provider>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MODULE: PRESENT MODE — Full-screen presentation view for client meetings
+// ═══════════════════════════════════════════════════════════════
+// When the FC clicks "Present" in the Header, the entire app swaps to this
+// view. It hides forms, notes, settings, and tab navigation, and shows only
+// large-format summary cards designed to be read across a table during a live
+// client conversation.
+//
+// Design principles:
+//   • BIG numbers. Baseline font is 16-18px; hero numbers are 48-72px.
+//   • Generous spacing. Cards breathe.
+//   • Navy + gold palette matching the PDF report so there's brand continuity.
+//   • No edit surfaces. Every form, every draft field, every "working" area
+//     is removed. Only read-only summaries.
+//   • Single scroll. No tabs, no sub-navigation. Everything visible by scrolling.
+//   • One exit path. Top-right "Exit Present" button only.
+//
+// Data sources (all optional — degrades gracefully):
+//   • policies, clientProfile from AppCtx
+//   • window.__retirementLiteCache if Dashboard has been visited, for
+//     retirement adequacy metrics
+//
+// The component intentionally re-computes protection coverage inline rather
+// than reading from a cache because the calc is cheap (single pass over
+// policies) and avoids coupling Present mode to Dashboard's render lifecycle.
+function PresentMode() {
+  const {policies, clientProfile, clientName, setPresentMode} = useContext(AppCtx);
+
+  // ── Derived metrics — all inline, no external dependencies ──
+  const active = policies.filter(p =>
+    p.status !== 'lapsed' && p.status !== 'surrendered' && p.status !== 'matured'
+  );
+
+  // Total coverage: death SA across all active protection-bearing policies.
+  // Uses annualizedPremium-style handling: reads pol.sumAssured directly plus
+  // any death-rider SA. ISPs and unit trusts are correctly excluded because
+  // they have no death benefit.
+  let totalDeathSA = 0, totalCI = 0, totalTPD = 0, totalDI = 0;
+  let hasISP = false, hasLife = false, hasCI = false, hasTPD = false, hasDI = false;
+  active.forEach(pol => {
+    const sub = pol.subType || '';
+    const cat = pol.category || '';
+    const sa = parseFloat(pol.sumAssured) || 0;
+    // Base policy contributions
+    if(cat === 'protection' && !['Personal Accident','Critical Illness','Disability Income'].includes(sub)) {
+      const mult = parseFloat(pol.saMultiplier) || 1;
+      const multEnd = parseInt(pol.multiplierEndAge) || 70;
+      const clientAge = clientProfile?.dob ? Math.floor((Date.now() - new Date(clientProfile.dob).getTime())/31557600000) : 35;
+      const effSA = clientAge < multEnd ? sa * mult : sa;
+      totalDeathSA += effSA;
+      totalTPD += effSA; // most WL/term include TPD by default
+      hasLife = true;
+      if(effSA > 0) hasTPD = true;
+    }
+    if(sub === 'Critical Illness') { totalCI += sa; hasCI = true; }
+    if(sub === 'Disability Income') { totalDI += parseFloat(pol.diMonthlyBenefit) || 0; hasDI = true; }
+    if(sub === 'Integrated Shield Plan') hasISP = true;
+    // Rider contributions
+    (pol.riders || []).forEach(rd => {
+      const rsa = parseFloat(rd.sa) || 0;
+      if(rd.type === 'death')       { totalDeathSA += rsa; if(rsa > 0) hasLife = true; }
+      else if(rd.type === 'tpd')    { totalTPD += rsa; if(rsa > 0) hasTPD = true; }
+      else if(rd.type === 'ci')     { totalCI += rsa; if(rsa > 0) hasCI = true; }
+      else if(rd.type === 'di')     { totalDI += rsa; if(rsa > 0) hasDI = true; }
+    });
+  });
+
+  // Annual premium (aggregated, normalized to yearly)
+  const annualPrem = active.reduce((s, pol) => {
+    // Exclude single-premium policies from the annual commitment number
+    if(pol.premSingle || pol.premiumStructure === 'Single Premium' || pol.premFrequency === 'single') return s;
+    const raw = parseFloat(pol.annualPremium) || 0;
+    return s + (pol.premFrequency === 'monthly' ? raw * 12 : raw);
+  }, 0);
+
+  // Annual income for protection-need calc
+  const annualIncome = parseFloat(clientProfile?.annualIncome) || ((parseFloat(clientProfile?.monthlyIncome) || 0) * 12);
+  const premiumPctOfIncome = annualIncome > 0 ? (annualPrem / annualIncome * 100) : 0;
+
+  // LIA-style required coverage (simplified)
+  const reqDeath = annualIncome > 0 ? annualIncome * 10 : 500000;
+  const reqTPD = annualIncome > 0 ? annualIncome * 10 : 500000;
+  const reqCI = annualIncome > 0 ? annualIncome * 5 : 250000;
+  const reqDI = annualIncome > 0 ? Math.round(annualIncome / 12 * 0.75) : 3000;
+
+  // Protection score (simplified LIA framework)
+  const coverPct = (have, need) => need === 0 ? 100 : Math.min(100, have / need * 100);
+  const score = Math.round(
+    coverPct(totalDeathSA, reqDeath) * 0.25 +
+    coverPct(totalTPD, reqTPD) * 0.15 +
+    coverPct(totalCI, reqCI) * 0.25 +
+    coverPct(totalDI, reqDI) * 0.15 +
+    (hasISP ? 20 : 0)
+  );
+  const scoreColor = score >= 80 ? '#5ba8a0' : score >= 50 ? '#d4a96a' : '#dc5a50';
+  const scoreLabel = score >= 80 ? 'WELL PROTECTED' : score >= 50 ? 'PARTIALLY PROTECTED' : 'SIGNIFICANTLY UNDERPROTECTED';
+
+  // Retirement adequacy from window cache (set by Dashboard)
+  let retData = null;
+  try {
+    if(typeof window !== 'undefined' && window.__retirementLiteCache) {
+      const rc = window.__retirementLiteCache;
+      retData = {
+        desired: rc.desiredMonthly || 0,
+        cpf: rc.cpfPayout?.mid || 0,
+        policy: (rc.policyMonthlyIncome || 0) + (rc.policyDividends || 0),
+        other: rc.otherMonthly || 0,
+      };
+      retData.projected = retData.cpf + retData.policy + retData.other;
+      retData.gap = Math.max(0, retData.desired - retData.projected);
+      retData.pct = retData.desired > 0 ? Math.min(100, Math.round(retData.projected / retData.desired * 100)) : 0;
+    }
+  } catch(e) { /* no cache — skip retirement card */ }
+
+  // ── Formatting helpers ──
+  const bigFmt = n => {
+    if(!n || n < 0) return '—';
+    if(n >= 1e6) return '$' + (n/1e6).toFixed(n >= 1e7 ? 1 : 2) + 'M';
+    if(n >= 1e3) return '$' + Math.round(n/1e3) + 'k';
+    return '$' + Math.round(n);
+  };
+  const pctFmt = n => Math.round(n || 0) + '%';
+
+  // ── Coverage breakdown row definitions ──
+  const coverageBars = [
+    { label: 'Life / Death', have: totalDeathSA, need: reqDeath, ok: hasLife },
+    { label: 'TPD',           have: totalTPD,     need: reqTPD,   ok: hasTPD  },
+    { label: 'Critical Illness', have: totalCI, need: reqCI, ok: hasCI  },
+    { label: 'Hospitalisation',  have: hasISP ? 1 : 0, need: 1,  ok: hasISP, isFlag: true },
+    { label: 'Disability/mth',   have: totalDI, need: reqDI, ok: hasDI  },
+  ];
+
+  // Top policies by premium (simplified, no edit)
+  const topByPremium = [...active]
+    .sort((a, b) => {
+      const ap = (a.premFrequency === 'monthly' ? (parseFloat(a.annualPremium)||0)*12 : (parseFloat(a.annualPremium)||0));
+      const bp = (b.premFrequency === 'monthly' ? (parseFloat(b.annualPremium)||0)*12 : (parseFloat(b.annualPremium)||0));
+      return bp - ap;
+    })
+    .slice(0, 5);
+
+  // ── Exit confirmation: long-press or double-tap would be ideal, but for v1
+  //    a simple confirm() is safer against accidental exits during meetings ──
+  const handleExit = () => {
+    setPresentMode(false);
+  };
+
+  // ── Styling: navy bg, gold accents, generous padding ──
+  const NAVY = '#0e1929';
+  const NAVY_LIGHT = '#1a2740';
+  const GOLD = '#d4a96a';
+  const GOLD_DARK = '#b8935a';
+  const CREAM = '#f4ead5';
+  const MUTED = '#8a9ab5';
+
+  return (
+    <div style={{
+      position:'fixed', top:0, left:0, right:0, bottom:0,
+      background: `linear-gradient(180deg, ${NAVY} 0%, #0a1220 100%)`,
+      color: CREAM,
+      fontFamily: 'system-ui, -apple-system, sans-serif',
+      overflowY: 'auto',
+      WebkitOverflowScrolling: 'touch',
+      zIndex: 9998,
+    }}>
+      {/* ── TOP BAR ── */}
+      <div style={{
+        display:'flex', justifyContent:'space-between', alignItems:'center',
+        padding:'20px clamp(16px, 4vw, 40px) 16px',
+        borderBottom: `1px solid rgba(212,169,106,0.18)`,
+        position:'sticky', top:0, zIndex:2,
+        background: `linear-gradient(180deg, ${NAVY} 85%, transparent 100%)`,
+        backdropFilter:'blur(6px)',
+      }}>
+        <div>
+          <div style={{fontSize:11, fontWeight:600, color:GOLD, letterSpacing:'1.5px', textTransform:'uppercase', marginBottom:2}}>
+            Portfolio Summary
+          </div>
+          <div style={{fontSize:'clamp(20px, 4vw, 28px)', fontWeight:700, color:CREAM, letterSpacing:'-0.3px'}}>
+            {clientProfile?.name || clientName || 'Client Portfolio'}
+          </div>
+        </div>
+        <button onClick={handleExit} style={{
+          background:'rgba(212,169,106,0.1)',
+          color:GOLD,
+          border:`1px solid rgba(212,169,106,0.4)`,
+          padding:'10px 18px',
+          borderRadius:10,
+          fontSize:13,
+          fontWeight:600,
+          cursor:'pointer',
+          letterSpacing:'0.3px',
+          display:'flex', alignItems:'center', gap:6,
+        }}>
+          <span style={{fontSize:14}}>✕</span> Exit Present
+        </button>
+      </div>
+
+      {/* ── CONTENT ── */}
+      <div style={{padding:'clamp(20px, 4vw, 40px)', maxWidth:1100, margin:'0 auto'}}>
+
+        {/* HERO ROW: 3 big cards */}
+        <div style={{
+          display:'grid',
+          gridTemplateColumns:'repeat(auto-fit, minmax(280px, 1fr))',
+          gap:20,
+          marginBottom:28,
+        }}>
+          {/* Card 1: Total Coverage */}
+          <div style={{
+            background:NAVY_LIGHT,
+            border:`1px solid rgba(212,169,106,0.25)`,
+            borderRadius:16,
+            padding:'28px 24px',
+            position:'relative',
+            overflow:'hidden',
+          }}>
+            <div style={{position:'absolute', top:0, left:0, right:0, height:3, background:`linear-gradient(90deg, ${GOLD}, ${GOLD_DARK})`}}></div>
+            <div style={{fontSize:11, fontWeight:700, color:GOLD, letterSpacing:'1.5px', textTransform:'uppercase', marginBottom:10}}>
+              Total Coverage
+            </div>
+            <div style={{fontSize:'clamp(40px, 7vw, 56px)', fontWeight:800, color:CREAM, lineHeight:1, letterSpacing:'-1.5px'}}>
+              {bigFmt(totalDeathSA)}
+            </div>
+            <div style={{fontSize:13, color:MUTED, marginTop:10}}>
+              {active.length} active polic{active.length === 1 ? 'y' : 'ies'}
+            </div>
+          </div>
+
+          {/* Card 2: Annual Premium */}
+          <div style={{
+            background:NAVY_LIGHT,
+            border:`1px solid rgba(212,169,106,0.25)`,
+            borderRadius:16,
+            padding:'28px 24px',
+            position:'relative',
+            overflow:'hidden',
+          }}>
+            <div style={{position:'absolute', top:0, left:0, right:0, height:3, background:`linear-gradient(90deg, ${GOLD}, ${GOLD_DARK})`}}></div>
+            <div style={{fontSize:11, fontWeight:700, color:GOLD, letterSpacing:'1.5px', textTransform:'uppercase', marginBottom:10}}>
+              Annual Commitment
+            </div>
+            <div style={{fontSize:'clamp(40px, 7vw, 56px)', fontWeight:800, color:CREAM, lineHeight:1, letterSpacing:'-1.5px'}}>
+              {bigFmt(annualPrem)}
+            </div>
+            <div style={{fontSize:13, color:MUTED, marginTop:10}}>
+              {annualPrem > 0 ? '$' + Math.round(annualPrem/12).toLocaleString() + ' / month' : 'No recurring premiums'}
+              {premiumPctOfIncome > 0 && <span style={{color: premiumPctOfIncome > 15 ? '#e09168' : MUTED}}> · {premiumPctOfIncome.toFixed(1)}% of income</span>}
+            </div>
+          </div>
+
+          {/* Card 3: Protection Score */}
+          <div style={{
+            background:NAVY_LIGHT,
+            border:`1px solid ${scoreColor}40`,
+            borderRadius:16,
+            padding:'28px 24px',
+            position:'relative',
+            overflow:'hidden',
+          }}>
+            <div style={{position:'absolute', top:0, left:0, right:0, height:3, background:scoreColor}}></div>
+            <div style={{fontSize:11, fontWeight:700, color:scoreColor, letterSpacing:'1.5px', textTransform:'uppercase', marginBottom:10}}>
+              Protection Score
+            </div>
+            <div style={{display:'flex', alignItems:'baseline', gap:8}}>
+              <div style={{fontSize:'clamp(48px, 8vw, 72px)', fontWeight:800, color:scoreColor, lineHeight:1, letterSpacing:'-2px'}}>
+                {score}
+              </div>
+              <div style={{fontSize:18, color:MUTED, fontWeight:500}}>/ 100</div>
+            </div>
+            <div style={{fontSize:11, color:scoreColor, marginTop:10, fontWeight:700, letterSpacing:'0.5px'}}>
+              {scoreLabel}
+            </div>
+          </div>
+        </div>
+
+        {/* ── COVERAGE BREAKDOWN ── */}
+        <div style={{
+          background:NAVY_LIGHT,
+          border:`1px solid rgba(212,169,106,0.2)`,
+          borderRadius:16,
+          padding:'24px 28px',
+          marginBottom:28,
+        }}>
+          <div style={{fontSize:11, fontWeight:700, color:GOLD, letterSpacing:'1.5px', textTransform:'uppercase', marginBottom:20}}>
+            Coverage Breakdown
+          </div>
+          {coverageBars.map((row, i) => {
+            const pct = row.isFlag ? (row.ok ? 100 : 0) : coverPct(row.have, row.need);
+            const rowColor = pct >= 80 ? '#5ba8a0' : pct >= 50 ? '#d4a96a' : '#dc5a50';
+            return (
+              <div key={row.label} style={{marginBottom: i < coverageBars.length - 1 ? 18 : 0}}>
+                <div style={{display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:6}}>
+                  <div style={{display:'flex', alignItems:'center', gap:8}}>
+                    <span style={{fontSize:14, color: row.ok ? rowColor : MUTED}}>{row.ok ? '✓' : '○'}</span>
+                    <span style={{fontSize:15, fontWeight:600, color:CREAM}}>{row.label}</span>
+                  </div>
+                  <div style={{fontSize:13, color:MUTED}}>
+                    {row.isFlag ? (
+                      <span style={{color:rowColor, fontWeight:600}}>{row.ok ? 'Covered' : 'Not held'}</span>
+                    ) : (
+                      <>
+                        <span style={{color:CREAM, fontWeight:700}}>{bigFmt(row.have)}</span>
+                        <span style={{margin:'0 6px'}}>/</span>
+                        <span>{bigFmt(row.need)}</span>
+                        <span style={{marginLeft:10, color:rowColor, fontWeight:600}}>{pctFmt(pct)}</span>
+                      </>
+                    )}
+                  </div>
+                </div>
+                <div style={{height:6, background:'rgba(255,255,255,0.08)', borderRadius:3, overflow:'hidden'}}>
+                  <div style={{
+                    height:'100%',
+                    width: pct + '%',
+                    background: rowColor,
+                    borderRadius:3,
+                    transition:'width 0.8s cubic-bezier(0.4, 0, 0.2, 1)',
+                  }}></div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        {/* ── RETIREMENT ADEQUACY (if data available) ── */}
+        {retData && retData.desired > 0 && (
+          <div style={{
+            background:NAVY_LIGHT,
+            border:`1px solid rgba(212,169,106,0.2)`,
+            borderRadius:16,
+            padding:'24px 28px',
+            marginBottom:28,
+          }}>
+            <div style={{fontSize:11, fontWeight:700, color:GOLD, letterSpacing:'1.5px', textTransform:'uppercase', marginBottom:20}}>
+              Retirement Readiness
+            </div>
+            <div style={{display:'grid', gridTemplateColumns:'1fr 1fr', gap:24, marginBottom:20}}>
+              <div>
+                <div style={{fontSize:11, color:MUTED, textTransform:'uppercase', letterSpacing:'1px', marginBottom:6}}>Desired Monthly</div>
+                <div style={{fontSize:'clamp(28px, 5vw, 38px)', fontWeight:700, color:CREAM, lineHeight:1}}>
+                  ${Math.round(retData.desired).toLocaleString()}
+                </div>
+              </div>
+              <div>
+                <div style={{fontSize:11, color:MUTED, textTransform:'uppercase', letterSpacing:'1px', marginBottom:6}}>Projected Monthly</div>
+                <div style={{fontSize:'clamp(28px, 5vw, 38px)', fontWeight:700, color:retData.pct >= 80 ? '#5ba8a0' : retData.pct >= 50 ? GOLD : '#dc5a50', lineHeight:1}}>
+                  ${Math.round(retData.projected).toLocaleString()}
+                </div>
+              </div>
+            </div>
+            {/* Adequacy bar */}
+            <div style={{marginBottom:12}}>
+              <div style={{display:'flex', justifyContent:'space-between', fontSize:11, color:MUTED, marginBottom:4}}>
+                <span>ADEQUACY</span>
+                <span style={{color: retData.pct >= 80 ? '#5ba8a0' : retData.pct >= 50 ? GOLD : '#dc5a50', fontWeight:700}}>{retData.pct}%</span>
+              </div>
+              <div style={{height:10, background:'rgba(255,255,255,0.08)', borderRadius:5, overflow:'hidden'}}>
+                <div style={{
+                  height:'100%',
+                  width: retData.pct + '%',
+                  background: retData.pct >= 80 ? '#5ba8a0' : retData.pct >= 50 ? GOLD : '#dc5a50',
+                  borderRadius:5,
+                  transition:'width 1s cubic-bezier(0.4, 0, 0.2, 1)',
+                }}></div>
+              </div>
+            </div>
+            {/* Composition breakdown */}
+            <div style={{display:'flex', gap:16, fontSize:12, color:MUTED, flexWrap:'wrap'}}>
+              {retData.cpf > 0 && <span>CPF LIFE: <strong style={{color:CREAM}}>${Math.round(retData.cpf).toLocaleString()}/mo</strong></span>}
+              {retData.policy > 0 && <span>Policies: <strong style={{color:CREAM}}>${Math.round(retData.policy).toLocaleString()}/mo</strong></span>}
+              {retData.other > 0 && <span>Other: <strong style={{color:CREAM}}>${Math.round(retData.other).toLocaleString()}/mo</strong></span>}
+            </div>
+            {retData.gap > 0 && (
+              <div style={{marginTop:14, padding:'10px 14px', background:'rgba(220,90,80,0.1)', borderRadius:8, borderLeft:`3px solid #dc5a50`}}>
+                <span style={{fontSize:12, color:MUTED}}>Shortfall: </span>
+                <span style={{fontSize:14, fontWeight:700, color:'#dc5a50'}}>${Math.round(retData.gap).toLocaleString()} / month</span>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── TOP POLICIES ── */}
+        {topByPremium.length > 0 && (
+          <div style={{
+            background:NAVY_LIGHT,
+            border:`1px solid rgba(212,169,106,0.2)`,
+            borderRadius:16,
+            padding:'24px 28px',
+            marginBottom:28,
+          }}>
+            <div style={{fontSize:11, fontWeight:700, color:GOLD, letterSpacing:'1.5px', textTransform:'uppercase', marginBottom:20}}>
+              Top Policies by Premium
+            </div>
+            {topByPremium.map((pol, i) => {
+              const prem = pol.premFrequency === 'monthly' ? (parseFloat(pol.annualPremium)||0)*12 : (parseFloat(pol.annualPremium)||0);
+              return (
+                <div key={pol.id || i} style={{
+                  display:'flex', justifyContent:'space-between', alignItems:'center',
+                  padding:'14px 0',
+                  borderTop: i > 0 ? '1px solid rgba(212,169,106,0.1)' : 'none',
+                }}>
+                  <div style={{minWidth:0, flex:1}}>
+                    <div style={{fontSize:15, fontWeight:600, color:CREAM, marginBottom:2, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>
+                      {pol.productName || pol.policyName || 'Unnamed Policy'}
+                    </div>
+                    <div style={{fontSize:12, color:MUTED}}>
+                      {pol.insurer || 'Unknown'} · {pol.subType || pol.category || '—'}
+                    </div>
+                  </div>
+                  <div style={{textAlign:'right', marginLeft:12, flexShrink:0}}>
+                    <div style={{fontSize:15, fontWeight:700, color:GOLD}}>
+                      ${Math.round(prem).toLocaleString()}
+                    </div>
+                    <div style={{fontSize:10, color:MUTED}}>per year</div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* ── FOOTER ── */}
+        <div style={{textAlign:'center', fontSize:10, color:MUTED, padding:'20px 0 40px', letterSpacing:'0.5px'}}>
+          PolicyLens · Prepared {new Date().toLocaleDateString('en-SG',{day:'numeric',month:'long',year:'numeric'})}
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -5386,7 +5883,7 @@ const OrientationLock = memo(function OrientationLock() {
 // ═══════════════════════════════════════════════════════════════
 
 function Header() {
-  const {tab,setTab,policies,clientName,clientProfile,savePolicy,deletePolicy,saveProfile} = useContext(AppCtx);
+  const {tab,setTab,policies,clientName,clientProfile,savePolicy,deletePolicy,saveProfile,setPresentMode} = useContext(AppCtx);
   const loadRef = useRef(null);
   const doSave = () => {
     const data = {version:'PolicyLens_V1',exportedAt:new Date().toISOString(),clientName:clientProfile?.name||clientName||'',clientProfile,policies};
@@ -5441,6 +5938,11 @@ function Header() {
             title="Guide"
             style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.2)',width:28,height:28,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:13,fontWeight:700,flexShrink:0}}>
             ?
+          </button>
+          <button onClick={()=>setPresentMode(true)} disabled={policies.length===0}
+            title="Present mode — full-screen client view"
+            style={{background:policies.length===0?'var(--bg3)':'linear-gradient(135deg,#d4a96a,#b8935a)',color:policies.length===0?'var(--text3)':'#0b0f1a',border:'1px solid rgba(212,169,106,.3)',padding:'0 10px',height:28,borderRadius:14,display:'flex',alignItems:'center',justifyContent:'center',cursor:policies.length===0?'not-allowed':'pointer',fontSize:11,fontWeight:700,flexShrink:0,opacity:policies.length===0?.4:1,gap:4}}>
+            <span style={{fontSize:13}}>▶</span> Present
           </button>
           <button onClick={async()=>{
             if(!confirm('⚠️ WIPE PORTFOLIO DATA?\n\nThis will permanently delete:\n• All policies\n• Client profile (name, NRIC, dependants)\n• Saved drafts\n• Scan cache\n\nYour API keys and sign-in will be preserved.\n\nThis cannot be undone.')) return;
