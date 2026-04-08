@@ -5578,6 +5578,99 @@ function PresentMode() {
     })
     .slice(0, 5);
 
+  // ── ACTION-REQUIRED GAP DETAILS ──
+  // Extract the shortfalls from the coverageBars data in a form the FC can
+  // point at and say "these are the three things we should talk about
+  // today". Sorted by severity (biggest absolute shortfall first), capped
+  // at 4 rows so the card stays focused.
+  const gapDetails = coverageBars
+    .filter(row => !row.isFlag && row.have < row.need)
+    .map(row => ({
+      label: row.label,
+      shortfall: Math.max(0, row.need - row.have),
+      have: row.have,
+      need: row.need,
+      pct: row.need > 0 ? Math.round(row.have / row.need * 100) : 0,
+    }))
+    .sort((a, b) => b.shortfall - a.shortfall)
+    .slice(0, 4);
+  // Add the ISP flag as a dedicated row when missing — it's binary but
+  // crucial, and the FC always wants to surface "no hospital cover" as a
+  // conversation starter.
+  if(!hasISP) {
+    gapDetails.unshift({
+      label: 'Hospital Coverage',
+      shortfall: 0,
+      isFlag: true,
+      pct: 0,
+    });
+  }
+
+  // ── PREMIUM ALLOCATION BY CATEGORY ──
+  // Simple sum of annualized premium per category. Used for a horizontal
+  // stacked bar showing where the client's money is going. We exclude
+  // single-premium policies from the category roll-up because a one-time
+  // $100k investment would drown out recurring commitments.
+  const categoryAlloc = {};
+  active.forEach(pol => {
+    if(pol.premSingle || pol.premiumStructure === 'Single Premium' || pol.premFrequency === 'single') return;
+    const cat = pol.category || 'other';
+    const raw = parseFloat(pol.annualPremium) || 0;
+    const ann = pol.premFrequency === 'monthly' ? raw * 12 : raw;
+    if(ann > 0) categoryAlloc[cat] = (categoryAlloc[cat] || 0) + ann;
+  });
+  const catTotal = Object.values(categoryAlloc).reduce((s, v) => s + v, 0);
+  const CATEGORY_LABELS = {
+    protection: 'Protection',
+    health: 'Health / Medical',
+    savings: 'Savings / Endowment',
+    investment: 'Investment',
+    retirement: 'Retirement',
+    maternity: 'Maternity',
+    cash_investments: 'Cash Investments',
+    other_assets: 'Other Assets',
+    other: 'Other',
+  };
+  const CATEGORY_COLORS = {
+    protection: '#5b8fd9',
+    health: '#c97b9a',
+    savings: '#5ba8a0',
+    investment: '#9d8abf',
+    retirement: '#d4a96a',
+    maternity: '#e09168',
+    cash_investments: '#6c8ab0',
+    other_assets: '#7a7a8c',
+    other: '#7a7a8c',
+  };
+  const categoryRows = Object.entries(categoryAlloc)
+    .map(([key, amt]) => ({
+      key,
+      label: CATEGORY_LABELS[key] || key,
+      color: CATEGORY_COLORS[key] || '#7a7a8c',
+      amt,
+      pct: catTotal > 0 ? (amt / catTotal * 100) : 0,
+    }))
+    .sort((a, b) => b.amt - a.amt);
+
+  // ── INSURER CONCENTRATION ──
+  // Top 3 insurers by share of annualized premium. Useful FC talking point
+  // — concentration risk, counterparty exposure, diversification
+  // opportunities. Only computed when we have 2+ active policies worth
+  // showing, otherwise the card is meaningless.
+  const insurerAlloc = {};
+  active.forEach(pol => {
+    if(pol.premSingle || pol.premiumStructure === 'Single Premium' || pol.premFrequency === 'single') return;
+    const ins = pol.insurer || 'Unknown';
+    const raw = parseFloat(pol.annualPremium) || 0;
+    const ann = pol.premFrequency === 'monthly' ? raw * 12 : raw;
+    if(ann > 0) insurerAlloc[ins] = (insurerAlloc[ins] || 0) + ann;
+  });
+  const insurerTotal = Object.values(insurerAlloc).reduce((s, v) => s + v, 0);
+  const insurerRows = Object.entries(insurerAlloc)
+    .map(([name, amt]) => ({ name, amt, pct: insurerTotal > 0 ? (amt / insurerTotal * 100) : 0 }))
+    .sort((a, b) => b.amt - a.amt)
+    .slice(0, 5);
+
   // ── Exit confirmation: long-press or double-tap would be ideal, but for v1
   //    a simple confirm() is safer against accidental exits during meetings ──
   const handleExit = () => {
@@ -5815,6 +5908,161 @@ function PresentMode() {
                 <span style={{fontSize:14, fontWeight:700, color:'#dc5a50'}}>${Math.round(retData.gap).toLocaleString()} / month</span>
               </div>
             )}
+          </div>
+        )}
+
+        {/* ── ACTION REQUIRED ── */}
+        {/* The "3 things we should talk about today" card. Biggest
+            conversation driver in any review meeting. Surfaces the largest
+            gaps with specific dollar shortfalls so the client sees concrete
+            numbers, not abstractions. */}
+        {gapDetails.length > 0 && (
+          <div style={{
+            background:NAVY_LIGHT,
+            border:`1px solid rgba(220,90,80,0.28)`,
+            borderRadius:16,
+            padding:'24px 28px',
+            marginBottom:28,
+            position:'relative',
+            overflow:'hidden',
+          }}>
+            <div style={{position:'absolute', top:0, left:0, right:0, height:2, background:'#dc5a50'}}></div>
+            <div style={{fontSize:11, fontWeight:700, color:'#dc5a50', letterSpacing:'1.5px', textTransform:'uppercase', marginBottom:6}}>
+              Action Required
+            </div>
+            <div style={{fontSize:11, color:MUTED, marginBottom:18}}>
+              Priorities worth addressing in your next policy review
+            </div>
+            {gapDetails.map((row, i) => (
+              <div key={row.label} style={{
+                display:'flex',
+                justifyContent:'space-between',
+                alignItems:'flex-start',
+                padding:'12px 0',
+                borderTop: i > 0 ? '1px solid rgba(220,90,80,0.12)' : 'none',
+              }}>
+                <div style={{flex:1, minWidth:0, marginRight:12}}>
+                  <div style={{fontSize:14, fontWeight:600, color:CREAM, marginBottom:3}}>
+                    {row.label}
+                  </div>
+                  <div style={{fontSize:11, color:MUTED}}>
+                    {row.isFlag
+                      ? 'No Integrated Shield Plan currently held — essential for private hospital access'
+                      : `Currently covered at ${bigFmt(row.have)} — ${row.pct}% of LIA benchmark`
+                    }
+                  </div>
+                </div>
+                <div style={{textAlign:'right', flexShrink:0}}>
+                  {row.isFlag ? (
+                    <div style={{fontSize:11, fontWeight:700, color:'#dc5a50', padding:'4px 10px', background:'rgba(220,90,80,0.12)', borderRadius:6, whiteSpace:'nowrap'}}>
+                      NOT HELD
+                    </div>
+                  ) : (
+                    <>
+                      <div style={{fontSize:11, color:MUTED, marginBottom:2}}>Shortfall</div>
+                      <div style={{fontSize:17, fontWeight:700, color:'#dc5a50', lineHeight:1}}>
+                        +{bigFmt(row.shortfall)}
+                      </div>
+                    </>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* ── PREMIUM ALLOCATION ── */}
+        {/* Where the client's money is going. Horizontal stacked bar + per-
+            category breakdown. Lets the FC make statements like "60% of
+            your commitment is going to savings — is that aligned with your
+            protection priorities?" */}
+        {categoryRows.length > 0 && (
+          <div style={{
+            background:NAVY_LIGHT,
+            border:`1px solid rgba(212,169,106,0.2)`,
+            borderRadius:16,
+            padding:'24px 28px',
+            marginBottom:28,
+          }}>
+            <div style={{fontSize:11, fontWeight:700, color:GOLD, letterSpacing:'1.5px', textTransform:'uppercase', marginBottom:6}}>
+              Premium Allocation
+            </div>
+            <div style={{fontSize:11, color:MUTED, marginBottom:18}}>
+              Where your annual commitment of ${Math.round(catTotal).toLocaleString()} is going
+            </div>
+            {/* Stacked bar */}
+            <div style={{display:'flex', height:12, borderRadius:6, overflow:'hidden', marginBottom:16, background:'rgba(255,255,255,0.05)'}}>
+              {categoryRows.map(cat => (
+                <div key={cat.key} title={`${cat.label}: ${cat.pct.toFixed(1)}%`}
+                  style={{width: cat.pct + '%', background: cat.color, transition:'width 0.8s cubic-bezier(0.4, 0, 0.2, 1)'}}></div>
+              ))}
+            </div>
+            {/* Per-category rows */}
+            {categoryRows.map(cat => (
+              <div key={cat.key} style={{
+                display:'flex',
+                justifyContent:'space-between',
+                alignItems:'center',
+                padding:'8px 0',
+                borderTop:'1px solid rgba(255,255,255,0.04)',
+              }}>
+                <div style={{display:'flex', alignItems:'center', gap:10, minWidth:0, flex:1}}>
+                  <span style={{width:10, height:10, background:cat.color, borderRadius:2, flexShrink:0}}></span>
+                  <span style={{fontSize:13, fontWeight:500, color:CREAM, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>{cat.label}</span>
+                </div>
+                <div style={{textAlign:'right', flexShrink:0, marginLeft:12}}>
+                  <span style={{fontSize:13, fontWeight:700, color:CREAM}}>
+                    ${Math.round(cat.amt).toLocaleString()}
+                  </span>
+                  <span style={{fontSize:11, color:MUTED, marginLeft:8}}>
+                    {cat.pct.toFixed(0)}%
+                  </span>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {/* ── INSURER DIVERSIFICATION ── */}
+        {/* Shows concentration across insurers. Surfaces a concentration
+            warning if any single insurer holds >50% of premium. Good
+            talking point for portfolio risk discussions. */}
+        {insurerRows.length >= 2 && (
+          <div style={{
+            background:NAVY_LIGHT,
+            border:`1px solid rgba(212,169,106,0.2)`,
+            borderRadius:16,
+            padding:'24px 28px',
+            marginBottom:28,
+          }}>
+            <div style={{fontSize:11, fontWeight:700, color:GOLD, letterSpacing:'1.5px', textTransform:'uppercase', marginBottom:6}}>
+              Insurer Diversification
+            </div>
+            <div style={{fontSize:11, color:MUTED, marginBottom:18}}>
+              {insurerRows[0].pct > 50
+                ? `${insurerRows[0].pct.toFixed(0)}% of premium is concentrated with ${insurerRows[0].name} — consider diversification`
+                : `${insurerRows.length} insurer${insurerRows.length===1?'':'s'} across your portfolio`}
+            </div>
+            {insurerRows.map((ins, i) => (
+              <div key={ins.name} style={{marginBottom: i < insurerRows.length - 1 ? 14 : 0}}>
+                <div style={{display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:5}}>
+                  <span style={{fontSize:13, fontWeight:600, color:CREAM}}>{ins.name}</span>
+                  <span style={{fontSize:12, color:MUTED}}>
+                    <span style={{color:CREAM, fontWeight:600}}>${Math.round(ins.amt).toLocaleString()}</span>
+                    <span style={{marginLeft:8}}>{ins.pct.toFixed(0)}%</span>
+                  </span>
+                </div>
+                <div style={{height:5, background:'rgba(255,255,255,0.06)', borderRadius:3, overflow:'hidden'}}>
+                  <div style={{
+                    height:'100%',
+                    width: ins.pct + '%',
+                    background: ins.pct > 50 ? '#dc5a50' : GOLD,
+                    borderRadius:3,
+                    transition:'width 0.8s cubic-bezier(0.4, 0, 0.2, 1)',
+                  }}></div>
+                </div>
+              </div>
+            ))}
           </div>
         )}
 
@@ -9543,6 +9791,14 @@ function GettingStartedChecklist({ compact = false }) {
   const GOLD = '#d4a96a';
   const GREEN = '#5ba8a0';
 
+  // Compute specific missing fields for step 1 so we can surface them as
+  // attention-grabbing chips rather than hiding the requirement in a small
+  // gray subtitle. If step 1 is done, the array is empty and no chips render.
+  const missingFields = [];
+  if(!hasName) missingFields.push({label:'Name', icon:'👤'});
+  if(!hasDob) missingFields.push({label:'Date of Birth', icon:'📅'});
+  if(!hasIncome) missingFields.push({label:'Annual Income', icon:'💰'});
+
   const steps = [
     {
       n: 1,
@@ -9550,18 +9806,24 @@ function GettingStartedChecklist({ compact = false }) {
       title: 'Client details',
       desc: hasProfile
         ? 'Profile complete'
-        : !hasName
-          ? 'Add name, date of birth, income'
-          : !hasDob
-            ? 'Add date of birth and income'
-            : 'Add annual income',
+        : missingFields.length === 3
+          ? 'Required to unlock your dashboard'
+          : `${missingFields.length} required field${missingFields.length===1?'':'s'} missing`,
+      // Render these as red chips in the step body so the FC can see at a
+      // glance exactly what's blocking progress. Previously buried in a 10px
+      // gray subtitle that was easy to miss.
+      missingFields,
       // Secondary hint surfaced only when step 1 is active — reminds the FC
       // they don't have to type everything by hand. Scanning a policy document
       // auto-populates name, DOB, gender, smoker, nationality, and occupation
       // from the policy owner info via mergeToProfile.
       hint: hasProfile ? null : '💡 Scanning a policy also auto-fills name, DOB, and more',
       action: () => setTab('profile'),
-      actionLabel: 'Set up profile'
+      // Make the CTA more specific when only one field is missing — e.g.,
+      // "Add income →" is clearer than the generic "Set up profile →".
+      actionLabel: missingFields.length === 1
+        ? `Add ${missingFields[0].label.toLowerCase()}`
+        : 'Set up profile'
     },
     {
       n: 2,
@@ -9654,6 +9916,28 @@ function GettingStartedChecklist({ compact = false }) {
                 </div>
               </div>
             </div>
+            {/* Missing field chips — shown for active step 1 when profile is
+                incomplete. Each chip names a specific missing field (Name,
+                DOB, Annual Income) so the FC can see exactly what's blocking
+                the dashboard instead of scrolling through the full profile form. */}
+            {isActive && step.missingFields && step.missingFields.length > 0 && (
+              <div style={{display:'flex', gap:6, flexWrap:'wrap', marginTop:8, marginLeft:38}}>
+                {step.missingFields.map(field => (
+                  <span key={field.label} style={{
+                    display:'inline-flex', alignItems:'center', gap:4,
+                    fontSize:10, fontWeight:600,
+                    padding:'4px 9px',
+                    borderRadius:12,
+                    background:'rgba(239,83,80,0.1)',
+                    color:'var(--red)',
+                    border:'1px solid rgba(239,83,80,0.25)',
+                  }}>
+                    <span style={{fontSize:11}}>{field.icon}</span>
+                    Missing: {field.label}
+                  </span>
+                ))}
+              </div>
+            )}
             {/* Row 2 (active step only): CTA button + hint. Own row so it
                 never fights the title row for horizontal space. */}
             {isActive && (step.action || step.hint) && (
