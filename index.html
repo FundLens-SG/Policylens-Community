@@ -5539,10 +5539,17 @@ function PresentMode() {
   try {
     if(typeof window !== 'undefined' && window.__retirementLiteCache) {
       const rc = window.__retirementLiteCache;
+      // Split income sources so the Composition card can render each
+      // separately, while keeping the combined `policy` field for the
+      // existing Retirement Readiness card's simpler summary.
+      const annuity = rc.policyMonthlyIncome || 0;
+      const dividends = rc.policyDividends || 0;
       retData = {
         desired: rc.desiredMonthly || 0,
         cpf: rc.cpfPayout?.mid || 0,
-        policy: (rc.policyMonthlyIncome || 0) + (rc.policyDividends || 0),
+        annuity,
+        dividends,
+        policy: annuity + dividends,
         other: rc.otherMonthly || 0,
       };
       retData.projected = retData.cpf + retData.policy + retData.other;
@@ -5652,24 +5659,69 @@ function PresentMode() {
     }))
     .sort((a, b) => b.amt - a.amt);
 
-  // ── INSURER CONCENTRATION ──
-  // Top 3 insurers by share of annualized premium. Useful FC talking point
-  // — concentration risk, counterparty exposure, diversification
-  // opportunities. Only computed when we have 2+ active policies worth
-  // showing, otherwise the card is meaningless.
-  const insurerAlloc = {};
-  active.forEach(pol => {
-    if(pol.premSingle || pol.premiumStructure === 'Single Premium' || pol.premFrequency === 'single') return;
-    const ins = pol.insurer || 'Unknown';
-    const raw = parseFloat(pol.annualPremium) || 0;
-    const ann = pol.premFrequency === 'monthly' ? raw * 12 : raw;
-    if(ann > 0) insurerAlloc[ins] = (insurerAlloc[ins] || 0) + ann;
-  });
-  const insurerTotal = Object.values(insurerAlloc).reduce((s, v) => s + v, 0);
-  const insurerRows = Object.entries(insurerAlloc)
-    .map(([name, amt]) => ({ name, amt, pct: insurerTotal > 0 ? (amt / insurerTotal * 100) : 0 }))
-    .sort((a, b) => b.amt - a.amt)
-    .slice(0, 5);
+  // ── INSURER CONCENTRATION removed from Present mode per design review ──
+  // Was useful as a planner talking point but cluttered the client-facing
+  // view. If re-added later, see git history for the computation + JSX.
+
+  // ── CLIENT AGE + RETIREMENT AGE ──
+  // Needed by Cashflow Timeline to determine which policies are still
+  // paying in future years, and by Retirement Income Composition for the
+  // headline at retirement age. Falls back to sensible defaults.
+  const clientAge = clientProfile?.dob
+    ? Math.floor((Date.now() - new Date(clientProfile.dob).getTime()) / 31557600000)
+    : 35;
+  const retAge = parseInt(clientProfile?.retirementAge) || 65;
+
+  // ── CASHFLOW TIMELINE ──
+  // Year-by-year projection of recurring premium commitment over the next
+  // 15 years. Each year aggregates the annualized premium across all
+  // active policies whose payment term hasn't ended yet, grouped by
+  // category for visual stacking. Drop-off years (where total decreases
+  // meaningfully vs the previous year) are annotated so the FC can point
+  // at them during the meeting and say "your commitment lightens here".
+  //
+  // Excludes single-premium policies entirely — a one-time $100k upfront
+  // cost is a different conversation and doesn't belong on a recurring-
+  // commitment projection.
+  const cashflowYears = (() => {
+    const years = [];
+    const horizon = 15; // 15-year projection, enough for retirement framing
+    const startYear = new Date().getFullYear();
+    for(let i = 0; i < horizon; i++) {
+      const year = startYear + i;
+      const ageAt = clientAge + i;
+      const byCat = {};
+      let total = 0;
+      for(const pol of active) {
+        if(pol.premSingle || pol.premFrequency === 'single') continue;
+        // Hard stop: if premEndAge is set and client has aged past it,
+        // the policy is no longer drawing premium.
+        const endAge = parseInt(pol.premEndAge);
+        if(endAge && ageAt >= endAge) continue;
+        const raw = parseFloat(pol.annualPremium) || 0;
+        if(!raw) continue;
+        const ann = pol.premFrequency === 'monthly' ? raw * 12 : raw;
+        total += ann;
+        const cat = pol.category || 'other';
+        byCat[cat] = (byCat[cat] || 0) + ann;
+      }
+      years.push({ year, ageAt, total, byCat });
+    }
+    return years;
+  })();
+  const cashflowMax = Math.max(1, ...cashflowYears.map(y => y.total));
+  // Annotate drop-off years: a year is "dropping off" if its total is
+  // meaningfully less (>5%) than the previous year's total. We only mark
+  // the first year of each drop-off so sustained lower levels don't all
+  // get flagged.
+  for(let i = 1; i < cashflowYears.length; i++) {
+    const prev = cashflowYears[i-1].total;
+    const cur = cashflowYears[i].total;
+    if(prev > 0 && cur < prev * 0.95) {
+      cashflowYears[i].dropOff = true;
+      cashflowYears[i].savedDelta = prev - cur;
+    }
+  }
 
   // ── Exit confirmation: long-press or double-tap would be ideal, but for v1
   //    a simple confirm() is safer against accidental exits during meetings ──
@@ -5911,6 +5963,120 @@ function PresentMode() {
           </div>
         )}
 
+        {/* ── RETIREMENT INCOME COMPOSITION ── */}
+        {/* Complements Retirement Readiness by answering WHERE the income
+            comes from, not just whether it's enough. A horizontal stacked
+            bar compares projected income sources (CPF, annuities,
+            dividends, other) against the desired monthly target.
+            Only rendered when there's meaningful retirement data in the
+            cache and the client actually has a desired monthly income
+            target — otherwise it would just show an empty bar. */}
+        {retData && retData.desired > 0 && retData.projected > 0 && (() => {
+          // Normalize bar segments against the larger of projected and
+          // desired, so the bar fills to 100% when the client is fully
+          // covered, and clearly short when they aren't.
+          const maxScale = Math.max(retData.projected, retData.desired);
+          const sources = [
+            { key: 'cpf', label: 'CPF LIFE', amt: retData.cpf, color: '#5ba8a0' },
+            { key: 'annuity', label: 'Annuity Income', amt: retData.annuity, color: GOLD },
+            { key: 'dividends', label: 'Policy Dividends', amt: retData.dividends, color: '#5b8fd9' },
+            { key: 'other', label: 'Other Sources', amt: retData.other, color: '#9d8abf' },
+          ].filter(s => s.amt > 0);
+          return (
+            <div style={{
+              background:NAVY_LIGHT,
+              border:`1px solid rgba(212,169,106,0.2)`,
+              borderRadius:16,
+              padding:'24px 28px',
+              marginBottom:28,
+            }}>
+              <div style={{fontSize:11, fontWeight:700, color:GOLD, letterSpacing:'1.5px', textTransform:'uppercase', marginBottom:6}}>
+                Retirement Income Composition
+              </div>
+              <div style={{fontSize:11, color:MUTED, marginBottom:20}}>
+                Where your ${Math.round(retData.projected).toLocaleString()}/month at age {retAge} will come from
+              </div>
+
+              {/* Stacked bar: one segment per source, scaled to maxScale */}
+              <div style={{position:'relative', height:32, background:'rgba(255,255,255,0.04)', borderRadius:6, overflow:'hidden', marginBottom:10}}>
+                <div style={{display:'flex', height:'100%', width:'100%'}}>
+                  {sources.map(src => (
+                    <div key={src.key} title={`${src.label}: $${Math.round(src.amt).toLocaleString()}/mo`}
+                      style={{
+                        width: (src.amt / maxScale * 100) + '%',
+                        background: src.color,
+                        transition: 'width 0.8s cubic-bezier(0.4, 0, 0.2, 1)',
+                      }}></div>
+                  ))}
+                </div>
+                {/* Desired target marker — only if the desired level is
+                    reachable within the bar (otherwise it'd be off-screen) */}
+                {retData.desired <= maxScale && retData.projected < retData.desired && (
+                  <div style={{
+                    position:'absolute', top:-4, bottom:-4,
+                    left: (retData.desired / maxScale * 100) + '%',
+                    width: 2,
+                    background: CREAM,
+                    boxShadow: '0 0 6px rgba(244,234,213,0.6)',
+                  }}></div>
+                )}
+              </div>
+              {retData.projected < retData.desired && (
+                <div style={{fontSize:10, color:MUTED, marginBottom:16, textAlign:'right', fontStyle:'italic'}}>
+                  ↑ White marker = target ${Math.round(retData.desired).toLocaleString()}/mo
+                </div>
+              )}
+
+              {/* Per-source legend */}
+              {sources.map((src, i) => (
+                <div key={src.key} style={{
+                  display:'flex',
+                  justifyContent:'space-between',
+                  alignItems:'center',
+                  padding:'10px 0',
+                  borderTop: i > 0 ? '1px solid rgba(255,255,255,0.04)' : 'none',
+                }}>
+                  <div style={{display:'flex', alignItems:'center', gap:10, minWidth:0, flex:1}}>
+                    <span style={{width:10, height:10, background:src.color, borderRadius:2, flexShrink:0}}></span>
+                    <span style={{fontSize:13, fontWeight:500, color:CREAM}}>{src.label}</span>
+                  </div>
+                  <div style={{textAlign:'right', flexShrink:0, marginLeft:12}}>
+                    <span style={{fontSize:13, fontWeight:700, color:CREAM}}>
+                      ${Math.round(src.amt).toLocaleString()}
+                    </span>
+                    <span style={{fontSize:11, color:MUTED, marginLeft:4}}>/mo</span>
+                  </div>
+                </div>
+              ))}
+
+              {/* Gap row if shortfall exists */}
+              {retData.gap > 0 && (
+                <div style={{
+                  display:'flex',
+                  justifyContent:'space-between',
+                  alignItems:'center',
+                  padding:'12px 14px',
+                  marginTop:12,
+                  background:'rgba(220,90,80,0.08)',
+                  borderRadius:8,
+                  border:'1px solid rgba(220,90,80,0.2)',
+                }}>
+                  <div style={{display:'flex', alignItems:'center', gap:10}}>
+                    <span style={{fontSize:14}}>⚠️</span>
+                    <span style={{fontSize:13, fontWeight:600, color:'#dc5a50'}}>Gap to fill</span>
+                  </div>
+                  <div style={{textAlign:'right'}}>
+                    <span style={{fontSize:15, fontWeight:800, color:'#dc5a50'}}>
+                      ${Math.round(retData.gap).toLocaleString()}
+                    </span>
+                    <span style={{fontSize:11, color:'#dc5a50', marginLeft:4, opacity:0.85}}>/mo</span>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })()}
+
         {/* ── ACTION REQUIRED ── */}
         {/* The "3 things we should talk about today" card. Biggest
             conversation driver in any review meeting. Surfaces the largest
@@ -6023,11 +6189,18 @@ function PresentMode() {
           </div>
         )}
 
-        {/* ── INSURER DIVERSIFICATION ── */}
-        {/* Shows concentration across insurers. Surfaces a concentration
-            warning if any single insurer holds >50% of premium. Good
-            talking point for portfolio risk discussions. */}
-        {insurerRows.length >= 2 && (
+        {/* ── CASHFLOW TIMELINE ── */}
+        {/* 15-year projection of recurring premium commitment year by
+            year, rendered as horizontal stacked bars. Each row is one
+            year; bar segments are category-colored so the client can see
+            their mix change over time. Drop-off years are badged with the
+            dollar saving so the FC can point at them and talk about when
+            the commitment lightens.
+
+            This is arguably the most valuable addition to Present mode
+            because it's the one visual every client silently wants to
+            see: "when does this commitment end?" */}
+        {cashflowYears.length > 0 && cashflowMax > 0 && (
           <div style={{
             background:NAVY_LIGHT,
             border:`1px solid rgba(212,169,106,0.2)`,
@@ -6036,33 +6209,108 @@ function PresentMode() {
             marginBottom:28,
           }}>
             <div style={{fontSize:11, fontWeight:700, color:GOLD, letterSpacing:'1.5px', textTransform:'uppercase', marginBottom:6}}>
-              Insurer Diversification
+              Premium Outlook
             </div>
-            <div style={{fontSize:11, color:MUTED, marginBottom:18}}>
-              {insurerRows[0].pct > 50
-                ? `${insurerRows[0].pct.toFixed(0)}% of premium is concentrated with ${insurerRows[0].name} — consider diversification`
-                : `${insurerRows.length} insurer${insurerRows.length===1?'':'s'} across your portfolio`}
+            <div style={{fontSize:11, color:MUTED, marginBottom:20}}>
+              Your recurring annual commitment over the next {cashflowYears.length} years
             </div>
-            {insurerRows.map((ins, i) => (
-              <div key={ins.name} style={{marginBottom: i < insurerRows.length - 1 ? 14 : 0}}>
-                <div style={{display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:5}}>
-                  <span style={{fontSize:13, fontWeight:600, color:CREAM}}>{ins.name}</span>
-                  <span style={{fontSize:12, color:MUTED}}>
-                    <span style={{color:CREAM, fontWeight:600}}>${Math.round(ins.amt).toLocaleString()}</span>
-                    <span style={{marginLeft:8}}>{ins.pct.toFixed(0)}%</span>
-                  </span>
+
+            {/* Year rows */}
+            <div style={{display:'flex', flexDirection:'column', gap:6}}>
+              {cashflowYears.map((y, i) => {
+                const widthPct = (y.total / cashflowMax) * 100;
+                // Build stacked segments from the category totals in
+                // descending order (biggest first) for visual stability
+                const segments = Object.entries(y.byCat)
+                  .map(([cat, amt]) => ({
+                    cat,
+                    amt,
+                    pct: (amt / y.total) * 100,
+                    color: CATEGORY_COLORS[cat] || '#7a7a8c',
+                  }))
+                  .sort((a, b) => b.amt - a.amt);
+                return (
+                  <div key={y.year} style={{
+                    display:'grid',
+                    gridTemplateColumns:'44px 1fr 68px',
+                    alignItems:'center',
+                    gap:10,
+                  }}>
+                    {/* Year label */}
+                    <div style={{fontSize:11, color:MUTED, fontVariantNumeric:'tabular-nums'}}>
+                      {y.year}
+                    </div>
+                    {/* Bar with stacked category segments */}
+                    <div style={{position:'relative', height:14}}>
+                      <div style={{
+                        position:'absolute', top:0, left:0,
+                        height:'100%',
+                        width: widthPct + '%',
+                        display:'flex',
+                        borderRadius:3,
+                        overflow:'hidden',
+                        transition: 'width 0.8s cubic-bezier(0.4, 0, 0.2, 1)',
+                      }}>
+                        {segments.map(seg => (
+                          <div key={seg.cat} title={`${CATEGORY_LABELS[seg.cat] || seg.cat}: $${Math.round(seg.amt).toLocaleString()}`}
+                            style={{
+                              width: seg.pct + '%',
+                              background: seg.color,
+                            }}></div>
+                        ))}
+                      </div>
+                      {/* Drop-off badge */}
+                      {y.dropOff && (
+                        <div style={{
+                          position:'absolute',
+                          left: `calc(${widthPct}% + 6px)`,
+                          top: '50%',
+                          transform: 'translateY(-50%)',
+                          fontSize: 9,
+                          fontWeight: 700,
+                          color: '#5ba8a0',
+                          padding: '1px 6px',
+                          background: 'rgba(91,168,160,0.14)',
+                          border: '1px solid rgba(91,168,160,0.35)',
+                          borderRadius: 3,
+                          whiteSpace: 'nowrap',
+                        }}>
+                          -${Math.round(y.savedDelta / 1000)}k
+                        </div>
+                      )}
+                    </div>
+                    {/* Total $ */}
+                    <div style={{
+                      fontSize: 11,
+                      fontWeight: 600,
+                      color: y.total === 0 ? MUTED : CREAM,
+                      textAlign: 'right',
+                      fontVariantNumeric: 'tabular-nums',
+                    }}>
+                      {y.total >= 1000 ? '$' + Math.round(y.total / 1000) + 'k' : y.total > 0 ? '$' + Math.round(y.total) : '—'}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {/* Category legend — only show categories that actually appear */}
+            {(() => {
+              const appearing = new Set();
+              cashflowYears.forEach(y => Object.keys(y.byCat).forEach(c => appearing.add(c)));
+              const legend = Array.from(appearing).sort();
+              if(legend.length === 0) return null;
+              return (
+                <div style={{display:'flex', flexWrap:'wrap', gap:12, marginTop:18, paddingTop:14, borderTop:'1px solid rgba(255,255,255,0.06)'}}>
+                  {legend.map(cat => (
+                    <div key={cat} style={{display:'flex', alignItems:'center', gap:6}}>
+                      <span style={{width:9, height:9, background:CATEGORY_COLORS[cat] || '#7a7a8c', borderRadius:2}}></span>
+                      <span style={{fontSize:10, color:MUTED}}>{CATEGORY_LABELS[cat] || cat}</span>
+                    </div>
+                  ))}
                 </div>
-                <div style={{height:5, background:'rgba(255,255,255,0.06)', borderRadius:3, overflow:'hidden'}}>
-                  <div style={{
-                    height:'100%',
-                    width: ins.pct + '%',
-                    background: ins.pct > 50 ? '#dc5a50' : GOLD,
-                    borderRadius:3,
-                    transition:'width 0.8s cubic-bezier(0.4, 0, 0.2, 1)',
-                  }}></div>
-                </div>
-              </div>
-            ))}
+              );
+            })()}
           </div>
         )}
 
