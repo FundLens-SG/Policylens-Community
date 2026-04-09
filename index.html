@@ -51,7 +51,7 @@ console.error=function(){var m=arguments[0]||'';if(typeof m==='string'&&m.includ
 // steps, zero data loss (partial extractions already survive via
 // the sessionStorage resume banner).
 // ═══════════════════════════════════════════════════════════════
-const EXPECTED_SW_VERSION = 'policylens-v1.0.5-bgfetch-check';
+const EXPECTED_SW_VERSION = 'policylens-v1.0.6-retry';
 
 function __plShowUpdateToast(msg) {
   try {
@@ -2049,6 +2049,97 @@ const readFileAsBase64 = (file) => new Promise((res, rej) => {
   }
 });
 
+// ── IMAGE DOWNSCALE BEFORE SENDING TO AI ──
+// Phone cameras produce 3000×4000px / 3-4MB JPEGs. Sending those to
+// Gemini costs ~6000 tokens EACH (the model tiles large images into
+// 768×768 patches at 258 tokens per tile, so a 3000×4000 image is
+// ~24 tiles). With 10 photos per batch and 6 batches, a single
+// extraction can burn 360k+ tokens on images alone — enough to hit
+// the free-tier quota (1M tokens/minute) and trigger 503 "high
+// demand" errors from Google even when their service is healthy.
+//
+// Downscaling to 1568px max dimension brings each image to ~4 tiles
+// (1032 tokens). Net effect: 6× token reduction AND 13× payload
+// reduction (3-4MB → 250-400KB per image). Text OCR quality is
+// unaffected — policy text is plenty legible at 1568px and Gemini's
+// own recommended resolution for document understanding is
+// actually lower than that.
+//
+// Only downscales if the image is larger than maxDim on either side.
+// Skips HEIC (browser canvas may not decode them reliably — let the
+// native path handle those). On any decode failure, returns the
+// original file unchanged — never blocks extraction.
+const DOWNSCALE_MAX_DIM = 1568;
+const DOWNSCALE_JPEG_QUALITY = 0.85;
+async function downscaleImageIfNeeded(file) {
+  try {
+    // Skip non-images and HEIC
+    const mime = (file?.type || '').toLowerCase();
+    const name = (file?.name || '').toLowerCase();
+    if (!mime.startsWith('image/')) return file;
+    if (mime.includes('heic') || mime.includes('heif') || name.endsWith('.heic') || name.endsWith('.heif')) return file;
+    // Decode via createImageBitmap — fastest path, handles EXIF orientation
+    let bitmap;
+    try {
+      bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+    } catch (decodeErr) {
+      console.warn('[Downscale] createImageBitmap failed for ' + (file.name || '?') + ' — passing through:', decodeErr?.message || decodeErr);
+      return file;
+    }
+    const srcW = bitmap.width;
+    const srcH = bitmap.height;
+    // Already small enough — no-op
+    if (srcW <= DOWNSCALE_MAX_DIM && srcH <= DOWNSCALE_MAX_DIM) {
+      try { bitmap.close?.(); } catch(_) {}
+      return file;
+    }
+    // Compute target dimensions preserving aspect ratio
+    const scale = DOWNSCALE_MAX_DIM / Math.max(srcW, srcH);
+    const dstW = Math.round(srcW * scale);
+    const dstH = Math.round(srcH * scale);
+    // Prefer OffscreenCanvas (no DOM mutation, faster on mobile)
+    let canvas, ctx, blob;
+    try {
+      if (typeof OffscreenCanvas === 'function') {
+        canvas = new OffscreenCanvas(dstW, dstH);
+        ctx = canvas.getContext('2d', { alpha: false });
+        if (!ctx) throw new Error('no 2d context on OffscreenCanvas');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(bitmap, 0, 0, dstW, dstH);
+        blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: DOWNSCALE_JPEG_QUALITY });
+      } else {
+        canvas = document.createElement('canvas');
+        canvas.width = dstW;
+        canvas.height = dstH;
+        ctx = canvas.getContext('2d', { alpha: false });
+        if (!ctx) throw new Error('no 2d context');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(bitmap, 0, 0, dstW, dstH);
+        blob = await new Promise((res, rej) => {
+          canvas.toBlob((b) => b ? res(b) : rej(new Error('toBlob returned null')), 'image/jpeg', DOWNSCALE_JPEG_QUALITY);
+        });
+      }
+    } finally {
+      try { bitmap.close?.(); } catch(_) {}
+    }
+    if (!blob) return file;
+    // Wrap the blob as a File so downstream code (name, etc.) keeps working
+    const downscaledFile = new File([blob], file.name || 'image.jpg', {
+      type: 'image/jpeg',
+      lastModified: file.lastModified || Date.now(),
+    });
+    const reduction = file.size > 0 ? Math.round((1 - downscaledFile.size / file.size) * 100) : 0;
+    console.log('[Downscale] '+(file.name||'?')+': '+srcW+'×'+srcH+' ('+Math.round(file.size/1024)+'KB) → '+dstW+'×'+dstH+' ('+Math.round(downscaledFile.size/1024)+'KB, −'+reduction+'%)');
+    return downscaledFile;
+  } catch (e) {
+    // Never block extraction on a downscale failure — pass through
+    console.warn('[Downscale] Unexpected error for ' + (file?.name || '?') + ' — passing through:', e?.message || e);
+    return file;
+  }
+}
+
 async function processFile(file) {
   const isPDF = file.type === 'application/pdf' || file.name?.toLowerCase().endsWith('.pdf');
   const isExcel = file.name?.match(/\.(xlsx|xls|csv)$/i) || file.type?.includes('spreadsheet') || file.type?.includes('excel');
@@ -2160,8 +2251,13 @@ async function processFile(file) {
   }
   
   // ── Images (Gemini + Claude both handle these) ──
-  const b64 = await readFileAsBase64(file);
-  const mime = file.type || 'application/octet-stream';
+  // Downscale first — phone cameras produce 3000×4000 photos that
+  // cost ~6× more tokens than needed for OCR. See downscaleImageIfNeeded
+  // for the rationale. On any failure the original file passes through
+  // unchanged so extraction never regresses.
+  const imageFile = await downscaleImageIfNeeded(file);
+  const b64 = await readFileAsBase64(imageFile);
+  const mime = imageFile.type || file.type || 'application/octet-stream';
   if(mime.startsWith('image/')) return [{type:'image', source:{type:'base64', media_type:mime, data:b64}}];
   
   // ── Text files ──
@@ -8190,7 +8286,6 @@ async function geminiStructuredExtract(geminiKey, systemPrompt, contentBlocks, m
   console.log('[Gemini Structured] Sending:', mediaCount, 'files +', parts.length-mediaCount, 'text blocks. Schema has', Object.keys(responseSchema?.items?.properties||{}).length, 'top-level fields.');
 
   // Assemble the full request body once — we'll use it for either path.
-  const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=' + geminiKey;
   const bodyObj = {
     contents: [{parts}],
     systemInstruction: {parts:[{text:systemPrompt}]},
@@ -8201,13 +8296,37 @@ async function geminiStructuredExtract(geminiKey, systemPrompt, contentBlocks, m
     },
   };
 
-  // Try SW-routed Background Fetch first when supported. On any
-  // failure (support check, timeout, network, parse), we fall
-  // through to the direct fetch path so extraction never regresses.
+  // ── MODEL FALLBACK LIST ──
+  // Gemini 2.5 Flash is the primary — highest quality for document
+  // extraction, structured output support, high context window.
+  // BUT: 2.5 Flash has well-documented capacity issues that affect
+  // even paid-tier customers during peak hours. Google returns 503
+  // UNAVAILABLE ("high demand") even when the service status page
+  // is green and the user is nowhere near their quota (verified by
+  // CK on 2026-04-09 from AI Studio dashboard: 1000 RPM / 1M TPM
+  // paid limits, ~100 RPM usage, yet 503s still returned).
+  //
+  // Fallback: Gemini 2.0 Flash has significantly better spare
+  // capacity and handles document OCR roughly as well as 2.5 Flash.
+  // Same API shape, same responseSchema support, same inline image
+  // handling. Quality delta is negligible for our extraction use
+  // case (reading policy documents, filling a structured schema).
+  //
+  // Flow: try 2.5 Flash with the normal retry loop. If that exhausts
+  // all attempts with a 503/UNAVAILABLE error, swap to 2.0 Flash and
+  // retry the full loop. Only switch models on CAPACITY errors — for
+  // auth/bad-request/parse errors, fail fast with the original error.
+  const MODEL_FALLBACK_CHAIN = ['gemini-2.5-flash', 'gemini-2.0-flash'];
+  const makeModelUrl = (model) =>
+    'https://generativelanguage.googleapis.com/v1beta/models/' + model + ':generateContent?key=' + geminiKey;
+
+  // Try SW-routed Background Fetch first when supported. The SW path
+  // uses the PRIMARY model only — if it fails, the direct-fetch path
+  // below will handle full retries + model fallback.
   try {
     if (await swExtractIsAvailable()) {
-      console.log('[Gemini Structured] Routing via SW background fetch');
-      const rawViaSW = await swExtractRelay(url, bodyObj);
+      console.log('[Gemini Structured] Routing via SW background fetch ('+MODEL_FALLBACK_CHAIN[0]+')');
+      const rawViaSW = await swExtractRelay(makeModelUrl(MODEL_FALLBACK_CHAIN[0]), bodyObj);
       if (rawViaSW && rawViaSW.length >= 2) {
         console.log('[Gemini Structured] SW path returned:', rawViaSW.length, 'chars');
         return rawViaSW;
@@ -8219,19 +8338,98 @@ async function geminiStructuredExtract(geminiKey, systemPrompt, contentBlocks, m
   }
 
   // Direct fetch fallback (also the only path on iOS / unsupported browsers).
+  //
+  // ── RETRY WITH EXPONENTIAL BACKOFF + MODEL FALLBACK ──
+  // Gemini periodically returns 503 ("high demand"), 429 (rate limit),
+  // or 5xx errors that are transient — retrying after a short wait
+  // almost always succeeds. Without retries, the FC sees a red banner
+  // and has to manually tap Retry Extraction.
+  //
+  // Strategy: retry up to 3 times per model with 2s → 4s → 8s backoff
+  // (~14s max per model). If all retries on 2.5 Flash fail with a
+  // capacity error, swap to 2.0 Flash and run the whole retry loop
+  // again. Total worst-case: ~30 seconds across both models before
+  // surfacing a hard failure to the FC.
+  const RETRY_STATUSES = new Set([429, 500, 502, 503, 504]);
+  const MAX_RETRIES = 3;
   let resp;
-  try {
-    resp = await fetchWithTimeout(url, {
-      method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify(bodyObj),
-    });
-  } catch(fetchErr) {
-    if(fetchErr.message && fetchErr.message.includes('timed out')) throw fetchErr;
-    throw new Error('Gemini: NetworkError when attempting to fetch resource.');
+  let lastErrMsg = '';
+  let lastStatus = 0;
+  let modelUsedForResponse = null;
+  modelLoop: for (let modelIdx = 0; modelIdx < MODEL_FALLBACK_CHAIN.length; modelIdx++) {
+    const currentModel = MODEL_FALLBACK_CHAIN[modelIdx];
+    const url = makeModelUrl(currentModel);
+    console.log('[Gemini Structured] Attempting model:', currentModel);
+    // Reset per-model state
+    resp = undefined;
+    let hadCapacityError = false;
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
+      try {
+        resp = await fetchWithTimeout(url, {
+          method:'POST',headers:{'Content-Type':'application/json'},
+          body:JSON.stringify(bodyObj),
+        });
+      } catch(fetchErr) {
+        // Network-ish errors are retryable (connection drop, DNS hiccup)
+        const isTimeout = fetchErr.message && fetchErr.message.includes('timed out');
+        const isNetwork = fetchErr instanceof TypeError
+          || (fetchErr.message && (fetchErr.message.includes('NetworkError') || fetchErr.message.includes('Failed to fetch') || fetchErr.message.includes('network')));
+        if (attempt < MAX_RETRIES && (isTimeout || isNetwork)) {
+          const delay = 2000 * Math.pow(2, attempt); // 2s, 4s, 8s
+          console.warn('[Gemini Structured] '+currentModel+' network error on attempt '+(attempt+1)+'/'+(MAX_RETRIES+1)+' — retrying in '+delay+'ms:', fetchErr.message);
+          lastErrMsg = fetchErr.message || 'network error';
+          await new Promise(r => setTimeout(r, delay));
+          continue;
+        }
+        // Network errors after retries exhausted — try next model if possible
+        if (isTimeout) { lastErrMsg = fetchErr.message; hadCapacityError = true; break; }
+        lastErrMsg = 'NetworkError'; hadCapacityError = true; break;
+      }
+      // Non-ok response: maybe retry based on status code
+      if (!resp.ok) {
+        const errData = await resp.json().catch(()=>({}));
+        console.warn('[Gemini Structured] '+currentModel+' error payload:', JSON.stringify(errData).slice(0, 500));
+        const errInfo = errData.error || {};
+        const googleStatus = errInfo.status || '';
+        const baseMsg = errInfo.message || resp.statusText || 'unknown';
+        const errMsg = googleStatus ? (googleStatus + ': ' + baseMsg) : baseMsg;
+        lastStatus = resp.status;
+        lastErrMsg = errMsg;
+        if (RETRY_STATUSES.has(resp.status) && attempt < MAX_RETRIES) {
+          const delay = 2000 * Math.pow(2, attempt);
+          console.warn('[Gemini Structured] '+currentModel+' status '+resp.status+' ('+googleStatus+') on attempt '+(attempt+1)+'/'+(MAX_RETRIES+1)+' — retrying in '+delay+'ms:', baseMsg);
+          await new Promise(r => setTimeout(r, delay));
+          continue;
+        }
+        // Retries exhausted or non-retryable
+        const isCapacity = RETRY_STATUSES.has(resp.status) || /UNAVAILABLE|DEADLINE_EXCEEDED|RESOURCE_EXHAUSTED/i.test(googleStatus);
+        if (isCapacity && modelIdx + 1 < MODEL_FALLBACK_CHAIN.length) {
+          // Fall through to next model in chain
+          const nextModel = MODEL_FALLBACK_CHAIN[modelIdx + 1];
+          console.warn('[Gemini Structured] '+currentModel+' exhausted with capacity error — falling back to '+nextModel);
+          try { toast('Gemini '+currentModel+' is overloaded — switching to '+nextModel, 'info', 3500); } catch(_) {}
+          hadCapacityError = true;
+          break;
+        }
+        // Non-capacity error, or last model in chain — fail hard
+        const retryNote = attempt > 0 ? ' (after '+(attempt+1)+' attempts on '+currentModel+')' : ' (on '+currentModel+')';
+        throw new Error('Gemini structured API error ('+resp.status+')'+retryNote+': '+errMsg);
+      }
+      // Success
+      modelUsedForResponse = currentModel;
+      break modelLoop;
+    }
+    // If we exited the attempt loop without breaking modelLoop, we
+    // either exhausted retries with a capacity error (fall to next
+    // model) or hit a hard error (already thrown above). If this is
+    // the last model, throw the final error.
+    if (!hadCapacityError) break; // shouldn't happen — hard errors throw above
+    if (modelIdx + 1 >= MODEL_FALLBACK_CHAIN.length) {
+      throw new Error('Gemini structured API error'+(lastStatus?' ('+lastStatus+')':'')+' — all models in fallback chain exhausted: '+lastErrMsg);
+    }
   }
-  if(!resp.ok) {
-    const errData = await resp.json().catch(()=>({}));
-    throw new Error('Gemini structured API error ('+resp.status+'): '+(errData.error?.message||resp.statusText));
+  if (!resp || !resp.ok) {
+    throw new Error('Gemini structured API error'+(lastStatus?' ('+lastStatus+')':'')+': '+(lastErrMsg||'no response'));
   }
   const data = await resp.json();
   if(data.error) throw new Error('Gemini: '+data.error.message);
@@ -8241,7 +8439,7 @@ async function geminiStructuredExtract(geminiKey, systemPrompt, contentBlocks, m
   }
   const raw = data.candidates[0]?.content?.parts?.[0]?.text||'';
   if(!raw || raw.length < 2) throw new Error('Gemini structured returned empty response.');
-  console.log('[Gemini Structured] Response:', raw.length, 'chars. finishReason:', data.candidates[0]?.finishReason);
+  console.log('[Gemini Structured] Response:', raw.length, 'chars. finishReason:', data.candidates[0]?.finishReason, '· model:', modelUsedForResponse || 'unknown');
   // With responseMimeType:'application/json' + responseSchema, the output is guaranteed
   // valid JSON matching the schema. No repairJSON needed.
   return raw;
