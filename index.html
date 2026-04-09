@@ -19,39 +19,177 @@ console.error=function(){var m=arguments[0]||'';if(typeof m==='string'&&m.includ
 <meta name="apple-mobile-web-app-title" content="PolicyLens">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <script>
+// ═══════════════════════════════════════════════════════════════
+// SERVICE WORKER AUTO-UPDATE (user-invisible)
+// ───────────────────────────────────────────────────────────────
+// Problem: Service Workers don't auto-propagate to existing users.
+// When we deploy a new sw.js, Chrome only re-checks for updates
+// every 24 hours AND even after detecting a new version, the old
+// SW keeps controlling the tab until all tabs close. For FCs who
+// never close their PolicyLens tab, this means a deployed fix may
+// NEVER reach them without manual action (clearing site data,
+// hard-refresh, etc.) — none of which is realistic for non-technical
+// users.
+//
+// Solution: aggressive auto-update with these layers:
+//   1. EXPECTED_SW_VERSION embedded in index.html — the version we
+//      expect the active SW to report. Bumped alongside CACHE_NAME
+//      in sw.js.
+//   2. On page load: force reg.update() to make Chrome re-fetch sw.js
+//   3. On updatefound + new SW installed + skipWaiting activates it:
+//      auto-reload the page ONCE to pick up the new version
+//   4. On load: query the active SW's version via CHECK_SUPPORT and
+//      compare to EXPECTED_SW_VERSION. If mismatched AND the update
+//      flow hasn't fired, force unregister + reload as last resort
+//   5. All reloads are guarded by a sessionStorage flag so we never
+//      loop, and by a "scanning in progress" flag so we never
+//      interrupt a mid-extraction
+//
+// End result: the FC opens PolicyLens and within ~2 seconds is
+// running the latest code. They may see one brief "Updating…" toast
+// and one auto-reload, then everything works normally. Zero manual
+// steps, zero data loss (partial extractions already survive via
+// the sessionStorage resume banner).
+// ═══════════════════════════════════════════════════════════════
+const EXPECTED_SW_VERSION = 'policylens-v1.0.5-bgfetch-check';
+
+function __plShowUpdateToast(msg) {
+  try {
+    let el = document.getElementById('__pl_update_toast');
+    if (!el) {
+      el = document.createElement('div');
+      el.id = '__pl_update_toast';
+      el.style.cssText = 'position:fixed;top:16px;left:50%;transform:translateX(-50%);background:rgba(26,35,50,0.96);color:#c9a96e;padding:10px 16px;border-radius:8px;font-family:system-ui,sans-serif;font-size:13px;font-weight:600;box-shadow:0 4px 20px rgba(0,0,0,0.4);z-index:999999;border:1px solid rgba(201,169,110,0.4);backdrop-filter:blur(6px);';
+      document.body?.appendChild(el) || document.documentElement.appendChild(el);
+    }
+    el.textContent = msg;
+  } catch(_) {}
+}
+function __plHideUpdateToast() {
+  try {
+    const el = document.getElementById('__pl_update_toast');
+    if (el) el.remove();
+  } catch(_) {}
+}
+
 if('serviceWorker' in navigator && location.hostname.includes('github.io')){
+  // Global flag so other code (extraction loop) can signal "don't
+  // reload right now" by setting sessionStorage policylens_scanning_active
+  let __plReloadedForUpdate = false;
+  try {
+    __plReloadedForUpdate = sessionStorage.getItem('__pl_sw_reloaded_this_session') === '1';
+  } catch(_) {}
+
+  const tryAutoReload = (reason) => {
+    if (__plReloadedForUpdate) return false; // already reloaded once this session
+    // Guard: don't reload mid-extraction
+    let scanning = false;
+    try { scanning = sessionStorage.getItem('policylens_scanning_active') === '1'; } catch(_) {}
+    if (scanning) {
+      console.log('[SW Update] Deferring reload — extraction in progress');
+      // Set a flag so scan completion can trigger the reload
+      try { sessionStorage.setItem('__pl_sw_reload_pending', '1'); } catch(_) {}
+      return false;
+    }
+    __plReloadedForUpdate = true;
+    try { sessionStorage.setItem('__pl_sw_reloaded_this_session', '1'); } catch(_) {}
+    console.log('[SW Update] Auto-reloading:', reason);
+    __plShowUpdateToast('✨ Updating PolicyLens to latest version…');
+    setTimeout(() => window.location.reload(), 600);
+    return true;
+  };
+
   window.addEventListener('load', async () => {
     try {
       const reg = await navigator.serviceWorker.register('sw.js');
       console.log('[SW] Registered:', reg.scope);
-      // Force an update check on every page load. Chrome's default is
-      // once per 24h which means freshly-deployed sw.js fixes can take
-      // up to a day to reach users. This forces an immediate re-fetch.
+
+      // Force update check — Chrome's default 24h cycle is too slow
       try { await reg.update(); } catch(_) {}
-      // Listen for new SW becoming available — fires after update()
-      // discovers a new version or when the site is reloaded with a
-      // new sw.js on the server.
+
+      // When a new SW is installing (either from update() above or
+      // from a later background check), listen for its state changes.
+      // Once it's INSTALLED, if we already had a controller (meaning
+      // this is an update, not a first-install), we know the skipWaiting
+      // in sw.js will activate it. Then controllerchange fires and we
+      // auto-reload.
       reg.addEventListener('updatefound', () => {
         const newSW = reg.installing;
         if (!newSW) return;
-        console.log('[SW] New version found — installing');
+        console.log('[SW] New version installing');
         newSW.addEventListener('statechange', () => {
+          console.log('[SW] New version state:', newSW.state);
           if (newSW.state === 'installed' && navigator.serviceWorker.controller) {
-            console.log('[SW] New version installed — will take control on next navigation');
-            // Because sw.js calls self.skipWaiting() in its install
-            // handler, the new SW becomes active immediately. We just
-            // need to clear the capability cache so the next extraction
-            // re-checks support with the fresh SW.
+            // New SW installed while old one is still controlling.
+            // sw.js calls skipWaiting() in install so it will become
+            // active immediately — we'll get controllerchange next.
             try { if (typeof swExtractResetCache === 'function') swExtractResetCache(); } catch(_) {}
           }
         });
       });
-      // Also listen for controller changes (new SW takes over) and
-      // clear the cache then too.
+
+      // When the controller actually changes, the new SW is live.
+      // Reload ONCE to ensure the page's code matches the new SW.
       navigator.serviceWorker.addEventListener('controllerchange', () => {
         console.log('[SW] Controller changed — new SW is active');
         try { if (typeof swExtractResetCache === 'function') swExtractResetCache(); } catch(_) {}
+        tryAutoReload('controllerchange');
       });
+
+      // ── VERSION DRIFT DETECTION ──
+      // Query the active SW's version and compare to EXPECTED_SW_VERSION.
+      // Handles the case where Chrome has CACHED an old sw.js and isn't
+      // re-fetching it on update(). If we detect drift AND the update
+      // lifecycle hasn't already fired, force a harder refresh.
+      if (reg.active) {
+        setTimeout(async () => {
+          try {
+            const result = await new Promise((resolve) => {
+              const channel = new MessageChannel();
+              const to = setTimeout(() => resolve(null), 3000);
+              channel.port1.onmessage = (e) => { clearTimeout(to); resolve(e.data); };
+              reg.active.postMessage({ type: 'CHECK_SUPPORT' }, [channel.port2]);
+            });
+            if (result && result.version && result.version !== EXPECTED_SW_VERSION) {
+              console.warn('[SW Update] Version drift detected:',
+                'active=' + result.version, 'expected=' + EXPECTED_SW_VERSION);
+              // Try one more update() — sometimes Chrome needs the hint
+              try { await reg.update(); } catch(_) {}
+              // Give updatefound a moment to fire
+              await new Promise(r => setTimeout(r, 1500));
+              // If we still haven't reloaded, force the nuclear option:
+              // unregister the old SW and reload. On next load a fresh
+              // SW will be registered from scratch.
+              if (!__plReloadedForUpdate) {
+                console.warn('[SW Update] Update() did not trigger reload — forcing unregister + reload');
+                __plShowUpdateToast('✨ Updating PolicyLens to latest version…');
+                try { await reg.unregister(); } catch(_) {}
+                // Guard: don't loop, don't interrupt extraction
+                if (!__plReloadedForUpdate) {
+                  let scanning = false;
+                  try { scanning = sessionStorage.getItem('policylens_scanning_active') === '1'; } catch(_) {}
+                  if (!scanning) {
+                    __plReloadedForUpdate = true;
+                    try { sessionStorage.setItem('__pl_sw_reloaded_this_session', '1'); } catch(_) {}
+                    setTimeout(() => window.location.reload(), 600);
+                  } else {
+                    try { sessionStorage.setItem('__pl_sw_reload_pending', '1'); } catch(_) {}
+                  }
+                }
+              }
+            } else if (result && result.version === EXPECTED_SW_VERSION) {
+              console.log('[SW Update] Version matches:', result.version);
+              // Clear the session flag so if the user stays on this
+              // page across a future deploy, they get the update
+              try { sessionStorage.removeItem('__pl_sw_reloaded_this_session'); } catch(_) {}
+            } else if (result === null) {
+              console.warn('[SW Update] CHECK_SUPPORT timed out — SW may be stopped');
+            }
+          } catch (e) {
+            console.warn('[SW Update] Version check failed:', e);
+          }
+        }, 1200); // delay so the initial update() has a chance to run first
+      }
     } catch (e) {
       console.warn('[SW] Registration failed:', e);
     }
@@ -13568,6 +13706,9 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
     document.addEventListener('visibilitychange', onVisibilityChange);
 
     setScanning(true);
+    // Signal to the SW auto-update flow that we're mid-extraction —
+    // it should defer any pending reload until we're done.
+    try { sessionStorage.setItem('policylens_scanning_active', '1'); } catch(_) {}
 
     // ── ADAPTIVE BATCH SIZE + EXACT DUPLICATE DEDUPE ──
     // Photos correlate worse than PDFs inside a single Gemini call —
@@ -14667,6 +14808,20 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       document.removeEventListener('visibilitychange', onVisibilityChange);
       window.removeEventListener('beforeunload', beforeUnloadHandler);
       try { releaseWakeLock(); } catch(e) { console.warn('[Extract] Wake lock release failed:', e); }
+      // Clear the scanning flag so the SW auto-update flow can reload
+      // if needed. If a reload was queued during extraction (new SW
+      // was detected mid-scan), trigger it now.
+      try { sessionStorage.removeItem('policylens_scanning_active'); } catch(_) {}
+      try {
+        if (sessionStorage.getItem('__pl_sw_reload_pending') === '1' &&
+            sessionStorage.getItem('__pl_sw_reloaded_this_session') !== '1') {
+          sessionStorage.removeItem('__pl_sw_reload_pending');
+          sessionStorage.setItem('__pl_sw_reloaded_this_session', '1');
+          console.log('[SW Update] Extraction done — applying deferred reload');
+          try { toast('✨ Updating PolicyLens to latest version…','info',4000); } catch(_) {}
+          setTimeout(() => window.location.reload(), 1500);
+        }
+      } catch(_) {}
     }
   };
 
