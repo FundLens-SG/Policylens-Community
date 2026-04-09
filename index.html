@@ -5643,6 +5643,201 @@ async function sbRepoDelete(id) {
 
 
 // ═══════════════════════════════════════════════════════════════
+// MODULE: CLOUD SYNC — clientProfile + policies cross-device sync
+// ═══════════════════════════════════════════════════════════════
+//
+// REQUIRED SQL — run this in Supabase SQL editor before first use:
+//
+//   -- Per-user client profile (the FC's CURRENT client's data)
+//   CREATE TABLE IF NOT EXISTS user_client_profile (
+//     user_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+//     data JSONB NOT NULL DEFAULT '{}',
+//     field_versions JSONB NOT NULL DEFAULT '{}',
+//     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+//   );
+//   ALTER TABLE user_client_profile ENABLE ROW LEVEL SECURITY;
+//   CREATE POLICY "Users access own client profile" ON user_client_profile
+//     FOR ALL USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);
+//
+//   -- Per-user policies (one row per policy, soft-deleted)
+//   CREATE TABLE IF NOT EXISTS user_policies (
+//     id TEXT NOT NULL,
+//     user_id UUID NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
+//     data JSONB NOT NULL DEFAULT '{}',
+//     field_versions JSONB NOT NULL DEFAULT '{}',
+//     deleted_at TIMESTAMPTZ,
+//     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+//     PRIMARY KEY (user_id, id)
+//   );
+//   ALTER TABLE user_policies ENABLE ROW LEVEL SECURITY;
+//   CREATE POLICY "Users access own policies" ON user_policies
+//     FOR ALL USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);
+//   CREATE INDEX IF NOT EXISTS user_policies_user_idx ON user_policies(user_id);
+//
+// HOW IT WORKS:
+//   • Every save (savePolicy / saveProfile) bumps per-field timestamps
+//     for any fields whose values changed, then pushes to Supabase.
+//   • On app load, pull from Supabase. For each cloud entity, do a
+//     per-field merge with the local copy: side with the later
+//     timestamp wins per-field. Result is written back to both
+//     local IDB and (if it differs from cloud) pushed to cloud.
+//   • _fieldVersions is stored on the entity itself as a private
+//     field, and stripped before pushing to cloud (the cloud has
+//     its own field_versions JSONB column).
+//   • A first-sync flag (cloudSyncInitialized in settings) tracks
+//     whether we've ever synced for this device. If unset AND both
+//     sides have data, the reconciliation modal opens for the FC
+//     to choose merge strategy.
+
+const sbGetUserId = () => window._user?.id || null;
+
+// Compare two values for equality (deep enough for our shapes)
+function _syncFieldEqual(a, b) {
+  if (a === b) return true;
+  if (a == null && b == null) return true;
+  if (a == null || b == null) return false;
+  if (typeof a !== typeof b) return false;
+  if (typeof a === 'object') {
+    try { return JSON.stringify(a) === JSON.stringify(b); }
+    catch(e) { return false; }
+  }
+  return false;
+}
+
+// Bump field versions for fields whose values differ between
+// oldData and newData. Fields unchanged retain their existing
+// timestamp. Fields new to newData get the current timestamp.
+function bumpFieldVersions(newData, oldData, baseVersions, ts) {
+  ts = ts || Date.now();
+  const versions = {...(baseVersions || {})};
+  const cleanNew = {...(newData || {})};
+  delete cleanNew._fieldVersions;
+  const cleanOld = {...(oldData || {})};
+  delete cleanOld._fieldVersions;
+  for (const key of Object.keys(cleanNew)) {
+    if (key.startsWith('_')) continue; // skip private fields
+    if (!_syncFieldEqual(cleanOld[key], cleanNew[key])) {
+      versions[key] = ts;
+    } else if (!versions[key]) {
+      versions[key] = ts;
+    }
+  }
+  return versions;
+}
+
+// Per-field merge: for each key in either side, the side with the
+// later timestamp wins. Returns { data, versions } for the merged
+// entity.
+function mergePerField(localData, cloudData, localVersions, cloudVersions) {
+  const result = {};
+  const mergedVersions = {};
+  const cleanLocal = {...(localData || {})};
+  delete cleanLocal._fieldVersions;
+  const cleanCloud = {...(cloudData || {})};
+  delete cleanCloud._fieldVersions;
+  const allKeys = new Set([...Object.keys(cleanLocal), ...Object.keys(cleanCloud)]);
+  for (const key of allKeys) {
+    if (key.startsWith('_')) continue;
+    const localT = (localVersions || {})[key] || 0;
+    const cloudT = (cloudVersions || {})[key] || 0;
+    if (cloudT > localT) {
+      if (key in cleanCloud) result[key] = cleanCloud[key];
+      mergedVersions[key] = cloudT;
+    } else {
+      if (key in cleanLocal) result[key] = cleanLocal[key];
+      mergedVersions[key] = localT || cloudT;
+    }
+  }
+  return { data: result, versions: mergedVersions };
+}
+
+// ── Profile cloud push/pull ──
+async function sbProfilePush(profile, versions) {
+  const s = getSB();
+  const uid = sbGetUserId();
+  if (!s || !uid) return false;
+  try {
+    // Strip _fieldVersions before sending — it lives in its own column
+    const clean = {...profile};
+    delete clean._fieldVersions;
+    const { error } = await s.from('user_client_profile').upsert({
+      user_id: uid,
+      data: clean,
+      field_versions: versions || {},
+      updated_at: new Date().toISOString(),
+    });
+    if (error) { console.warn('[Sync] Profile push error:', error.message); return false; }
+    console.log('[Sync] Pushed profile to cloud');
+    return true;
+  } catch(e) { console.warn('[Sync] Profile push failed:', e.message); return false; }
+}
+
+async function sbProfilePull() {
+  const s = getSB();
+  const uid = sbGetUserId();
+  if (!s || !uid) return null;
+  try {
+    const { data, error } = await s.from('user_client_profile').select('*').eq('user_id', uid).maybeSingle();
+    if (error) { console.warn('[Sync] Profile pull error:', error.message); return null; }
+    if (!data) return null;
+    return { data: data.data || {}, versions: data.field_versions || {} };
+  } catch(e) { console.warn('[Sync] Profile pull failed:', e.message); return null; }
+}
+
+// ── Policy cloud push/pull/delete ──
+async function sbPolicyPush(policy, versions) {
+  const s = getSB();
+  const uid = sbGetUserId();
+  if (!s || !uid || !policy?.id) return false;
+  try {
+    const clean = {...policy};
+    delete clean._fieldVersions;
+    const { error } = await s.from('user_policies').upsert({
+      id: policy.id,
+      user_id: uid,
+      data: clean,
+      field_versions: versions || {},
+      deleted_at: null,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'user_id,id' });
+    if (error) { console.warn('[Sync] Policy push error:', error.message); return false; }
+    return true;
+  } catch(e) { console.warn('[Sync] Policy push failed:', e.message); return false; }
+}
+
+async function sbPolicyDelete(id) {
+  const s = getSB();
+  const uid = sbGetUserId();
+  if (!s || !uid || !id) return false;
+  try {
+    // Soft delete — set deleted_at so other devices know to remove locally
+    const { error } = await s.from('user_policies').update({
+      deleted_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    }).eq('user_id', uid).eq('id', id);
+    if (error) { console.warn('[Sync] Policy delete error:', error.message); return false; }
+    return true;
+  } catch(e) { console.warn('[Sync] Policy delete failed:', e.message); return false; }
+}
+
+async function sbPoliciesPull() {
+  const s = getSB();
+  const uid = sbGetUserId();
+  if (!s || !uid) return null;
+  try {
+    const { data, error } = await s.from('user_policies').select('*').eq('user_id', uid);
+    if (error) { console.warn('[Sync] Policies pull error:', error.message); return null; }
+    return (data || []).map(row => ({
+      id: row.id,
+      data: row.data || {},
+      versions: row.field_versions || {},
+      deleted: !!row.deleted_at,
+    }));
+  } catch(e) { console.warn('[Sync] Policies pull failed:', e.message); return null; }
+}
+
+
+// ═══════════════════════════════════════════════════════════════
 // MODULE: CAMERA — In-app camera for multi-snap
 // ═══════════════════════════════════════════════════════════════
 
@@ -5928,6 +6123,137 @@ function OnboardingModal() {
 // MODULE: APP — Main App component + state management
 // ═══════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════
+// MODULE: RECONCILE SYNC MODAL — first-sync data conflict resolution
+// ═══════════════════════════════════════════════════════════════
+//
+// Shown when cloud sync runs for the FIRST TIME on a device and
+// detects non-trivial data on BOTH local IDB AND Supabase. The FC
+// is asked to choose how to merge:
+//   • Keep this device — push local up, overwrite cloud
+//   • Keep cloud — pull cloud down, overwrite local
+//   • Merge both — combine policies by id, per-field merge for
+//     conflicts on the same id (uses bumpFieldVersions/mergePerField)
+//
+// Locked-in: cannot dismiss without choosing. The cloudSyncInitialized
+// flag is set after the FC commits, so this modal never reappears
+// for the same device.
+function ReconcileSyncModal({ data, onChoose, onClose }) {
+  const localPolicyCount = (data.localPolicies || []).length;
+  const cloudPolicyCount = (data.cloudPolicies || []).length;
+  const localHasProfile = !!(data.localProfile && Object.keys(data.localProfile).filter(k => !k.startsWith('_') && data.localProfile[k]).length > 0);
+  const cloudHasProfile = !!(data.cloudProfile && Object.keys(data.cloudProfile).filter(k => !k.startsWith('_') && data.cloudProfile[k]).length > 0);
+  const localProfileName = (data.localProfile && data.localProfile.name) || '(unnamed)';
+  const cloudProfileName = (data.cloudProfile && data.cloudProfile.name) || '(unnamed)';
+
+  // Compute overlap stats for the merge preview
+  const localIds = new Set((data.localPolicies || []).map(p => p.id));
+  const cloudIds = new Set((data.cloudPolicies || []).map(c => c.id));
+  let bothCount = 0;
+  for (const id of localIds) if (cloudIds.has(id)) bothCount++;
+  const localOnly = localPolicyCount - bothCount;
+  const cloudOnly = cloudPolicyCount - bothCount;
+  const mergeTotal = localOnly + cloudOnly + bothCount;
+
+  return (
+    <div className="modal" style={{
+      position:'fixed', inset:0, background:'rgba(0,0,0,.85)',
+      display:'flex', alignItems:'center', justifyContent:'center',
+      zIndex:10000, padding:16, overflowY:'auto',
+    }}>
+      <div style={{
+        background:'var(--bg2)', borderRadius:14, maxWidth:600, width:'100%',
+        padding:24, border:'1px solid var(--border)', maxHeight:'90vh', overflowY:'auto',
+      }}>
+        <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:6}}>
+          <span style={{fontSize:24}}>☁️</span>
+          <h2 style={{fontSize:18,fontWeight:600,margin:0}}>Cloud Sync — First Time Setup</h2>
+        </div>
+        <p style={{fontSize:13,color:'var(--text2)',marginBottom:18,lineHeight:1.5}}>
+          We found data on this device <strong>and</strong> in your cloud account. Choose how to merge them — this only happens once.
+        </p>
+
+        {/* Side-by-side comparison */}
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,marginBottom:18}}>
+          <div style={{background:'var(--bg3)',borderRadius:10,padding:14,border:'1px solid var(--border)'}}>
+            <div style={{fontSize:10,fontWeight:700,color:'var(--gold)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8}}>📱 This Device</div>
+            <div style={{fontSize:12,color:'var(--text2)',marginBottom:4}}>
+              <strong style={{color:'var(--text1)'}}>Profile:</strong> {localHasProfile ? localProfileName : <em style={{color:'var(--text3)'}}>none</em>}
+            </div>
+            <div style={{fontSize:12,color:'var(--text2)'}}>
+              <strong style={{color:'var(--text1)'}}>Policies:</strong> {localPolicyCount}
+            </div>
+          </div>
+          <div style={{background:'var(--bg3)',borderRadius:10,padding:14,border:'1px solid var(--border)'}}>
+            <div style={{fontSize:10,fontWeight:700,color:'var(--teal)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8}}>☁️ Cloud</div>
+            <div style={{fontSize:12,color:'var(--text2)',marginBottom:4}}>
+              <strong style={{color:'var(--text1)'}}>Profile:</strong> {cloudHasProfile ? cloudProfileName : <em style={{color:'var(--text3)'}}>none</em>}
+            </div>
+            <div style={{fontSize:12,color:'var(--text2)'}}>
+              <strong style={{color:'var(--text1)'}}>Policies:</strong> {cloudPolicyCount}
+            </div>
+          </div>
+        </div>
+
+        {/* Merge preview */}
+        {(bothCount > 0 || (localOnly > 0 && cloudOnly > 0)) && (
+          <div style={{background:'rgba(91,168,160,.06)',border:'1px solid rgba(91,168,160,.25)',borderRadius:8,padding:10,marginBottom:18,fontSize:11,color:'var(--text2)'}}>
+            <strong style={{color:'var(--teal)'}}>Merge preview:</strong> {localOnly} on this device only · {cloudOnly} in cloud only · {bothCount} on both · <strong>{mergeTotal} total</strong>
+          </div>
+        )}
+
+        {/* Three action buttons */}
+        <div style={{display:'flex',flexDirection:'column',gap:10}}>
+          <button
+            onClick={() => onChoose('local')}
+            style={{
+              padding:'12px 16px', borderRadius:10, border:'1px solid rgba(212,169,106,.4)',
+              background:'rgba(212,169,106,.08)', color:'var(--gold)', cursor:'pointer',
+              textAlign:'left', fontSize:13, fontWeight:500,
+            }}
+          >
+            <div style={{fontWeight:600,marginBottom:2}}>📱 Keep this device</div>
+            <div style={{fontSize:11,color:'var(--text3)',fontWeight:400}}>
+              Push {localPolicyCount} polic{localPolicyCount===1?'y':'ies'} from here to cloud. Cloud data will be overwritten.
+            </div>
+          </button>
+          <button
+            onClick={() => onChoose('cloud')}
+            style={{
+              padding:'12px 16px', borderRadius:10, border:'1px solid rgba(91,168,160,.4)',
+              background:'rgba(91,168,160,.08)', color:'var(--teal)', cursor:'pointer',
+              textAlign:'left', fontSize:13, fontWeight:500,
+            }}
+          >
+            <div style={{fontWeight:600,marginBottom:2}}>☁️ Keep cloud</div>
+            <div style={{fontSize:11,color:'var(--text3)',fontWeight:400}}>
+              Pull {cloudPolicyCount} polic{cloudPolicyCount===1?'y':'ies'} from cloud. This device's data will be overwritten.
+            </div>
+          </button>
+          <button
+            onClick={() => onChoose('merge')}
+            style={{
+              padding:'12px 16px', borderRadius:10, border:'1px solid rgba(91,168,160,.5)',
+              background:'linear-gradient(135deg, rgba(91,168,160,.15), rgba(212,169,106,.1))',
+              color:'var(--text1)', cursor:'pointer',
+              textAlign:'left', fontSize:13, fontWeight:500,
+            }}
+          >
+            <div style={{fontWeight:600,marginBottom:2}}>🔀 Merge both <span style={{color:'var(--teal)',fontSize:10}}>(recommended)</span></div>
+            <div style={{fontSize:11,color:'var(--text3)',fontWeight:400}}>
+              Combine all policies by ID. For policies on both sides, the most recently edited field wins per field. Result: {mergeTotal} polic{mergeTotal===1?'y':'ies'}.
+            </div>
+          </button>
+        </div>
+
+        <div style={{fontSize:10,color:'var(--text3)',marginTop:14,textAlign:'center'}}>
+          This dialog appears only once. After you choose, future changes auto-sync between devices.
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [tab, setTab] = useState('dashboard');
   const [policies, setPolicies] = useState([]);
@@ -5950,6 +6276,15 @@ function App() {
   // as fallback. The FC can edit these in Settings → House Defaults; changes
   // apply to new clients going forward, never retroactively.
   const [houseDefaults, setHouseDefaults] = useState(DEFAULT_HOUSE_VALUES);
+
+  // ── CLOUD SYNC RECONCILIATION ──
+  // When the FIRST cloud sync detects data on both local IDB AND
+  // Supabase, this state holds the side-by-side comparison so the
+  // ReconcileSyncModal can present the FC with three choices:
+  // keep local, keep cloud, or merge both. Set to null after the
+  // FC makes their choice and the cloudSyncInitialized flag flips.
+  // Shape: { localProfile, cloudProfile, localPolicies, cloudPolicies }
+  const [reconcileData, setReconcileData] = useState(null);
 
   useEffect(() => {
     (async () => {
@@ -6037,10 +6372,223 @@ function App() {
       const gk = await dbGet('settings','geminiKey').catch(()=>null);
       const ck = await dbGet('settings','anthropicKey').catch(()=>null);
       if(gk?.value || ck?.value) console.log('[App] API keys reloaded after Supabase sync');
+      // Cloud sync also depends on auth being ready — run it now
+      // (it's idempotent via cloudSyncRanRef so calling multiple
+      // times is safe).
+      runCloudSync().catch(err => console.warn('[Sync] runCloudSync failed:', err));
     };
     window.addEventListener('policylens-keys-synced', handler);
     return () => window.removeEventListener('policylens-keys-synced', handler);
   }, []);
+
+  // ── CLOUD SYNC RUNNER (cross-device sync, 2026-04-09) ──
+  // Pulls clientProfile + policies from Supabase and merges them
+  // with local IDB. Ref-guarded to run exactly once per app
+  // session, and callable from both:
+  //   1. The auth-ready event (policylens-keys-synced) — for the
+  //      common case where auth completes before initial load.
+  //   2. A useEffect watching `loading` — for the case where the
+  //      local load finishes after auth has already fired.
+  // Whichever fires first wins; the second one no-ops.
+  //
+  // First-sync detection: a flag in IDB ('cloudSyncInitialized')
+  // tracks whether we've ever synced for this device. If unset
+  // AND both sides have non-trivial data, opens the reconciliation
+  // modal so the FC can choose merge strategy. Otherwise auto-
+  // merges per-field using bumpFieldVersions/mergePerField.
+  const cloudSyncRanRef = useRef(false);
+  const runCloudSync = async () => {
+    if (cloudSyncRanRef.current) return;
+    const uid = sbGetUserId();
+    if (!uid) {
+      console.log('[Sync] No user ID yet — deferring cloud sync');
+      return;
+    }
+    if (loading) {
+      console.log('[Sync] Local load not complete yet — deferring cloud sync');
+      return;
+    }
+    cloudSyncRanRef.current = true;
+    console.log('[Sync] Running cloud sync for user', uid);
+    try {
+      // Pull both in parallel
+      const [cloudProfileRec, cloudPolicyRecs] = await Promise.all([
+        sbProfilePull(),
+        sbPoliciesPull(),
+      ]);
+      const cloudProfile = cloudProfileRec; // {data, versions} | null
+      const cloudPolicies = cloudPolicyRecs || []; // [{id, data, versions, deleted}]
+      console.log('[Sync] Cloud:', cloudProfile ? 'profile yes' : 'profile no', '·', cloudPolicies.length, 'policies');
+
+      // First-sync detection
+      const initFlagRec = await dbGet('settings', 'cloudSyncInitialized').catch(() => null);
+      const initialized = !!(initFlagRec && initFlagRec.value);
+
+      // Helper: is the local profile non-trivial? (i.e. has any
+      // user-entered fields beyond defaults)
+      const isNonTrivialProfile = (p) => {
+        if (!p) return false;
+        const keys = Object.keys(p).filter(k => !k.startsWith('_'));
+        return keys.some(k => {
+          const v = p[k];
+          if (v == null || v === '') return false;
+          if (Array.isArray(v) && v.length === 0) return false;
+          return true;
+        });
+      };
+
+      const localProfileHasData = isNonTrivialProfile(clientProfile);
+      const cloudProfileHasData = !!(cloudProfile && isNonTrivialProfile(cloudProfile.data));
+      const localPolicyCount = (policies || []).length;
+      const liveCloudPolicies = cloudPolicies.filter(p => !p.deleted);
+      const cloudPolicyCount = liveCloudPolicies.length;
+
+      if (!initialized) {
+        // FIRST SYNC PATH
+        // If both sides have data → reconcile via modal
+        if ((localProfileHasData && cloudProfileHasData) || (localPolicyCount > 0 && cloudPolicyCount > 0)) {
+          console.log('[Sync] First sync — both sides have data, opening reconciliation modal');
+          setReconcileData({
+            localProfile: clientProfile,
+            cloudProfile: cloudProfile?.data || null,
+            cloudProfileVersions: cloudProfile?.versions || {},
+            localPolicies: policies || [],
+            cloudPolicies: liveCloudPolicies,
+          });
+          // The modal will set the flag when the FC makes a choice
+          return;
+        }
+        // Local-only → push everything to cloud silently
+        if ((localProfileHasData || localPolicyCount > 0) && !cloudProfileHasData && cloudPolicyCount === 0) {
+          console.log('[Sync] First sync — local has data, cloud empty. Pushing everything up.');
+          if (localProfileHasData) {
+            const versions = bumpFieldVersions(clientProfile, {}, {});
+            await sbProfilePush(clientProfile, versions);
+            // Persist versions back to local so future merges work
+            const enriched = {...clientProfile, _fieldVersions: versions};
+            await dbPut('settings', {key:'clientProfile', value: enriched});
+            setClientProfile(enriched);
+          }
+          for (const pol of (policies || [])) {
+            const versions = bumpFieldVersions(pol, {}, {});
+            await sbPolicyPush(pol, versions);
+            const enrichedPol = {...pol, _fieldVersions: versions};
+            await dbPut('policies', enrichedPol);
+          }
+          if ((policies || []).length > 0) {
+            const reloaded = await dbGetAll('policies');
+            setPolicies(reloaded);
+          }
+          await dbPut('settings', {key:'cloudSyncInitialized', value:true});
+          try { toast('☁️ Synced '+(localPolicyCount)+' policies to cloud','success',4000); } catch(e){}
+          return;
+        }
+        // Cloud-only → pull everything down silently
+        if (!localProfileHasData && localPolicyCount === 0 && (cloudProfileHasData || cloudPolicyCount > 0)) {
+          console.log('[Sync] First sync — cloud has data, local empty. Pulling everything down.');
+          if (cloudProfileHasData) {
+            const enriched = {...cloudProfile.data, _fieldVersions: cloudProfile.versions};
+            await dbPut('settings', {key:'clientProfile', value: enriched});
+            setClientProfile(enriched);
+          }
+          for (const cp of liveCloudPolicies) {
+            const enriched = {...cp.data, _fieldVersions: cp.versions};
+            await dbPut('policies', enriched);
+          }
+          const reloaded = await dbGetAll('policies');
+          setPolicies(reloaded);
+          await dbPut('settings', {key:'cloudSyncInitialized', value:true});
+          try { toast('☁️ Pulled '+cloudPolicyCount+' policies from cloud','success',4000); } catch(e){}
+          return;
+        }
+        // Neither side has data → nothing to do, just mark initialized
+        console.log('[Sync] First sync — both sides empty, marking initialized');
+        await dbPut('settings', {key:'cloudSyncInitialized', value:true});
+        return;
+      }
+
+      // SUBSEQUENT SYNC PATH — auto-merge per field
+      console.log('[Sync] Subsequent sync — auto-merging per field');
+      let profileChanges = 0;
+      let policyChanges = 0;
+      // Profile merge
+      if (cloudProfile) {
+        const localVers = clientProfile?._fieldVersions || {};
+        const merged = mergePerField(clientProfile, cloudProfile.data, localVers, cloudProfile.versions);
+        const mergedProfile = {...merged.data, _fieldVersions: merged.versions};
+        if (JSON.stringify(mergedProfile) !== JSON.stringify(clientProfile)) {
+          await dbPut('settings', {key:'clientProfile', value: mergedProfile});
+          setClientProfile(mergedProfile);
+          profileChanges++;
+          // Push merged result back to cloud (it may have new fields the cloud didn't have)
+          sbProfilePush(mergedProfile, merged.versions).catch(()=>{});
+        }
+      } else if (localProfileHasData) {
+        // Cloud has no profile but local does → push local up
+        const versions = bumpFieldVersions(clientProfile, {}, clientProfile?._fieldVersions || {});
+        sbProfilePush(clientProfile, versions).catch(()=>{});
+      }
+      // Policies merge
+      const localById = new Map((policies || []).map(p => [p.id, p]));
+      const cloudById = new Map(cloudPolicies.map(c => [c.id, c]));
+      // Cloud → local: merge or insert
+      for (const cp of cloudPolicies) {
+        if (cp.deleted) {
+          // Cloud says deleted — remove locally if present
+          if (localById.has(cp.id)) {
+            await dbDel('policies', cp.id);
+            policyChanges++;
+          }
+          continue;
+        }
+        const localPol = localById.get(cp.id);
+        if (localPol) {
+          const localVers = localPol._fieldVersions || {};
+          const merged = mergePerField(localPol, cp.data, localVers, cp.versions);
+          const mergedPol = {...merged.data, _fieldVersions: merged.versions, id: cp.id};
+          if (JSON.stringify(mergedPol) !== JSON.stringify(localPol)) {
+            await dbPut('policies', mergedPol);
+            policyChanges++;
+            // Push merged back if local had newer fields the cloud didn't
+            sbPolicyPush(mergedPol, merged.versions).catch(()=>{});
+          }
+        } else {
+          // Cloud-only policy → save locally
+          const enriched = {...cp.data, _fieldVersions: cp.versions, id: cp.id};
+          await dbPut('policies', enriched);
+          policyChanges++;
+        }
+      }
+      // Local → cloud: push any local-only policies (not in cloud at all)
+      for (const lp of (policies || [])) {
+        if (!cloudById.has(lp.id)) {
+          const versions = bumpFieldVersions(lp, {}, lp._fieldVersions || {});
+          sbPolicyPush(lp, versions).catch(()=>{});
+        }
+      }
+      if (policyChanges > 0) {
+        const reloaded = await dbGetAll('policies');
+        setPolicies(reloaded);
+        try { toast('☁️ Synced '+policyChanges+' policy update'+(policyChanges>1?'s':'')+' from cloud','info',3000); } catch(e){}
+      }
+      if (profileChanges > 0 && policyChanges === 0) {
+        try { toast('☁️ Synced profile updates from cloud','info',3000); } catch(e){}
+      }
+      console.log('[Sync] Auto-merge done:', profileChanges, 'profile changes,', policyChanges, 'policy changes');
+    } catch (err) {
+      console.warn('[Sync] Cloud sync failed:', err);
+      cloudSyncRanRef.current = false; // allow retry on next trigger
+    }
+  };
+
+  // Trigger cloud sync when local loading completes (catches the
+  // case where auth fired BEFORE the load was done — in that case
+  // the auth handler bailed and we need this useEffect to run it).
+  useEffect(() => {
+    if (loading) return;
+    runCloudSync().catch(err => console.warn('[Sync] runCloudSync failed:', err));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading]);
 
   // ── ONE-TIME CLEANUP: purge stale extractCache entries from old pipeline versions ──
   // The extractCache uses EXTRACT_PIPELINE_VERSION as a key prefix, so when the
@@ -6083,12 +6631,25 @@ function App() {
   // Repo reload triggered manually via refreshRepo or on initial load
 
   const savePolicy = async (p) => {
-    await dbPut('policies', p);
-    setPolicies(prev => {const idx=prev.findIndex(x=>x.id===p.id);if(idx>=0){const n=[...prev];n[idx]=p;return n}return[...prev,p]});
+    // ── CLOUD SYNC: bump field versions and push fire-and-forget ──
+    // Field versions track per-field timestamps so cross-device
+    // merges can resolve conflicts intelligently. Compare against
+    // the existing in-memory copy to bump only fields that changed.
+    const oldData = policies.find(x => x.id === p.id);
+    const oldVersions = oldData?._fieldVersions || {};
+    const newVersions = bumpFieldVersions(p, oldData, oldVersions);
+    const enriched = {...p, _fieldVersions: newVersions};
+    await dbPut('policies', enriched);
+    setPolicies(prev => {const idx=prev.findIndex(x=>x.id===enriched.id);if(idx>=0){const n=[...prev];n[idx]=enriched;return n}return[...prev,enriched]});
+    // Push to cloud (fire-and-forget — don't block save flow).
+    // Cloud helper strips _fieldVersions before sending.
+    sbPolicyPush(enriched, newVersions).catch(() => {});
   };
   const deletePolicy = async (id) => {
     await dbDel('policies', id);
     setPolicies(prev => prev.filter(x=>x.id!==id));
+    // Cloud soft-delete (fire-and-forget)
+    sbPolicyDelete(id).catch(() => {});
   };
 
   // Repo operations — Supabase primary, local fallback
@@ -6125,10 +6686,16 @@ function App() {
     await dbPut('settings',{key:'clientName',value:n});
   };
   const saveProfile = async (p) => {
-    setClientProfile(p);
-    setClientName(p.name||'');
-    await dbPut('settings',{key:'clientProfile',value:p});
-    await dbPut('settings',{key:'clientName',value:p.name||''});
+    // ── CLOUD SYNC: bump field versions, push fire-and-forget ──
+    const oldVersions = clientProfile?._fieldVersions || {};
+    const newVersions = bumpFieldVersions(p, clientProfile, oldVersions);
+    const enriched = {...p, _fieldVersions: newVersions};
+    setClientProfile(enriched);
+    setClientName(enriched.name||'');
+    await dbPut('settings',{key:'clientProfile',value:enriched});
+    await dbPut('settings',{key:'clientName',value:enriched.name||''});
+    // Push to cloud (fire-and-forget). Cloud helper strips _fieldVersions.
+    sbProfilePush(enriched, newVersions).catch(() => {});
     // ── GLOBAL SYNC: Recalculate ageAtEntry for all policies ──
     // Triggers whenever the profile has ANY age source (real DOB
     // OR current age + asOf timestamp). Uses getProfileEffectiveDob
@@ -6203,6 +6770,125 @@ function App() {
       <ToastContainer />
       <CameraModal />
       <OnboardingModal />
+      {reconcileData && <ReconcileSyncModal
+        data={reconcileData}
+        onClose={() => setReconcileData(null)}
+        onChoose={async (choice) => {
+          // choice: 'local' | 'cloud' | 'merge'
+          const ts = Date.now();
+          try {
+            if (choice === 'local') {
+              // Push everything local up to cloud, overwriting
+              console.log('[Sync] Reconcile: keeping local, pushing to cloud');
+              if (reconcileData.localProfile) {
+                const versions = bumpFieldVersions(reconcileData.localProfile, {}, {}, ts);
+                const enriched = {...reconcileData.localProfile, _fieldVersions: versions};
+                await dbPut('settings', {key:'clientProfile', value: enriched});
+                setClientProfile(enriched);
+                await sbProfilePush(reconcileData.localProfile, versions);
+              }
+              // Soft-delete cloud-only policies (those not in local)
+              const localIds = new Set((reconcileData.localPolicies || []).map(p => p.id));
+              for (const cp of reconcileData.cloudPolicies || []) {
+                if (!localIds.has(cp.id)) {
+                  await sbPolicyDelete(cp.id);
+                }
+              }
+              // Push all local policies up
+              for (const lp of reconcileData.localPolicies || []) {
+                const versions = bumpFieldVersions(lp, {}, lp._fieldVersions || {}, ts);
+                const enriched = {...lp, _fieldVersions: versions};
+                await dbPut('policies', enriched);
+                await sbPolicyPush(lp, versions);
+              }
+              const reloaded = await dbGetAll('policies');
+              setPolicies(reloaded);
+              try { toast('☁️ Kept this device, pushed '+(reconcileData.localPolicies||[]).length+' policies to cloud','success',5000); } catch(e){}
+
+            } else if (choice === 'cloud') {
+              // Pull cloud, overwriting local
+              console.log('[Sync] Reconcile: keeping cloud, pulling to local');
+              // Wipe local policies first
+              const oldIds = (reconcileData.localPolicies || []).map(p => p.id);
+              for (const id of oldIds) await dbDel('policies', id);
+              // Apply cloud profile
+              if (reconcileData.cloudProfile) {
+                const enriched = {...reconcileData.cloudProfile, _fieldVersions: reconcileData.cloudProfileVersions || {}};
+                await dbPut('settings', {key:'clientProfile', value: enriched});
+                setClientProfile(enriched);
+              }
+              // Apply cloud policies
+              for (const cp of reconcileData.cloudPolicies || []) {
+                const enriched = {...cp.data, _fieldVersions: cp.versions || {}, id: cp.id};
+                await dbPut('policies', enriched);
+              }
+              const reloaded = await dbGetAll('policies');
+              setPolicies(reloaded);
+              try { toast('☁️ Kept cloud, pulled '+(reconcileData.cloudPolicies||[]).length+' policies to this device','success',5000); } catch(e){}
+
+            } else if (choice === 'merge') {
+              // Per-field merge: combine both sets, dedupe by id,
+              // merge per-field for conflicts. Local profile + cloud
+              // profile merged via mergePerField.
+              console.log('[Sync] Reconcile: merging per-field');
+              if (reconcileData.localProfile && reconcileData.cloudProfile) {
+                const localVers = reconcileData.localProfile._fieldVersions || {};
+                const merged = mergePerField(
+                  reconcileData.localProfile,
+                  reconcileData.cloudProfile,
+                  localVers,
+                  reconcileData.cloudProfileVersions || {}
+                );
+                const mergedProfile = {...merged.data, _fieldVersions: merged.versions};
+                await dbPut('settings', {key:'clientProfile', value: mergedProfile});
+                setClientProfile(mergedProfile);
+                await sbProfilePush(mergedProfile, merged.versions);
+              } else if (reconcileData.cloudProfile) {
+                const enriched = {...reconcileData.cloudProfile, _fieldVersions: reconcileData.cloudProfileVersions || {}};
+                await dbPut('settings', {key:'clientProfile', value: enriched});
+                setClientProfile(enriched);
+              } else if (reconcileData.localProfile) {
+                const versions = bumpFieldVersions(reconcileData.localProfile, {}, {}, ts);
+                const enriched = {...reconcileData.localProfile, _fieldVersions: versions};
+                await dbPut('settings', {key:'clientProfile', value: enriched});
+                setClientProfile(enriched);
+                await sbProfilePush(reconcileData.localProfile, versions);
+              }
+              // Merge policies by id
+              const localById = new Map((reconcileData.localPolicies || []).map(p => [p.id, p]));
+              const cloudById = new Map((reconcileData.cloudPolicies || []).map(c => [c.id, c]));
+              const allIds = new Set([...localById.keys(), ...cloudById.keys()]);
+              for (const id of allIds) {
+                const lp = localById.get(id);
+                const cp = cloudById.get(id);
+                if (lp && cp) {
+                  const merged = mergePerField(lp, cp.data, lp._fieldVersions || {}, cp.versions || {});
+                  const mergedPol = {...merged.data, _fieldVersions: merged.versions, id};
+                  await dbPut('policies', mergedPol);
+                  await sbPolicyPush(mergedPol, merged.versions);
+                } else if (lp) {
+                  const versions = bumpFieldVersions(lp, {}, lp._fieldVersions || {}, ts);
+                  const enriched = {...lp, _fieldVersions: versions};
+                  await dbPut('policies', enriched);
+                  await sbPolicyPush(lp, versions);
+                } else if (cp) {
+                  const enriched = {...cp.data, _fieldVersions: cp.versions || {}, id};
+                  await dbPut('policies', enriched);
+                }
+              }
+              const reloaded = await dbGetAll('policies');
+              setPolicies(reloaded);
+              try { toast('☁️ Merged — '+allIds.size+' policies total','success',5000); } catch(e){}
+            }
+            // Mark sync initialized so we don't show this modal again
+            await dbPut('settings', {key:'cloudSyncInitialized', value:true});
+          } catch (err) {
+            console.error('[Sync] Reconcile failed:', err);
+            try { toast('Sync failed: '+(err.message||err),'error',6000); } catch(e){}
+          }
+          setReconcileData(null);
+        }}
+      />}
       <Header />
       <div style={{flex:1,overflow:'auto',padding:'12px clamp(10px, 3vw, 20px) 40px'}}>
         {tab==='profile' && <ErrorBoundary key="profile"><ProfileTab /></ErrorBoundary>}
@@ -13418,6 +14104,24 @@ function Policies() {
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState(null);
   const [staged, setStaged] = useState([]);
+  // Synchronous mirror of staged for reads from inside async
+  // callbacks (triggerProgressiveExtract, chain-on-complete
+  // setTimeout, button onClick handlers). React's setState callback
+  // pattern doesn't work for our case because the updater callback
+  // is invoked LATER when React processes the update — by which
+  // time the surrounding sync code has already moved on with stale
+  // captured values. The ref is updated via useEffect so it always
+  // reflects the latest committed state.
+  //
+  // CRITICAL: this was the root cause of the flicker bug. The
+  // earlier `setStaged(prev => { snapshot = prev.filter(...); ... })`
+  // pattern captured `snapshot` inside a callback that ran AFTER
+  // the wrapper's `if (snapshot.length === 0) return;` check, so
+  // the wrapper bailed immediately without ever calling handleExtract.
+  // The deferred setStaged update then marked files as 'extracting'
+  // with no extraction running, and the defensive effect reverted them.
+  const stagedRef = useRef([]);
+  useEffect(() => { stagedRef.current = staged; }, [staged]);
   const [scanProgress, setScanProgress] = useState(null); // {batch, totalBatches, totalFiles, status, pctComplete}
   // ── SYNCHRONOUS RE-ENTRY GUARD (2026-04-09 fix) ──
   // `scanning` state is async — a dropzone event, SW recovery, or
@@ -14118,18 +14822,20 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
     // its own extractingRef). Cleared in the finally block below.
     triggerInFlightRef.current = true;
     try {
-    // Snapshot queued items via functional setState to avoid a
-    // stale closure over `staged`. The setter is called inside a
-    // render lifecycle but the result is used imperatively.
-    let snapshot = [];
-    let markedKeys = new Set();
-    setStaged(prev => {
-      snapshot = prev.filter(s => s._status === 'queued' || s._status == null);
-      if (snapshot.length === 0) return prev;
-      markedKeys = new Set(snapshot.map(s => s.file));
-      return prev.map(s => markedKeys.has(s.file) ? {...s, _status: 'extracting'} : s);
-    });
-    if (snapshot.length === 0) return;
+    // Read the latest staged state SYNCHRONOUSLY via stagedRef.
+    // Functional setState doesn't work here because the updater
+    // callback runs LATER when React processes the update — the
+    // sync continuation of this function would see stale closure
+    // values and bail out without ever calling handleExtract.
+    const currentStaged = stagedRef.current;
+    const snapshot = currentStaged.filter(s => s._status === 'queued' || s._status == null);
+    if (snapshot.length === 0) {
+      console.log('[Progressive] Nothing to extract — bailing');
+      return;
+    }
+    const markedKeys = new Set(snapshot.map(s => s.file));
+    // Now actually mark them as 'extracting' via setStaged
+    setStaged(prev => prev.map(s => markedKeys.has(s.file) ? {...s, _status: 'extracting'} : s));
 
     progressiveSessionRef.current = true;
     console.log('[Progressive] Triggered ('+triggerReason+'):', snapshot.length, 'files');
@@ -14162,6 +14868,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
     // Success: mark the snapshot's files as 'done' (stay visible
     // with a green badge). New staged items added during the run
     // remain 'queued' for the next pass.
+    console.log('[Progressive] Extraction succeeded — marking', snapshot.length, 'files as done');
     setStaged(prev => prev.map(s => markedKeys.has(s.file) ? {...s, _status: 'done'} : s));
 
     // ── CHAIN-ON-COMPLETE ──
@@ -14174,27 +14881,24 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
     // chainingNext flag flips true during the delay so the staged
     // strip header can display a "Queuing next pass…" indicator —
     // otherwise the app looks frozen for 300ms between runs.
-    // Read the current staged state synchronously first so we only
-    // show the indicator if there ACTUALLY is a next pass coming.
-    let hasMoreQueued = false;
-    setStaged(prev => {
-      hasMoreQueued = prev.some(s => s._status === 'queued' || s._status == null);
-      return prev;
-    });
-    if (hasMoreQueued) {
+    // Read the current staged state synchronously via stagedRef.
+    // (Note: stagedRef may be one render behind because the
+    // setStaged 'done' above hasn't committed yet, but that's fine
+    // because we're checking for files NOT in markedKeys —
+    // i.e. files added during the run that are still 'queued'.)
+    const newQueued = stagedRef.current.filter(s =>
+      !markedKeys.has(s.file) && (s._status === 'queued' || s._status == null)
+    );
+    if (newQueued.length > 0) {
       setChainingNext(true);
     }
     setTimeout(() => {
       setChainingNext(false);
       // Re-check queued state — user may have removed items during
       // the delay, or the session may have closed.
-      let stillHasQueued = false;
-      setStaged(prev => {
-        stillHasQueued = prev.some(s => s._status === 'queued' || s._status == null);
-        return prev;
-      });
-      if (stillHasQueued) {
-        console.log('[Progressive] More queued items detected — chaining next pass');
+      const stillQueued = stagedRef.current.filter(s => s._status === 'queued' || s._status == null);
+      if (stillQueued.length > 0) {
+        console.log('[Progressive] More queued items detected — chaining next pass (' + stillQueued.length + ' files)');
         triggerProgressiveExtract('chain');
       } else {
         console.log('[Progressive] No more queued items — session idle');
