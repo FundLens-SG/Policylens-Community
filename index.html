@@ -3,20 +3,16 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-<meta name="screen-orientation" content="portrait">
-<meta name="x5-orientation" content="portrait">
 <meta name="browsermode" content="application">
 <title>PolicyLens V1.0</title>
 <script>window.onerror=function(m,s){if(!s||m==='Script error.')return true;return false};window.onunhandledrejection=function(e){if(!e||!e.reason)return;var r=String(e.reason);if(r==='Script error.')e.preventDefault();};
-// Lock to portrait
-try{if(screen.orientation&&screen.orientation.lock)screen.orientation.lock('portrait').catch(function(){});}catch(e){}
 // Suppress noisy library warnings
 (function(){var _warn=console.warn,_error=console.error;
 console.warn=function(){var m=arguments[0]||'';if(typeof m==='string'&&(m.includes('gotrue-js')||m.includes('lock:')||m.includes('not released within')||m.includes('this.lock')))return;_warn.apply(console,arguments)};
 console.error=function(){var m=arguments[0]||'';if(typeof m==='string'&&m.includes('deoptimised'))return;_error.apply(console,arguments)};
 })();
 </script>
-<link rel="manifest" href="data:application/json,%7B%22name%22%3A%22PolicyLens%22%2C%22short_name%22%3A%22PolicyLens%22%2C%22start_url%22%3A%22.%22%2C%22display%22%3A%22standalone%22%2C%22orientation%22%3A%22portrait%22%2C%22background_color%22%3A%22%230b0f1a%22%2C%22theme_color%22%3A%22%23d4a96a%22%7D">
+<link rel="manifest" href="data:application/json,%7B%22name%22%3A%22PolicyLens%22%2C%22short_name%22%3A%22PolicyLens%22%2C%22start_url%22%3A%22.%22%2C%22display%22%3A%22standalone%22%2C%22orientation%22%3A%22any%22%2C%22background_color%22%3A%22%230b0f1a%22%2C%22theme_color%22%3A%22%23d4a96a%22%7D">
 <meta name="theme-color" content="#0b0f1a">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -45,17 +41,9 @@ if(!navigator.locks){navigator.locks={request:function(name,opts,cb){if(typeof o
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{overflow-x:hidden;width:100%}
-/* ══════ LANDSCAPE LOCK — only activate on real mobile touchscreens in landscape ══════ */
-/* Requires: landscape orientation + coarse pointer (touchscreen) + narrow viewport.
-   This correctly excludes desktops (fine pointer), tablets (wider than 950px when landscape),
-   and desktops with dev tools open (which can compress viewport height below 500px). */
-@media screen and (orientation:landscape) and (pointer:coarse) and (max-width:950px) {
-  #root{display:none!important}
-  #landscape-lock{display:flex!important}
-}
-#landscape-lock{display:none;position:fixed;inset:0;z-index:99999;background:var(--bg);flex-direction:column;align-items:center;justify-content:center;text-align:center;padding:24px;gap:12px}
-#landscape-lock .rotate-icon{font-size:48px;animation:rotateHint 2s ease-in-out infinite}
-@keyframes rotateHint{0%,100%{transform:rotate(0deg)}50%{transform:rotate(-90deg)}}
+/* Landscape support — both orientations are fully usable. The OrientationLock
+   floating button (bottom-right) provides optional manual lock for users who
+   prefer to fix orientation. No automatic portrait-only enforcement. */
 :root{
 --bg:#0b0f1a;--bg2:#111827;--bg3:#171f2e;--bg4:#1f2a3d;
 --text:#e8dcc8;--text2:#a39580;--text3:#6b6050;
@@ -526,11 +514,6 @@ document.addEventListener('DOMContentLoaded',function(){
 });
 </script>
 
-<div id="landscape-lock">
-  <div class="rotate-icon">📱</div>
-  <div style="font-size:16px;font-weight:600;color:#d4a96a">Please rotate to portrait</div>
-  <div style="font-size:12px;color:#6b6050">PolicyLens is designed for portrait mode</div>
-</div>
 <div id="root"></div>
 <script type="text/babel">
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
@@ -5576,14 +5559,10 @@ function PresentMode() {
     { label: 'Disability/mth',   have: totalDI, need: reqDI, ok: hasDI  },
   ];
 
-  // Top policies by premium (simplified, no edit)
-  const topByPremium = [...active]
-    .sort((a, b) => {
-      const ap = (a.premFrequency === 'monthly' ? (parseFloat(a.annualPremium)||0)*12 : (parseFloat(a.annualPremium)||0));
-      const bp = (b.premFrequency === 'monthly' ? (parseFloat(b.annualPremium)||0)*12 : (parseFloat(b.annualPremium)||0));
-      return bp - ap;
-    })
-    .slice(0, 5);
+  // Top policies by premium — removed from Present mode per design review.
+  // Card cluttered the client-facing view; detailed per-policy data lives
+  // in the Policies tab where it belongs. The Premium Allocation card
+  // already shows aggregate breakdown.
 
   // ── ACTION-REQUIRED GAP DETAILS ──
   // Extract the shortfalls from the coverageBars data in a form the FC can
@@ -5672,56 +5651,134 @@ function PresentMode() {
     : 35;
   const retAge = parseInt(clientProfile?.retirementAge) || 65;
 
-  // ── CASHFLOW TIMELINE ──
-  // Year-by-year projection of recurring premium commitment over the next
-  // 15 years. Each year aggregates the annualized premium across all
-  // active policies whose payment term hasn't ended yet, grouped by
-  // category for visual stacking. Drop-off years (where total decreases
-  // meaningfully vs the previous year) are annotated so the FC can point
-  // at them during the meeting and say "your commitment lightens here".
-  //
-  // Excludes single-premium policies entirely — a one-time $100k upfront
-  // cost is a different conversation and doesn't belong on a recurring-
-  // commitment projection.
-  const cashflowYears = (() => {
-    const years = [];
-    const horizon = 15; // 15-year projection, enough for retirement framing
-    const startYear = new Date().getFullYear();
-    for(let i = 0; i < horizon; i++) {
-      const year = startYear + i;
-      const ageAt = clientAge + i;
-      const byCat = {};
-      let total = 0;
-      for(const pol of active) {
-        if(pol.premSingle || pol.premFrequency === 'single') continue;
-        // Hard stop: if premEndAge is set and client has aged past it,
-        // the policy is no longer drawing premium.
-        const endAge = parseInt(pol.premEndAge);
-        if(endAge && ageAt >= endAge) continue;
-        const raw = parseFloat(pol.annualPremium) || 0;
-        if(!raw) continue;
-        const ann = pol.premFrequency === 'monthly' ? raw * 12 : raw;
-        total += ann;
-        const cat = pol.category || 'other';
-        byCat[cat] = (byCat[cat] || 0) + ann;
-      }
-      years.push({ year, ageAt, total, byCat });
+  // ── CLIENT-LEVEL CACHES FOR TIER 2 CARDS ──
+  // These come from Dashboard via window.__cvTimelineCache (set by Dashboard
+  // when it computes its own cvTimeline). If Dashboard hasn't been visited
+  // yet, the cache is null and the cards gracefully hide.
+  let cvCache = null;
+  try {
+    if(typeof window !== 'undefined' && Array.isArray(window.__cvTimelineCache)) {
+      cvCache = window.__cvTimelineCache;
     }
-    return years;
-  })();
-  const cashflowMax = Math.max(1, ...cashflowYears.map(y => y.total));
-  // Annotate drop-off years: a year is "dropping off" if its total is
-  // meaningfully less (>5%) than the previous year's total. We only mark
-  // the first year of each drop-off so sustained lower levels don't all
-  // get flagged.
-  for(let i = 1; i < cashflowYears.length; i++) {
-    const prev = cashflowYears[i-1].total;
-    const cur = cashflowYears[i].total;
-    if(prev > 0 && cur < prev * 0.95) {
-      cashflowYears[i].dropOff = true;
-      cashflowYears[i].savedDelta = prev - cur;
+  } catch(e) { /* no cache — skip cv projection */ }
+
+  // ── DEPENDANTS + FAMILY PROTECTION ──
+  // For each dependant listed on the client profile, find the policies
+  // where they are the life assured. Lets the FC say "Jane is covered
+  // under these 3 policies totalling $500k death benefit."
+  const dependants = clientProfile?.dependants || [];
+  const normalize = (s) => String(s||'').trim().toLowerCase().replace(/\s+/g,' ');
+  const clientNameNorm = normalize(clientProfile?.name);
+  const dependantCoverage = dependants.map(dep => {
+    const depNorm = normalize(dep.name);
+    if(!depNorm) return { ...dep, policies: [], deathSA: 0, policyCount: 0 };
+    const theirPolicies = active.filter(pol => {
+      const liNorm = normalize(pol.lifeInsured);
+      // If lifeInsured is explicitly the dependant, they're covered
+      if(liNorm && liNorm === depNorm) return true;
+      return false;
+    });
+    let deathSA = 0;
+    theirPolicies.forEach(pol => {
+      const sa = parseFloat(pol.sumAssured) || 0;
+      const cat = pol.category || '';
+      const sub = pol.subType || '';
+      if(cat === 'protection' && !['Personal Accident','Critical Illness','Disability Income'].includes(sub)) {
+        deathSA += sa;
+      }
+    });
+    return { ...dep, policies: theirPolicies, deathSA, policyCount: theirPolicies.length };
+  });
+  const hasDependantsWithCoverage = dependantCoverage.length > 0;
+
+  // ── CASH VALUE GROWTH PROJECTION ──
+  // Reads window.__cvTimelineCache rows and extracts the totalCV trajectory
+  // from today (client age) to a few years past retirement. Picks a small
+  // set of milestone ages for a clean mobile sparkline-ish chart: today,
+  // +5 years, +10 years, retirement, +5 past retirement, +10 past retirement.
+  let cvProjection = null;
+  if(cvCache && cvCache.length > 0) {
+    const findRow = (age) => cvCache.find(r => r.age === age) || null;
+    const ages = [
+      { age: clientAge, label: 'Today' },
+      { age: clientAge + 5, label: `Age ${clientAge + 5}` },
+      { age: clientAge + 10, label: `Age ${clientAge + 10}` },
+      { age: retAge, label: `Retire (${retAge})` },
+    ];
+    if(retAge - clientAge >= 15) ages.splice(2, 1); // drop +10 if retAge too close to avoid crowding
+    const milestones = ages
+      .filter(a => a.age >= clientAge && a.age <= (cvCache[cvCache.length-1]?.age || 0))
+      .map(a => {
+        const row = findRow(a.age);
+        return { ...a, totalCV: row?.totalCV || 0 };
+      })
+      .filter(m => m.totalCV > 0);
+    if(milestones.length >= 2) {
+      cvProjection = {
+        milestones,
+        maxCV: Math.max(...milestones.map(m => m.totalCV)),
+        todayCV: milestones[0].totalCV,
+        retCV: milestones.find(m => m.age === retAge)?.totalCV || milestones[milestones.length-1].totalCV,
+      };
     }
   }
+
+  // ── POLICY EVENT TIMELINE ──
+  // Scan all active policies for dated events over the next 20 years:
+  // premium term endings, policy maturities, annuity payouts starting.
+  // Each event becomes a row on a vertical timeline. Sorted by year,
+  // capped at 8 events to avoid overwhelming the card.
+  const policyEvents = [];
+  const nowYear = new Date().getFullYear();
+  active.forEach(pol => {
+    if(pol.premSingle || pol.premFrequency === 'single') return;
+    const startAge = parseInt(pol.premStartAge) || parseInt(pol.ageAtEntry) || clientAge;
+    // Premium term ending
+    const endAge = parseInt(pol.premEndAge);
+    if(endAge && endAge > clientAge && endAge - clientAge <= 20) {
+      policyEvents.push({
+        year: nowYear + (endAge - clientAge),
+        age: endAge,
+        kind: 'premium_end',
+        label: `${pol.productName || 'Policy'} — premium paid up`,
+        subLabel: pol.insurer || '',
+        color: '#5ba8a0',
+        icon: '✓',
+      });
+    }
+    // Policy maturity (endowment, term life)
+    if(pol.maturityDate) {
+      const matYear = new Date(pol.maturityDate).getFullYear();
+      if(matYear > nowYear && matYear - nowYear <= 20) {
+        const raw = parseFloat(pol.sumAssured) || 0;
+        policyEvents.push({
+          year: matYear,
+          age: clientAge + (matYear - nowYear),
+          kind: 'maturity',
+          label: `${pol.productName || 'Policy'} — matures`,
+          subLabel: raw > 0 ? `$${Math.round(raw/1000)}k payout` : (pol.insurer || ''),
+          color: GOLD,
+          icon: '★',
+        });
+      }
+    }
+    // Annuity / income payout starting
+    const payoutStart = parseInt(pol.payoutStartAge);
+    if(payoutStart && payoutStart > clientAge && payoutStart - clientAge <= 20) {
+      const monthly = parseFloat(pol.annuityMonthly) || parseFloat(pol.monthlyBenefit) || 0;
+      policyEvents.push({
+        year: nowYear + (payoutStart - clientAge),
+        age: payoutStart,
+        kind: 'payout_start',
+        label: `${pol.productName || 'Policy'} — income begins`,
+        subLabel: monthly > 0 ? `$${Math.round(monthly).toLocaleString()}/mo` : (pol.insurer || ''),
+        color: '#5b8fd9',
+        icon: '→',
+      });
+    }
+  });
+  policyEvents.sort((a, b) => a.year - b.year || a.age - b.age);
+  const topEvents = policyEvents.slice(0, 8);
 
   // ── Exit confirmation: long-press or double-tap would be ideal, but for v1
   //    a simple confirm() is safer against accidental exits during meetings ──
@@ -6189,18 +6246,15 @@ function PresentMode() {
           </div>
         )}
 
-        {/* ── CASHFLOW TIMELINE ── */}
-        {/* 15-year projection of recurring premium commitment year by
-            year, rendered as horizontal stacked bars. Each row is one
-            year; bar segments are category-colored so the client can see
-            their mix change over time. Drop-off years are badged with the
-            dollar saving so the FC can point at them and talk about when
-            the commitment lightens.
-
-            This is arguably the most valuable addition to Present mode
-            because it's the one visual every client silently wants to
-            see: "when does this commitment end?" */}
-        {cashflowYears.length > 0 && cashflowMax > 0 && (
+        {/* ═══════════════════════════════════════════════════════════ */}
+        {/* TIER 2: Dependants + Family Protection                       */}
+        {/* ═══════════════════════════════════════════════════════════ */}
+        {/* Humanizes the portfolio by showing who's actually protected.
+            Every financial review is ultimately about the family, not the
+            client. Showing spouse and kids by name early in the meeting
+            makes every subsequent number feel like it's FOR them. Card
+            auto-hides when the client has no dependants on file. */}
+        {hasDependantsWithCoverage && (
           <div style={{
             background:NAVY_LIGHT,
             border:`1px solid rgba(212,169,106,0.2)`,
@@ -6209,113 +6263,153 @@ function PresentMode() {
             marginBottom:28,
           }}>
             <div style={{fontSize:11, fontWeight:700, color:GOLD, letterSpacing:'1.5px', textTransform:'uppercase', marginBottom:6}}>
-              Premium Outlook
+              Protecting Your Family
             </div>
-            <div style={{fontSize:11, color:MUTED, marginBottom:20}}>
-              Your recurring annual commitment over the next {cashflowYears.length} years
+            <div style={{fontSize:11, color:MUTED, marginBottom:18}}>
+              {dependantCoverage.length} dependant{dependantCoverage.length === 1 ? '' : 's'} on file
             </div>
-
-            {/* Year rows */}
-            <div style={{display:'flex', flexDirection:'column', gap:6}}>
-              {cashflowYears.map((y, i) => {
-                const widthPct = (y.total / cashflowMax) * 100;
-                // Build stacked segments from the category totals in
-                // descending order (biggest first) for visual stability
-                const segments = Object.entries(y.byCat)
-                  .map(([cat, amt]) => ({
-                    cat,
-                    amt,
-                    pct: (amt / y.total) * 100,
-                    color: CATEGORY_COLORS[cat] || '#7a7a8c',
-                  }))
-                  .sort((a, b) => b.amt - a.amt);
-                return (
-                  <div key={y.year} style={{
-                    display:'grid',
-                    gridTemplateColumns:'44px 1fr 68px',
-                    alignItems:'center',
-                    gap:10,
-                  }}>
-                    {/* Year label */}
-                    <div style={{fontSize:11, color:MUTED, fontVariantNumeric:'tabular-nums'}}>
-                      {y.year}
+            {dependantCoverage.map((dep, i) => {
+              const depAge = dep.dob ? Math.floor((Date.now() - new Date(dep.dob).getTime()) / 31557600000) : null;
+              return (
+                <div key={dep.id || i} style={{
+                  display:'flex',
+                  justifyContent:'space-between',
+                  alignItems:'center',
+                  padding:'14px 0',
+                  borderTop: i > 0 ? '1px solid rgba(212,169,106,0.1)' : 'none',
+                }}>
+                  <div style={{flex:1, minWidth:0, marginRight:12}}>
+                    <div style={{fontSize:15, fontWeight:600, color:CREAM, marginBottom:3}}>
+                      {dep.name || `Dependant ${i+1}`}
                     </div>
-                    {/* Bar with stacked category segments */}
-                    <div style={{position:'relative', height:14}}>
-                      <div style={{
-                        position:'absolute', top:0, left:0,
-                        height:'100%',
-                        width: widthPct + '%',
-                        display:'flex',
-                        borderRadius:3,
-                        overflow:'hidden',
-                        transition: 'width 0.8s cubic-bezier(0.4, 0, 0.2, 1)',
-                      }}>
-                        {segments.map(seg => (
-                          <div key={seg.cat} title={`${CATEGORY_LABELS[seg.cat] || seg.cat}: $${Math.round(seg.amt).toLocaleString()}`}
-                            style={{
-                              width: seg.pct + '%',
-                              background: seg.color,
-                            }}></div>
-                        ))}
-                      </div>
-                      {/* Drop-off badge */}
-                      {y.dropOff && (
-                        <div style={{
-                          position:'absolute',
-                          left: `calc(${widthPct}% + 6px)`,
-                          top: '50%',
-                          transform: 'translateY(-50%)',
-                          fontSize: 9,
-                          fontWeight: 700,
-                          color: '#5ba8a0',
-                          padding: '1px 6px',
-                          background: 'rgba(91,168,160,0.14)',
-                          border: '1px solid rgba(91,168,160,0.35)',
-                          borderRadius: 3,
-                          whiteSpace: 'nowrap',
-                        }}>
-                          -${Math.round(y.savedDelta / 1000)}k
-                        </div>
-                      )}
-                    </div>
-                    {/* Total $ */}
-                    <div style={{
-                      fontSize: 11,
-                      fontWeight: 600,
-                      color: y.total === 0 ? MUTED : CREAM,
-                      textAlign: 'right',
-                      fontVariantNumeric: 'tabular-nums',
-                    }}>
-                      {y.total >= 1000 ? '$' + Math.round(y.total / 1000) + 'k' : y.total > 0 ? '$' + Math.round(y.total) : '—'}
+                    <div style={{fontSize:11, color:MUTED}}>
+                      {dep.relationship || 'Dependant'}
+                      {depAge !== null && depAge >= 0 && depAge < 120 ? ` · Age ${depAge}` : ''}
                     </div>
                   </div>
-                );
-              })}
+                  <div style={{textAlign:'right', flexShrink:0}}>
+                    {dep.policyCount > 0 ? (
+                      <>
+                        <div style={{fontSize:14, fontWeight:700, color:GOLD}}>
+                          {dep.policyCount} polic{dep.policyCount === 1 ? 'y' : 'ies'}
+                        </div>
+                        {dep.deathSA > 0 && (
+                          <div style={{fontSize:11, color:MUTED}}>
+                            {bigFmt(dep.deathSA)} cover
+                          </div>
+                        )}
+                      </>
+                    ) : (
+                      <div style={{fontSize:11, fontWeight:600, color:'#dc5a50', padding:'3px 9px', background:'rgba(220,90,80,0.12)', borderRadius:5, whiteSpace:'nowrap'}}>
+                        NO COVER
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+
+        {/* ═══════════════════════════════════════════════════════════ */}
+        {/* TIER 2: Cash Value Growth Projection                         */}
+        {/* ═══════════════════════════════════════════════════════════ */}
+        {/* Balances the doom-and-gloom of Action Required with an
+            optimistic number. Shows how the client's total surrender
+            cash value grows from today to retirement. Only renders when
+            Dashboard has been visited first (cvCache is populated) and
+            there are enough milestones to draw a meaningful sparkline. */}
+        {cvProjection && cvProjection.milestones.length >= 2 && (
+          <div style={{
+            background:NAVY_LIGHT,
+            border:`1px solid rgba(91,168,160,0.25)`,
+            borderRadius:16,
+            padding:'24px 28px',
+            marginBottom:28,
+          }}>
+            <div style={{fontSize:11, fontWeight:700, color:'#5ba8a0', letterSpacing:'1.5px', textTransform:'uppercase', marginBottom:6}}>
+              Your Savings Growing
+            </div>
+            <div style={{fontSize:11, color:MUTED, marginBottom:20}}>
+              Total portfolio cash value from today through retirement
             </div>
 
-            {/* Category legend — only show categories that actually appear */}
+            {/* Hero headline — big retirement number */}
+            <div style={{display:'flex', alignItems:'baseline', gap:14, marginBottom:20, flexWrap:'wrap'}}>
+              <div>
+                <div style={{fontSize:10, color:MUTED, textTransform:'uppercase', letterSpacing:'1px', marginBottom:4}}>
+                  At Retirement (Age {retAge})
+                </div>
+                <div style={{fontSize:'clamp(32px, 7vw, 44px)', fontWeight:700, color:'#5ba8a0', lineHeight:1}}>
+                  {bigFmt(cvProjection.retCV)}
+                </div>
+              </div>
+              {cvProjection.todayCV > 0 && cvProjection.retCV > cvProjection.todayCV && (
+                <div style={{fontSize:12, color:MUTED}}>
+                  up from {bigFmt(cvProjection.todayCV)} today
+                </div>
+              )}
+            </div>
+
+            {/* SVG sparkline + milestone markers. Dead simple: one polyline
+                through the milestone points, dots at each, labels below. */}
             {(() => {
-              const appearing = new Set();
-              cashflowYears.forEach(y => Object.keys(y.byCat).forEach(c => appearing.add(c)));
-              const legend = Array.from(appearing).sort();
-              if(legend.length === 0) return null;
+              const W = 320, H = 70;
+              const PAD_X = 12, PAD_Y = 12;
+              const plotW = W - PAD_X * 2;
+              const plotH = H - PAD_Y * 2;
+              const n = cvProjection.milestones.length;
+              const maxCV = cvProjection.maxCV || 1;
+              const points = cvProjection.milestones.map((m, i) => {
+                const x = PAD_X + (n === 1 ? plotW/2 : (i / (n - 1)) * plotW);
+                const y = PAD_Y + plotH - (m.totalCV / maxCV) * plotH;
+                return { x, y, ...m };
+              });
+              const linePath = points.map((p, i) => (i === 0 ? 'M' : 'L') + p.x + ',' + p.y).join(' ');
+              const areaPath = linePath + ' L' + points[points.length-1].x + ',' + (PAD_Y + plotH) + ' L' + points[0].x + ',' + (PAD_Y + plotH) + ' Z';
               return (
-                <div style={{display:'flex', flexWrap:'wrap', gap:12, marginTop:18, paddingTop:14, borderTop:'1px solid rgba(255,255,255,0.06)'}}>
-                  {legend.map(cat => (
-                    <div key={cat} style={{display:'flex', alignItems:'center', gap:6}}>
-                      <span style={{width:9, height:9, background:CATEGORY_COLORS[cat] || '#7a7a8c', borderRadius:2}}></span>
-                      <span style={{fontSize:10, color:MUTED}}>{CATEGORY_LABELS[cat] || cat}</span>
-                    </div>
-                  ))}
+                <div>
+                  <svg viewBox={`0 0 ${W} ${H}`} style={{width:'100%', height:'auto', display:'block'}}>
+                    {/* Gradient area fill under the line */}
+                    <defs>
+                      <linearGradient id="cvGrad" x1="0" y1="0" x2="0" y2="1">
+                        <stop offset="0%" stopColor="#5ba8a0" stopOpacity="0.35" />
+                        <stop offset="100%" stopColor="#5ba8a0" stopOpacity="0" />
+                      </linearGradient>
+                    </defs>
+                    <path d={areaPath} fill="url(#cvGrad)" />
+                    <path d={linePath} fill="none" stroke="#5ba8a0" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                    {points.map((p, i) => (
+                      <circle key={i} cx={p.x} cy={p.y} r="3.5" fill="#5ba8a0" stroke={NAVY_LIGHT} strokeWidth="2" />
+                    ))}
+                  </svg>
+                  {/* Milestone labels row */}
+                  <div style={{display:'grid', gridTemplateColumns:`repeat(${n}, 1fr)`, gap:4, marginTop:4}}>
+                    {cvProjection.milestones.map((m, i) => (
+                      <div key={i} style={{textAlign: i === 0 ? 'left' : i === n-1 ? 'right' : 'center'}}>
+                        <div style={{fontSize:9, color:MUTED, textTransform:'uppercase', letterSpacing:'0.5px', marginBottom:2}}>
+                          {m.label}
+                        </div>
+                        <div style={{fontSize:11, fontWeight:700, color:CREAM}}>
+                          {bigFmt(m.totalCV)}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
                 </div>
               );
             })()}
           </div>
         )}
 
-        {/* ── TOP POLICIES ── */}
-        {topByPremium.length > 0 && (
+        {/* ═══════════════════════════════════════════════════════════ */}
+        {/* TIER 2: Policy Event Timeline                                */}
+        {/* ═══════════════════════════════════════════════════════════ */}
+        {/* Vertical timeline of upcoming dated events over the next 20
+            years: premium term endings, policy maturities, annuity
+            payouts starting. Complements the numeric cards by giving
+            the FC a concrete "what happens when" narrative. */}
+        {topEvents.length > 0 && (
           <div style={{
             background:NAVY_LIGHT,
             border:`1px solid rgba(212,169,106,0.2)`,
@@ -6323,34 +6417,65 @@ function PresentMode() {
             padding:'24px 28px',
             marginBottom:28,
           }}>
-            <div style={{fontSize:11, fontWeight:700, color:GOLD, letterSpacing:'1.5px', textTransform:'uppercase', marginBottom:20}}>
-              Top Policies by Premium
+            <div style={{fontSize:11, fontWeight:700, color:GOLD, letterSpacing:'1.5px', textTransform:'uppercase', marginBottom:6}}>
+              Upcoming Milestones
             </div>
-            {topByPremium.map((pol, i) => {
-              const prem = pol.premFrequency === 'monthly' ? (parseFloat(pol.annualPremium)||0)*12 : (parseFloat(pol.annualPremium)||0);
-              return (
-                <div key={pol.id || i} style={{
-                  display:'flex', justifyContent:'space-between', alignItems:'center',
-                  padding:'14px 0',
-                  borderTop: i > 0 ? '1px solid rgba(212,169,106,0.1)' : 'none',
+            <div style={{fontSize:11, color:MUTED, marginBottom:20}}>
+              Key events over the next 20 years
+            </div>
+            {/* Timeline rows */}
+            <div style={{position:'relative'}}>
+              {/* Vertical spine — absolute positioned line down the left
+                  side connecting all the icons. */}
+              <div style={{
+                position:'absolute',
+                left:13,
+                top:14,
+                bottom:14,
+                width:1,
+                background:'rgba(212,169,106,0.2)',
+              }}></div>
+              {topEvents.map((evt, i) => (
+                <div key={i} style={{
+                  display:'flex',
+                  gap:14,
+                  padding:'12px 0',
+                  position:'relative',
                 }}>
-                  <div style={{minWidth:0, flex:1}}>
-                    <div style={{fontSize:15, fontWeight:600, color:CREAM, marginBottom:2, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap'}}>
-                      {pol.productName || pol.policyName || 'Unnamed Policy'}
-                    </div>
-                    <div style={{fontSize:12, color:MUTED}}>
-                      {pol.insurer || 'Unknown'} · {pol.subType || pol.category || '—'}
-                    </div>
+                  {/* Icon bubble */}
+                  <div style={{
+                    width:28, height:28,
+                    borderRadius:'50%',
+                    background: NAVY,
+                    border: `2px solid ${evt.color}`,
+                    display:'flex',
+                    alignItems:'center',
+                    justifyContent:'center',
+                    fontSize:13,
+                    fontWeight:700,
+                    color: evt.color,
+                    flexShrink:0,
+                    zIndex:1,
+                  }}>
+                    {evt.icon}
                   </div>
-                  <div style={{textAlign:'right', marginLeft:12, flexShrink:0}}>
-                    <div style={{fontSize:15, fontWeight:700, color:GOLD}}>
-                      ${Math.round(prem).toLocaleString()}
+                  {/* Event content */}
+                  <div style={{flex:1, minWidth:0, paddingTop:2}}>
+                    <div style={{display:'flex', justifyContent:'space-between', alignItems:'baseline', gap:10, marginBottom:3}}>
+                      <div style={{fontSize:13, fontWeight:600, color:CREAM, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', minWidth:0, flex:1}}>
+                        {evt.label}
+                      </div>
+                      <div style={{fontSize:11, fontWeight:700, color:evt.color, flexShrink:0, fontVariantNumeric:'tabular-nums'}}>
+                        {evt.year}
+                      </div>
                     </div>
-                    <div style={{fontSize:10, color:MUTED}}>per year</div>
+                    <div style={{fontSize:10, color:MUTED}}>
+                      Age {evt.age}{evt.subLabel ? ` · ${evt.subLabel}` : ''}
+                    </div>
                   </div>
                 </div>
-              );
-            })}
+              ))}
+            </div>
           </div>
         )}
 
@@ -7000,6 +7125,385 @@ async function claudeExtract(anthropicKey, systemPrompt, rawText, maxTokens) {
   return raw.replace(/```json\s*|```\s*/g,'').trim();
 }
 
+// ═══════════════════════════════════════════════════════════════
+// SERVICE WORKER EXTRACTION BRIDGE (Tier 2 background extraction)
+// ───────────────────────────────────────────────────────────────
+// When the service worker is registered AND the browser supports
+// the Background Fetch API, we route the Gemini POST call through
+// the SW. The SW uses Background Fetch to hand the request to the
+// browser's download manager, which runs it independently of the
+// page lifecycle. If Chrome Android kills the tab, the fetch
+// survives; when the user returns, results are waiting in IDB.
+//
+// iOS Safari falls through to the direct-fetch path because it
+// doesn't support Background Fetch at all. Desktop falls through
+// similarly if no SW is registered.
+//
+// The SW path is feature-gated per invocation: if any part of the
+// round trip fails (no SW, no BG fetch support, message timeout,
+// parse error), we throw and the caller falls back to a direct
+// fetch. This keeps the SW path strictly additive — it can never
+// make extraction worse than the in-page path.
+// ═══════════════════════════════════════════════════════════════
+
+// Cached support state, populated on first call to swExtractIsAvailable.
+// null = unchecked, true/false = known capability.
+let _swSupportCache = null;
+
+function isIOS() {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  // iPad on iPadOS 13+ reports as MacIntel with touch support
+  const isIpadOS = ua.includes('Mac') && 'ontouchend' in document;
+  return /iPad|iPhone|iPod/.test(ua) || isIpadOS;
+}
+
+async function swExtractIsAvailable() {
+  if (_swSupportCache !== null) return _swSupportCache;
+  // Hard gates
+  if (isIOS()) { _swSupportCache = false; return false; }
+  if (!('serviceWorker' in navigator)) { _swSupportCache = false; return false; }
+  if (!('BackgroundFetchManager' in window)) { _swSupportCache = false; return false; }
+  // Must have an active SW controller
+  try {
+    const reg = await navigator.serviceWorker.ready;
+    if (!reg || !reg.active) { _swSupportCache = false; return false; }
+    // Ask the SW directly — it might have its own feature gates
+    const result = await new Promise((resolve) => {
+      const channel = new MessageChannel();
+      const timeoutId = setTimeout(() => resolve(null), 1500);
+      channel.port1.onmessage = (e) => {
+        clearTimeout(timeoutId);
+        resolve(e.data);
+      };
+      reg.active.postMessage({ type: 'CHECK_SUPPORT' }, [channel.port2]);
+    });
+    _swSupportCache = !!(result && result.bgFetch);
+    console.log('[SW Bridge] Support check:', _swSupportCache, result);
+    return _swSupportCache;
+  } catch (e) {
+    console.warn('[SW Bridge] Support check failed:', e);
+    _swSupportCache = false;
+    return false;
+  }
+}
+
+// Send a request to the SW for background-fetch-powered extraction.
+// Returns the raw Gemini response text (same shape as direct call).
+// Throws on any failure; caller must catch and fall back.
+//
+// Also writes the sessionId to sessionStorage before dispatch so a
+// separate mount-time recovery path can detect orphaned sessions if
+// the page dies while an extraction is in flight. The marker is
+// cleared on any terminal state (done, error, or timeout).
+async function swExtractRelay(url, body, timeoutMs = 600000) {
+  const reg = await navigator.serviceWorker.ready;
+  if (!reg || !reg.active) throw new Error('No active SW');
+  const sessionId = 'ext_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+
+  // Store session marker so mount recovery can detect orphans
+  try { sessionStorage.setItem('policylens_pending_sw_session', sessionId); } catch(_) {}
+
+  const clearMarker = () => {
+    try {
+      if (sessionStorage.getItem('policylens_pending_sw_session') === sessionId) {
+        sessionStorage.removeItem('policylens_pending_sw_session');
+      }
+    } catch(_) {}
+  };
+
+  // Set up a one-shot message listener BEFORE dispatching, so we
+  // don't miss the response if the SW replies synchronously.
+  const resultPromise = new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      navigator.serviceWorker.removeEventListener('message', handler);
+      clearMarker();
+      reject(new Error('SW extract timed out after ' + Math.round(timeoutMs / 1000) + 's'));
+    }, timeoutMs);
+
+    function handler(e) {
+      const d = e.data || {};
+      if (d.sessionId !== sessionId) return;
+      if (d.type === 'EXTRACT_DONE') {
+        clearTimeout(timeoutId);
+        navigator.serviceWorker.removeEventListener('message', handler);
+        clearMarker();
+        resolve(d.rawText);
+      } else if (d.type === 'EXTRACT_ERROR') {
+        clearTimeout(timeoutId);
+        navigator.serviceWorker.removeEventListener('message', handler);
+        clearMarker();
+        reject(new Error('SW extract error: ' + d.error));
+      }
+      // PROGRESS messages are logged but don't resolve the promise
+      else if (d.type === 'EXTRACT_PROGRESS') {
+        console.log('[SW Bridge] Phase:', d.phase);
+      }
+    }
+    navigator.serviceWorker.addEventListener('message', handler);
+  });
+
+  // Dispatch the extraction request
+  reg.active.postMessage({
+    type: 'EXTRACT_RUN',
+    sessionId,
+    request: {
+      url,
+      headers: { 'Content-Type': 'application/json' },
+      body: typeof body === 'string' ? body : JSON.stringify(body),
+    },
+  });
+  console.log('[SW Bridge] Dispatched extraction session:', sessionId);
+
+  return resultPromise;
+}
+
+// ── MULTI-BATCH SW RELAY (Fix #1) ──
+// Dispatches ALL batch request bodies to the SW in a single message.
+// The SW stores them as a queue and processes sequentially via
+// chained Background Fetch registrations, which means:
+//   • Only one BG fetch is alive at a time (respects Chrome quota)
+//   • Page can die between batches and SW keeps going
+//   • Mount recovery can pick up partial or complete results
+//
+// Takes an onBatchProgress callback that's invoked each time the SW
+// broadcasts an EXTRACT_MULTI_PROGRESS event. This lets the page
+// update its UI incrementally as batches complete — same UX as the
+// current per-batch path.
+//
+// Resolves with the full results array ({batchIndex, rawText} items)
+// when the SW broadcasts EXTRACT_MULTI_DONE. Rejects on unrecoverable
+// errors or overall timeout.
+async function swExtractRelayMulti(url, bodies, onBatchProgress, timeoutMs) {
+  const reg = await navigator.serviceWorker.ready;
+  if (!reg || !reg.active) throw new Error('No active SW');
+  const sessionId = 'multi_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+
+  // 5 minutes per batch as default overall timeout ceiling
+  const effectiveTimeout = timeoutMs || (bodies.length * 300000 + 60000);
+
+  // Store session marker for mount recovery. Use a different key
+  // from single-batch to avoid confusion, plus remember totalBatches
+  // so recovery can display meaningful progress.
+  try {
+    sessionStorage.setItem(
+      'policylens_pending_sw_multi',
+      JSON.stringify({ sessionId, totalBatches: bodies.length, startedAt: Date.now() })
+    );
+  } catch(_) {}
+
+  const clearMarker = () => {
+    try {
+      const raw = sessionStorage.getItem('policylens_pending_sw_multi');
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (parsed.sessionId === sessionId) {
+          sessionStorage.removeItem('policylens_pending_sw_multi');
+        }
+      }
+    } catch(_) {}
+  };
+
+  return new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      navigator.serviceWorker.removeEventListener('message', handler);
+      clearMarker();
+      reject(new Error('SW multi-extract timed out after ' + Math.round(effectiveTimeout / 1000) + 's'));
+    }, effectiveTimeout);
+
+    function handler(e) {
+      const d = e.data || {};
+      if (d.sessionId !== sessionId) return;
+      if (d.type === 'EXTRACT_MULTI_PROGRESS') {
+        // Per-batch completion — run the callback with the rawText
+        // so the page can incrementally process results. Callback
+        // errors are logged but don't halt the chain.
+        if (d.phase === 'batch_complete' && d.latestRawText) {
+          try {
+            if (typeof onBatchProgress === 'function') {
+              onBatchProgress({
+                batchIndex: d.latestBatchIndex,
+                rawText: d.latestRawText,
+                completedBatches: d.completedBatches,
+                totalBatches: d.totalBatches,
+              });
+            }
+          } catch(cbErr) {
+            console.warn('[SW Multi] onBatchProgress callback error:', cbErr);
+          }
+        } else if (d.phase === 'batch_error') {
+          console.warn('[SW Multi] Batch', d.latestBatchIndex, 'failed:', d.latestError);
+        }
+      } else if (d.type === 'EXTRACT_MULTI_DONE') {
+        clearTimeout(timeoutId);
+        navigator.serviceWorker.removeEventListener('message', handler);
+        clearMarker();
+        resolve(d.results || []);
+      } else if (d.type === 'EXTRACT_MULTI_ERROR') {
+        clearTimeout(timeoutId);
+        navigator.serviceWorker.removeEventListener('message', handler);
+        clearMarker();
+        reject(new Error('SW multi-extract error: ' + d.error));
+      }
+    }
+    navigator.serviceWorker.addEventListener('message', handler);
+
+    // Dispatch the multi-batch request. All bodies sent in one message.
+    // Body size per batch is already vetted by the page against the
+    // MAX_BG_FETCH_BODY_BYTES cap before dispatch.
+    reg.active.postMessage({
+      type: 'EXTRACT_RUN_MULTI',
+      sessionId,
+      url,
+      headers: { 'Content-Type': 'application/json' },
+      bodies: bodies.map(b => typeof b === 'string' ? b : JSON.stringify(b)),
+    });
+    console.log('[SW Bridge] Dispatched multi-batch session:', sessionId, '(' + bodies.length + ' batches)');
+  });
+}
+
+// ── NOTIFICATION PERMISSION (Fix #3) ──
+// Request the Notifications API permission if we haven't already.
+// Persists a "asked" flag in localStorage so we only prompt once per
+// device, regardless of the user's answer (grant or deny).
+//
+// Returns: true if permission is currently granted, false otherwise.
+// Safe to call multiple times — becomes a no-op after first call.
+async function ensureNotificationPermission() {
+  if (typeof Notification === 'undefined') return false;
+  // Already granted — nothing to do
+  if (Notification.permission === 'granted') return true;
+  // Denied — respect the user's choice, don't re-prompt
+  if (Notification.permission === 'denied') return false;
+  // Check if we already asked on this device
+  let askedFlag = null;
+  try { askedFlag = localStorage.getItem('policylens_notif_asked'); } catch(_) {}
+  if (askedFlag) return false; // asked before, user didn't grant
+  // First ask
+  try {
+    const result = await Notification.requestPermission();
+    try { localStorage.setItem('policylens_notif_asked', String(Date.now())); } catch(_) {}
+    return result === 'granted';
+  } catch(e) {
+    // Firefox throws on the legacy callback form in some versions — ignore
+    console.warn('[Notifications] requestPermission failed:', e);
+    try { localStorage.setItem('policylens_notif_asked', String(Date.now())); } catch(_) {}
+    return false;
+  }
+}
+
+// ── ORPHANED SESSION RECOVERY ──
+// When an SW extraction was in flight and the page died (tab killed,
+// refresh, crash), the SW's Background Fetch may still complete in
+// the background and store the result in IDB — but the page never
+// received the EXTRACT_DONE message. On next mount, we check the
+// sessionStorage marker left by swExtractRelay and poll the SW for
+// any stored result matching that sessionId.
+//
+// Returns: { rawText, sessionId } on recovery, null otherwise.
+// Silently handles all failure modes — never throws.
+async function recoverPendingSWSession() {
+  let sessionId;
+  try { sessionId = sessionStorage.getItem('policylens_pending_sw_session'); }
+  catch(_) { return null; }
+  if (!sessionId) return null;
+  // If SW support is gone (user switched browsers?), discard the marker
+  if (!(await swExtractIsAvailable())) {
+    try { sessionStorage.removeItem('policylens_pending_sw_session'); } catch(_) {}
+    return null;
+  }
+  let reg;
+  try { reg = await navigator.serviceWorker.ready; } catch(_) { return null; }
+  if (!reg || !reg.active) return null;
+  // Poll the SW via MessageChannel
+  const result = await new Promise((resolve) => {
+    try {
+      const channel = new MessageChannel();
+      const timeoutId = setTimeout(() => resolve(null), 3000);
+      channel.port1.onmessage = (e) => {
+        clearTimeout(timeoutId);
+        resolve(e.data);
+      };
+      reg.active.postMessage({ type: 'EXTRACT_POLL', sessionId }, [channel.port2]);
+    } catch(_) { resolve(null); }
+  });
+  if (!result) return null;
+  // If still pending, leave the marker in place and keep waiting
+  if (result.state === 'pending') return null;
+  // Any other state → consume the marker
+  try { sessionStorage.removeItem('policylens_pending_sw_session'); } catch(_) {}
+  if (result.state === 'done' && result.rawText) {
+    return { rawText: result.rawText, sessionId };
+  }
+  // state === 'error' or 'missing' → silent cleanup, nothing to recover
+  console.log('[SW Recovery] Session', sessionId, 'state:', result.state);
+  return null;
+}
+
+// ── ORPHANED MULTI-SESSION RECOVERY ──
+// Same as recoverPendingSWSession but for multi-batch sessions. The
+// SW's BATCH_QUEUE_STORE holds pending chains; on recovery we poll
+// once and either wait (if still processing) or consume the aggregated
+// results. Partial completion (some batches done, some errored) also
+// counts as recovery — we return whatever rawTexts survived.
+//
+// Returns: { rawTexts: [{batchIndex, rawText}], sessionId, totalBatches }
+// on recovery, null otherwise.
+async function recoverPendingSWMultiSession() {
+  let marker;
+  try {
+    const raw = sessionStorage.getItem('policylens_pending_sw_multi');
+    if (!raw) return null;
+    marker = JSON.parse(raw);
+  } catch(_) { return null; }
+  if (!marker || !marker.sessionId) return null;
+  if (!(await swExtractIsAvailable())) {
+    try { sessionStorage.removeItem('policylens_pending_sw_multi'); } catch(_) {}
+    return null;
+  }
+  let reg;
+  try { reg = await navigator.serviceWorker.ready; } catch(_) { return null; }
+  if (!reg || !reg.active) return null;
+  const result = await new Promise((resolve) => {
+    try {
+      const channel = new MessageChannel();
+      const timeoutId = setTimeout(() => resolve(null), 3000);
+      channel.port1.onmessage = (e) => {
+        clearTimeout(timeoutId);
+        resolve(e.data);
+      };
+      reg.active.postMessage({ type: 'EXTRACT_POLL', sessionId: marker.sessionId }, [channel.port2]);
+    } catch(_) { resolve(null); }
+  });
+  if (!result) return null;
+  if (result.state === 'pending') {
+    // Still running — show a gentle toast and leave the marker so
+    // the next mount can pick it up.
+    if (result.completedBatches > 0) {
+      try {
+        toast(`⏳ Background extraction still running: ${result.completedBatches} of ${result.totalBatches} batches done`, 'info', 5000);
+      } catch(_) {}
+    }
+    return null;
+  }
+  // Any terminal state → consume the marker
+  try { sessionStorage.removeItem('policylens_pending_sw_multi'); } catch(_) {}
+  if (result.state === 'done' && result.kind === 'multi' && Array.isArray(result.multiResults)) {
+    // Keep only successful batches (non-empty rawText)
+    const usable = result.multiResults.filter(r => r.rawText && r.rawText.length > 0);
+    if (usable.length === 0) return null;
+    return {
+      rawTexts: usable,
+      sessionId: marker.sessionId,
+      totalBatches: result.totalBatches,
+    };
+  }
+  console.log('[SW Recovery] Multi session', marker.sessionId, 'state:', result.state);
+  return null;
+}
+
+// ═══════════════════════════════════════════════════════════════
+
 // Gemini with typed responseSchema — guaranteed-valid, type-safe structured output.
 // This is the PREFERRED path for policy extraction when a schema is provided.
 // Benefits vs the dual-AI (Gemini reads → Claude extracts) pipeline:
@@ -7010,6 +7514,10 @@ async function claudeExtract(anthropicKey, systemPrompt, rawText, maxTokens) {
 // The systemPrompt still carries all domain rules (ISP merging, Singapore
 // product knowledge, income plan classification, etc.); only the OUTPUT shape
 // is constrained by the schema.
+//
+// If the SW bridge is available (Android + Background Fetch), the network
+// call is dispatched through the SW for tab-death survival. Falls back
+// silently to a direct fetch on any bridge failure.
 async function geminiStructuredExtract(geminiKey, systemPrompt, contentBlocks, maxTokens, responseSchema) {
   const parts = [];
   for(const block of contentBlocks) {
@@ -7020,19 +7528,42 @@ async function geminiStructuredExtract(geminiKey, systemPrompt, contentBlocks, m
   if(parts.length === 0) throw new Error('No content to extract from');
   const mediaCount = parts.filter(p=>p.inlineData).length;
   console.log('[Gemini Structured] Sending:', mediaCount, 'files +', parts.length-mediaCount, 'text blocks. Schema has', Object.keys(responseSchema?.items?.properties||{}).length, 'top-level fields.');
+
+  // Assemble the full request body once — we'll use it for either path.
+  const url = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=' + geminiKey;
+  const bodyObj = {
+    contents: [{parts}],
+    systemInstruction: {parts:[{text:systemPrompt}]},
+    generationConfig: {
+      maxOutputTokens: maxTokens||32000,
+      responseMimeType: 'application/json',
+      responseSchema: responseSchema,
+    },
+  };
+
+  // Try SW-routed Background Fetch first when supported. On any
+  // failure (support check, timeout, network, parse), we fall
+  // through to the direct fetch path so extraction never regresses.
+  try {
+    if (await swExtractIsAvailable()) {
+      console.log('[Gemini Structured] Routing via SW background fetch');
+      const rawViaSW = await swExtractRelay(url, bodyObj);
+      if (rawViaSW && rawViaSW.length >= 2) {
+        console.log('[Gemini Structured] SW path returned:', rawViaSW.length, 'chars');
+        return rawViaSW;
+      }
+      console.warn('[Gemini Structured] SW returned empty, falling back to direct fetch');
+    }
+  } catch (swErr) {
+    console.warn('[Gemini Structured] SW path failed, falling back to direct fetch:', swErr.message);
+  }
+
+  // Direct fetch fallback (also the only path on iOS / unsupported browsers).
   let resp;
   try {
-    resp = await fetchWithTimeout('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='+geminiKey,{
+    resp = await fetchWithTimeout(url, {
       method:'POST',headers:{'Content-Type':'application/json'},
-      body:JSON.stringify({
-        contents:[{parts}],
-        systemInstruction:{parts:[{text:systemPrompt}]},
-        generationConfig:{
-          maxOutputTokens:maxTokens||32000,
-          responseMimeType:'application/json',
-          responseSchema:responseSchema
-        }
-      })
+      body:JSON.stringify(bodyObj),
     });
   } catch(fetchErr) {
     if(fetchErr.message && fetchErr.message.includes('timed out')) throw fetchErr;
@@ -9069,6 +9600,18 @@ function Dashboard() {
     try { window.__retirementLiteCache = retirementLite; } catch(e) {}
   }, [retirementLite]);
 
+  // ── PUBLISH CV TIMELINE TO WINDOW CACHE ──
+  // Present mode's Cash Value Growth Projection card reads from this
+  // cache. Same rationale as the retirement cache above: rather than
+  // pipe cvTimeline through context (which would force all consumers to
+  // re-render on every policy edit), we publish it on window when
+  // Dashboard recomputes. Present mode reads it lazily on render.
+  // If Dashboard has never been visited, the cache is undefined and
+  // Present mode's Cash Value card gracefully hides.
+  useEffect(() => {
+    try { window.__cvTimelineCache = cvTimeline; } catch(e) {}
+  }, [cvTimeline]);
+
   // CV timeline chart
   const chartRef2 = useRef(null);
   const chartInst2 = useRef(null);
@@ -11060,6 +11603,27 @@ function Policies() {
   // catch paths where files came from a stale source and can't be retried.
   const [scanFailure, setScanFailure] = useState(null);
 
+  // ── SW BACKGROUND FETCH READINESS ──
+  // Null = unchecked (show cautious default warning).
+  // true = Android + SW + Background Fetch available — show relaxed
+  //        "runs in background" message.
+  // false = iOS, desktop, or unsupported — show strict "keep in
+  //         foreground" warning.
+  const [swBgFetchReady, setSwBgFetchReady] = useState(null);
+  useEffect(() => {
+    // Single best-effort check on mount. Uses the module-level
+    // swExtractIsAvailable helper which caches its result. Safe to
+    // call multiple times.
+    (async () => {
+      try {
+        const ready = await swExtractIsAvailable();
+        setSwBgFetchReady(ready);
+      } catch(e) {
+        setSwBgFetchReady(false);
+      }
+    })();
+  }, []);
+
   // ── Draft auto-save/restore ──
   const DRAFT_KEY = 'policylens_draft';
   const saveDraft = (formData) => {
@@ -11086,6 +11650,138 @@ function Policies() {
       window._pendingDropFiles = null;
       setTimeout(()=>handleExtract(files), 100);
     }
+  }, []);
+
+  // ── ORPHANED SW SESSION RECOVERY ──
+  // Runs once on Policies mount. If a previous extraction was
+  // dispatched via the SW but the page died before receiving the
+  // result, the SW's Background Fetch likely still completed and
+  // the rawText is sitting in the SW's own IndexedDB. Fetch it,
+  // minimally process into policies, and pop them into the review
+  // modal with a toast so the FC knows recovery happened.
+  //
+  // Minimal processing here is intentionally lighter than what
+  // handleExtract does for fresh extractions. No dedup against
+  // existing policies, no repo reconciliation, no rider type
+  // validation — just enough field defaults so the form renders
+  // cleanly. The FC can then review and accept/reject in the
+  // BulkVerifyModal exactly as they would for a normal scan.
+  useEffect(() => {
+    (async () => {
+      // Shared helper: parse a Gemini rawText and apply minimal field
+      // defaults so recovered policies render cleanly in the review
+      // modal. Used for both single-session and multi-session recovery
+      // paths. Returns an array of processed policies (possibly empty).
+      const processRecoveredRawText = (rawText) => {
+        let parsed;
+        try { parsed = JSON.parse(rawText); }
+        catch(parseErr) {
+          // Fall back to repairJSON for slightly malformed output
+          try { parsed = repairJSON(rawText); }
+          catch(_) { return []; }
+        }
+        if (!Array.isArray(parsed)) {
+          if (parsed && typeof parsed === 'object') {
+            const wrapperKeys = ['policies','data','results','items','extracted','records'];
+            const found = wrapperKeys.find(k => Array.isArray(parsed[k]));
+            parsed = found ? parsed[found] : [parsed];
+          } else {
+            return [];
+          }
+        }
+        return parsed
+          .filter(p => p && typeof p === 'object' && (p.productName || p.insurer || p.category || p.fdPrincipal))
+          .map(p => {
+            const result = {
+              ...p,
+              id: genId(),
+              status: p.status || 'inforce',
+              sumAssured: parseFloat(p.sumAssured || p.faceAmount) || 0,
+              annualPremium: parseFloat(p.premiumAmount ?? p.annualPremium) || 0,
+              monthlyBenefit: parseFloat(p.monthlyBenefit) || 0,
+              riders: (p.riders || []).map(r => ({...r, _selected: true})),
+              _selected: true,
+              _recovered: true, // flag for any downstream UI to surface recovery status
+            };
+            if (result.premiumStructure === 'Single Premium' || result.premFrequency === 'single') {
+              result.premSingle = true;
+            }
+            return result;
+          });
+      };
+
+      // Try multi-session recovery first — more common now that Fix #1
+      // routes multi-batch extractions through the SW. If no multi
+      // marker, falls through to single-session recovery.
+      try {
+        const multiRecovered = await recoverPendingSWMultiSession();
+        if (multiRecovered) {
+          console.log('[SW Recovery] Recovered multi session',
+            multiRecovered.sessionId,
+            'with', multiRecovered.rawTexts.length, 'of', multiRecovered.totalBatches, 'batches');
+          // Flatten rawTexts across batches, dedup by policy number /
+          // insurer+productName fingerprint to handle cross-batch
+          // duplicates (same policy appearing in multiple batches).
+          const allProcessed = [];
+          for (const r of multiRecovered.rawTexts) {
+            const batchPolicies = processRecoveredRawText(r.rawText);
+            allProcessed.push(...batchPolicies);
+          }
+          // Lightweight dedup — policy number or fingerprint
+          const seen = new Set();
+          const deduped = allProcessed.filter(p => {
+            const polNum = (p.policyNumber||'').toString().trim().toLowerCase();
+            if (polNum && polNum.length >= 4) {
+              const k = 'num:'+polNum;
+              if (seen.has(k)) return false;
+              seen.add(k);
+              return true;
+            }
+            const ins = (p.insurer||'').toString().trim().toLowerCase();
+            const name = (p.productName||p.policyName||'').toString().trim().toLowerCase();
+            if (!ins && !name) return true;
+            const k = 'fp:'+ins+'|'+name;
+            if (seen.has(k)) return false;
+            seen.add(k);
+            return true;
+          });
+          if (deduped.length > 0) {
+            setBulkExtracted(deduped);
+            const batchNote = multiRecovered.rawTexts.length < multiRecovered.totalBatches
+              ? ` (${multiRecovered.rawTexts.length} of ${multiRecovered.totalBatches} batches)`
+              : '';
+            toast(
+              `📦 Recovered ${deduped.length} polic${deduped.length === 1 ? 'y' : 'ies'} from background extraction${batchNote}`,
+              'success',
+              6000
+            );
+            return; // don't also try single-session recovery
+          }
+        }
+      } catch(e) {
+        console.warn('[SW Recovery] Multi recovery error:', e);
+      }
+
+      // Single-session recovery fallback
+      try {
+        const recovered = await recoverPendingSWSession();
+        if (!recovered) return;
+        console.log('[SW Recovery] Recovered session', recovered.sessionId);
+        const processed = processRecoveredRawText(recovered.rawText);
+        if (processed.length === 0) {
+          console.log('[SW Recovery] No policies in recovered result');
+          return;
+        }
+        setBulkExtracted(processed);
+        toast(
+          `📦 Recovered ${processed.length} polic${processed.length === 1 ? 'y' : 'ies'} from background extraction`,
+          'success',
+          6000
+        );
+      } catch(e) {
+        console.warn('[SW Recovery] Single recovery error:', e);
+      }
+    })();
   }, []);
 
   const restoreDraft = () => {
@@ -11604,59 +12300,98 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
   };
 
   // Single-batch extraction (returns processed array)
-  const extractBatch = async (batchFiles) => {
+  // precomputedRawText: optional pre-fetched Gemini rawText from SW multi
+  // path. When provided, skips the file encoding + Gemini API call
+  // entirely and jumps straight to parsing + post-processing.
+  const extractBatch = async (batchFiles, precomputedRawText) => {
     // ── CONTENT-HASH CACHE CHECK ──
     // Hash the batch's file bytes. If we've already extracted this exact set of files,
     // return the cached AI output — zero token cost, near-instant rescans.
+    // Skip the check when using precomputed — the caller has already done the work.
     let cacheKey = null;
-    try {
-      cacheKey = await batchCacheKey(batchFiles);
-      const cached = await dbGet('extractCache', cacheKey).catch(()=>null);
-      if(cached && Array.isArray(cached.value) && cached.value.length > 0) {
-        console.log('[Extract] ✨ Cache hit:', cacheKey.slice(0,12)+'…', '→', cached.value.length, 'policies (no API cost)');
-        try { toast('📦 Loaded '+cached.value.length+' policies from cache (no API call)','success',3500); } catch(e){}
-        return cached.value;
-      }
-    } catch(e) { console.warn('[Extract] Cache check failed (non-fatal):', e.message); }
-
-    const content = [];
-    for(const file of batchFiles){
-      const blocks = await processFile(file);
-      content.push(...blocks);
-    }
-    // ── EXPECTED POLICY COUNT (for reconciliation) ──
-    // Scan the text blocks for hints like "You have 16 active policies" before the AI call.
-    // If the final extracted count is lower than this hint, we'll warn the user.
-    const sourceText = content.filter(b => b.type === 'text').map(b => b.text).join('\n');
-    const expectedCount = parseExpectedPolicyCount(sourceText);
-    if(expectedCount) console.log('[Extract] Document hints at', expectedCount, 'policies');
-
-    // ── REPO-GROUNDED PRIORS ──
-    // Scan source text for known products in the repository. If matched, inject
-    // a PRIOR KNOWLEDGE block into the content array so the AI uses canonical
-    // classification instead of guessing from document appearance.
-    // This runs in-process with zero additional AI calls — we use the text
-    // already extracted from text-layer PDFs / CSVs / Excel. For image-only
-    // scans sourceText is empty and priors silently skip (post-extract
-    // reconciliation would catch those, planned for a follow-up).
-    const priorMatches = fuzzyMatchReposFromText(sourceText, repo);
-    if(priorMatches.length > 0) {
-      const topNames = priorMatches.slice(0, 6).map(m => m.repo.insurer+' '+m.repo.productName+' ('+m.score.toFixed(2)+')').join(', ');
-      console.log('[PriorInjection] Matched', priorMatches.length, 'repo product(s):', topNames);
-      const priorBlock = buildRepoPriorBlock(priorMatches, 6);
-      if(priorBlock) {
-        // Push as its own text block BEFORE the instruction tail so the AI
-        // reads the prior knowledge as authoritative context.
-        content.push({type:'text', text: priorBlock});
-      }
-    } else {
-      console.log('[PriorInjection] No repo matches in source text (length='+sourceText.length+', repo size='+repo.length+')');
+    if (precomputedRawText == null) {
+      try {
+        cacheKey = await batchCacheKey(batchFiles);
+        const cached = await dbGet('extractCache', cacheKey).catch(()=>null);
+        if(cached && Array.isArray(cached.value) && cached.value.length > 0) {
+          console.log('[Extract] ✨ Cache hit:', cacheKey.slice(0,12)+'…', '→', cached.value.length, 'policies (no API cost)');
+          try { toast('📦 Loaded '+cached.value.length+' policies from cache (no API call)','success',3500); } catch(e){}
+          return cached.value;
+        }
+      } catch(e) { console.warn('[Extract] Cache check failed (non-fatal):', e.message); }
     }
 
-    content.push({type:'text',text:'Extract ALL insurance policies AND financial instruments from these documents. CRITICAL RULES:\n1. Multiple photos may show DIFFERENT PAGES of the SAME policy — correlate them by policy number, insurer+product name, or context clues. Merge information from multiple pages into ONE policy entry.\n2. Multiple photos may also show DIFFERENT policies — extract each as a separate entry.\n3. NEVER skip or merge genuinely different policies. Two policies from the same insurer with different product names = 2 entries.\n4. If the same fund (e.g. "Allianz Global High Payout") appears under DIFFERENT accounts (CPFIS-OA vs Cash), these are SEPARATE entries — differentiate by appending the account type in policyName.\n5. Look across ALL images for related data — page 1 might have the policy name while page 3 has the premium details.\n6. If REPOSITORY PRIOR KNOWLEDGE is provided above, treat those products\' canonical category/subType as authoritative — do not reclassify them based on document appearance.\nReturn ONLY valid JSON array or object.'});
+    let arr;
+    if (precomputedRawText != null) {
+      // ── PRECOMPUTED PATH (SW multi pre-fetch) ──
+      // Parse the rawText Gemini response directly, bypassing content
+      // building + AI call. Mirrors the parsing logic in
+      // runExtractionWithRecovery so output shape is identical.
+      console.log('[Extract] ⚡ Using precomputed SW multi result:', precomputedRawText.length, 'chars');
+      // Still compute cacheKey so the result is written to the batch
+      // cache on success — subsequent retries of the same files hit
+      // the cache instantly without needing the SW path at all.
+      try { cacheKey = await batchCacheKey(batchFiles); } catch(_) {}
+      try {
+        const parsed = repairJSON(precomputedRawText);
+        if (Array.isArray(parsed)) arr = parsed;
+        else if (parsed && typeof parsed === 'object') {
+          const wrapperKeys = ['policies','data','results','items','extracted','records'];
+          const found = wrapperKeys.find(k => Array.isArray(parsed[k]));
+          arr = found ? parsed[found] : [parsed];
+        } else arr = [];
+        arr = arr.filter(p => p && typeof p === 'object' && (p.productName || p.insurer || p.category || p.fdPrincipal));
+      } catch(parseErr) {
+        // Precomputed result was malformed — bail to the normal path.
+        // This is rare since Gemini responseSchema guarantees valid JSON,
+        // but handling it defensively means the SW multi path is strictly
+        // additive and never makes things worse.
+        console.warn('[Extract] Precomputed parse failed, falling through to normal path:', parseErr.message);
+        arr = null;
+      }
+    }
 
-    // ── RUN EXTRACTION WITH SELF-HEALING TRUNCATION RECOVERY ──
-    let arr = await runExtractionWithRecovery(content, 0, 'batch');
+    if (arr == null) {
+      // ── NORMAL PATH ──
+      const content = [];
+      for(const file of batchFiles){
+        const blocks = await processFile(file);
+        content.push(...blocks);
+      }
+      // ── EXPECTED POLICY COUNT (for reconciliation) ──
+      // Scan the text blocks for hints like "You have 16 active policies" before the AI call.
+      // If the final extracted count is lower than this hint, we'll warn the user.
+      const sourceText = content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+      const expectedCount = parseExpectedPolicyCount(sourceText);
+      if(expectedCount) console.log('[Extract] Document hints at', expectedCount, 'policies');
+
+      // ── REPO-GROUNDED PRIORS ──
+      // Scan source text for known products in the repository. If matched, inject
+      // a PRIOR KNOWLEDGE block into the content array so the AI uses canonical
+      // classification instead of guessing from document appearance.
+      // This runs in-process with zero additional AI calls — we use the text
+      // already extracted from text-layer PDFs / CSVs / Excel. For image-only
+      // scans sourceText is empty and priors silently skip (post-extract
+      // reconciliation would catch those, planned for a follow-up).
+      const priorMatches = fuzzyMatchReposFromText(sourceText, repo);
+      if(priorMatches.length > 0) {
+        const topNames = priorMatches.slice(0, 6).map(m => m.repo.insurer+' '+m.repo.productName+' ('+m.score.toFixed(2)+')').join(', ');
+        console.log('[PriorInjection] Matched', priorMatches.length, 'repo product(s):', topNames);
+        const priorBlock = buildRepoPriorBlock(priorMatches, 6);
+        if(priorBlock) {
+          // Push as its own text block BEFORE the instruction tail so the AI
+          // reads the prior knowledge as authoritative context.
+          content.push({type:'text', text: priorBlock});
+        }
+      } else {
+        console.log('[PriorInjection] No repo matches in source text (length='+sourceText.length+', repo size='+repo.length+')');
+      }
+
+      content.push({type:'text',text:'Extract ALL insurance policies AND financial instruments from these documents. CRITICAL RULES:\n1. Multiple photos may show DIFFERENT PAGES of the SAME policy — correlate them by policy number, insurer+product name, or context clues. Merge information from multiple pages into ONE policy entry.\n2. Multiple photos may also show DIFFERENT policies — extract each as a separate entry.\n3. NEVER skip or merge genuinely different policies. Two policies from the same insurer with different product names = 2 entries.\n4. If the same fund (e.g. "Allianz Global High Payout") appears under DIFFERENT accounts (CPFIS-OA vs Cash), these are SEPARATE entries — differentiate by appending the account type in policyName.\n5. Look across ALL images for related data — page 1 might have the policy name while page 3 has the premium details.\n6. If REPOSITORY PRIOR KNOWLEDGE is provided above, treat those products\' canonical category/subType as authoritative — do not reclassify them based on document appearance.\nReturn ONLY valid JSON array or object.'});
+
+      // ── RUN EXTRACTION WITH SELF-HEALING TRUNCATION RECOVERY ──
+      arr = await runExtractionWithRecovery(content, 0, 'batch');
+    }
 
     // ── BATCH DEDUPLICATION ──
     // Recovery recursion may produce overlapping policies if both halves of a split
@@ -11849,8 +12584,133 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
     const totalBatches = batches.length;
     let allExtracted = [];
     let firstBatchShown = false;
+    // ── RESUME STATE TRACKING ──
+    // completedBatches tracks how many batches finished successfully in this
+    // invocation. Used by the failure banner to show progress ("3 of 5 batches
+    // done before interruption") and to persist accumulated results to
+    // sessionStorage after each batch, so a page refresh mid-extraction
+    // doesn't wipe in-memory work.
+    let completedBatches = 0;
 
     setScanProgress({batch:0, totalBatches, totalFiles:allFiles.length, status:'Preparing...', pctComplete:0, startTime:Date.now()});
+
+    // ── PRE-COMPUTE VIA SW MULTI (Fix #1) ──
+    // When multiple batches AND Background Fetch is available, dispatch
+    // ALL batch requests to the SW upfront. The SW processes them as a
+    // sequential chain; each batch's result flows back via broadcasts
+    // which populate per-batch resolver promises. The normal batch loop
+    // below awaits those promises instead of making its own network
+    // calls, giving us true page-death survival: if the page dies
+    // between batches, the SW's queue continues and mount recovery
+    // picks up results.
+    //
+    // Any failure in this phase is strictly additive — we fall through
+    // to the normal per-batch path without regression. Single-batch
+    // extractions skip this phase entirely and use the existing SW
+    // single-dispatch path via swExtractRelay.
+    let precomputedPromises = null;
+    if (batches.length > 1) {
+      try {
+        const swAvailable = await swExtractIsAvailable();
+        if (swAvailable) {
+          // Ask for notification permission once per device (no-op if already asked/denied)
+          ensureNotificationPermission().catch(()=>{});
+
+          const geminiKey = ((await dbGet('settings','geminiKey').catch(()=>null))?.value || '').trim();
+          if (geminiKey) {
+            const swUrl = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=' + geminiKey;
+
+            // Build all request bodies. This pre-processes every batch's
+            // files (compression, base64) upfront, so it can take several
+            // seconds for large uploads. Progress updates during this
+            // phase show "Preparing batch N of M for background fetch".
+            const allBodies = [];
+            let preprocessFailed = false;
+            for (let b = 0; b < batches.length; b++) {
+              try {
+                setScanProgress({
+                  batch: b+1, totalBatches, totalFiles: allFiles.length,
+                  status: `Preparing batch ${b+1} of ${totalBatches} for background fetch...`,
+                  pctComplete: Math.round((b/batches.length)*10), // first 10% is prep
+                  startTime: Date.now(),
+                });
+                const content = [];
+                for (const file of batches[b]) {
+                  const blocks = await processFile(file);
+                  content.push(...blocks);
+                }
+                // Repo priors (same as extractBatch's normal path)
+                const sourceText = content.filter(bl => bl.type === 'text').map(bl => bl.text).join('\n');
+                const priorMatches = fuzzyMatchReposFromText(sourceText, repo);
+                if (priorMatches.length > 0) {
+                  const priorBlock = buildRepoPriorBlock(priorMatches, 6);
+                  if (priorBlock) content.push({type:'text', text: priorBlock});
+                }
+                // Instruction tail (same as extractBatch)
+                content.push({type:'text',text:'Extract ALL insurance policies AND financial instruments from these documents. CRITICAL RULES:\n1. Multiple photos may show DIFFERENT PAGES of the SAME policy — correlate them by policy number, insurer+product name, or context clues. Merge information from multiple pages into ONE policy entry.\n2. Multiple photos may also show DIFFERENT policies — extract each as a separate entry.\n3. NEVER skip or merge genuinely different policies. Two policies from the same insurer with different product names = 2 entries.\n4. If the same fund (e.g. "Allianz Global High Payout") appears under DIFFERENT accounts (CPFIS-OA vs Cash), these are SEPARATE entries — differentiate by appending the account type in policyName.\n5. Look across ALL images for related data — page 1 might have the policy name while page 3 has the premium details.\n6. If REPOSITORY PRIOR KNOWLEDGE is provided above, treat those products\' canonical category/subType as authoritative — do not reclassify them based on document appearance.\nReturn ONLY valid JSON array or object.'});
+                // Build Gemini POST body
+                const parts = [];
+                for (const block of content) {
+                  if (block.type === 'text') parts.push({text: block.text});
+                  else if (block.type === 'image') parts.push({inlineData: {mimeType: block.source.media_type, data: block.source.data}});
+                  else if (block.type === 'document') parts.push({inlineData: {mimeType: block.source.media_type || 'application/pdf', data: block.source.data}});
+                }
+                const body = JSON.stringify({
+                  contents: [{parts}],
+                  systemInstruction: {parts: [{text: EXTRACT_PROMPT}]},
+                  generationConfig: {
+                    maxOutputTokens: 32000,
+                    responseMimeType: 'application/json',
+                    responseSchema: POLICY_EXTRACTION_SCHEMA,
+                  },
+                });
+                allBodies.push(body);
+              } catch (buildErr) {
+                console.warn('[Pre-fetch] Build body failed for batch', b, ':', buildErr);
+                preprocessFailed = true;
+                break;
+              }
+            }
+
+            if (!preprocessFailed && allBodies.length === batches.length) {
+              // Create per-batch resolver promises. The SW will call the
+              // progress callback as each batch completes; we use the
+              // callback to resolve the corresponding promise.
+              const resolvers = batches.map(() => {
+                let resolveFn;
+                const p = new Promise((res) => { resolveFn = res; });
+                p._resolve = resolveFn;
+                return p;
+              });
+              precomputedPromises = resolvers;
+
+              // Fire the multi relay (don't await — let it run in background)
+              swExtractRelayMulti(swUrl, allBodies, (prog) => {
+                const resolver = resolvers[prog.batchIndex];
+                if (resolver && resolver._resolve) {
+                  resolver._resolve(prog.rawText);
+                  delete resolver._resolve;
+                }
+              }).catch((e) => {
+                console.warn('[Pre-fetch] SW multi failed:', e.message);
+                // Resolve any still-pending promises with null so the batch
+                // loop falls through to the normal per-batch path for them.
+                resolvers.forEach(r => {
+                  if (r._resolve) {
+                    r._resolve(null);
+                    delete r._resolve;
+                  }
+                });
+              });
+              console.log('[Pre-fetch] Dispatched', batches.length, 'batches via SW multi');
+            }
+          }
+        }
+      } catch (preErr) {
+        console.warn('[Pre-fetch] setup failed, falling back to per-batch path:', preErr);
+        precomputedPromises = null;
+      }
+    }
 
     try {
       for(let b=0; b<batches.length; b++) {
@@ -11860,7 +12720,27 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         const etaText = remaining > 60 ? `~${Math.ceil(remaining/60)} min left` : `~${remaining}s left`;
         setScanProgress({batch:b+1, totalBatches, totalFiles:allFiles.length, status:`Extracting batch ${b+1} of ${totalBatches} (${batches[b].length} files)...`, pctComplete:Math.round(b/totalBatches*100), startTime:scanProgress?.startTime||Date.now(), eta:etaText});
 
-        const arr = await extractBatch(batches[b]);
+        // Pick up the precomputed rawText for this batch if the SW
+        // multi path is active. Each resolver promise resolves when its
+        // batch's SW result arrives via broadcast. Race against a
+        // per-batch timeout so a silently-stuck SW doesn't block
+        // indefinitely — on timeout we pass null to extractBatch which
+        // falls through to the normal in-page Gemini call path.
+        let precomputedRawText = null;
+        if (precomputedPromises && precomputedPromises[b]) {
+          try {
+            const batchTimeoutMs = 300000; // 5 minutes per batch
+            precomputedRawText = await Promise.race([
+              precomputedPromises[b],
+              new Promise((resolve) => setTimeout(() => resolve(null), batchTimeoutMs)),
+            ]);
+          } catch (prErr) {
+            console.warn('[Extract] Precomputed await failed for batch', b, ':', prErr);
+            precomputedRawText = null;
+          }
+        }
+
+        const arr = await extractBatch(batches[b], precomputedRawText);
         if(arr.length === 0 && b === 0 && batches.length === 1) {
           // Zero results from a single batch — could mean:
           //   1. The AI genuinely couldn't extract anything from a blank/garbage image
@@ -11875,7 +12755,10 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
               ? 'Extraction returned empty — you tabbed away while it was running, which kills Chrome background fetches on mobile. Try again with PolicyLens in the foreground.'
               : 'AI could not extract policies from the uploaded documents. This usually means the images are unclear, the document is too short, or the AI hit a transient error. Try clearer photos or retry.',
             files: filesSnapshot,
-            at: Date.now()
+            at: Date.now(),
+            completedBatches: 0,
+            totalBatches,
+            partialPolicies: 0,
           });
           return;
         }
@@ -12314,6 +13197,22 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
 
       console.log('[Extract] Batch', b+1, 'done:', processed.length, 'policies. Total so far:', allExtracted.length);
 
+      // ── PER-BATCH PROGRESS PERSISTENCE ──
+      // Write the accumulated extraction output to sessionStorage after EACH
+      // completed batch, not just at the end. This means:
+      //   • A page refresh mid-extraction restores the partial results
+      //     (already wired at line ~11566 on Policies mount)
+      //   • The failure banner can display an accurate "X policies extracted
+      //     so far" count when the next batch dies mid-flight
+      //   • The sessionId binds this run's output to a specific extraction
+      //     session, so stale partials from a previous run don't leak
+      completedBatches++;
+      try {
+        sessionStorage.setItem('policylens_pendingExtract',
+          JSON.stringify(allExtracted.map(m => { const c={...m}; delete c._repoMatch; return c; }))
+        );
+      } catch(e) { /* storage quota or private mode — non-fatal */ }
+
       // Show first batch results immediately so user can start reviewing
       if(!firstBatchShown) {
         firstBatchShown = true;
@@ -12333,6 +13232,12 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       // All batches done
       clearStaged();
       setScanning(false);
+      // Successful completion: clear the partial-extract sessionStorage so the
+      // next extraction run doesn't inherit stale resume state. The canonical
+      // bulkExtracted state stays in memory until the user accepts or closes
+      // the review modal — at which point that modal's own close handler
+      // clears sessionStorage again.
+      try { sessionStorage.removeItem('policylens_pendingExtract'); } catch(e) {}
       setTimeout(()=>setScanProgress(null), 3000);
     } catch(e){
       console.error('[Extract] Error:', e);
@@ -12370,16 +13275,28 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         toast(allExtracted.length + ' policies extracted before error — review now','warning',5000);
       }
       setScanning(false); setScanProgress(null);
-      // ── PERSISTENT FAILURE BANNER ──
+      // ── PERSISTENT FAILURE BANNER WITH RESUME STATE ──
       // The toast above will time out in 7s and on mobile is easy to miss
       // (especially if the FC returns from a background tab). The banner
       // sticks until the FC explicitly dismisses or retries.
+      //
+      // Resume telemetry: how many batches completed before the failure,
+      // how many policies were already extracted. The banner renders this
+      // as "Resume · 6 policies from 2 of 5 batches already extracted" so
+      // the FC understands that Retry isn't starting from scratch — the
+      // deterministic batch cache will instant-hit anything that already
+      // completed, and the new run picks up from where we left off.
       setScanFailure({
         reason: wasBackgrounded
-          ? 'Chrome killed the extraction when you tabbed away. PolicyLens needs to stay in the foreground while scanning. Tap Retry to start over.'
+          ? 'Chrome killed the extraction when you tabbed away. PolicyLens needs to stay in the foreground while scanning.'
           : msg.split('\n')[0] || 'Extraction failed. See details in the error toast.',
         files: filesSnapshot,
-        at: Date.now()
+        at: Date.now(),
+        // Resume progress — each of these may be undefined on very early
+        // failures. The banner UI guards for that.
+        completedBatches,
+        totalBatches,
+        partialPolicies: allExtracted.length,
       });
     } finally {
       // Always clean up the wake lock, visibility listener, and
@@ -12476,70 +13393,139 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
           {scanProgress.pctComplete > 0 && scanProgress.pctComplete < 100 && (
             <div style={{fontSize:9,color:'var(--text3)',marginTop:4}}>You can review extracted policies below while remaining batches process</div>
           )}
-          {/* ── KEEP IN FOREGROUND WARNING ── */}
-          {/* This is the biggest source of flaky extractions on mobile: the FC
-              tabs away to WhatsApp or the lock screen kicks in, Chrome suspends
-              the in-flight fetch, and the request dies silently. A persistent
-              banner is clearer than a one-shot toast. */}
+          {/* ── KEEP IN FOREGROUND WARNING (platform-aware) ── */}
+          {/* Three visual states driven by swBgFetchReady:
+              • null (unchecked) or false → strict red warning (default
+                safe behavior: "don't tab away")
+              • true (Android Chrome + Background Fetch ready) → softer
+                teal message: "extraction runs in background, safe to
+                tab away" — the SW path guarantees tab-death survival.
+              The warning never disappears entirely; even in the best
+              case we still want the user to know extraction is
+              running so they don't think the app is frozen. */}
           {scanning && (
-            <div style={{
-              marginTop:8,padding:'8px 10px',
-              background:'rgba(239,83,80,0.08)',
-              border:'1px solid rgba(239,83,80,0.25)',
-              borderRadius:6,
-              display:'flex',alignItems:'center',gap:8
-            }}>
-              <span style={{fontSize:14}}>⚠️</span>
-              <div style={{fontSize:10,color:'var(--red)',fontWeight:600,lineHeight:1.35}}>
-                Keep PolicyLens in the foreground. Tabbing away or letting the screen sleep will kill the extraction.
+            swBgFetchReady === true ? (
+              <div style={{
+                marginTop:8,padding:'8px 10px',
+                background:'rgba(91,168,160,0.08)',
+                border:'1px solid rgba(91,168,160,0.25)',
+                borderRadius:6,
+                display:'flex',alignItems:'center',gap:8
+              }}>
+                <span style={{fontSize:14}}>✓</span>
+                <div style={{fontSize:10,color:'var(--teal)',fontWeight:600,lineHeight:1.35}}>
+                  Running in background. Safe to tab away or lock your screen — extraction will continue and you'll see results when you return.
+                </div>
               </div>
-            </div>
+            ) : (
+              <div style={{
+                marginTop:8,padding:'8px 10px',
+                background:'rgba(239,83,80,0.08)',
+                border:'1px solid rgba(239,83,80,0.25)',
+                borderRadius:6,
+                display:'flex',alignItems:'center',gap:8
+              }}>
+                <span style={{fontSize:14}}>⚠️</span>
+                <div style={{fontSize:10,color:'var(--red)',fontWeight:600,lineHeight:1.35}}>
+                  Keep PolicyLens in the foreground. Tabbing away or letting the screen sleep will kill the extraction.
+                </div>
+              </div>
+            )
           )}
         </div>
       )}
 
-      {/* ── SCAN FAILURE BANNER ── */}
-      {/* Shown after handleExtract catches an error or returns zero results.
-          Sticks around until the FC dismisses or retries. The retry reuses
-          the in-memory files snapshot so the FC doesn't have to re-pick
-          from the file dialog. */}
-      {scanFailure && !scanning && (
-        <div className="card" style={{
-          marginBottom:12,padding:14,
-          borderLeft:'3px solid var(--red)',
-          background:'rgba(239,83,80,0.04)'
-        }}>
-          <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:10,marginBottom:8}}>
-            <div style={{flex:1,minWidth:0}}>
-              <div style={{fontSize:12,fontWeight:700,color:'var(--red)',marginBottom:4}}>
-                ⚠️ Extraction Interrupted
-              </div>
-              <div style={{fontSize:11,color:'var(--text2)',lineHeight:1.5}}>
-                {scanFailure.reason}
-              </div>
-              {scanFailure.files && scanFailure.files.length > 0 && (
-                <div style={{fontSize:9,color:'var(--text3)',marginTop:6}}>
-                  {scanFailure.files.length} file{scanFailure.files.length===1?'':'s'} ready for retry · no need to reselect
+      {/* ── SCAN FAILURE / RESUME BANNER ── */}
+      {/* Two visual states:
+          1. HARD FAILURE (no partial progress) — red, "Retry Extraction"
+          2. RESUME AVAILABLE (some batches completed) — teal, shows progress
+             bar, "Resume Extraction" button, reassures the FC that tapping
+             retry will hit the batch cache and continue from where it left
+             off instead of starting over.
+
+          The distinction matters a lot on mobile: when a user tabs away for
+          30 seconds on a 10-batch extraction and 6 batches had completed,
+          the resume UX turns "wasted 5 minutes" into "tap once, back in 90
+          seconds". That's the whole point of Tier 1. */}
+      {scanFailure && !scanning && (() => {
+        const hasProgress = (scanFailure.completedBatches || 0) > 0 && (scanFailure.partialPolicies || 0) > 0;
+        const progressPct = scanFailure.totalBatches > 0
+          ? Math.round((scanFailure.completedBatches / scanFailure.totalBatches) * 100)
+          : 0;
+        // Teal tones when we have progress (reassuring, "we can pick up
+        // from here"), red when it's a full failure (attention-grabbing).
+        const accent = hasProgress ? 'var(--teal)' : 'var(--red)';
+        const bgTint = hasProgress ? 'rgba(91,168,160,0.06)' : 'rgba(239,83,80,0.04)';
+        return (
+          <div className="card" style={{
+            marginBottom:12,padding:14,
+            borderLeft:`3px solid ${accent}`,
+            background:bgTint
+          }}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',gap:10,marginBottom:8}}>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{fontSize:12,fontWeight:700,color:accent,marginBottom:4}}>
+                  {hasProgress ? '⏸ Extraction Paused' : '⚠️ Extraction Failed'}
                 </div>
+                <div style={{fontSize:11,color:'var(--text2)',lineHeight:1.5}}>
+                  {scanFailure.reason}
+                </div>
+                {/* Progress stats — only shown when we have something to resume */}
+                {hasProgress && (
+                  <div style={{marginTop:10,padding:'8px 10px',background:'rgba(91,168,160,0.08)',borderRadius:6,border:'1px solid rgba(91,168,160,0.2)'}}>
+                    <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:5}}>
+                      <span style={{fontSize:10,fontWeight:700,color:'var(--teal)',textTransform:'uppercase',letterSpacing:'0.5px'}}>
+                        Progress saved
+                      </span>
+                      <span style={{fontSize:10,color:'var(--text3)',fontVariantNumeric:'tabular-nums'}}>
+                        {scanFailure.completedBatches} of {scanFailure.totalBatches} batches · {progressPct}%
+                      </span>
+                    </div>
+                    {/* Progress bar */}
+                    <div style={{height:4,background:'rgba(255,255,255,0.06)',borderRadius:2,overflow:'hidden',marginBottom:6}}>
+                      <div style={{height:'100%',width:progressPct+'%',background:'var(--teal)',borderRadius:2}}></div>
+                    </div>
+                    <div style={{fontSize:10,color:'var(--text2)',lineHeight:1.4}}>
+                      <strong style={{color:'var(--teal)'}}>{scanFailure.partialPolicies} polic{scanFailure.partialPolicies===1?'y':'ies'}</strong> already extracted and cached.
+                      Resume will continue from batch {(scanFailure.completedBatches || 0) + 1} — completed batches will be instant cache hits.
+                    </div>
+                  </div>
+                )}
+                {scanFailure.files && scanFailure.files.length > 0 && !hasProgress && (
+                  <div style={{fontSize:9,color:'var(--text3)',marginTop:6}}>
+                    {scanFailure.files.length} file{scanFailure.files.length===1?'':'s'} ready for retry · no need to reselect
+                  </div>
+                )}
+              </div>
+            </div>
+            <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+              {scanFailure.files && scanFailure.files.length > 0 && (
+                <button onClick={()=>{
+                  const files = scanFailure.files;
+                  setScanFailure(null);
+                  handleExtract(files);
+                }} style={{
+                  fontSize:11,
+                  fontWeight:600,
+                  padding:'6px 14px',
+                  borderRadius:6,
+                  border:'none',
+                  cursor:'pointer',
+                  background: hasProgress
+                    ? 'linear-gradient(135deg, var(--teal), #4a9088)'
+                    : 'var(--gold)',
+                  color: hasProgress ? '#fff' : '#0b0f1a',
+                }}>
+                  {hasProgress ? '▶ Resume Extraction' : '🔄 Retry Extraction'}
+                </button>
               )}
+              <button className="btn-secondary btn-sm" onClick={()=>setScanFailure(null)} style={{fontSize:11}}>
+                Dismiss
+              </button>
             </div>
           </div>
-          <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
-            {scanFailure.files && scanFailure.files.length > 0 && (
-              <button className="btn-primary btn-sm" onClick={()=>{
-                const files = scanFailure.files;
-                setScanFailure(null);
-                handleExtract(files);
-              }} style={{fontSize:11}}>
-                🔄 Retry Extraction
-              </button>
-            )}
-            <button className="btn-secondary btn-sm" onClick={()=>setScanFailure(null)} style={{fontSize:11}}>
-              Dismiss
-            </button>
-          </div>
-        </div>
-      )}
+        );
+      })()}
 
       {/* Staged photos strip */}
       {staged.length > 0 && (
