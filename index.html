@@ -5719,10 +5719,35 @@ function _syncFieldEqual(a, b) {
   if (a == null || b == null) return false;
   if (typeof a !== typeof b) return false;
   if (typeof a === 'object') {
-    try { return JSON.stringify(a) === JSON.stringify(b); }
-    catch(e) { return false; }
+    return _syncDeepEqual(a, b);
   }
   return false;
+}
+
+// Order-insensitive deep equality. Critical for the sync layer
+// because the JSON.stringify-based comparison was producing false
+// positives whenever key order differed between two equivalent
+// objects (e.g. {id, ...rest} vs {...rest, id}). False positives
+// here cause infinite push-back loops in cloud sync.
+function _syncDeepEqual(a, b) {
+  if (a === b) return true;
+  if (a == null || b == null) return a === b;
+  if (typeof a !== typeof b) return false;
+  if (typeof a !== 'object') return a === b;
+  if (Array.isArray(a) !== Array.isArray(b)) return false;
+  if (Array.isArray(a)) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) if (!_syncDeepEqual(a[i], b[i])) return false;
+    return true;
+  }
+  const keysA = Object.keys(a);
+  const keysB = Object.keys(b);
+  if (keysA.length !== keysB.length) return false;
+  for (const k of keysA) {
+    if (!Object.prototype.hasOwnProperty.call(b, k)) return false;
+    if (!_syncDeepEqual(a[k], b[k])) return false;
+  }
+  return true;
 }
 
 // Bump field versions for fields whose values DIFFER between
@@ -5771,10 +5796,21 @@ function mergePerField(localData, cloudData, localVersions, cloudVersions) {
     const localT = (localVersions || {})[key] || 0;
     const cloudT = (cloudVersions || {})[key] || 0;
     if (cloudT > localT) {
+      // Cloud wins
       if (key in cleanCloud) result[key] = cleanCloud[key];
+      else if (key in cleanLocal) result[key] = cleanLocal[key]; // fallback
       mergedVersions[key] = cloudT;
     } else {
+      // Local wins (or tie — tie goes to local by default)
+      // CRITICAL: if the key exists only on the CLOUD side (no
+      // local entry) and both timestamps are 0, we still need
+      // to take the cloud value. Otherwise cloud-only fields are
+      // silently dropped during merge, producing "truncated"
+      // policies. This is the root cause of the observed data
+      // loss when syncing pre-existing data without per-field
+      // versions.
       if (key in cleanLocal) result[key] = cleanLocal[key];
+      else if (key in cleanCloud) result[key] = cleanCloud[key]; // fallback — prevents field loss
       mergedVersions[key] = localT || cloudT;
     }
   }
@@ -6468,6 +6504,13 @@ function App() {
   // modal so the FC can choose merge strategy. Otherwise auto-
   // merges per-field using bumpFieldVersions/mergePerField.
   const cloudSyncRanRef = useRef(false);
+  // Timestamp (ms) of the last sync round — used by Realtime
+  // handlers to skip rapid re-triggers. When we push a change,
+  // Realtime echoes the event back to us; without a cooldown this
+  // cycles forever. 2s is enough to absorb self-echoes without
+  // missing legitimate cross-device events (the next user action
+  // will re-trigger sync anyway).
+  const lastSyncRef = useRef(0);
   // Ref to the LATEST runCloudSync function. Updated on every
   // render so event handlers (which capture the closure once via
   // useEffect with []) can always call the freshest version with
@@ -6595,11 +6638,21 @@ function App() {
         const localVers = clientProfile?._fieldVersions || {};
         const merged = mergePerField(clientProfile, cloudProfile.data, localVers, cloudProfile.versions);
         const mergedProfile = {...merged.data, _fieldVersions: merged.versions};
-        if (JSON.stringify(mergedProfile) !== JSON.stringify(clientProfile)) {
+        // Compare merged result against LOCAL using order-insensitive
+        // deep equal. If equal → no local change needed. JSON.stringify
+        // would give false positives here because the rebuilt object
+        // has a different key order than the original, triggering an
+        // endless push-back → realtime → push loop.
+        if (!_syncDeepEqual(mergedProfile, clientProfile)) {
           await dbPut('settings', {key:'clientProfile', value: mergedProfile});
           setClientProfile(mergedProfile);
           profileChanges++;
-          // Push merged result back to cloud (it may have new fields the cloud didn't have)
+        }
+        // Push merged result back ONLY if it differs from what cloud
+        // already has. Otherwise we'd push identical data, which
+        // still triggers Realtime on other devices (and this one),
+        // causing an endless loop.
+        if (!_syncDeepEqual(merged.data, cloudProfile.data) || !_syncDeepEqual(merged.versions, cloudProfile.versions)) {
           sbProfilePush(mergedProfile, merged.versions).catch(()=>{});
         }
       } else if (localProfileHasData) {
@@ -6625,10 +6678,15 @@ function App() {
           const localVers = localPol._fieldVersions || {};
           const merged = mergePerField(localPol, cp.data, localVers, cp.versions);
           const mergedPol = {...merged.data, _fieldVersions: merged.versions, id: cp.id};
-          if (JSON.stringify(mergedPol) !== JSON.stringify(localPol)) {
+          // Deep-equal against LOCAL to decide whether to update local state.
+          if (!_syncDeepEqual(mergedPol, localPol)) {
             await dbPut('policies', mergedPol);
             policyChanges++;
-            // Push merged back if local had newer fields the cloud didn't
+          }
+          // Deep-equal against CLOUD to decide whether to push back.
+          // Only push if the merge produced something the cloud doesn't already have —
+          // otherwise we loop.
+          if (!_syncDeepEqual(merged.data, cp.data) || !_syncDeepEqual(merged.versions, cp.versions)) {
             sbPolicyPush(mergedPol, merged.versions).catch(()=>{});
           }
         } else {
@@ -6683,8 +6741,8 @@ function App() {
         }
         // Persist merged versions and push back to cloud if changed
         await dbPut('settings', { key:'appSettingsVersions', value: merged.versions });
-        if (JSON.stringify(merged.data) !== JSON.stringify(cloudSettings.data) ||
-            JSON.stringify(merged.versions) !== JSON.stringify(cloudSettings.versions)) {
+        if (!_syncDeepEqual(merged.data, cloudSettings.data) ||
+            !_syncDeepEqual(merged.versions, cloudSettings.versions)) {
           sbAppSettingsPush(merged.data, merged.versions).catch(()=>{});
         }
       } else if (Object.keys(localBundle).length > 0) {
@@ -6701,6 +6759,9 @@ function App() {
       }
 
       console.log('[Sync] Auto-merge done:', profileChanges, 'profile changes,', policyChanges, 'policy changes,', settingsChanges, 'settings changes');
+      // Stamp successful completion so Realtime handlers can
+      // skip re-triggering for a short cooldown window.
+      lastSyncRef.current = Date.now();
     } catch (err) {
       console.warn('[Sync] Cloud sync failed:', err);
       cloudSyncRanRef.current = false; // allow retry on next trigger
@@ -6742,6 +6803,21 @@ function App() {
     if (!sb) return;
 
     console.log('[Realtime] Subscribing to live updates for', uid);
+    // Cooldown check shared by all three handlers — skip if we
+    // synced within the last 2 seconds. This absorbs self-echoes
+    // from our own sbPolicyPush / sbProfilePush / sbAppSettingsPush
+    // calls without blocking legitimate cross-device events for
+    // more than a couple seconds (the next user action re-triggers
+    // sync anyway).
+    const REALTIME_COOLDOWN_MS = 2000;
+    const shouldSkipRealtime = () => {
+      const sinceLast = Date.now() - lastSyncRef.current;
+      if (sinceLast < REALTIME_COOLDOWN_MS) {
+        console.log('[Realtime] Skipping — synced', sinceLast, 'ms ago (cooldown)');
+        return true;
+      }
+      return false;
+    };
     const channel = sb.channel('user-data-' + uid)
       .on('postgres_changes', {
         event: '*',
@@ -6751,8 +6827,7 @@ function App() {
       }, async (payload) => {
         try {
           console.log('[Realtime] Policy event:', payload.eventType, payload.new?.id || payload.old?.id);
-          // Re-trigger a full cloud sync (it'll be fast — only
-          // pulls + merges what's actually different).
+          if (shouldSkipRealtime()) return;
           if (runCloudSyncRef.current) {
             await runCloudSyncRef.current({ force: true });
           }
@@ -6766,6 +6841,7 @@ function App() {
       }, async (payload) => {
         try {
           console.log('[Realtime] Profile event:', payload.eventType);
+          if (shouldSkipRealtime()) return;
           if (runCloudSyncRef.current) {
             await runCloudSyncRef.current({ force: true });
           }
@@ -6779,6 +6855,7 @@ function App() {
       }, async (payload) => {
         try {
           console.log('[Realtime] Settings event:', payload.eventType);
+          if (shouldSkipRealtime()) return;
           if (runCloudSyncRef.current) {
             await runCloudSyncRef.current({ force: true });
           }
