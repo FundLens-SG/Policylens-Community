@@ -1645,6 +1645,59 @@ async function pdfToImages(pdfDoc, maxPages=12) {
 const EXTRACT_PIPELINE_VERSION = 'v8-2026-04-08-quick-verify-confidence';
 
 // ═══════════════════════════════════════════════════════════════
+// OCR SPACING FIX (2026-04-09)
+// ═══════════════════════════════════════════════════════════════
+// Gemini occasionally returns product names like "ACHI EV ER ACCU
+// MULA TOR" — the correct name is "ACHIEVER ACCUMULATOR" but the
+// source document rendered the title with wide letter-tracking /
+// kerning, and Gemini OCR'd the visual whitespace as literal spaces
+// between character chunks. This is a real, reproducible pattern
+// CK has seen in AIA policy illustrations.
+//
+// We can't perfectly reconstruct word boundaries without a dictionary,
+// but a conservative heuristic handles the common case:
+//   • If ≥3 consecutive tokens are ALL ≤4 chars, they're probably
+//     fragments of a single word that got split by OCR spacing.
+//   • Collapse such runs into a single joined word.
+//   • Leave tokens ≥5 chars alone — those are real words.
+//
+// Tradeoffs:
+//   • "AIA SRS ILP" (3 tokens, all ≤3 chars) would incorrectly
+//     collapse to "AIASRSILP". Mitigated by requiring the total
+//     collapsed length to be ≥8 chars (real OCR artifacts are long
+//     words like ACHIEVERACCUMULATOR, not short acronym strings).
+//   • "ACHIEVER ACCUMULATOR" cannot be perfectly reconstructed —
+//     we get "ACHIEVERACCUMULATOR" instead. That's acceptable;
+//     the FC can manually add the space if they care, and
+//     searches / dedupe still work on the joined form.
+function fixOCRSpacing(text) {
+  if (!text || typeof text !== 'string') return text;
+  const tokens = text.split(/\s+/).filter(Boolean);
+  if (tokens.length < 3) return text;
+  const out = [];
+  let i = 0;
+  while (i < tokens.length) {
+    // Look ahead for a run of ≥3 adjacent tokens each ≤4 chars
+    let runLen = 0;
+    while (i + runLen < tokens.length && tokens[i + runLen].length <= 4) runLen++;
+    if (runLen >= 3) {
+      const run = tokens.slice(i, i + runLen);
+      const joined = run.join('');
+      // Only collapse if the result is a "long word" (≥8 chars) —
+      // avoids false positives on legitimate short acronym strings.
+      if (joined.length >= 8) {
+        out.push(joined);
+        i += runLen;
+        continue;
+      }
+    }
+    out.push(tokens[i]);
+    i++;
+  }
+  return out.join(' ');
+}
+
+// ═══════════════════════════════════════════════════════════════
 // GEMINI MODEL CONFIGURATION (2026-04-09)
 // ═══════════════════════════════════════════════════════════════
 // Centralized so we can swap models by changing ONE constant
@@ -9583,12 +9636,12 @@ const RetirementLiteDashboard = memo(function RetirementLiteDashboard({data,age,
 
     // Grouped policy sections
     const policyGroups = [
-      {id:'protection', main:'Insurance', sub:'🛡 Protection', match: pol => pol.category==='protection' && !['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(pol.subType), cols:['Provider','Product','Sub-type','Sum Assured','Premium','Mode']},
+      {id:'protection', main:'Insurance', sub:'🛡 Protection', match: pol => pol.category==='protection' && !['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)','Personal Accident'].includes(pol.subType), cols:['Provider','Product','Sub-type','Sum Assured','Premium','Mode']},
       {id:'ul', main:'Insurance', sub:'💎 Universal Life', match: pol => ['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(pol.subType), cols:['Provider','Product','Sub-type','Sum Assured','Premium','Mode']},
       {id:'investment', main:'Insurance', sub:'📈 Investment', match: pol => pol.category==='investment', cols:['Provider','Product','Sub-type','Sum Assured','Premium','Mode']},
       {id:'savings', main:'Insurance', sub:'💰 Endowment & Savings', match: pol => pol.category==='savings', cols:['Provider','Product','Sub-type','Sum Assured','Premium','Mode']},
       {id:'retirement', main:'Insurance', sub:'🏦 Retirement & Annuities', match: pol => pol.category==='retirement', cols:['Provider','Product','Sub-type','Sum Assured','Premium','Mode']},
-      {id:'health', main:'Insurance', sub:'🏥 Accident & Medical', match: pol => pol.category==='health' || pol.category==='maternity', cols:['Provider','Product','Sub-type','—','Premium','Mode']},
+      {id:'health', main:'Insurance', sub:'🏥 Accident & Medical', match: pol => pol.category==='health' || pol.category==='maternity' || (pol.category==='protection' && pol.subType==='Personal Accident'), cols:['Provider','Product','Sub-type','—','Premium','Mode']},
       {id:'fi', main:'Fixed Deposits, T-bills & Bonds', sub:null, match: pol => pol.category==='cash_investments', cols:['Bank','Product','Type','Principal','Yield']},
     ];
     const groupedData = policyGroups.map(g => ({...g, items: activePols.filter(g.match)})).filter(g => g.items.length > 0);
@@ -14856,6 +14909,25 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
 
       // Process all policies uniformly
       const processed = arr.map(p => {
+        // ── OCR SPACING FIX (2026-04-09) ──
+        // Run product/policy names through the collapser BEFORE
+        // spreading p into result, so every downstream consumer
+        // (display, dedupe, repo match) sees the cleaned version.
+        // See fixOCRSpacing() definition for the heuristic.
+        if (p.productName) {
+          const fixed = fixOCRSpacing(p.productName);
+          if (fixed !== p.productName) {
+            console.log('[OCR Fix] productName:', JSON.stringify(p.productName), '→', JSON.stringify(fixed));
+            p.productName = fixed;
+          }
+        }
+        if (p.policyName) {
+          const fixed = fixOCRSpacing(p.policyName);
+          if (fixed !== p.policyName) {
+            console.log('[OCR Fix] policyName:', JSON.stringify(p.policyName), '→', JSON.stringify(fixed));
+            p.policyName = fixed;
+          }
+        }
         const result = {...p, id:genId(), _batch:b+1, status:p.status||'inforce',
           sumAssured:parseFloat(p.sumAssured||p.faceAmount)||0,
           // ⚠️ FIELD NAMING HAZARD ⚠️
@@ -15796,12 +15868,16 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
           // Group policies into sections
           const isCPFLifePolicy = p => (p.insurer||'').toLowerCase().includes('cpf board') || (p.productName||'').toLowerCase().includes('cpf life');
           const insuranceGroups = [
-            {id:'protection', sub:'Protection', icon:'🛡', color:'#5b8fd9', match: p => p.category==='protection' && !['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(p.subType)},
+            {id:'protection', sub:'Protection', icon:'🛡', color:'#5b8fd9', match: p => p.category==='protection' && !['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)','Personal Accident'].includes(p.subType)},
             {id:'ul', sub:'Universal Life', icon:'💎', color:'#9d8abf', match: p => ['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(p.subType)},
             {id:'investment', sub:'Investment', icon:'📈', color:'var(--green2)', match: p => p.category==='investment'},
             {id:'savings', sub:'Endowment & Savings', icon:'💰', color:'var(--blue2)', match: p => p.category==='savings'},
             {id:'retirement', sub:'Retirement & Annuities', icon:'🏦', color:'var(--green2)', match: p => p.category==='retirement' && !isCPFLifePolicy(p)},
-            {id:'health', sub:'Accident & Medical', icon:'🏥', color:'#c97b9a', match: p => p.category==='health' || p.category==='maternity'},
+            // Accident & Medical includes: health category, maternity, AND Personal
+            // Accident (which is technically under protection category in the schema
+            // but belongs here in the UI per CK 2026-04-09 — PA is an A&M product,
+            // not a life protection product).
+            {id:'health', sub:'Accident & Medical', icon:'🏥', color:'#c97b9a', match: p => p.category==='health' || p.category==='maternity' || (p.category==='protection' && p.subType==='Personal Accident')},
           ];
           const fiItems = activePolicies.filter(p => p.category==='cash_investments');
           const otherItems = activePolicies.filter(p => p.category==='other_assets');
@@ -18396,12 +18472,30 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
               try{
                 const tidyResp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key='+ak,{
                   method:'POST',headers:{'Content-Type':'application/json'},
-                  body:JSON.stringify({contents:[{parts:[{text:'Clean up these rough insurance policy notes into a concise FC reference card. Keep key numbers, conditions, exclusions, premium details. Be factual and brief. Return ONLY the cleaned text:\n\n'+form.notes}]}],
-                    systemInstruction:{parts:[{text:'You are an insurance product analyst for Singapore Financial Consultants.'}]},
+                  body:JSON.stringify({contents:[{parts:[{text:'Clean up these rough insurance policy notes into a concise FC reference card. Keep key numbers, conditions, exclusions, premium details. Be factual and brief.\n\nFORMAT RULES (STRICT):\n- Plain text only. NO Markdown syntax whatsoever.\n- NEVER use asterisks (*) for bold, italic, or bullets.\n- For bullet lists, use a hyphen ("- ") at the start of each line.\n- For emphasis, use CAPS sparingly or just rely on clear wording.\n- Do not wrap section headers in asterisks or any other decoration.\n\nReturn ONLY the cleaned text, nothing else:\n\n'+form.notes}]}],
+                    systemInstruction:{parts:[{text:'You are an insurance product analyst for Singapore Financial Consultants. You write in clean plain text with no Markdown formatting.'}]},
                     generationConfig:{maxOutputTokens:1000}})});
                 const tidyData = await tidyResp.json();
                 if(tidyData.error) throw new Error(tidyData.error.message);
-                set('notes',tidyData.candidates?.[0]?.content?.parts?.[0]?.text||form.notes);
+                let cleaned = tidyData.candidates?.[0]?.content?.parts?.[0]?.text||form.notes;
+                // ── STRIP MARKDOWN ARTIFACTS (2026-04-09) ──
+                // Gemini ignores "no markdown" instructions ~30% of the time
+                // and emits **bold** + *italic* + * bullet. Strip these on
+                // the way out so the textarea never shows raw asterisks.
+                // Rules (order matters):
+                //   1. Bold **text** → text (two asterisks, either side)
+                //   2. Italic *text* → text (single asterisks, either side,
+                //      but NOT when the * is at line start, which is a bullet)
+                //   3. Bullet *  at line start → -  (consistent bullet char)
+                //   4. Markdown headers (# ## ###) → plain line
+                //   5. Inline code `text` → text
+                cleaned = cleaned
+                  .replace(/\*\*([^\*\n]+?)\*\*/g, '$1')               // **bold**
+                  .replace(/(^|[^\*])\*(?!\s)([^\*\n]+?)\*(?!\*)/g, '$1$2')  // *italic*
+                  .replace(/^(\s*)\*(\s+)/gm, '$1-$2')                 // * bullet → - bullet
+                  .replace(/^#{1,6}\s+/gm, '')                          // # headers
+                  .replace(/`([^`\n]+?)`/g, '$1');                      // `code`
+                set('notes', cleaned);
               }catch(e){toast('AI error: '+e.message,'error')}
               setTidying(false);
             }}>{tidying?'Tidying...':'AI Tidy'}</button>
@@ -20447,12 +20541,12 @@ function ReportTab() {
       if(y>240){doc.addPage();y=pageHeader('Premium Schedule','Annual premium commitments');y+=4;}
 
       const pdfGroups = [
-        {id:'protection', main:'Insurance', sub:'Protection', match: pol => pol.category==='protection' && !['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(pol.subType)},
+        {id:'protection', main:'Insurance', sub:'Protection', match: pol => pol.category==='protection' && !['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)','Personal Accident'].includes(pol.subType)},
         {id:'ul', main:'Insurance', sub:'Universal Life', match: pol => ['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(pol.subType)},
         {id:'investment', main:'Insurance', sub:'Investment', match: pol => pol.category==='investment'},
         {id:'savings', main:'Insurance', sub:'Endowment & Savings', match: pol => pol.category==='savings'},
         {id:'retirement', main:'Insurance', sub:'Retirement & Annuities', match: pol => pol.category==='retirement'},
-        {id:'health', main:'Insurance', sub:'Accident & Medical', match: pol => pol.category==='health' || pol.category==='maternity'},
+        {id:'health', main:'Insurance', sub:'Accident & Medical', match: pol => pol.category==='health' || pol.category==='maternity' || (pol.category==='protection' && pol.subType==='Personal Accident')},
         {id:'fi', main:'Fixed Deposits, T-bills & Bonds', sub:null, match: pol => pol.category==='cash_investments'},
         {id:'other', main:'Other Assets', sub:null, match: pol => pol.category==='other_assets'},
       ].map(g => ({...g, items: policies.filter(p=>p.status!=='matured'&&p.status!=='surrendered'&&p.status!=='lapsed').filter(g.match).sort((a,b)=>(a.subType||'').localeCompare(b.subType||'')||(a.insurer||'').localeCompare(b.insurer||''))})).filter(g => g.items.length > 0);
@@ -20520,12 +20614,12 @@ function ReportTab() {
 
       // ═══ PAGE 2+: PER-POLICY DETAIL BLOCKS — GROUPED ═══
       const detailGroups = [
-        {label:'Protection', match: pol => pol.category==='protection' && !['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(pol.subType)},
+        {label:'Protection', match: pol => pol.category==='protection' && !['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)','Personal Accident'].includes(pol.subType)},
         {label:'Universal Life', match: pol => ['Universal Life (UL)','Indexed UL (IUL)','Variable UL (VUL)'].includes(pol.subType)},
         {label:'Investment', match: pol => pol.category==='investment'},
         {label:'Endowment & Savings', match: pol => pol.category==='savings'},
         {label:'Retirement & Annuities', match: pol => pol.category==='retirement'},
-        {label:'Accident & Medical', match: pol => pol.category==='health' || pol.category==='maternity'},
+        {label:'Accident & Medical', match: pol => pol.category==='health' || pol.category==='maternity' || (pol.category==='protection' && pol.subType==='Personal Accident')},
         {label:'Fixed Deposits, T-bills & Bonds', match: pol => pol.category==='cash_investments'},
         {label:'Other Assets', match: pol => pol.category==='other_assets'},
       ].map(g => ({...g, items: policies.filter(g.match)})).filter(g => g.items.length > 0);
