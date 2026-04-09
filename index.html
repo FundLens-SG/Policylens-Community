@@ -9493,30 +9493,7 @@ function ProfileTab() {
           <div className="field"><label>Full Name</label><input value={p.name||''} onChange={e=>set('name',e.target.value)} placeholder="Client full name" /></div>
           <div className="field"><label>NRIC / Passport</label><input value={p.nric||''} onChange={e=>set('nric',e.target.value)} placeholder="S1234567X" /></div>
           <div className="field">
-            <label style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:6}}>
-              <span>{ageMode === 'dob' ? 'Date of Birth' : 'Current Age'}</span>
-              {/* Mode toggle: only visible if one of the two is empty, to
-                  avoid accidental data loss when switching */}
-              <button
-                type="button"
-                onClick={() => {
-                  if (ageMode === 'dob') {
-                    // Switch to age-only mode. If DOB is set, seed the
-                    // current age from it (lossy but user-requested).
-                    const seeded = computedAge != null ? computedAge : '';
-                    if (p.dob && !confirm('Switch to "current age" mode?\n\nThis will clear the Date of Birth ('+p.dob+') and keep only an estimated age. Continue?')) return;
-                    setP(prev => ({...prev, dob:'', currentAge: seeded === '' ? '' : String(seeded), currentAgeAsOf: new Date().toISOString().slice(0,10)}));
-                  } else {
-                    // Switch back to DOB mode. Clears currentAge fields.
-                    if ((p.currentAge || '') !== '' && !confirm('Switch to "date of birth" mode?\n\nThis will clear the current age ('+p.currentAge+') — you\'ll need to enter a real birth date instead. Continue?')) return;
-                    setP(prev => ({...prev, currentAge:'', currentAgeAsOf:''}));
-                  }
-                }}
-                style={{fontSize:9,padding:'2px 6px',borderRadius:4,background:'transparent',color:'var(--text3)',border:'1px solid var(--border)',cursor:'pointer'}}
-              >
-                {ageMode === 'dob' ? '↕ Use age instead' : '↕ Use DOB instead'}
-              </button>
-            </label>
+            <label>{ageMode === 'dob' ? 'Date of Birth' : 'Current Age'}</label>
             {ageMode === 'dob' ? (
               <>
                 <input type="date" value={p.dob||''} onChange={e=>set('dob',e.target.value)} />
@@ -9565,6 +9542,44 @@ function ProfileTab() {
                 })()}
               </>
             )}
+            {/* Mode toggle — pulled OUT of the label element (previously
+                nested, which broke click handling because native label
+                semantics forward clicks to the associated form control,
+                intercepting the button's onClick on mobile/touch). Now
+                lives directly under the input where it's visually adjacent
+                to the field and obviously controls it. */}
+            <div style={{marginTop:4}}>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  if (ageMode === 'dob') {
+                    // Switch to age-only mode. If DOB is set, seed the
+                    // current age from it (lossy but user-requested).
+                    const seeded = computedAge != null ? computedAge : '';
+                    if (p.dob && !confirm('Switch to "current age" mode?\n\nThis will clear the Date of Birth ('+p.dob+') and keep only an estimated age. Continue?')) return;
+                    setP(prev => ({...prev, dob:'', currentAge: seeded === '' ? '' : String(seeded), currentAgeAsOf: new Date().toISOString().slice(0,10)}));
+                  } else {
+                    // Switch back to DOB mode. Clears currentAge fields.
+                    if ((p.currentAge || '') !== '' && !confirm('Switch to "date of birth" mode?\n\nThis will clear the current age ('+p.currentAge+') — you\'ll need to enter a real birth date instead. Continue?')) return;
+                    setP(prev => ({...prev, currentAge:'', currentAgeAsOf:''}));
+                  }
+                }}
+                style={{
+                  fontSize:10,
+                  padding:'3px 8px',
+                  borderRadius:4,
+                  background:'transparent',
+                  color:'var(--teal)',
+                  border:'1px dashed rgba(91,168,160,.35)',
+                  cursor:'pointer',
+                  textDecoration:'none',
+                }}
+              >
+                {ageMode === 'dob' ? "↕ Don't know DOB? Use age instead" : '↕ Switch back to Date of Birth'}
+              </button>
+            </div>
           </div>
         </div>
         <div className="grid-3">
@@ -16859,6 +16874,80 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
   const isFD = ['Fixed Deposit','T-bill','Singapore Savings Bond','Corporate Bond','Money Market'].includes(form.subType);
   const isILP = form.subType==='ILP (Protection)' || form.subType==='ILP (Investment)';
   const isISP = form.subType==='Integrated Shield Plan';
+  // ── ISP CASH OUTLAY + AUTO-SYNC (2026-04-09) ──
+  // For ISP policies, compute whether the total annual cash outlay
+  // is $0 — i.e. MediShield Life + ISP additional component are
+  // fully covered by MediSave (within AWL) AND there's no rider
+  // premium (riders are always cash, so any rider = cash > 0).
+  //
+  // When cash outlay is $0, the "correct" paymentMethod is
+  // "MediSave" (not "MediSave+Cash" which is what the AI tends to
+  // extract by default for ISPs). We:
+  //   1. Auto-sync paymentMethod to 'MediSave' on modal open when
+  //      cash=0 and current value is empty or 'MediSave+Cash'.
+  //      One-time, guarded by a ref so we don't fight user edits.
+  //   2. Show a persistent hint under the dropdown when cash=0 and
+  //      paymentMethod is anything other than 'MediSave', with a
+  //      one-click "switch" button.
+  //   3. Intercept manual onChange to 'Cash' or 'MediSave+Cash'
+  //      when cash=0 with a confirm dialog.
+  const ispCashOutlay = useMemo(() => {
+    if (!isISP) return null;
+    const totalPrem = parseFloat(form.annualPremium) || 0;
+    const riderPrem = parseFloat(form.riderPremium) || 0;
+    if (totalPrem <= 0) return null;
+    // Resolve age using the same priority as the ISP structure block:
+    // profile age → policy-local derivation → fallback.
+    const profileAgeToday = getProfileAge(_cp);
+    let useAge;
+    if (profileAgeToday != null) {
+      useAge = profileAgeToday;
+    } else if (form.ageAtEntry && form.inceptionDate) {
+      const entryAge = parseInt(form.ageAtEntry) || 0;
+      const inceptMs = new Date(form.inceptionDate).getTime();
+      if (entryAge > 0 && !isNaN(inceptMs)) {
+        useAge = entryAge + Math.max(0, Math.floor((Date.now() - inceptMs) / 31557600000));
+      }
+    }
+    if (useAge == null) useAge = parseInt(form.premStartAge) || 35;
+    const bd = calcISPBreakdown(totalPrem, useAge);
+    return bd.totalCash + riderPrem;
+  }, [isISP, form.annualPremium, form.riderPremium, form.ageAtEntry, form.inceptionDate, form.premStartAge, _cp]);
+
+  // One-time auto-sync on modal open. The ref prevents the effect
+  // from re-firing if the user explicitly picks a non-MediSave
+  // method after confirming the override — avoiding a fight loop.
+  const ispAutoSyncDoneRef = useRef(false);
+  useEffect(() => {
+    if (ispAutoSyncDoneRef.current) return;
+    if (!isISP) return;
+    if (ispCashOutlay !== 0) return;
+    // Only auto-sync if the current value is "unset" or the common
+    // AI-extracted default. Don't clobber an explicit user choice.
+    const current = form.paymentMethod;
+    if (current === 'MediSave') { ispAutoSyncDoneRef.current = true; return; }
+    if (current === '' || current == null || current === 'MediSave+Cash' || current === 'Cash') {
+      console.log('[ISP auto-sync] cash=0, setting paymentMethod to MediSave (was', JSON.stringify(current), ')');
+      set('paymentMethod', 'MediSave');
+      ispAutoSyncDoneRef.current = true;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isISP, ispCashOutlay]);
+
+  // Confirm-intercept handler for manual paymentMethod changes on
+  // an ISP policy when cash=0. Wraps set('paymentMethod', ...) so
+  // the dropdown's onChange can call it directly.
+  const handlePaymentMethodChange = (newVal) => {
+    if (isISP && ispCashOutlay === 0 && (newVal === 'Cash' || newVal === 'MediSave+Cash') && newVal !== form.paymentMethod) {
+      const proceed = confirm(
+        'This ISP policy has a calculated cash outlay of $0 — the premium is fully covered by MediSave (MediShield Life + AWL).\n\n' +
+        'You\'re changing the payment method to "' + newVal + '", which implies some cash payment.\n\n' +
+        'Are you sure? (This won\'t change the actual premium, only how it\'s labelled.)'
+      );
+      if (!proceed) return;
+    }
+    set('paymentMethod', newVal);
+  };
   // ── Unit Trust is NOT an insurance policy — it can be withdrawn anytime.
   // No surrender value, no riders, no premium term, no maturity. Just a holding
   // with current value, cost basis, and fund analysis.
@@ -17108,7 +17197,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
               {form.premFrequency==='single' && <div style={{fontSize:10,color:'var(--gold)'}}>Single lump sum</div>}
               {form.premFrequency==='unknown' && <div style={{fontSize:10,color:'var(--orange)'}}>Confirm frequency above</div>}
             </div>
-            <div className="field"><label>Payment Method</label><select value={form.paymentMethod||''} onChange={e=>set('paymentMethod',e.target.value)}>
+            <div className="field"><label>Payment Method</label><select value={form.paymentMethod||''} onChange={e=>handlePaymentMethodChange(e.target.value)}>
               <option value="">—</option>
               <option value="Cash">Cash</option>
               {(isISP||isCSL) && <option value="MediSave">MediSave</option>}
@@ -17119,6 +17208,19 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
             </select>
             {isISP && <div style={{fontSize:10,color:'var(--teal)'}}>ISP: MediSave (AWL) + Cash overflow</div>}
             {isCSL && <div style={{fontSize:10,color:'var(--green2)'}}>MediSave cap $600/yr · overflow → Cash</div>}
+            {/* ── ISP cash=0 hint + switch button (2026-04-09) ── */}
+            {isISP && ispCashOutlay === 0 && form.paymentMethod !== 'MediSave' && (
+              <div style={{fontSize:10,color:'var(--green2)',marginTop:4,padding:'4px 8px',background:'rgba(91,168,160,.08)',border:'1px solid rgba(91,168,160,.2)',borderRadius:4,display:'flex',alignItems:'center',justifyContent:'space-between',gap:6,flexWrap:'wrap'}}>
+                <span>✓ Cash outlay is $0 — fully covered by MediSave</span>
+                <button
+                  type="button"
+                  onClick={() => set('paymentMethod', 'MediSave')}
+                  style={{fontSize:9,padding:'2px 8px',background:'var(--green2)',color:'#0b0f1a',border:'none',borderRadius:3,cursor:'pointer',fontWeight:600}}
+                >
+                  Switch to MediSave
+                </button>
+              </div>
+            )}
             </div>
             {!isISP && !isCSL && <div className="field"><label>Sum Assured / Face Amount</label><input type="number" value={form.sumAssured} onChange={e=>set('sumAssured',e.target.value)} placeholder="Notional for par/annuity" /></div>}
           </div>
