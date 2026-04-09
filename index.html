@@ -250,7 +250,7 @@ td{padding:8px 12px;font-size:13px;border-bottom:1px solid var(--border)}
 .card{background:var(--bg2);border:1px solid var(--border);border-radius:12px;padding:20px}
 .card-sm{padding:14px}
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.8);display:flex;align-items:center;justify-content:center;z-index:100}
-.modal{background:var(--bg2);border:1px solid var(--border2);border-radius:16px;max-width:720px;width:95%;max-height:85vh;overflow-y:auto;padding:24px;box-shadow:0 24px 64px rgba(0,0,0,.4)}
+.modal{background:var(--bg2);border:1px solid var(--border2);border-radius:16px;max-width:720px;width:95%;max-height:85vh;overflow-y:auto;overflow-x:hidden;padding:24px;box-shadow:0 24px 64px rgba(0,0,0,.4)}
 .grid-2{display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .grid-3{display:grid;grid-template-columns:1fr 1fr 1fr;gap:12px}
 label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.5px;color:var(--text3);margin-bottom:4px}
@@ -1736,6 +1736,92 @@ const GEMINI_EXTRACTION_CHAIN = [
 // Utility model for lightweight text-only tasks (note enrichment,
 // "tidy up", settings test). Cheapest stable Flash.
 const GEMINI_UTILITY_MODEL = 'gemini-2.5-flash';
+
+// ═══════════════════════════════════════════════════════════════
+// PROFILE AGE HELPERS (2026-04-09)
+// ═══════════════════════════════════════════════════════════════
+// The source of truth for "how old is this client TODAY" is these
+// helpers. Historically the code computed age inline from
+// clientProfile.dob in ~6 places, defaulting to 35 when DOB was
+// missing. That's wrong in two ways:
+//   1. A hardcoded 35 silently fed the wrong number to MSL premium
+//      calculations, gap analysis, and retirement projections.
+//   2. It had no way to handle "I don't know my birthday but I
+//      know I'm 54" — a very common FC scenario with walk-ins.
+//
+// New model: profile can have EITHER a real DOB, OR an
+// age + asOf pair. The asOf timestamp lets us advance the age
+// as time passes — if the user says "I'm 54" in 2026, the next
+// year the helpers will report 55 automatically.
+//
+//   profile.dob                → ground truth, YYYY-MM-DD string
+//   profile.currentAge         → user-entered today's age (number)
+//   profile.currentAgeAsOf     → ISO timestamp when the age was set
+//
+// Both fields can coexist; dob always wins if present. Editing
+// the dob clears currentAge/currentAgeAsOf implicitly via the
+// profile form UI (see ProfileTab age mode toggle).
+
+// Returns the client's current age as a number, or null if we
+// have no way to compute it. Callers should NOT default to 35 —
+// either use this value or show a "set age" prompt.
+function getProfileAge(profile) {
+  if (!profile) return null;
+  if (profile.dob) {
+    const ms = Date.now() - new Date(profile.dob).getTime();
+    if (!isNaN(ms) && ms > 0) return Math.floor(ms / 31557600000);
+  }
+  if (profile.currentAge != null && profile.currentAge !== '' && profile.currentAgeAsOf) {
+    const asOfMs = new Date(profile.currentAgeAsOf).getTime();
+    if (!isNaN(asOfMs)) {
+      const yrsSinceAsOf = Math.max(0, Math.floor((Date.now() - asOfMs) / 31557600000));
+      const age = parseInt(profile.currentAge);
+      if (age > 0 && age < 120) return age + yrsSinceAsOf;
+    }
+  }
+  return null;
+}
+
+// Returns a canonical birth Date for age-at-date calculations.
+// Used by policy forms to compute ageAtEntry given an
+// inceptionDate. When the profile is in age-only mode, this
+// returns a pseudo-DOB computed backwards from (asOf − age years).
+// The pseudo-DOB is accurate to roughly ±1 year since we don't
+// know the actual birthday within the year.
+function getProfileEffectiveDob(profile) {
+  if (!profile) return null;
+  if (profile.dob) {
+    const d = new Date(profile.dob);
+    if (!isNaN(d.getTime())) return d;
+  }
+  if (profile.currentAge != null && profile.currentAge !== '' && profile.currentAgeAsOf) {
+    const asOf = new Date(profile.currentAgeAsOf);
+    if (!isNaN(asOf.getTime())) {
+      const age = parseInt(profile.currentAge);
+      if (age > 0 && age < 120) {
+        return new Date(asOf.getTime() - age * 31557600000);
+      }
+    }
+  }
+  return null;
+}
+
+// Returns true if the profile has some way to compute today's age
+// (either real DOB or currentAge+asOf). Used by policy forms to
+// decide whether to show the "synced from profile" hint or the
+// "set DOB/age first" warning.
+function profileHasAgeSource(profile) {
+  return !!(profile && (profile.dob || (profile.currentAge != null && profile.currentAge !== '' && profile.currentAgeAsOf)));
+}
+
+// Returns the human-readable source label for an age value:
+// 'dob' | 'age' | null. Used by UI badges to show provenance.
+function getProfileAgeSource(profile) {
+  if (!profile) return null;
+  if (profile.dob) return 'dob';
+  if (profile.currentAge != null && profile.currentAge !== '' && profile.currentAgeAsOf) return 'age';
+  return null;
+}
 
 // ═══════════════════════════════════════════════════════════════
 // HOUSE-VIEW DEFAULTS — Firm-level baseline values
@@ -5877,33 +5963,39 @@ function App() {
     setClientName(p.name||'');
     await dbPut('settings',{key:'clientProfile',value:p});
     await dbPut('settings',{key:'clientName',value:p.name||''});
-    // ── GLOBAL SYNC: Recalculate ageAtEntry for all policies when DOB changes ──
-    if(p.dob) {
-      const dob = new Date(p.dob);
-      if(!isNaN(dob.getTime())) {
-        let updated = 0;
-        for(const pol of policies) {
-          if(!pol.inceptionDate) continue;
-          const inception = new Date(pol.inceptionDate);
-          if(isNaN(inception.getTime())) continue;
-          const entryAge = Math.floor((inception.getTime()-dob.getTime())/31557600000);
-          if(entryAge <= 0 || entryAge >= 100) continue;
-          const needsUpdate = !pol.ageAtEntry || !pol.premStartAge || 
-            (pol.inceptionDate && Math.abs(parseInt(pol.ageAtEntry||0)-entryAge) > 1);
-          if(needsUpdate) {
-            const upd = {...pol, ageAtEntry:String(entryAge), premStartAge:String(entryAge)};
-            if(parseInt(pol.premTerm)>0 && !pol.premEndAge) upd.premEndAge = String(entryAge+parseInt(pol.premTerm));
-            else if(parseInt(pol.premTerm)>0) upd.premEndAge = String(entryAge+parseInt(pol.premTerm));
-            await dbPut('policies',upd);
-            updated++;
-          }
+    // ── GLOBAL SYNC: Recalculate ageAtEntry for all policies ──
+    // Triggers whenever the profile has ANY age source (real DOB
+    // OR current age + asOf timestamp). Uses getProfileEffectiveDob
+    // to get the canonical birth date proxy, then derives
+    // ageAtEntry per policy from (inceptionDate − effectiveDob).
+    // This means: when the FC keys in "I'm 54 today" without a
+    // DOB, every policy with an inceptionDate automatically
+    // gets its ageAtEntry/premStartAge updated to match.
+    const effectiveDob = getProfileEffectiveDob(p);
+    if (effectiveDob) {
+      let updated = 0;
+      for(const pol of policies) {
+        if(!pol.inceptionDate) continue;
+        const inception = new Date(pol.inceptionDate);
+        if(isNaN(inception.getTime())) continue;
+        const entryAge = Math.floor((inception.getTime()-effectiveDob.getTime())/31557600000);
+        if(entryAge <= 0 || entryAge >= 100) continue;
+        const needsUpdate = !pol.ageAtEntry || !pol.premStartAge || 
+          (pol.inceptionDate && Math.abs(parseInt(pol.ageAtEntry||0)-entryAge) > 1);
+        if(needsUpdate) {
+          const upd = {...pol, ageAtEntry:String(entryAge), premStartAge:String(entryAge)};
+          if(parseInt(pol.premTerm)>0 && !pol.premEndAge) upd.premEndAge = String(entryAge+parseInt(pol.premTerm));
+          else if(parseInt(pol.premTerm)>0) upd.premEndAge = String(entryAge+parseInt(pol.premTerm));
+          await dbPut('policies',upd);
+          updated++;
         }
-        if(updated > 0) {
-          console.log('[Sync] Updated ageAtEntry for '+updated+' policies from DOB');
-          // Reload policies
-          const all = await dbGetAll('policies');
-          setPolicies(all);
-        }
+      }
+      if(updated > 0) {
+        const source = getProfileAgeSource(p);
+        console.log('[Sync] Updated ageAtEntry for '+updated+' policies from '+(source==='dob'?'DOB':'current age'));
+        // Reload policies
+        const all = await dbGetAll('policies');
+        setPolicies(all);
       }
     }
   };
@@ -6007,7 +6099,7 @@ function PresentMode() {
     if(cat === 'protection' && !['Personal Accident','Critical Illness','Disability Income'].includes(sub)) {
       const mult = parseFloat(pol.saMultiplier) || 1;
       const multEnd = parseInt(pol.multiplierEndAge) || 70;
-      const clientAge = clientProfile?.dob ? Math.floor((Date.now() - new Date(clientProfile.dob).getTime())/31557600000) : 35;
+      const clientAge = getProfileAge(clientProfile) ?? 35;
       const effSA = clientAge < multEnd ? sa * mult : sa;
       totalDeathSA += effSA;
       totalTPD += effSA; // most WL/term include TPD by default
@@ -6186,9 +6278,7 @@ function PresentMode() {
   // Needed by Cashflow Timeline to determine which policies are still
   // paying in future years, and by Retirement Income Composition for the
   // headline at retirement age. Falls back to sensible defaults.
-  const clientAge = clientProfile?.dob
-    ? Math.floor((Date.now() - new Date(clientProfile.dob).getTime()) / 31557600000)
-    : 35;
+  const clientAge = getProfileAge(clientProfile) ?? 35;
   const retAge = parseInt(clientProfile?.retirementAge) || 65;
 
   // ── CLIENT-LEVEL CACHES FOR TIER 2 CARDS ──
@@ -9180,7 +9270,14 @@ function ProfileTab() {
     setScanning(false);
   };
 
-  const age = p.dob ? Math.floor((Date.now()-new Date(p.dob).getTime())/(365.25*24*60*60*1000)) : '';
+  // ── AGE SOURCE: derived once per render, covers DOB + age-only modes ──
+  // Drives the age display badge and the mode toggle default.
+  const computedAge = getProfileAge(p);
+  const ageSource = getProfileAgeSource(p);
+  // Mode is implicit: if we have a real dob, we're in 'dob' mode; if we
+  // have currentAge but no dob, we're in 'age' mode; otherwise default
+  // to 'dob' mode (the fresh-profile starting state).
+  const ageMode = ageSource === 'age' ? 'age' : 'dob';
 
   return (
     <div className="fade-in">
@@ -9226,7 +9323,80 @@ function ProfileTab() {
         <div className="grid-3">
           <div className="field"><label>Full Name</label><input value={p.name||''} onChange={e=>set('name',e.target.value)} placeholder="Client full name" /></div>
           <div className="field"><label>NRIC / Passport</label><input value={p.nric||''} onChange={e=>set('nric',e.target.value)} placeholder="S1234567X" /></div>
-          <div className="field"><label>Date of Birth</label><input type="date" value={p.dob||''} onChange={e=>set('dob',e.target.value)} /></div>
+          <div className="field">
+            <label style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:6}}>
+              <span>{ageMode === 'dob' ? 'Date of Birth' : 'Current Age'}</span>
+              {/* Mode toggle: only visible if one of the two is empty, to
+                  avoid accidental data loss when switching */}
+              <button
+                type="button"
+                onClick={() => {
+                  if (ageMode === 'dob') {
+                    // Switch to age-only mode. If DOB is set, seed the
+                    // current age from it (lossy but user-requested).
+                    const seeded = computedAge != null ? computedAge : '';
+                    if (p.dob && !confirm('Switch to "current age" mode?\n\nThis will clear the Date of Birth ('+p.dob+') and keep only an estimated age. Continue?')) return;
+                    setP(prev => ({...prev, dob:'', currentAge: seeded === '' ? '' : String(seeded), currentAgeAsOf: new Date().toISOString().slice(0,10)}));
+                  } else {
+                    // Switch back to DOB mode. Clears currentAge fields.
+                    if ((p.currentAge || '') !== '' && !confirm('Switch to "date of birth" mode?\n\nThis will clear the current age ('+p.currentAge+') — you\'ll need to enter a real birth date instead. Continue?')) return;
+                    setP(prev => ({...prev, currentAge:'', currentAgeAsOf:''}));
+                  }
+                }}
+                style={{fontSize:9,padding:'2px 6px',borderRadius:4,background:'transparent',color:'var(--text3)',border:'1px solid var(--border)',cursor:'pointer'}}
+              >
+                {ageMode === 'dob' ? '↕ Use age instead' : '↕ Use DOB instead'}
+              </button>
+            </label>
+            {ageMode === 'dob' ? (
+              <>
+                <input type="date" value={p.dob||''} onChange={e=>set('dob',e.target.value)} />
+                {computedAge != null && (
+                  <div style={{fontSize:10,color:'var(--green2)',marginTop:2}}>✓ Current age: <strong>{computedAge}</strong> (synced to all policies)</div>
+                )}
+              </>
+            ) : (
+              <>
+                <input
+                  type="number"
+                  min="0"
+                  max="120"
+                  value={p.currentAge||''}
+                  placeholder="e.g. 54"
+                  onChange={e=>setP(prev=>({...prev,currentAge:e.target.value,currentAgeAsOf: e.target.value ? new Date().toISOString().slice(0,10) : ''}))}
+                />
+                {computedAge != null && (() => {
+                  // The stored currentAge is what the user originally
+                  // typed; computedAge advances it by (today − asOf).
+                  // When they differ (time has passed since the value
+                  // was set), show both numbers and offer a one-click
+                  // refresh that resets asOf to today.
+                  const stored = parseInt(p.currentAge);
+                  const stale = computedAge !== stored;
+                  return (
+                    <div style={{fontSize:10,color:'var(--gold)',marginTop:2,lineHeight:1.5}}>
+                      ⚠ Estimated — set as of {p.currentAgeAsOf}
+                      {stale && (
+                        <>
+                          {' · '}
+                          <strong style={{color:'var(--teal)'}}>current: ~{computedAge}</strong>
+                          {' '}
+                          <button
+                            type="button"
+                            onClick={() => setP(prev => ({...prev, currentAge: String(computedAge), currentAgeAsOf: new Date().toISOString().slice(0,10)}))}
+                            style={{fontSize:9,padding:'1px 5px',background:'transparent',border:'1px solid var(--teal)',borderRadius:3,color:'var(--teal)',cursor:'pointer'}}
+                          >
+                            refresh
+                          </button>
+                        </>
+                      )}
+                      {!stale && ' · synced to all policies'}
+                    </div>
+                  );
+                })()}
+              </>
+            )}
+          </div>
         </div>
         <div className="grid-3">
           <div className="field"><label>Gender</label><select value={p.gender||''} onChange={e=>set('gender',e.target.value)}><option value="">—</option><option>Male</option><option>Female</option></select></div>
@@ -9238,7 +9408,6 @@ function ProfileTab() {
           <div className="field"><label>Phone</label><input value={p.phone||''} onChange={e=>set('phone',e.target.value)} placeholder="+65 9xxx xxxx" /></div>
           <div className="field"><label>Email</label><input value={p.email||''} onChange={e=>set('email',e.target.value)} placeholder="client@email.com" /></div>
         </div>
-        {age && <div style={{fontSize:12,color:'var(--text3)',marginTop:8}}>Current Age: <strong>{age}</strong></div>}
       </div>
 
       {/* Financial Profile */}
@@ -9313,7 +9482,7 @@ function ProfileTab() {
               )}
               {p.cpfScheme && p.cpfScheme !== 'none' && (() => {
                 const startAge = parseInt(p.cpfStartAge)||65;
-                const clientAge = age || 35;
+                const clientAge = getProfileAge(p) ?? 35;
                 const yearsTo55 = Math.max(0, 55 - clientAge);
                 const schemeBase = getCPFSchemeAmount(p.cpfScheme);
                 const projectedScheme = Math.round(schemeBase * Math.pow(1.035, yearsTo55));
@@ -10062,7 +10231,7 @@ function ReviewSession({onClose}) {
   const {policies, clientProfile, clientName} = useContext(AppCtx);
   const [step, setStep] = useState(0);
   const p = clientProfile || {};
-  const age = p.dob ? Math.floor((Date.now()-new Date(p.dob).getTime())/31557600000) : 35;
+  const age = getProfileAge(p) ?? 35;
   const retAge = parseInt(p.retirementAge)||65;
   const income = parseFloat(p.annualIncome)||0;
   const active = policies.filter(pol=>pol.status!=='matured'&&pol.status!=='surrendered'&&pol.status!=='lapsed');
@@ -10290,7 +10459,7 @@ function ReviewSession({onClose}) {
 function Dashboard() {
   const {policies,setTab,apiKey,clientProfile,saveProfile,houseDefaults} = useContext(AppCtx);
   const p = clientProfile || {};
-  const age = p.dob ? Math.floor((Date.now()-new Date(p.dob).getTime())/31557600000) : 35;
+  const age = getProfileAge(p) ?? 35;
   const retAge = parseInt(p.retirementAge)||houseDefaults.retirementAge;
   const annualIncome = parseFloat(p.annualIncome)||0;
   const monthlyIncome = annualIncome/12;
@@ -11728,9 +11897,10 @@ function mergeToProfile(extracted, currentProfile, saveProfile) {
 function GettingStartedChecklist({ compact = false }) {
   const { clientProfile, policies, setTab } = useContext(AppCtx);
 
-  // Step completion logic
+  // Step completion logic — accepts either real DOB or age-only mode
+  // as a valid "age source" for the profile.
   const hasName = !!(clientProfile?.name && String(clientProfile.name).trim());
-  const hasDob = !!(clientProfile?.dob && String(clientProfile.dob).trim());
+  const hasDob = profileHasAgeSource(clientProfile);
   const hasIncome = !!(parseFloat(clientProfile?.annualIncome) > 0 || parseFloat(clientProfile?.monthlyIncome) > 0);
   const hasProfile = hasName && hasDob && hasIncome;
   const hasPolicies = policies.length >= 1;
@@ -12494,7 +12664,7 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
           </div>
         )}
 
-        <div style={{maxHeight:'65vh',overflowY:'auto'}}>
+        <div style={{maxHeight:'65vh',overflowY:'auto',overflowX:'hidden'}}>
 
           {/* ── WHAT'S MISSING CHECKLIST ── */}
           {items.length > 0 && (() => {
@@ -12674,13 +12844,14 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
 
                   {/* ── RIDERS (carry over from full card) ── */}
                   {ridersOn.length > 0 && (
-                    <div style={{display:'flex',gap:3,flexWrap:'wrap',marginTop:6}}>
+                    <div style={{display:'flex',gap:3,flexWrap:'wrap',marginTop:6,minWidth:0,maxWidth:'100%'}}>
                       {(item.riders||[]).map((rd,ri) => (
                         <span key={ri} onClick={()=>toggleRider(item._idx,ri)} style={{
                           fontSize:8,padding:'2px 5px',borderRadius:4,cursor:'pointer',
                           background: rd._selected!==false ? ({death:'#5b8fd922',ci:'#c97b9a22',tpd:'#9d8abf22',di:'#5ba8a022',acc_medical:'#5ba8a022',acc_tcm:'#5ba8a022',acc_dismember:'#d4a96a22'}[rd.type]||'var(--bg2)') : 'var(--bg)',
                           color: rd._selected!==false ? ({death:'#5b8fd9',ci:'#c97b9a',tpd:'#9d8abf',di:'#5ba8a0',acc_medical:'#5ba8a0',acc_tcm:'#5ba8a0',acc_dismember:'#d4a96a'}[rd.type]||'var(--text3)') : 'var(--text3)',
-                          textDecoration: rd._selected===false ? 'line-through' : 'none'
+                          textDecoration: rd._selected===false ? 'line-through' : 'none',
+                          whiteSpace:'normal',wordBreak:'break-word',maxWidth:'100%'
                         }}>
                           {rd.riderName || (({death:'Death',tpd:'TPD',ci:'CI',eci:'ECI',di:'DI',accidental:'ADD',acc_medical:'Med',acc_tcm:'TCM',acc_dismember:'Dismem',premium_waiver:'Waiver',other:'Other'})[rd.type] || rd.type)} ${(+rd.sa||0).toLocaleString()}
                         </span>
@@ -12728,7 +12899,7 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
 
             // ── FULL CARD (legacy / Full Review mode / expanded compact) ──
             return (
-            <div key={item._idx} style={{background:item._selected?'var(--bg3)':'var(--bg)',borderRadius:8,padding:10,marginBottom:6,border:'1px solid '+(item._dupOf?'var(--gold3)':item._selected?'var(--border2)':'var(--border)'),opacity:item._selected?1:.4}}>
+            <div key={item._idx} style={{background:item._selected?'var(--bg3)':'var(--bg)',borderRadius:8,padding:10,marginBottom:6,border:'1px solid '+(item._dupOf?'var(--gold3)':item._selected?'var(--border2)':'var(--border)'),opacity:item._selected?1:.4,minWidth:0,maxWidth:'100%',overflow:'hidden'}}>
               {/* Collapse-back button when an expanded card is shown in Quick mode */}
               {viewMode === 'quick' && item._expanded && (
                 <div style={{marginBottom:6,paddingBottom:6,borderBottom:'1px solid var(--border)'}}>
@@ -12783,8 +12954,8 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
                 </div>
               </div>
               {/* Riders inline */}
-              {(item.riders||[]).length > 0 && <div style={{display:'flex',gap:3,flexWrap:'wrap',marginTop:5}}>
-                {(item.riders||[]).map((rd,ri)=><span key={ri} onClick={()=>toggleRider(item._idx,ri)} style={{fontSize:8,padding:'2px 5px',borderRadius:4,cursor:'pointer',background:rd._selected!==false?({death:'#5b8fd922',ci:'#c97b9a22',tpd:'#9d8abf22',di:'#5ba8a022',acc_medical:'#5ba8a022',acc_tcm:'#5ba8a022',acc_dismember:'#d4a96a22'}[rd.type]||'var(--bg2)'):'var(--bg)',color:rd._selected!==false?({death:'#5b8fd9',ci:'#c97b9a',tpd:'#9d8abf',di:'#5ba8a0',acc_medical:'#5ba8a0',acc_tcm:'#5ba8a0',acc_dismember:'#d4a96a'}[rd.type]||'var(--text3)'):'var(--text3)',textDecoration:rd._selected===false?'line-through':'none'}}>{rd.riderName||(({death:'Death',tpd:'TPD',ci:'CI',eci:'ECI',di:'DI',accidental:'ADD',acc_medical:'Med',acc_tcm:'TCM',acc_dismember:'Dismem',premium_waiver:'Waiver',other:'Other'})[rd.type]||rd.type)} ${(+rd.sa||0).toLocaleString()}</span>)}
+              {(item.riders||[]).length > 0 && <div style={{display:'flex',gap:3,flexWrap:'wrap',marginTop:5,minWidth:0,maxWidth:'100%'}}>
+                {(item.riders||[]).map((rd,ri)=><span key={ri} onClick={()=>toggleRider(item._idx,ri)} style={{fontSize:8,padding:'2px 5px',borderRadius:4,cursor:'pointer',background:rd._selected!==false?({death:'#5b8fd922',ci:'#c97b9a22',tpd:'#9d8abf22',di:'#5ba8a022',acc_medical:'#5ba8a022',acc_tcm:'#5ba8a022',acc_dismember:'#d4a96a22'}[rd.type]||'var(--bg2)'):'var(--bg)',color:rd._selected!==false?({death:'#5b8fd9',ci:'#c97b9a',tpd:'#9d8abf',di:'#5ba8a0',acc_medical:'#5ba8a0',acc_tcm:'#5ba8a0',acc_dismember:'#d4a96a'}[rd.type]||'var(--text3)'):'var(--text3)',textDecoration:rd._selected===false?'line-through':'none',whiteSpace:'normal',wordBreak:'break-word',maxWidth:'100%'}}>{rd.riderName||(({death:'Death',tpd:'TPD',ci:'CI',eci:'ECI',di:'DI',accidental:'ADD',acc_medical:'Med',acc_tcm:'TCM',acc_dismember:'Dismem',premium_waiver:'Waiver',other:'Other'})[rd.type]||rd.type)} ${(+rd.sa||0).toLocaleString()}</span>)}
               </div>}
               {/* Fund classification */}
               {isFundLike(item) && (() => {
@@ -15125,12 +15296,20 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         if(result.ageAtEntry && result.premTerm && !result.premEndAge) result.premEndAge = String(parseInt(result.ageAtEntry)+parseInt(result.premTerm));
         if(result.ageAtEntry && !result.premStartAge) result.premStartAge = result.ageAtEntry;
         if(result.premStartAge && !result.ageAtEntry) result.ageAtEntry = result.premStartAge;
-        // ── AUTO-CALC ageAtEntry from inceptionDate + client DOB ──
-        if(!result.ageAtEntry && result.inceptionDate && clientProfile?.dob) {
-          const entryAge = Math.floor((new Date(result.inceptionDate).getTime()-new Date(clientProfile.dob).getTime())/31557600000);
-          if(entryAge > 0 && entryAge < 100) { result.ageAtEntry = String(entryAge); result.premStartAge = String(entryAge); 
-            if(parseInt(result.premTerm)>0) result.premEndAge = String(entryAge+parseInt(result.premTerm));
-            console.log('[Extract] Auto-calc ageAtEntry from DOB:', result.productName, '→ age', entryAge);
+        // ── AUTO-CALC ageAtEntry from inceptionDate + profile age source ──
+        // Uses getProfileEffectiveDob so this works in both DOB mode
+        // and age-only mode. Previously only fired when clientProfile.dob
+        // was set, which silently broke the age-only workflow during
+        // bulk extraction.
+        if(!result.ageAtEntry && result.inceptionDate) {
+          const effDob = getProfileEffectiveDob(clientProfile);
+          if(effDob) {
+            const entryAge = Math.floor((new Date(result.inceptionDate).getTime()-effDob.getTime())/31557600000);
+            if(entryAge > 0 && entryAge < 100) { result.ageAtEntry = String(entryAge); result.premStartAge = String(entryAge); 
+              if(parseInt(result.premTerm)>0) result.premEndAge = String(entryAge+parseInt(result.premTerm));
+              const src = getProfileAgeSource(clientProfile);
+              console.log('[Extract] Auto-calc ageAtEntry from '+(src==='dob'?'DOB':'current age')+':', result.productName, '→ age', entryAge);
+            }
           }
         }
         if(result.highlights && typeof result.highlights === 'string') try { result.highlights = JSON.parse(result.highlights); } catch(e){}
@@ -16293,7 +16472,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
 
   // Build life insured dropdown from profile
   const {clientProfile:_cp, saveProfile:_sp} = useContext(AppCtx);
-  const clientAge = useMemo(() => _cp?.dob ? Math.floor((Date.now()-new Date(_cp.dob).getTime())/31557600000) : 35, [_cp]);
+  const clientAge = useMemo(() => getProfileAge(_cp) ?? 35, [_cp]);
   const profileNames = useMemo(() => {
     const names = [];
     if(_cp?.name) names.push(_cp.name);
@@ -16362,10 +16541,15 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
     // Sync premSingle from premiumStructure on load
     if(init.premiumStructure==='Single Premium' || init.premFrequency==='single') { init.premSingle = true; init.premFrequency = 'single'; }
     if(!init.premFrequency) init.premFrequency = init.premSingle ? 'single' : 'annual';
-    // ── AUTO-CALC ageAtEntry from inceptionDate + profile DOB on load ──
-    if(!init.ageAtEntry && !init.premStartAge && init.inceptionDate && _cp?.dob) {
-      const entryAge = Math.floor((new Date(init.inceptionDate).getTime()-new Date(_cp.dob).getTime())/31557600000);
-      if(entryAge > 0 && entryAge < 100) { init.ageAtEntry = String(entryAge); init.premStartAge = String(entryAge); }
+    // ── AUTO-CALC ageAtEntry from inceptionDate + profile age source on load ──
+    // Uses getProfileEffectiveDob so this works in both DOB mode
+    // and age-only mode.
+    if(!init.ageAtEntry && !init.premStartAge && init.inceptionDate) {
+      const effDob = getProfileEffectiveDob(_cp);
+      if(effDob) {
+        const entryAge = Math.floor((new Date(init.inceptionDate).getTime()-effDob.getTime())/31557600000);
+        if(entryAge > 0 && entryAge < 100) { init.ageAtEntry = String(entryAge); init.premStartAge = String(entryAge); }
+      }
     }
     // ── SYNC premStartAge ↔ ageAtEntry on load ──
     if(init.ageAtEntry && !init.premStartAge) init.premStartAge = init.ageAtEntry;
@@ -16377,16 +16561,32 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
 
   const set = (k,v) => setForm(f=>{
     const nf={...f,[k]:v};
-    // ── AUTO-CALC ageAtEntry from inceptionDate + profile DOB ──
-    if((k==='inceptionDate' || k==='dob') && _cp?.dob) {
-      const inception = k==='inceptionDate' ? v : nf.inceptionDate;
-      const dob = _cp.dob;
-      if(inception && dob) {
-        const entryAge = Math.floor((new Date(inception).getTime()-new Date(dob).getTime())/31557600000);
+    // ── AUTO-CALC ageAtEntry from inceptionDate + age source ──
+    // Two paths:
+    //   1. User changed inceptionDate → use profile effective DOB
+    //      (works in both DOB mode and age-only mode via helper)
+    //   2. User changed the policy's own life-insured DOB → use that
+    //      directly (supports policies where the life insured is a
+    //      dependant with a different DOB from the profile client)
+    if(k==='inceptionDate') {
+      const inception = v;
+      const effDob = getProfileEffectiveDob(_cp);
+      if(inception && effDob) {
+        const entryAge = Math.floor((new Date(inception).getTime()-effDob.getTime())/31557600000);
         if(entryAge > 0 && entryAge < 100) {
           nf.ageAtEntry = String(entryAge);
           nf.premStartAge = String(entryAge);
-          // Recalc premEndAge if premTerm exists
+          if(parseInt(nf.premTerm) > 0) nf.premEndAge = String(entryAge + parseInt(nf.premTerm));
+        }
+      }
+    } else if(k==='dob') {
+      // Life insured's own DOB was edited — use it (not profile DOB)
+      const inception = nf.inceptionDate;
+      if(inception && v) {
+        const entryAge = Math.floor((new Date(inception).getTime()-new Date(v).getTime())/31557600000);
+        if(entryAge > 0 && entryAge < 100) {
+          nf.ageAtEntry = String(entryAge);
+          nf.premStartAge = String(entryAge);
           if(parseInt(nf.premTerm) > 0) nf.premEndAge = String(entryAge + parseInt(nf.premTerm));
         }
       }
@@ -16732,7 +16932,66 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
             {!isISP && !isCSL && <div className="field"><label>Sum Assured / Face Amount</label><input type="number" value={form.sumAssured} onChange={e=>set('sumAssured',e.target.value)} placeholder="Notional for par/annuity" /></div>}
           </div>
           <div className="grid-3" style={{marginTop:4}}>
-            <div className="field"><label>Age at Entry</label><input type="number" value={form.premStartAge||form.ageAtEntry||''} onChange={e=>{set('premStartAge',e.target.value);set('ageAtEntry',e.target.value)}} placeholder="e.g. 30" /></div>
+            {/* ── AGE AT ENTRY (profile-synced) ──
+                When the profile has an age source (real DOB or age-only
+                mode) AND this policy has an inception date, the correct
+                ageAtEntry is derived from (inception − effectiveDob).
+                We show a "✓ synced from profile" hint and intercept edits
+                with a confirm dialog pointing the FC to profile instead —
+                the profile is the single source of truth. */}
+            {(() => {
+              const effDob = getProfileEffectiveDob(_cp);
+              const canonicalAge = (effDob && form.inceptionDate)
+                ? (() => {
+                    const ms = new Date(form.inceptionDate).getTime() - effDob.getTime();
+                    if (isNaN(ms) || ms <= 0) return null;
+                    const yrs = Math.floor(ms / 31557600000);
+                    return (yrs > 0 && yrs < 100) ? yrs : null;
+                  })()
+                : null;
+              const profileSource = getProfileAgeSource(_cp);
+              const currentVal = form.premStartAge || form.ageAtEntry || '';
+              const synced = canonicalAge != null && String(canonicalAge) === String(currentVal);
+              const handleAgeChange = (newVal) => {
+                // If profile has an age source AND we can derive the
+                // canonical age, ask the FC to confirm any manual override.
+                // The profile is the single source of truth — edits here
+                // will get silently reverted next time the profile is
+                // saved (the global sync in saveProfile re-runs). Warn
+                // explicitly rather than letting a ghost edit confuse them.
+                if (canonicalAge != null && String(newVal) !== String(canonicalAge) && newVal !== '') {
+                  const label = profileSource === 'dob' ? 'Date of Birth' : 'Current Age';
+                  const proceed = confirm(
+                    'Age at Entry is auto-calculated from your profile '+label+' and this policy\'s inception date.\n\n' +
+                    'Profile-derived value: '+canonicalAge+'\n' +
+                    'You\'re changing it to: '+newVal+'\n\n' +
+                    'To fix it properly, update the '+label+' in My Profile — that will re-sync every policy automatically.\n\n' +
+                    'Override anyway for this policy only? (It may get overwritten next time the profile is saved.)'
+                  );
+                  if (!proceed) return;
+                }
+                set('premStartAge', newVal);
+                set('ageAtEntry', newVal);
+              };
+              return (
+                <div className="field">
+                  <label style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:6}}>
+                    <span>Age at Entry</span>
+                    {synced && profileSource && (
+                      <span style={{fontSize:9,color:'var(--green2)',fontWeight:500}}>
+                        ✓ synced from {profileSource === 'dob' ? 'DOB' : 'profile age'}
+                      </span>
+                    )}
+                  </label>
+                  <input type="number" value={currentVal} onChange={e=>handleAgeChange(e.target.value)} placeholder="e.g. 30" />
+                  {!synced && canonicalAge != null && (
+                    <div style={{fontSize:9,color:'var(--gold)',marginTop:2}}>
+                      ⚠ Profile suggests age {canonicalAge} at inception — <button type="button" onClick={()=>{set('premStartAge',String(canonicalAge));set('ageAtEntry',String(canonicalAge));}} style={{fontSize:9,padding:'0 4px',background:'transparent',border:'none',color:'var(--teal)',cursor:'pointer',textDecoration:'underline'}}>sync</button>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
             <div className="field">
               <label>Premium Term (years)</label>
               <input type="number" value={form.premTerm||''} onChange={e=>set('premTerm',e.target.value)} placeholder={form.premSingle?'N/A':'e.g. 25'} disabled={form.premSingle||form.premWholeLife} style={form.premSingle||form.premWholeLife?{opacity:.35,background:'var(--bg4)'}:{}} />
@@ -17859,10 +18118,37 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
               );
             })()}
             {(() => {
-              // Use client DOB age if available, else fall back to premStartAge field
-              const profileAge = clientAge || 35;
-              const formAge = parseInt(form.premStartAge) || profileAge;
-              const useAge = _cp?.dob ? profileAge : formAge;
+              // ── AGE RESOLUTION FOR ISP CALCULATIONS (2026-04-09) ──
+              // MSL premiums and AWL bands are both age-driven, so the
+              // whole ISP breakdown is only meaningful at TODAY'S age —
+              // not the age the client was when they bought the plan.
+              //
+              // Priority order (see getProfileAge helper):
+              //   1. profile.dob → ground truth, "synced ✓ from DOB"
+              //   2. profile.currentAge + asOf → age-only mode,
+              //      "synced ✓ from current age"
+              //   3. ageAtEntry + (today − inceptionDate) → policy-local
+              //      derivation when profile has no age source at all
+              //   4. bare premStartAge → last resort with warning
+              const profileAgeToday = getProfileAge(_cp);
+              let useAge;
+              let useAgeSource;
+              if (profileAgeToday != null) {
+                useAge = profileAgeToday;
+                useAgeSource = _cp?.dob ? 'dob' : 'age';
+              } else if (form.ageAtEntry && form.inceptionDate) {
+                const entryAge = parseInt(form.ageAtEntry) || 0;
+                const inceptMs = new Date(form.inceptionDate).getTime();
+                if (entryAge > 0 && !isNaN(inceptMs)) {
+                  const yrsInForce = Math.max(0, Math.floor((Date.now() - inceptMs) / 31557600000));
+                  useAge = entryAge + yrsInForce;
+                  useAgeSource = 'inception';
+                }
+              }
+              if (useAge == null) {
+                useAge = parseInt(form.premStartAge) || 35;
+                useAgeSource = 'fallback';
+              }
               const anb = useAge + 1;
               const totalPrem = parseFloat(form.annualPremium)||0;
               const bd = calcISPBreakdown(totalPrem, useAge);
@@ -17881,7 +18167,10 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
               return (<>
                 <div style={{fontSize:10,fontWeight:700,color:'var(--teal)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:12}}>
                   ISP Premium Structure — Age {useAge} (ANB {anb}) · MediShield Life: <strong>${bd.msl}/yr</strong> · AWL: ${bd.awl}/yr
-                  {_cp?.dob && <span style={{color:'var(--green2)',marginLeft:6}}>✓ from DOB</span>}
+                  {useAgeSource === 'dob' && <span style={{color:'var(--green2)',marginLeft:6}}>✓ from DOB</span>}
+                  {useAgeSource === 'age' && <span style={{color:'var(--green2)',marginLeft:6}}>✓ from profile age</span>}
+                  {useAgeSource === 'inception' && <span style={{color:'var(--teal)',marginLeft:6}}>✓ from inception</span>}
+                  {useAgeSource === 'fallback' && <span style={{color:'var(--gold)',marginLeft:6}}>⚠ set DOB or age in profile</span>}
                 </div>
 
                 {/* Premium Breakdown Table */}
@@ -18421,7 +18710,24 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
             {(() => {
               const prem = parseFloat(form.annualPremium)||0;
               const startAge = parseInt(form.premStartAge)||parseInt(form.ageAtEntry)||0;
-              const premTerm = form.premSingle ? 1 : (parseInt(form.premTerm)||0);
+              const retAge = parseInt(_cp?.retirementAge)||65;
+              // ── PREMIUM TERM (2026-04-09 fix) ──
+              // When the user ticks the "Whole Life" checkbox, form.premTerm
+              // is empty and parseInt returns NaN (falling through to 0).
+              // That zeroed out the totalPaid calculation below, producing
+              // the "Net Gain / (Loss) = retCV, total premiums = $0"
+              // display bug where whole life policies looked like pure
+              // profit. Fall back to (retAge - startAge) as the effective
+              // premium term — "pay premiums from entry to retirement" —
+              // which is the right assumption for a WL projection at age
+              // retAge. Limited-pay plans still use their explicit
+              // premTerm (which is correctly read from the number input).
+              const premTermYrsToRet = Math.max(1, retAge - startAge);
+              const premTerm = form.premSingle
+                ? 1
+                : form.premWholeLife
+                  ? premTermYrsToRet
+                  : (parseInt(form.premTerm) || premTermYrsToRet);
               // ── EFFECTIVE COMPOUNDING RATE ──
               // ILP policies: rate = growth ± div − fee (depends on reinvest flag)
               // Non-ILP (WL, CI, retirement): rate = user-supplied est yield
@@ -18441,10 +18747,14 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                 rateBreakdown = 'User-specified est. yield for par plan';
               }
               const r = Math.max(-0.1, effRate / 100);
-              const retAge = parseInt(_cp?.retirementAge)||65;
               const age = clientAge;
               const yearsInForce = Math.max(0, age - startAge);
-              const totalPaid = form.premSingle ? prem : prem * Math.min(premTerm, Math.max(premTerm, retAge-startAge));
+              // totalPaid = cumulative premiums paid from policy start through
+              // retirement age, capped at the effective premium term. For
+              // whole life / missing premTerm, premTerm was defaulted above to
+              // (retAge - startAge) so this simplifies to prem × that span.
+              const effectiveYrs = Math.min(premTerm, premTermYrsToRet);
+              const totalPaid = form.premSingle ? prem : prem * effectiveYrs;
               const yrsToRet = Math.max(0, retAge - age);
 
               // Auto-estimate current CV if unknown
@@ -19373,7 +19683,7 @@ function ReportTab() {
   const [generating, setGenerating] = useState(false);
   const [generatingVisual, setGeneratingVisual] = useState(false);
   const p = clientProfile || {};
-  const age = p.dob ? Math.floor((Date.now()-new Date(p.dob).getTime())/31557600000) : 35;
+  const age = getProfileAge(p) ?? 35;
   const retAge = parseInt(p.retirementAge)||65;
   const annualIncome = parseFloat(p.annualIncome)||0;
 
