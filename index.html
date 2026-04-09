@@ -272,6 +272,7 @@ label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;lett
 
 /* ══════ SKELETON SHIMMER ══════ */
 @keyframes shimmer{0%{background-position:-200% 0}100%{background-position:200% 0}}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.55}}
 .skeleton{border-radius:6px;background:linear-gradient(90deg,var(--bg3) 25%,var(--bg4) 50%,var(--bg3) 75%);background-size:200% 100%;animation:shimmer 1.5s infinite ease-in-out}
 .fuzzy-alert{background:var(--gold-dim);border:1px solid rgba(212,169,106,.25);border-radius:10px;padding:14px;margin:12px 0}
 .fuzzy-alert h4{color:var(--gold);font-size:13px;margin-bottom:6px}
@@ -13428,6 +13429,62 @@ function Policies() {
   const extractingRef = useRef(false);
   const [draftBanner, setDraftBanner] = useState(false);
   const [bulkExtracted, setBulkExtracted] = useState(null); // for verification modal
+  // ── PROGRESSIVE EXTRACTION (feature c, 2026-04-09) ──
+  // Enables a "take photos continuously" workflow where extraction
+  // auto-starts after an idle period and new photos can be added
+  // while extraction is running. The additions queue up and trigger
+  // another extraction pass automatically when the current one
+  // finishes.
+  //
+  // Refs (not state) because these values are only read during
+  // handleExtract calls and inside timer callbacks — none of them
+  // need to trigger re-renders on their own, and making them state
+  // would cause excessive effect re-runs during heavy extraction.
+  //
+  //   sessionBulkRef — session-wide policy accumulator. Seeds
+  //     allExtracted at the start of each handleExtract call so
+  //     chained runs don't clobber previous runs' results in the
+  //     BulkVerifyModal. Reset when the modal closes.
+  //   progressiveSessionRef — true once auto-extract has fired at
+  //     least once this session. Drives UI label changes ("Extract
+  //     All" → "Done taking photos") and chain-on-complete behavior.
+  //   progressiveTimerRef — idle debounce timer ID. Cleared on every
+  //     staged-list change, then restarted. When it fires and
+  //     conditions still hold, auto-extract kicks off.
+  const sessionBulkRef = useRef([]);
+  const progressiveSessionRef = useRef(false);
+  const progressiveTimerRef = useRef(null);
+  // Tunable thresholds. ≥6 photos prevents the auto-trigger from
+  // firing for small one-off scans (single BI page, profile doc).
+  // 3000ms idle is long enough to take another photo mid-batch
+  // without prematurely firing, short enough that the user doesn't
+  // wonder why nothing is happening.
+  //
+  // CHAIN_DELAY_MS is the pause between a batch finishing and the
+  // next chained run starting when there are queued items waiting.
+  // Dropped from 800ms → 300ms on request (2026-04-09). Feels
+  // near-instant to the user. Side effects considered:
+  //   - Gemini Flash per-minute rate limiter: 300ms is far under
+  //     any real pressure point even at 10 QPS.
+  //   - SW connection pool: 300ms is enough for the TCP socket to
+  //     settle before the next fetch.
+  //   - The 500ms inter-BATCH cooldown WITHIN a single handleExtract
+  //     run is still in place, so sub-batch pressure is unchanged.
+  //   - Cumulative: 10 chained runs is 3s vs the old 8s.
+  const PROGRESSIVE_MIN_PHOTOS = 6;
+  const PROGRESSIVE_IDLE_MS = 3000;
+  const CHAIN_DELAY_MS = 300;
+
+  // Visual indicator for the chain-handoff moment — "queuing next
+  // pass" shows up briefly in the staged strip header between runs
+  // so the FC sees why the app isn't reacting for a fraction of a
+  // second before the next round kicks off.
+  const [chainingNext, setChainingNext] = useState(false);
+
+  // Guard ref so the staged save effect doesn't run before the
+  // initial restore completes — otherwise we'd wipe IDB on mount
+  // before we got a chance to read from it.
+  const hasRestoredStagedRef = useRef(false);
   // ── SCAN FAILURE BANNER ──
   // Persistent banner shown at the top of Policies when extraction dies mid-flight.
   // Unlike a toast, this sticks around until the user dismisses or retries —
@@ -13983,7 +14040,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
     if(!files||!files.length) return;
     const newStaged = [];
     for(const f of Array.from(files)){
-      newStaged.push({file:f, preview:URL.createObjectURL(f)});
+      newStaged.push({file:f, preview:URL.createObjectURL(f), _status:'queued'});
     }
     setStaged(prev => [...prev, ...newStaged].slice(0,200));
   };
@@ -13991,6 +14048,151 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
     setStaged(prev => { const n=[...prev]; URL.revokeObjectURL(n[idx].preview); n.splice(idx,1); return n; });
   };
   const clearStaged = () => { staged.forEach(s=>URL.revokeObjectURL(s.preview)); setStaged([]); };
+
+  // ── PROGRESSIVE EXTRACTION TRIGGER (feature c) ──
+  // Wrapper around handleExtract that:
+  //   1. Snapshots the currently queued items and marks them as
+  //      'extracting' so they show a spinner badge in the strip.
+  //   2. Awaits the extraction pass.
+  //   3. Marks the same items as 'done' on success, or back to
+  //      'queued' on failure so the FC can retry.
+  //   4. If new items accumulated in 'queued' while extraction was
+  //      running, recursively kicks off another pass.
+  //
+  // Uses useRef-backed closure state for the "in-flight file set"
+  // because React state updates are async and we need to identify
+  // the exact files we handed to handleExtract when it resolves.
+  //
+  // Safe to call multiple times — handleExtract's extractingRef
+  // re-entry guard prevents actual overlap.
+  const triggerProgressiveExtract = async (triggerReason) => {
+    // Clear any pending idle timer — we're firing NOW
+    if (progressiveTimerRef.current) {
+      clearTimeout(progressiveTimerRef.current);
+      progressiveTimerRef.current = null;
+    }
+    // Re-entry guard: if an extraction is already running, don't
+    // snapshot or mark anything. The current run's chain-on-complete
+    // will pick up whatever's queued when it finishes. Without this,
+    // a double-fire (idle timer + manual click) would mark files as
+    // 'extracting', then the inner handleExtract call would bail on
+    // its own re-entry guard, and we'd mark the files as 'done'
+    // even though nothing happened.
+    if (extractingRef.current) {
+      console.log('[Progressive] Re-entry blocked — extraction already running');
+      return;
+    }
+    // Snapshot queued items via functional setState to avoid a
+    // stale closure over `staged`. The setter is called inside a
+    // render lifecycle but the result is used imperatively.
+    let snapshot = [];
+    let markedKeys = new Set();
+    setStaged(prev => {
+      snapshot = prev.filter(s => s._status === 'queued' || s._status == null);
+      if (snapshot.length === 0) return prev;
+      markedKeys = new Set(snapshot.map(s => s.file));
+      return prev.map(s => markedKeys.has(s.file) ? {...s, _status: 'extracting'} : s);
+    });
+    if (snapshot.length === 0) return;
+
+    progressiveSessionRef.current = true;
+    console.log('[Progressive] Triggered ('+triggerReason+'):', snapshot.length, 'files');
+
+    try {
+      await handleExtract(snapshot.map(s => s.file));
+      // On success, mark the snapshot's files as 'done' (stay
+      // visible with a green badge). New staged items added during
+      // the run remain 'queued' for the next pass.
+      setStaged(prev => prev.map(s => markedKeys.has(s.file) ? {...s, _status: 'done'} : s));
+    } catch (err) {
+      // Failure — revert snapshot to 'queued' so user can retry,
+      // and stop the auto-chain (don't burn API calls on a loop).
+      console.warn('[Progressive] Extraction failed, reverting snapshot to queued:', err);
+      setStaged(prev => prev.map(s => markedKeys.has(s.file) ? {...s, _status: 'queued'} : s));
+      return;
+    }
+
+    // ── CHAIN-ON-COMPLETE ──
+    // If more files accumulated in 'queued' state during the run,
+    // automatically start another pass after a brief pause. The
+    // pause gives the BulkVerifyModal a moment to render batch N
+    // before batch N+1 starts piling in, and gives the SW's
+    // connection pool time to rotate.
+    //
+    // chainingNext flag flips true during the delay so the staged
+    // strip header can display a "Queuing next pass…" indicator —
+    // otherwise the app looks frozen for 300ms between runs.
+    // Read the current staged state synchronously first so we only
+    // show the indicator if there ACTUALLY is a next pass coming.
+    let hasMoreQueued = false;
+    setStaged(prev => {
+      hasMoreQueued = prev.some(s => s._status === 'queued' || s._status == null);
+      return prev;
+    });
+    if (hasMoreQueued) {
+      setChainingNext(true);
+    }
+    setTimeout(() => {
+      setChainingNext(false);
+      // Re-check queued state — user may have removed items during
+      // the delay, or the session may have closed.
+      let stillHasQueued = false;
+      setStaged(prev => {
+        stillHasQueued = prev.some(s => s._status === 'queued' || s._status == null);
+        return prev;
+      });
+      if (stillHasQueued) {
+        console.log('[Progressive] More queued items detected — chaining next pass');
+        triggerProgressiveExtract('chain');
+      } else {
+        console.log('[Progressive] No more queued items — session idle');
+      }
+    }, CHAIN_DELAY_MS);
+  };
+
+  // ── IDLE AUTO-TRIGGER ──
+  // Watches staged for changes. When the number of queued items
+  // crosses the threshold AND no extraction is currently running,
+  // start a debounce timer. If staged changes again before the
+  // timer fires (user added another photo), the timer resets —
+  // so auto-extract only fires after the FC has stopped adding
+  // photos for PROGRESSIVE_IDLE_MS.
+  //
+  // Deliberately does NOT fire on the first small batches (< min)
+  // so single-file scans still use the manual button path.
+  useEffect(() => {
+    // Clear any pending timer from the previous render
+    if (progressiveTimerRef.current) {
+      clearTimeout(progressiveTimerRef.current);
+      progressiveTimerRef.current = null;
+    }
+    // Count queued items
+    const queuedCount = staged.filter(s => s._status === 'queued' || s._status == null).length;
+    if (queuedCount === 0) return;
+    if (scanning) return;
+    if (extractingRef.current) return;
+    // Gate: threshold only applies for the INITIAL trigger. Once
+    // progressive mode is active (i.e. a session is in flight and
+    // the modal is open), any queued photo will idle-trigger —
+    // because the FC has already opted into progressive workflow.
+    // This matches the spec: small additions mid-session should
+    // still pick up automatically, not wait for a manual Done click.
+    if (!progressiveSessionRef.current && queuedCount < PROGRESSIVE_MIN_PHOTOS) return;
+    // Start idle timer
+    progressiveTimerRef.current = setTimeout(() => {
+      progressiveTimerRef.current = null;
+      console.log('[Progressive] Idle timeout reached with', queuedCount, 'queued items (session active:', progressiveSessionRef.current, ')');
+      triggerProgressiveExtract('idle-timeout');
+    }, PROGRESSIVE_IDLE_MS);
+    // Cleanup on unmount / re-run
+    return () => {
+      if (progressiveTimerRef.current) {
+        clearTimeout(progressiveTimerRef.current);
+        progressiveTimerRef.current = null;
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [staged, scanning]);
 
   // Restore pending extracted policies from sessionStorage (survives refresh)
   useEffect(() => {
@@ -14001,10 +14203,82 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         if(Array.isArray(parsed) && parsed.length > 0) {
           console.log('[Extract] Restored', parsed.length, 'pending policies from session');
           setBulkExtracted(parsed);
+          // Seed sessionBulkRef so chained runs continue where
+          // the previous session's last batch left off.
+          sessionBulkRef.current = parsed;
         }
       }
     } catch(e){}
   }, []);
+
+  // ── PROGRESSIVE STAGED PERSISTENCE (feature c, 2026-04-09) ──
+  // Survives full page reload / tab close by persisting to IDB.
+  // sessionStorage only holds strings; we need real File/Blob
+  // objects which IDB handles natively via structured clone.
+  //
+  // Restore fires ONCE on mount, BEFORE the save effect can run
+  // (guarded by hasRestoredStagedRef). The save effect mirrors
+  // staged to IDB on every change — wiping the entry when staged
+  // becomes empty so a cleared session doesn't linger.
+  //
+  // Files that were in 'extracting' state at the moment of the
+  // reload are reverted to 'queued' on restore — the extraction
+  // was almost certainly interrupted and needs to re-run. Files
+  // marked 'done' stay done (they're already in bulkExtracted).
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const record = await dbGet('settings', 'progressiveStaged').catch(() => null);
+        if (cancelled) return;
+        if (!record || !record.value) { hasRestoredStagedRef.current = true; return; }
+        const { files, statuses, sessionActive } = record.value;
+        if (!Array.isArray(files) || files.length === 0) { hasRestoredStagedRef.current = true; return; }
+        // Re-create preview URLs (object URLs don't survive reload)
+        const restored = files.map((f, i) => {
+          const s = statuses && statuses[i];
+          return {
+            file: f,
+            preview: URL.createObjectURL(f),
+            _status: s === 'extracting' ? 'queued' : (s || 'queued'),
+          };
+        });
+        setStaged(restored);
+        if (sessionActive) {
+          progressiveSessionRef.current = true;
+          console.log('[Progressive] Restored', restored.length, 'staged files with active session from IDB');
+        } else {
+          console.log('[Progressive] Restored', restored.length, 'staged files from IDB (session inactive)');
+        }
+      } catch (err) {
+        console.warn('[Progressive] Staged restore failed:', err);
+      } finally {
+        hasRestoredStagedRef.current = true;
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Mirror staged into IDB on every change. Wipes the entry when
+  // staged is empty (e.g. modal closed, session cleared). Guarded
+  // by hasRestoredStagedRef so it doesn't wipe IDB before the
+  // initial restore has had a chance to read from it.
+  useEffect(() => {
+    if (!hasRestoredStagedRef.current) return;
+    if (staged.length === 0) {
+      dbPut('settings', { key: 'progressiveStaged', value: null }).catch(() => {});
+      return;
+    }
+    const payload = {
+      files: staged.map(s => s.file),
+      statuses: staged.map(s => s._status || 'queued'),
+      sessionActive: progressiveSessionRef.current,
+      savedAt: Date.now(),
+    };
+    dbPut('settings', { key: 'progressiveStaged', value: payload }).catch(err => {
+      console.warn('[Progressive] Staged persist failed:', err);
+    });
+  }, [staged]);
 
   // Listen for pending scans from welcome screen
   useEffect(() => {
@@ -15030,8 +15304,18 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       throw preReadErr;
     }
 
-    let allExtracted = [];
-    let firstBatchShown = false;
+    // ── PROGRESSIVE SESSION SEED (feature c) ──
+    // If a previous handleExtract run in this session already put
+    // policies in the BulkVerifyModal via sessionBulkRef, seed our
+    // local accumulator with those so the setBulkExtracted calls
+    // further down merge rather than replace. The ref is cleared
+    // when the modal closes, so a "fresh" extraction still starts
+    // empty.
+    let allExtracted = Array.isArray(sessionBulkRef.current) ? [...sessionBulkRef.current] : [];
+    // When continuing an existing session, the first batch isn't
+    // really the "first" for the modal — treat the whole run as
+    // append-mode so the existing modal content isn't re-initialized.
+    let firstBatchShown = allExtracted.length > 0;
     // ── RESUME STATE TRACKING ──
     // completedBatches tracks how many batches finished successfully in this
     // invocation. Used by the failure banner to show progress ("3 of 5 batches
@@ -15794,6 +16078,9 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       // removes the duplicates and merges their field info into one
       // canonical entry per logical policy.
       allExtracted = dedupePolicies([...allExtracted, ...processed]);
+      // Mirror into sessionBulkRef so chained handleExtract runs
+      // (progressive mode) can seed their allExtracted from here.
+      sessionBulkRef.current = allExtracted;
 
       // ── MATCH AGAINST PERMANENTLY-STORED POLICIES (#7 repo fingerprint) ──
       // Four-tier matching cascade against the client's existing policies:
@@ -15923,7 +16210,14 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       }
 
       // All batches done
-      clearStaged();
+      // In progressive mode, DON'T clear staged — the triggering
+      // wrapper (triggerProgressiveExtract) will mark the extracted
+      // files as 'done' so they stay visible with a green badge,
+      // and any files added during the run remain queued for the
+      // next pass.
+      if (!progressiveSessionRef.current) {
+        clearStaged();
+      }
 
       // ── PERSIST LEARNED TIME-PER-FILE ──
       // Update the rolling historical average so the NEXT extraction
@@ -16069,15 +16363,15 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         </div>
         <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
           <input ref={cameraRef} type="file" accept="image/*" capture="environment" style={{display:'none'}} onChange={e=>{stagePhotos(e.target.files);e.target.value='';}} />
-          <input ref={uploadRef} type="file" accept="image/*,.pdf,.xlsx,.xls,.csv,.doc,.docx,.html,.htm,.txt,.rtf" multiple style={{display:'none'}} onChange={e=>{handleExtract(Array.from(e.target.files));e.target.value='';}} />
-          <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setStaged(prev=>[...prev,...newStaged].slice(0,200));}}} disabled={scanning}>
+          <input ref={uploadRef} type="file" accept="image/*,.pdf,.xlsx,.xls,.csv,.doc,.docx,.html,.htm,.txt,.rtf" multiple style={{display:'none'}} onChange={e=>{stagePhotos(Array.from(e.target.files));e.target.value='';}} />
+          <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length){stagePhotos(files);}}}>
             📷 Camera
           </button>
-          <button className="btn-secondary btn-sm" onClick={()=>{const inp=document.createElement('input');inp.type='file';inp.accept='image/*';inp.multiple=true;inp.onchange=e=>{const files=Array.from(e.target.files);if(files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setStaged(prev=>[...prev,...newStaged].slice(0,200));}};inp.click();}} disabled={scanning}>
+          <button className="btn-secondary btn-sm" onClick={()=>{const inp=document.createElement('input');inp.type='file';inp.accept='image/*';inp.multiple=true;inp.onchange=e=>{const files=Array.from(e.target.files);if(files.length){stagePhotos(files);}};inp.click();}}>
             🖼 Gallery
           </button>
-          <button className="btn-secondary btn-sm" onClick={()=>uploadRef.current?.click()} disabled={scanning}>
-            {scanning?'Extracting…':'📄 Upload'}
+          <button className="btn-secondary btn-sm" onClick={()=>uploadRef.current?.click()}>
+            📄 Upload
           </button>
           <button className="btn-secondary btn-sm" onClick={async()=>{
             try {
@@ -16088,10 +16382,10 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
                   if(type.startsWith('image/')) { const blob = await item.getType(type); files.push(new File([blob],'paste_'+Date.now()+'.'+type.split('/')[1],{type})); }
                 }
               }
-              if(files.length > 0) { handleExtract(files); }
-              else { const text = await navigator.clipboard.readText(); if(text && text.length > 20) { handleExtract([new File([text],'paste.txt',{type:'text/plain'})]); } else { toast('No content in clipboard — copy a screenshot or text first','warning'); } }
+              if(files.length > 0) { stagePhotos(files); }
+              else { const text = await navigator.clipboard.readText(); if(text && text.length > 20) { stagePhotos([new File([text],'paste.txt',{type:'text/plain'})]); } else { toast('No content in clipboard — copy a screenshot or text first','warning'); } }
             } catch(e) { toast('Clipboard access denied — try Ctrl+V on the drop zone','error'); }
-          }} disabled={scanning} title="Paste from clipboard">
+          }} title="Paste from clipboard">
             📋 Paste
           </button>
           <button className="btn-primary btn-sm" onClick={()=>{setEditing(null);setScanResult(null);setShowForm(true)}}>+ Add</button>
@@ -16106,7 +16400,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       </div>
 
       {/* Drop / Paste zone for policy extraction */}
-      {!showForm && <DropZone active={!showForm} onFiles={(files)=>handleExtract(files)} label="📎 Drop or paste any document or images — client profile, policy summaries, policy contracts, benefit illustrations" />}
+      {!showForm && <DropZone active={!showForm} onFiles={(files)=>stagePhotos(files)} label="📎 Drop or paste any document or images — they'll queue for extraction" />}
 
       {/* Draft restore banner */}
       {draftBanner && !showForm && (
@@ -16295,28 +16589,113 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       })()}
 
       {/* Staged photos strip */}
-      {staged.length > 0 && (
+      {staged.length > 0 && (() => {
+        // Counts for the header + button label
+        const queuedCount = staged.filter(s => s._status === 'queued' || s._status == null).length;
+        const extractingCount = staged.filter(s => s._status === 'extracting').length;
+        const doneCount = staged.filter(s => s._status === 'done').length;
+        const isProgressiveActive = progressiveSessionRef.current;
+        return (
         <div className="card" style={{marginBottom:12,padding:14,borderLeft:'3px solid var(--blue)'}}>
-          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
-            <div style={{fontSize:13,fontWeight:600}}>"📷" {staged.length} photo{staged.length>1?'s':''} staged</div>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8,flexWrap:'wrap',gap:6}}>
+            <div style={{fontSize:13,fontWeight:600}}>
+              📷 {staged.length} photo{staged.length>1?'s':''} staged
+              {(extractingCount > 0 || doneCount > 0) && (
+                <span style={{fontSize:10,fontWeight:400,color:'var(--text3)',marginLeft:6}}>
+                  {doneCount > 0 && <span style={{color:'var(--green2)'}}>{doneCount} done</span>}
+                  {doneCount > 0 && (extractingCount > 0 || queuedCount > 0) && ' · '}
+                  {extractingCount > 0 && <span style={{color:'var(--teal)'}}>{extractingCount} extracting</span>}
+                  {extractingCount > 0 && queuedCount > 0 && ' · '}
+                  {queuedCount > 0 && <span style={{color:'var(--gold)'}}>{queuedCount} queued</span>}
+                </span>
+              )}
+              {/* Chain-handoff indicator — visible only during the
+                  brief pause between a batch finishing and the next
+                  chained run starting. Gives the FC visual feedback
+                  so the app doesn't look frozen for 300ms. */}
+              {chainingNext && (
+                <span style={{
+                  fontSize:10,
+                  fontWeight:600,
+                  color:'var(--teal)',
+                  marginLeft:8,
+                  padding:'2px 8px',
+                  borderRadius:10,
+                  background:'rgba(91,168,160,.12)',
+                  border:'1px solid rgba(91,168,160,.35)',
+                  display:'inline-flex',
+                  alignItems:'center',
+                  gap:3,
+                  animation:'pulse 1s ease-in-out infinite',
+                }}>
+                  ⏭ Queuing next pass…
+                </span>
+              )}
+            </div>
             <div style={{display:'flex',gap:6}}>
-              <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setStaged(prev=>[...prev,...newStaged].slice(0,200));}}}>+ Take More</button>
-              <button className="btn-primary btn-sm" onClick={()=>handleExtract(staged.map(s=>s.file))} disabled={scanning}>{scanning?'Extracting…':'✨ Extract All'}</button>
+              {/* Take More — always enabled so progressive mode
+                  lets the FC keep shooting while extraction runs */}
+              <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length){stagePhotos(files);}}}>+ Take More</button>
+              {/* Extract button — label depends on session state.
+                  Fresh: "Extract All" (manual one-shot)
+                  Progressive active: "Done taking photos" (flushes
+                  any remaining queued items immediately) */}
+              <button
+                className="btn-primary btn-sm"
+                onClick={() => {
+                  if (isProgressiveActive) {
+                    // Progressive already running — force-flush any
+                    // pending idle timer and trigger immediately
+                    triggerProgressiveExtract('manual-done');
+                  } else if (queuedCount > 0) {
+                    // Fresh extraction — the triggerProgressiveExtract
+                    // path sets progressiveSessionRef.current=true so
+                    // the flow becomes progressive from here on, even
+                    // if the FC started with a big batch upfront.
+                    triggerProgressiveExtract('manual-extract');
+                  }
+                }}
+                disabled={scanning && !isProgressiveActive}
+              >
+                {isProgressiveActive
+                  ? (scanning ? (queuedCount > 0 ? `⏭ Extract ${queuedCount} more` : 'Extracting…') : (queuedCount > 0 ? `✓ Done — extract ${queuedCount} more` : '✓ Done'))
+                  : (scanning ? 'Extracting…' : '✨ Extract All')}
+              </button>
               <button className="btn-danger btn-sm" onClick={clearStaged}>Clear</button>
             </div>
           </div>
           <div style={{display:'flex',gap:8,overflowX:'auto',paddingBottom:4}}>
-            {staged.map((s,i) => (
-              <div key={i} style={{position:'relative',flexShrink:0}}>
-                <img src={s.preview} style={{width:72,height:72,objectFit:'cover',borderRadius:8,border:'1px solid var(--border2)'}} />
-                <button onClick={()=>removeStaged(i)} style={{position:'absolute',top:-4,right:-4,width:18,height:18,borderRadius:'50%',background:'var(--red)',color:'#fff',border:'none',fontSize:10,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}>×</button>
-                <div style={{position:'absolute',bottom:2,left:2,background:'rgba(0,0,0,.6)',color:'#fff',fontSize:9,padding:'1px 4px',borderRadius:4}}>{i+1}</div>
-              </div>
-            ))}
+            {staged.map((s,i) => {
+              const status = s._status || 'queued';
+              // Badge colors per status:
+              //   queued     → gold ⏳
+              //   extracting → teal 🔄 (animated)
+              //   done       → green ✓
+              //   failed     → red ✗ (treated same as queued for retry)
+              const badgeColor = status === 'done' ? 'var(--green2)' : status === 'extracting' ? 'var(--teal)' : status === 'failed' ? 'var(--red)' : 'var(--gold)';
+              const badgeIcon = status === 'done' ? '✓' : status === 'extracting' ? '🔄' : status === 'failed' ? '✗' : '⏳';
+              const frameOpacity = status === 'done' ? 0.55 : 1;
+              return (
+                <div key={i} style={{position:'relative',flexShrink:0,opacity:frameOpacity,transition:'opacity .3s'}}>
+                  <img src={s.preview} style={{width:72,height:72,objectFit:'cover',borderRadius:8,border:'2px solid '+badgeColor}} />
+                  <button onClick={()=>removeStaged(i)} style={{position:'absolute',top:-4,right:-4,width:18,height:18,borderRadius:'50%',background:'var(--red)',color:'#fff',border:'none',fontSize:10,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}>×</button>
+                  <div style={{position:'absolute',bottom:2,left:2,background:badgeColor,color:'#fff',fontSize:10,padding:'1px 4px',borderRadius:4,fontWeight:600,display:'flex',alignItems:'center',gap:2}}>
+                    {badgeIcon} {i+1}
+                  </div>
+                </div>
+              );
+            })}
           </div>
-          <div style={{fontSize:10,color:'var(--text3)',marginTop:6}}>Take all the photos you need, then hit Extract All</div>
+          <div style={{fontSize:10,color:'var(--text3)',marginTop:6}}>
+            {isProgressiveActive
+              ? `Progressive mode — extraction runs automatically. Keep taking photos; they'll be picked up. Hit "Done" when finished.`
+              : queuedCount >= PROGRESSIVE_MIN_PHOTOS
+                ? `Auto-extract in ${PROGRESSIVE_IDLE_MS/1000}s if you stop adding photos, or hit Extract All now`
+                : `Take photos (or add ${PROGRESSIVE_MIN_PHOTOS - queuedCount} more for auto-extract), then hit Extract All`}
+          </div>
         </div>
-      )}
+        );
+      })()}
 
       {/* Scan result preview */}
       {scanResult && !showForm && (
@@ -16552,7 +16931,20 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       </>)}
 
       {/* Bulk Verification Modal */}
-      {bulkExtracted && <BulkVerifyModal extracted={bulkExtracted} repo={repo} policies={policies} onSavePolicy={savePolicy} scanProgress={scanProgress} onClose={()=>{try{sessionStorage.removeItem('policylens_pendingExtract')}catch(e){}setBulkExtracted(null)}} onAccept={async(selected) => {
+      {bulkExtracted && <BulkVerifyModal extracted={bulkExtracted} repo={repo} policies={policies} onSavePolicy={savePolicy} scanProgress={scanProgress} onClose={()=>{
+        try{sessionStorage.removeItem('policylens_pendingExtract')}catch(e){}
+        // Progressive session ends — reset accumulator and clear
+        // any 'done' staged files so the FC starts clean for the
+        // next batch of photos.
+        sessionBulkRef.current = [];
+        progressiveSessionRef.current = false;
+        if (progressiveTimerRef.current) { clearTimeout(progressiveTimerRef.current); progressiveTimerRef.current = null; }
+        setStaged(prev => {
+          prev.forEach(s => { if (s.preview) URL.revokeObjectURL(s.preview); });
+          return [];
+        });
+        setBulkExtracted(null);
+      }} onAccept={async(selected) => {
         let count = 0;
         let mergedCount = 0;
         // ── DEDUPE AT SAVE TIME (2026-04-09 fix) ──
@@ -16619,6 +17011,14 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
           await savePolicy(result);
           count++;
         }
+        // Progressive session ends on accept — same reset as onClose
+        sessionBulkRef.current = [];
+        progressiveSessionRef.current = false;
+        if (progressiveTimerRef.current) { clearTimeout(progressiveTimerRef.current); progressiveTimerRef.current = null; }
+        setStaged(prev => {
+          prev.forEach(s => { if (s.preview) URL.revokeObjectURL(s.preview); });
+          return [];
+        });
         setBulkExtracted(null);
         const newCount = count - mergedCount;
         const parts = [];
