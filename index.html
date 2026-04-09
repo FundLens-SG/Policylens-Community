@@ -9436,17 +9436,37 @@ function ProfileTab() {
   };
 
   // ── AGE SOURCE: derived once per render, covers DOB + age-only modes ──
-  // Drives the age display badge and the mode toggle default.
+  // Drives the age display badge. computedAge is the canonical
+  // "today's age" regardless of which input mode is active.
   const computedAge = getProfileAge(p);
   const ageSource = getProfileAgeSource(p);
   // Legacy alias for in-component references. ProfileTab has ~15 inline
   // uses of `age` that predated the DOB/age-mode refactor — keeping the
   // alias is safer than rewriting each call site individually.
   const age = computedAge;
-  // Mode is implicit: if we have a real dob, we're in 'dob' mode; if we
-  // have currentAge but no dob, we're in 'age' mode; otherwise default
-  // to 'dob' mode (the fresh-profile starting state).
-  const ageMode = ageSource === 'age' ? 'age' : 'dob';
+  // ── AGE INPUT MODE ── EXPLICIT UI STATE (2026-04-09)
+  // Must be a controlled useState, NOT derived from profile data.
+  // Earlier implementation derived it from getProfileAgeSource(p),
+  // which returned null for a fresh profile with neither DOB nor
+  // currentAge set. That meant clicking "Use age instead" updated
+  // the profile but ageMode stayed 'dob' (because currentAge was
+  // still empty), so the UI appeared frozen — looked like a broken
+  // button when the click was actually firing fine.
+  //
+  // Initial value comes from data (profile has existing age? use
+  // 'age' mode; else default to 'dob'), but after that the user's
+  // toggle clicks are authoritative. A useEffect syncs the mode
+  // back to data if the profile is reset externally.
+  const [ageMode, setAgeMode] = useState(() => ageSource === 'age' ? 'age' : 'dob');
+  // Re-sync if the underlying data source changes (e.g. profile
+  // scan imports a DOB, clear-profile button clears everything).
+  useEffect(() => {
+    if (ageSource === 'dob' && ageMode !== 'dob') setAgeMode('dob');
+    else if (ageSource === 'age' && ageMode !== 'age') setAgeMode('age');
+    // If ageSource is null, keep whatever the user last chose —
+    // don't clobber their intent to use age-mode just because
+    // they haven't typed anything yet.
+  }, [ageSource]);
 
   return (
     <div className="fade-in">
@@ -9547,7 +9567,13 @@ function ProfileTab() {
                 semantics forward clicks to the associated form control,
                 intercepting the button's onClick on mobile/touch). Now
                 lives directly under the input where it's visually adjacent
-                to the field and obviously controls it. */}
+                to the field and obviously controls it.
+
+                Uses explicit setAgeMode state (not derived) so the toggle
+                works even when both DOB and currentAge are empty — the
+                previous version relied on ageSource, which was null in
+                that case, making the mode always default back to 'dob'
+                and making the button appear unclickable. */}
             <div style={{marginTop:4}}>
               <button
                 type="button"
@@ -9557,13 +9583,20 @@ function ProfileTab() {
                   if (ageMode === 'dob') {
                     // Switch to age-only mode. If DOB is set, seed the
                     // current age from it (lossy but user-requested).
-                    const seeded = computedAge != null ? computedAge : '';
                     if (p.dob && !confirm('Switch to "current age" mode?\n\nThis will clear the Date of Birth ('+p.dob+') and keep only an estimated age. Continue?')) return;
-                    setP(prev => ({...prev, dob:'', currentAge: seeded === '' ? '' : String(seeded), currentAgeAsOf: new Date().toISOString().slice(0,10)}));
+                    const seeded = computedAge != null ? String(computedAge) : '';
+                    setP(prev => ({
+                      ...prev,
+                      dob: '',
+                      currentAge: seeded,
+                      currentAgeAsOf: seeded ? new Date().toISOString().slice(0,10) : '',
+                    }));
+                    setAgeMode('age');
                   } else {
                     // Switch back to DOB mode. Clears currentAge fields.
                     if ((p.currentAge || '') !== '' && !confirm('Switch to "date of birth" mode?\n\nThis will clear the current age ('+p.currentAge+') — you\'ll need to enter a real birth date instead. Continue?')) return;
                     setP(prev => ({...prev, currentAge:'', currentAgeAsOf:''}));
+                    setAgeMode('dob');
                   }
                 }}
                 style={{
