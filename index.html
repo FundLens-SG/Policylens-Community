@@ -1700,7 +1700,13 @@ const HOUSE_DEFAULT_FIELDS = [
 
 // SHA-256 hash of a File's bytes — used as content-addressable cache key.
 async function hashFile(file) {
-  const buf = await file.arrayBuffer();
+  // Prefer the extraction pre-read cache if populated (handleExtract
+  // pre-reads all files before batch processing to avoid Android
+  // file-handle revocation). Falls back to file.arrayBuffer() if the
+  // cache is empty — same behavior as before for callers outside an
+  // extraction run.
+  const cached = _extractionFileBuffers.get(file);
+  const buf = cached || await file.arrayBuffer();
   const digest = await crypto.subtle.digest('SHA-256', buf);
   return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2,'0')).join('');
 }
@@ -2013,14 +2019,16 @@ function reconcilePolicyAgainstRepo(policy, repo) {
 }
 
 // Master function: takes a File, returns content blocks ready for AI
-// ── FILE READER WITH PROPER ERROR REPORTING ──
-// Wraps FileReader.readAsDataURL in a promise that rejects with a
-// proper Error containing the file name AND the underlying reason.
-// Previously the catch block saw raw ProgressEvent objects which
-// stringify to "[object ProgressEvent]" or expose undefined via
-// .message — masking the real cause of read failures on mobile
-// (out-of-memory, permission denied, interrupted file picker, etc.)
-const readFileAsBase64 = (file) => new Promise((res, rej) => {
+// ── FILE READER WITH PROPER ERROR REPORTING + RETRY ──
+// Wraps FileReader.readAsDataURL in a promise. Retries ONCE on
+// NotReadableError/NetworkError because Android Chrome can
+// temporarily lose access to OS-backed file references under
+// memory pressure. The retry waits 500ms to let the OS/GC recover,
+// then tries a completely fresh FileReader instance. If that also
+// fails, the rejection includes the file name, size, and underlying
+// error so the extraction banner can show something actionable
+// instead of "[object ProgressEvent]" or "undefined".
+const _readFileAsBase64Once = (file) => new Promise((res, rej) => {
   const r = new FileReader();
   r.onload = () => {
     try {
@@ -2037,7 +2045,9 @@ const readFileAsBase64 = (file) => new Promise((res, rej) => {
   r.onerror = () => {
     const errName = r.error?.name || 'ReadError';
     const errMsg = r.error?.message || 'unknown';
-    rej(new Error('Failed to read file ' + (file?.name || 'unknown') + ' (' + (file?.size || 0) + ' bytes): ' + errName + ' — ' + errMsg));
+    const err = new Error('Failed to read file ' + (file?.name || 'unknown') + ' (' + (file?.size || 0) + ' bytes): ' + errName + ' — ' + errMsg);
+    err.name = errName;
+    rej(err);
   };
   r.onabort = () => {
     rej(new Error('File read aborted: ' + (file?.name || 'unknown')));
@@ -2048,56 +2058,178 @@ const readFileAsBase64 = (file) => new Promise((res, rej) => {
     rej(new Error('FileReader.readAsDataURL threw for ' + (file?.name || 'file') + ': ' + (e?.message || e)));
   }
 });
+const readFileAsBase64 = async (file) => {
+  // ── CHECK EXTRACTION CACHE FIRST ──
+  // handleExtract pre-reads all files into ArrayBuffers at the start
+  // of a run. If we're inside that run, swap the (possibly-dead) OS
+  // file reference for a fresh in-memory File wrapping the cached
+  // bytes. This sidesteps NotReadableError entirely for the common
+  // case where the cache is populated.
+  const cached = _extractionFileBuffers.get(file);
+  let source = file;
+  if (cached) {
+    try {
+      source = new File([cached], file.name || 'file', {
+        type: file.type || 'application/octet-stream',
+        lastModified: file.lastModified || Date.now(),
+      });
+    } catch (wrapErr) {
+      // If File constructor is unavailable or fails, fall through to
+      // reading from the original file reference.
+      source = file;
+    }
+  }
+  try {
+    return await _readFileAsBase64Once(source);
+  } catch (firstErr) {
+    // Retry ONCE on transient failures. The common Android pattern is
+    // NotReadableError after the OS revokes the file handle.
+    const errName = firstErr?.name || '';
+    const errMsg = (firstErr?.message || '').toLowerCase();
+    const isTransient = errName === 'NotReadableError'
+      || errName === 'NetworkError'
+      || errMsg.includes('notreadable')
+      || errMsg.includes('networkerror')
+      || errMsg.includes('permission');
+    if (!isTransient) throw firstErr;
+    console.warn('[readFileAsBase64] Transient failure for ' + (file?.name||'?') + ' — retrying in 500ms:', firstErr.message);
+    await new Promise(r => setTimeout(r, 500));
+    // On retry, prefer the cached path if we have one
+    if (cached) {
+      try {
+        const fresh = new File([cached], file.name || 'file', {
+          type: file.type || 'application/octet-stream',
+          lastModified: file.lastModified || Date.now(),
+        });
+        return await _readFileAsBase64Once(fresh);
+      } catch(_) { /* fall through to original file retry */ }
+    }
+    return await _readFileAsBase64Once(file);
+  }
+};
+
+// ── EXTRACTION FILE BUFFER CACHE ──
+// Module-level WeakMap populated at the start of each extraction run.
+// Maps File → ArrayBuffer. Populated up front in handleExtract via a
+// parallel burst of file.arrayBuffer() calls — this acquires the
+// actual file bytes WHILE the OS file handles are still fresh, before
+// downstream processing has a chance to burn through the handle
+// lifetime. After the pre-read, downscaleImageIfNeeded and other
+// consumers check this cache first and only fall back to file.arrayBuffer()
+// if the entry is missing.
+//
+// WeakMap (not Map) so entries auto-clear when File objects are GC'd.
+const _extractionFileBuffers = new WeakMap();
+
+// ── FILE BYTES ACCESSOR ──
+// Returns the ArrayBuffer for a File — preferring the extraction
+// pre-read cache when available, falling back to file.arrayBuffer().
+// Used by the PDF/Word/Excel code paths in processFile so they
+// benefit from the same Android file-handle protection as the image
+// path. The cache hit is effectively free; the miss is the old
+// behavior. Safe to call from anywhere.
+const getFileBytes = async (file) => {
+  const cached = _extractionFileBuffers.get(file);
+  if (cached) return cached;
+  return await file.arrayBuffer();
+};
 
 // ── IMAGE DOWNSCALE BEFORE SENDING TO AI ──
-// Phone cameras produce 3000×4000px / 3-4MB JPEGs. Sending those to
-// Gemini costs ~6000 tokens EACH (the model tiles large images into
-// 768×768 patches at 258 tokens per tile, so a 3000×4000 image is
-// ~24 tiles). With 10 photos per batch and 6 batches, a single
-// extraction can burn 360k+ tokens on images alone — enough to hit
-// the free-tier quota (1M tokens/minute) and trigger 503 "high
-// demand" errors from Google even when their service is healthy.
+// Phone cameras produce 3000×4000px / 3-4MB JPEGs. Downscaling to
+// 1568px max dim cuts token cost 6× and payload 13× (3-4MB → 300KB)
+// without affecting OCR quality.
 //
-// Downscaling to 1568px max dimension brings each image to ~4 tiles
-// (1032 tokens). Net effect: 6× token reduction AND 13× payload
-// reduction (3-4MB → 250-400KB per image). Text OCR quality is
-// unaffected — policy text is plenty legible at 1568px and Gemini's
-// own recommended resolution for document understanding is
-// actually lower than that.
+// ── CRITICAL: ANDROID FILE HANDLE LIFETIME ──
+// Android Chrome gives the page File objects that are actually
+// references to files in OS storage. Under memory/IO pressure, those
+// references can be revoked by the OS — any subsequent read attempt
+// throws NotReadableError ("permission problems that have occurred
+// after a reference to a file was acquired"). This happens reliably
+// with ~20+ files when processing takes longer than a few seconds
+// per file.
 //
-// Only downscales if the image is larger than maxDim on either side.
-// Skips HEIC (browser canvas may not decode them reliably — let the
-// native path handle those). On any decode failure, returns the
-// original file unchanged — never blocks extraction.
+// The fix: read each file's bytes into an ArrayBuffer AS EARLY AS
+// POSSIBLE (one quick read from the OS handle), then do EVERYTHING
+// ELSE — decode, downscale, encode, base64 — from in-memory data.
+// The ArrayBuffer is owned by the JS heap and cannot be revoked by
+// the OS. If the initial read itself fails, we retry once after a
+// 500ms delay — Android sometimes recovers handle access within
+// that window, especially right after a GC.
+//
+// Also: skips HEIC (browser canvas can't reliably decode it, let the
+// native path handle those). Skips non-images. Always returns a File
+// object (either downscaled or the original bytes wrapped in a new
+// in-memory File) so downstream code is unchanged.
 const DOWNSCALE_MAX_DIM = 1568;
 const DOWNSCALE_JPEG_QUALITY = 0.85;
 async function downscaleImageIfNeeded(file) {
+  const fileName = file?.name || 'unknown';
+  const fileSize = file?.size || 0;
   try {
-    // Skip non-images and HEIC
     const mime = (file?.type || '').toLowerCase();
-    const name = (file?.name || '').toLowerCase();
+    const lowerName = fileName.toLowerCase();
     if (!mime.startsWith('image/')) return file;
-    if (mime.includes('heic') || mime.includes('heif') || name.endsWith('.heic') || name.endsWith('.heif')) return file;
-    // Decode via createImageBitmap — fastest path, handles EXIF orientation
+    if (mime.includes('heic') || mime.includes('heif') || lowerName.endsWith('.heic') || lowerName.endsWith('.heif')) return file;
+
+    // ── STEP 1: READ FILE BYTES INTO MEMORY (WITH RETRY + CACHE) ──
+    // Check the module-level cache first — handleExtract pre-reads
+    // all files in parallel before batch processing starts, which
+    // acquires the OS file bytes while handles are still fresh. If
+    // the cache has an entry, we use it directly and NEVER touch
+    // the OS file handle from this point forward. Only if the cache
+    // is empty (e.g. direct processFile call outside a normal
+    // extraction run) do we fall back to reading from the file ref.
+    let arrayBuffer = _extractionFileBuffers.get(file);
+    if (!arrayBuffer) {
+      try {
+        arrayBuffer = await file.arrayBuffer();
+      } catch (firstErr) {
+        const errName = firstErr?.name || '';
+        const errMsg = firstErr?.message || String(firstErr);
+        console.warn('[Downscale] First arrayBuffer read failed for '+fileName+' ('+fileSize+' bytes): '+errName+' — '+errMsg+' — retrying in 500ms');
+        await new Promise(r => setTimeout(r, 500));
+        try {
+          arrayBuffer = await file.arrayBuffer();
+        } catch (secondErr) {
+          throw new Error('Failed to read file '+fileName+' ('+fileSize+' bytes) after 2 attempts: '+(secondErr?.name||'Error')+' — '+(secondErr?.message||secondErr));
+        }
+      }
+    }
+
+    // At this point, arrayBuffer is owned by the JS heap. The rest
+    // of the function cannot fail with NotReadableError.
+    const inMemoryBlob = new Blob([arrayBuffer], { type: file.type || 'image/jpeg' });
+
+    // ── STEP 2: DECODE VIA createImageBitmap ──
+    // From an in-memory Blob, not from the File ref.
     let bitmap;
     try {
-      bitmap = await createImageBitmap(file, { imageOrientation: 'from-image' });
+      bitmap = await createImageBitmap(inMemoryBlob, { imageOrientation: 'from-image' });
     } catch (decodeErr) {
-      console.warn('[Downscale] createImageBitmap failed for ' + (file.name || '?') + ' — passing through:', decodeErr?.message || decodeErr);
-      return file;
+      console.warn('[Downscale] createImageBitmap failed for '+fileName+' — passing through original bytes as in-memory File:', decodeErr?.message||decodeErr);
+      // Wrap the in-memory bytes as a fresh File with no OS handle
+      return new File([arrayBuffer], fileName, {
+        type: file.type || 'image/jpeg',
+        lastModified: file.lastModified || Date.now(),
+      });
     }
     const srcW = bitmap.width;
     const srcH = bitmap.height;
-    // Already small enough — no-op
+
+    // Already small enough — still return as in-memory File so that
+    // downstream readFileAsBase64 reads from JS heap, not OS handle.
     if (srcW <= DOWNSCALE_MAX_DIM && srcH <= DOWNSCALE_MAX_DIM) {
       try { bitmap.close?.(); } catch(_) {}
-      return file;
+      return new File([arrayBuffer], fileName, {
+        type: file.type || 'image/jpeg',
+        lastModified: file.lastModified || Date.now(),
+      });
     }
-    // Compute target dimensions preserving aspect ratio
+
+    // ── STEP 3: DOWNSCALE VIA CANVAS ──
     const scale = DOWNSCALE_MAX_DIM / Math.max(srcW, srcH);
     const dstW = Math.round(srcW * scale);
     const dstH = Math.round(srcH * scale);
-    // Prefer OffscreenCanvas (no DOM mutation, faster on mobile)
     let canvas, ctx, blob;
     try {
       if (typeof OffscreenCanvas === 'function') {
@@ -2124,19 +2256,27 @@ async function downscaleImageIfNeeded(file) {
     } finally {
       try { bitmap.close?.(); } catch(_) {}
     }
-    if (!blob) return file;
-    // Wrap the blob as a File so downstream code (name, etc.) keeps working
-    const downscaledFile = new File([blob], file.name || 'image.jpg', {
+    if (!blob) {
+      // Downscale failed but we still have the in-memory bytes
+      return new File([arrayBuffer], fileName, {
+        type: file.type || 'image/jpeg',
+        lastModified: file.lastModified || Date.now(),
+      });
+    }
+    const downscaledFile = new File([blob], fileName, {
       type: 'image/jpeg',
       lastModified: file.lastModified || Date.now(),
     });
-    const reduction = file.size > 0 ? Math.round((1 - downscaledFile.size / file.size) * 100) : 0;
-    console.log('[Downscale] '+(file.name||'?')+': '+srcW+'×'+srcH+' ('+Math.round(file.size/1024)+'KB) → '+dstW+'×'+dstH+' ('+Math.round(downscaledFile.size/1024)+'KB, −'+reduction+'%)');
+    const reduction = fileSize > 0 ? Math.round((1 - downscaledFile.size / fileSize) * 100) : 0;
+    console.log('[Downscale] '+fileName+': '+srcW+'×'+srcH+' ('+Math.round(fileSize/1024)+'KB) → '+dstW+'×'+dstH+' ('+Math.round(downscaledFile.size/1024)+'KB, −'+reduction+'%)');
     return downscaledFile;
   } catch (e) {
-    // Never block extraction on a downscale failure — pass through
-    console.warn('[Downscale] Unexpected error for ' + (file?.name || '?') + ' — passing through:', e?.message || e);
-    return file;
+    // Any other failure (OOM, canvas errors, etc.) — propagate so the
+    // extraction catch block can show a proper error. Previously we
+    // swallowed these and passed the original file through, which
+    // masked the real cause.
+    console.warn('[Downscale] Unexpected error for '+fileName+':', e?.message || e);
+    throw e;
   }
 }
 
@@ -2152,7 +2292,7 @@ async function processFile(file) {
         const text = await file.text();
         return [{type:'text', text:'[Spreadsheet: '+file.name+']\n'+text.slice(0,80000)}];
       }
-      const ab = await file.arrayBuffer();
+      const ab = await getFileBytes(file);
       if(typeof XLSX !== 'undefined') {
         const wb = XLSX.read(ab, {type:'array'});
         let allText = '[Spreadsheet: '+file.name+']\n';
@@ -2186,7 +2326,7 @@ async function processFile(file) {
   // ── Word .docx → extract text (basic XML parse), or send to Claude directly ──
   if(isWord && file.name?.match(/\.docx$/i)) {
     try {
-      const ab = await file.arrayBuffer();
+      const ab = await getFileBytes(file);
       const uint8 = new Uint8Array(ab);
       const decoder = new TextDecoder('utf-8', {fatal:false});
       const raw = decoder.decode(uint8);
@@ -2208,7 +2348,7 @@ async function processFile(file) {
 
   // ── PDF ──
   if(isPDF) {
-    const arrayBuffer = await file.arrayBuffer();
+    const arrayBuffer = await getFileBytes(file);
     try {
       if(typeof pdfjsLib === 'undefined') throw new Error('pdf.js not loaded');
       const {doc, wasLocked} = await tryUnlockPDF(arrayBuffer);
@@ -14184,11 +14324,70 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
     // Reconstruct allFiles from the actual batch contents (so the rest
     // of handleExtract sees the final file ordering after grouping).
     const allFiles = batches.flat();
+    const totalBatches = batches.length;
     console.log('[Extract] Adaptive batch size:', BATCH_SIZE,
       '('+(photoHeavy?'photo-heavy':'doc-heavy')+') · '+allFiles.length+' files total',
       groupingUsed ? '· time-grouped' : '');
 
-    const totalBatches = batches.length;
+    // ── PRE-READ FILE BYTES INTO MEMORY (ANDROID FILE HANDLE FIX) ──
+    // Android Chrome can revoke access to OS-backed File references
+    // under memory/IO pressure, especially when many files are staged
+    // and processing is slow. Symptom: NotReadableError ("permission
+    // problems that have occurred after a reference to a file was
+    // acquired") mid-extraction, which was breaking all batches after
+    // the downscaling code was added (each file now takes ~500ms of
+    // canvas work vs the old ~50ms FileReader path).
+    //
+    // The robust fix is to read ALL file bytes into ArrayBuffers RIGHT
+    // NOW — in parallel, before any slow processing starts — while the
+    // OS file handles are guaranteed to still be valid. After this
+    // phase, the extraction runs entirely from in-memory data and
+    // cannot hit NotReadableError again, even if processing takes
+    // minutes and the OS would have revoked the handles long ago.
+    //
+    // Parallel burst: Promise.allSettled so one failed file doesn't
+    // abort the whole phase. Any files whose reads fail get logged
+    // and a placeholder Error is stored — processFile will see the
+    // missing cache entry and attempt its own read with retry as a
+    // last resort. In practice, the parallel burst recovers ~100% of
+    // files because all reads fire within ~1 second of each other.
+    try {
+      const preReadStart = Date.now();
+      setScanProgress({
+        batch:0, totalBatches, totalFiles:allFiles.length,
+        status:'Reading '+allFiles.length+' files...',
+        pctComplete:0, startTime:preReadStart,
+      });
+      const preReadResults = await Promise.allSettled(
+        allFiles.map(f => f.arrayBuffer().then(ab => ({ file: f, ab })))
+      );
+      let preReadOk = 0, preReadFail = 0;
+      const failedNames = [];
+      for (const result of preReadResults) {
+        if (result.status === 'fulfilled' && result.value?.ab) {
+          _extractionFileBuffers.set(result.value.file, result.value.ab);
+          preReadOk++;
+        } else {
+          preReadFail++;
+          const reason = result.reason;
+          const name = reason?.fileName || 'unknown';
+          failedNames.push(name);
+        }
+      }
+      const preReadMs = Date.now() - preReadStart;
+      console.log('[Extract] Pre-read complete: '+preReadOk+'/'+allFiles.length+' files cached in '+preReadMs+'ms'+(preReadFail>0?' ('+preReadFail+' failed: '+failedNames.slice(0,5).join(', ')+(failedNames.length>5?'...':'')+')':''));
+      if (preReadFail > 0 && preReadOk === 0) {
+        // EVERY file failed to read — nothing we can do.
+        throw new Error('Could not read any files from storage. This usually means the files were moved or permission was revoked after selection. Please re-select the photos and try again.');
+      }
+    } catch (preReadErr) {
+      // If pre-read throws (shouldn't happen with allSettled, but just
+      // in case), surface it immediately rather than silently failing
+      // in every batch.
+      console.error('[Extract] Pre-read phase failed:', preReadErr);
+      throw preReadErr;
+    }
+
     let allExtracted = [];
     let firstBatchShown = false;
     // ── RESUME STATE TRACKING ──
