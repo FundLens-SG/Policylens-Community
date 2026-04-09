@@ -2662,6 +2662,171 @@ const INSURERS = {
 const INSURER_LIST = Object.keys(INSURERS).sort();
 const getInsurer = (name) => INSURERS[name] || {color:'#64748b',bg:'#f1f5f9',logo:null};
 
+// ═══════════════════════════════════════════════════════════════
+// INSURER NAME NORMALIZATION (2026-04-09)
+// ═══════════════════════════════════════════════════════════════
+// Maps common variants and suffixed/legal forms to canonical
+// registry names so extracted policies don't get flagged as
+// "Other" when the document just used a slightly different form
+// of the same brand.
+//
+//   "AIA Singapore Pte Ltd" → "AIA"
+//   "Great Eastern Life Assurance" → "Great Eastern"
+//   "Prudential Assurance Company Singapore" → "Prudential"
+//   "HSBC Life (Singapore)" → "HSBC Life"
+//   "Income Insurance" → "NTUC Income"
+//   "Manulife (Singapore) Pte Ltd" → "Manulife"
+//
+// Approach:
+//   1. Explicit alias table for non-obvious mappings (Income ↔ NTUC
+//      Income, Aviva ↔ Aviva/Singlife, etc.)
+//   2. Strip common corporate/geographic suffixes
+//   3. Case-insensitive exact match against canonical list
+//   4. Substring match (canonical name ⊂ normalized input), which
+//      catches "AIA Singapore" → "AIA" naturally
+//   5. If nothing matches, return the original string untouched so
+//      the user still sees what was extracted.
+
+// Explicit aliases — for cases where the normalized form still
+// doesn't match the canonical name via substring logic. Keys are
+// lowercased normalized forms; values are canonical names.
+const INSURER_ALIASES = {
+  'american international assurance': 'AIA',
+  'american international': 'AIA',
+  'aia group': 'AIA',
+  'aia financial': 'AIA',
+  'great eastern life': 'Great Eastern',
+  'great eastern life assurance': 'Great Eastern',
+  'gela': 'Great Eastern',
+  'ge life': 'Great Eastern',
+  'prudential assurance': 'Prudential',
+  'prudential assurance company': 'Prudential',
+  'pac': 'Prudential',
+  'pru': 'Prudential',
+  'prudential life': 'Prudential',
+  'prudential financial': 'Prudential',
+  'income insurance': 'NTUC Income',
+  'income': 'NTUC Income',
+  'ntuc': 'NTUC Income',
+  'manulife financial': 'Manulife',
+  'manulife asia': 'Manulife',
+  'john hancock': 'Manulife',
+  'hsbc insurance': 'HSBC Life',
+  'hsbc insurance singapore': 'HSBC Life',
+  'hsbc': 'HSBC Life',
+  'singapore life': 'Singlife',
+  'singlife with aviva': 'Singlife',
+  'aviva': 'Aviva/Singlife',
+  'aviva ltd': 'Aviva/Singlife',
+  'tokio marine life': 'Tokio Marine',
+  'tokio marine life insurance': 'Tokio Marine',
+  'tml': 'Tokio Marine',
+  'china life insurance': 'China Life',
+  'china taiping insurance': 'China Taiping',
+  'ctpis': 'China Taiping',
+  'etiqa insurance': 'Etiqa',
+  'zurich life': 'Zurich',
+  'zurich insurance': 'Zurich',
+  'sun life financial': 'Sun Life',
+  'sun life assurance': 'Sun Life',
+  'axa insurance': 'AXA',
+  'axa life': 'AXA',
+  'raffles medical': 'Raffles Health',
+  'rhi': 'Raffles Health',
+  'swiss life singapore': 'Swiss Life',
+  'msig insurance': 'MSIG',
+  'mitsui sumitomo': 'MSIG',
+  'sompo insurance': 'Sompo',
+  'chubb insurance': 'Chubb',
+  'qbe insurance': 'QBE',
+  'liberty insurance': 'Liberty',
+  'allianz': 'Allianz', // not in registry; pass through but canonical form
+  'fwd insurance': 'FWD',
+  'fwd life': 'FWD',
+};
+
+// Suffixes/prefixes to strip when normalizing. Order matters —
+// longer phrases first so "pte ltd" gets stripped before "ltd".
+const INSURER_STRIP_PATTERNS = [
+  /\bpte\s*\.?\s*ltd\.?\b/gi,
+  /\bprivate\s*limited\b/gi,
+  /\blimited\b/gi,
+  /\bltd\.?\b/gi,
+  /\bcompany\b/gi,
+  /\bholdings?\b/gi,
+  /\bgroup\b/gi,
+  /\binsurance\b/gi,
+  /\bassurance\b/gi,
+  /\bfinancial\b/gi,
+  /\b\(singapore\)/gi,
+  /\bsingapore\b/gi,
+  /\b\(sg\)/gi,
+  /\bsg\b/gi,
+  /\bs'pore\b/gi,
+  /[(),\.]/g,
+];
+
+function normalizeInsurerName(raw) {
+  if (!raw || typeof raw !== 'string') return raw;
+  const trimmed = raw.trim();
+  if (!trimmed) return raw;
+
+  // 1. Exact canonical match → return unchanged
+  if (INSURERS[trimmed]) return trimmed;
+
+  // 2. Case-insensitive canonical match
+  const lower = trimmed.toLowerCase();
+  const ciMatch = INSURER_LIST.find(n => n.toLowerCase() === lower);
+  if (ciMatch) return ciMatch;
+
+  // 3. Alias check BEFORE stripping — catches cases where the
+  //    alias key itself contains a would-be-stripped word
+  //    (e.g. "singapore life" → "Singlife", where stripping
+  //    "singapore" would leave only "life" and lose the match).
+  if (INSURER_ALIASES[lower]) return INSURER_ALIASES[lower];
+
+  // 4. Strip boilerplate and try again
+  let stripped = lower;
+  for (const pat of INSURER_STRIP_PATTERNS) {
+    stripped = stripped.replace(pat, ' ');
+  }
+  stripped = stripped.replace(/\s+/g, ' ').trim();
+
+  if (!stripped) return raw;
+
+  // 5. Alias check on stripped form
+  if (INSURER_ALIASES[stripped]) return INSURER_ALIASES[stripped];
+
+  // 6. Exact match against canonical list (after stripping)
+  const strippedMatch = INSURER_LIST.find(n => n.toLowerCase() === stripped);
+  if (strippedMatch) return strippedMatch;
+
+  // 7. The canonical name is a prefix/suffix of the normalized input
+  //    e.g. "aia" is a prefix of "aia singapore" → "AIA"
+  //    Sort by length descending so "HSBC Life" beats "HSBC" when
+  //    HSBC isn't in the registry but HSBC Life is.
+  const prefixMatch = INSURER_LIST
+    .filter(n => {
+      const nl = n.toLowerCase();
+      return stripped === nl || stripped.startsWith(nl + ' ') || stripped.endsWith(' ' + nl);
+    })
+    .sort((a, b) => b.length - a.length)[0];
+  if (prefixMatch) return prefixMatch;
+
+  // 8. Canonical name contained as a word boundary in the input
+  const wordMatch = INSURER_LIST
+    .filter(n => {
+      const nl = n.toLowerCase();
+      const rx = new RegExp('\\b' + nl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\b', 'i');
+      return rx.test(stripped);
+    })
+    .sort((a, b) => b.length - a.length)[0];
+  if (wordMatch) return wordMatch;
+
+  // 9. No match — return original so user still sees what was extracted
+  return raw;
+}
+
 // Insurer badge component
 const InsurerBadge = ({name, size='sm'}) => {
   const ins = getInsurer(name);
@@ -9274,6 +9439,10 @@ function ProfileTab() {
   // Drives the age display badge and the mode toggle default.
   const computedAge = getProfileAge(p);
   const ageSource = getProfileAgeSource(p);
+  // Legacy alias for in-component references. ProfileTab has ~15 inline
+  // uses of `age` that predated the DOB/age-mode refactor — keeping the
+  // alias is safer than rewriting each call site individually.
+  const age = computedAge;
   // Mode is implicit: if we have a real dob, we're in 'dob' mode; if we
   // have currentAge but no dob, we're in 'age' mode; otherwise default
   // to 'dob' mode (the fresh-profile starting state).
@@ -15094,6 +15263,22 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
 
       // Process all policies uniformly
       const processed = arr.map(p => {
+        // ── INSURER NAME NORMALIZATION (2026-04-09) ──
+        // Before any downstream processing runs, map variant forms
+        // like "AIA Singapore Pte Ltd" / "Great Eastern Life Assurance"
+        // to the canonical registry names ("AIA", "Great Eastern").
+        // Without this, the InsurerSelect dropdown flags them as
+        // "Other" and repo matching / dedupe can't cluster them.
+        // Runs BEFORE the generic-name check below so that block
+        // can strip the (canonical) insurer prefix correctly.
+        const rawInsurerBeforeNorm = p.insurer;
+        if (p.insurer) {
+          const normalized = normalizeInsurerName(p.insurer);
+          if (normalized !== p.insurer) {
+            console.log('[Extract] Insurer normalized:', JSON.stringify(p.insurer), '→', JSON.stringify(normalized));
+            p.insurer = normalized;
+          }
+        }
         // ── GENERIC PRODUCT NAME BLACKLIST (2026-04-09) ──
         // Some Gemini variants return sub-type descriptors like
         // "AIA Investment Linked Policy" as the productName when
@@ -15124,12 +15309,18 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
           /^critical illness (plan|cover)$/i,
         ];
         if (p.productName && typeof p.productName === 'string') {
-          // Strip the insurer prefix if present so "AIA Investment Linked
-          // Policy" → "Investment Linked Policy" gets matched.
-          const insurerPrefix = (p.insurer || '').trim();
+          // Try stripping BOTH the canonical (post-normalization)
+          // insurer prefix AND the raw pre-normalization prefix,
+          // to catch "AIA Singapore Investment Linked Policy" style
+          // emissions where the AI concatenated the full legal name.
+          const prefixes = [p.insurer, rawInsurerBeforeNorm].filter(Boolean);
           let nameCore = p.productName.trim();
-          if (insurerPrefix && nameCore.toLowerCase().startsWith(insurerPrefix.toLowerCase() + ' ')) {
-            nameCore = nameCore.slice(insurerPrefix.length + 1).trim();
+          for (const px of prefixes) {
+            const pxLower = px.trim().toLowerCase();
+            if (pxLower && nameCore.toLowerCase().startsWith(pxLower + ' ')) {
+              nameCore = nameCore.slice(px.trim().length + 1).trim();
+              break;
+            }
           }
           const isGeneric = GENERIC_NAME_PATTERNS.some(rx => rx.test(nameCore));
           if (isGeneric) {
