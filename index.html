@@ -5674,6 +5674,27 @@ async function sbRepoDelete(id) {
 //     FOR ALL USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);
 //   CREATE INDEX IF NOT EXISTS user_policies_user_idx ON user_policies(user_id);
 //
+//   -- Per-user app settings (houseDefaults, etc — anything CK wants
+//   -- consistent across devices). Each setting key is a top-level
+//   -- key in `data` JSONB; field_versions tracks per-key timestamps
+//   -- the same way the other tables do.
+//   CREATE TABLE IF NOT EXISTS user_app_settings (
+//     user_id UUID PRIMARY KEY REFERENCES auth.users(id) ON DELETE CASCADE,
+//     data JSONB NOT NULL DEFAULT '{}',
+//     field_versions JSONB NOT NULL DEFAULT '{}',
+//     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+//   );
+//   ALTER TABLE user_app_settings ENABLE ROW LEVEL SECURITY;
+//   CREATE POLICY "Users access own app settings" ON user_app_settings
+//     FOR ALL USING (auth.uid() = user_id) WITH CHECK (auth.uid() = user_id);
+//
+//   -- Enable Realtime on all three tables so cross-device updates
+//   -- propagate live (no reload needed). PolicyLens subscribes to
+//   -- postgres_changes events filtered by auth.uid().
+//   ALTER PUBLICATION supabase_realtime ADD TABLE user_client_profile;
+//   ALTER PUBLICATION supabase_realtime ADD TABLE user_policies;
+//   ALTER PUBLICATION supabase_realtime ADD TABLE user_app_settings;
+//
 // HOW IT WORKS:
 //   • Every save (savePolicy / saveProfile) bumps per-field timestamps
 //     for any fields whose values changed, then pushes to Supabase.
@@ -5704,9 +5725,15 @@ function _syncFieldEqual(a, b) {
   return false;
 }
 
-// Bump field versions for fields whose values differ between
+// Bump field versions for fields whose values DIFFER between
 // oldData and newData. Fields unchanged retain their existing
-// timestamp. Fields new to newData get the current timestamp.
+// timestamp (or stay un-stamped if they never had one). This is
+// important for the migration case: existing local data has no
+// _fieldVersions, and we don't want to stamp them all with "now"
+// on first save — that would make local always win against any
+// cloud data with real edit timestamps. By only stamping ACTUAL
+// changes, the merge correctly resolves: cloud edits beat
+// untouched local fields, local edits beat untouched cloud fields.
 function bumpFieldVersions(newData, oldData, baseVersions, ts) {
   ts = ts || Date.now();
   const versions = {...(baseVersions || {})};
@@ -5717,10 +5744,13 @@ function bumpFieldVersions(newData, oldData, baseVersions, ts) {
   for (const key of Object.keys(cleanNew)) {
     if (key.startsWith('_')) continue; // skip private fields
     if (!_syncFieldEqual(cleanOld[key], cleanNew[key])) {
-      versions[key] = ts;
-    } else if (!versions[key]) {
+      // Field actually changed — stamp it
       versions[key] = ts;
     }
+    // If unchanged: leave the version alone. If it was already
+    // stamped, it stays stamped. If it was never stamped (existing
+    // data pre-sync), it stays un-stamped (treated as 0 in the
+    // merge, so the OTHER side wins for that field).
   }
   return versions;
 }
@@ -5834,6 +5864,42 @@ async function sbPoliciesPull() {
       deleted: !!row.deleted_at,
     }));
   } catch(e) { console.warn('[Sync] Policies pull failed:', e.message); return null; }
+}
+
+// ── App settings sync ──
+// Whitelist of setting keys that get synced across devices.
+// Add new ones here as needed. Excluded by design:
+//   • API keys (already synced via auth profiles table)
+//   • Device-local state (progressiveStaged, pdfPasswords, etc)
+//   • Cloud sync flags themselves (cloudSyncInitialized)
+const SETTINGS_TO_SYNC = ['houseDefaults'];
+
+async function sbAppSettingsPush(settingsObj, versions) {
+  const s = getSB();
+  const uid = sbGetUserId();
+  if (!s || !uid) return false;
+  try {
+    const { error } = await s.from('user_app_settings').upsert({
+      user_id: uid,
+      data: settingsObj || {},
+      field_versions: versions || {},
+      updated_at: new Date().toISOString(),
+    });
+    if (error) { console.warn('[Sync] App settings push error:', error.message); return false; }
+    return true;
+  } catch(e) { console.warn('[Sync] App settings push failed:', e.message); return false; }
+}
+
+async function sbAppSettingsPull() {
+  const s = getSB();
+  const uid = sbGetUserId();
+  if (!s || !uid) return null;
+  try {
+    const { data, error } = await s.from('user_app_settings').select('*').eq('user_id', uid).maybeSingle();
+    if (error) { console.warn('[Sync] App settings pull error:', error.message); return null; }
+    if (!data) return null;
+    return { data: data.data || {}, versions: data.field_versions || {} };
+  } catch(e) { console.warn('[Sync] App settings pull failed:', e.message); return null; }
 }
 
 
@@ -6367,15 +6433,20 @@ function App() {
   }, []);
 
   // Reload API keys when Supabase sync completes (fixes race condition on login)
+  // Also fires the cloud sync because auth might be the LAST step before sync
+  // can run (it waits for both local load AND a valid uid).
   useEffect(() => {
     const handler = async () => {
       const gk = await dbGet('settings','geminiKey').catch(()=>null);
       const ck = await dbGet('settings','anthropicKey').catch(()=>null);
       if(gk?.value || ck?.value) console.log('[App] API keys reloaded after Supabase sync');
-      // Cloud sync also depends on auth being ready — run it now
-      // (it's idempotent via cloudSyncRanRef so calling multiple
-      // times is safe).
-      runCloudSync().catch(err => console.warn('[Sync] runCloudSync failed:', err));
+      // CRITICAL: must call the LATEST runCloudSync via ref, not
+      // the closure from first render. Otherwise the closure
+      // captures empty `policies` / `clientProfile` from initial
+      // state and silently bails (or syncs nothing useful).
+      if (runCloudSyncRef.current) {
+        runCloudSyncRef.current().catch(err => console.warn('[Sync] runCloudSync failed:', err));
+      }
     };
     window.addEventListener('policylens-keys-synced', handler);
     return () => window.removeEventListener('policylens-keys-synced', handler);
@@ -6397,8 +6468,14 @@ function App() {
   // modal so the FC can choose merge strategy. Otherwise auto-
   // merges per-field using bumpFieldVersions/mergePerField.
   const cloudSyncRanRef = useRef(false);
-  const runCloudSync = async () => {
-    if (cloudSyncRanRef.current) return;
+  // Ref to the LATEST runCloudSync function. Updated on every
+  // render so event handlers (which capture the closure once via
+  // useEffect with []) can always call the freshest version with
+  // the latest closure over policies/clientProfile/loading state.
+  const runCloudSyncRef = useRef(null);
+  const runCloudSync = async (opts) => {
+    const force = opts && opts.force;
+    if (cloudSyncRanRef.current && !force) return;
     const uid = sbGetUserId();
     if (!uid) {
       console.log('[Sync] No user ID yet — deferring cloud sync');
@@ -6411,14 +6488,16 @@ function App() {
     cloudSyncRanRef.current = true;
     console.log('[Sync] Running cloud sync for user', uid);
     try {
-      // Pull both in parallel
-      const [cloudProfileRec, cloudPolicyRecs] = await Promise.all([
+      // Pull all three in parallel
+      const [cloudProfileRec, cloudPolicyRecs, cloudSettingsRec] = await Promise.all([
         sbProfilePull(),
         sbPoliciesPull(),
+        sbAppSettingsPull(),
       ]);
       const cloudProfile = cloudProfileRec; // {data, versions} | null
       const cloudPolicies = cloudPolicyRecs || []; // [{id, data, versions, deleted}]
-      console.log('[Sync] Cloud:', cloudProfile ? 'profile yes' : 'profile no', '·', cloudPolicies.length, 'policies');
+      const cloudSettings = cloudSettingsRec; // {data, versions} | null
+      console.log('[Sync] Cloud:', cloudProfile ? 'profile yes' : 'profile no', '·', cloudPolicies.length, 'policies', '·', cloudSettings ? 'settings yes' : 'settings no');
 
       // First-sync detection
       const initFlagRec = await dbGet('settings', 'cloudSyncInitialized').catch(() => null);
@@ -6574,12 +6653,63 @@ function App() {
       if (profileChanges > 0 && policyChanges === 0) {
         try { toast('☁️ Synced profile updates from cloud','info',3000); } catch(e){}
       }
-      console.log('[Sync] Auto-merge done:', profileChanges, 'profile changes,', policyChanges, 'policy changes');
+
+      // ── APP SETTINGS PULL/MERGE ──
+      // Settings are key-versioned in the same way as profile fields,
+      // but the data shape is { houseDefaults: {...}, ...other keys }.
+      // Each top-level key gets its own timestamp in field_versions.
+      let settingsChanges = 0;
+      const localSettingsVers = (await dbGet('settings','appSettingsVersions').catch(()=>null))?.value || {};
+      // Build the local bundle from current settings
+      const localBundle = {};
+      for (const key of SETTINGS_TO_SYNC) {
+        if (key === 'houseDefaults') localBundle[key] = houseDefaults;
+        else {
+          const rec = await dbGet('settings', key).catch(()=>null);
+          if (rec?.value !== undefined) localBundle[key] = rec.value;
+        }
+      }
+      if (cloudSettings) {
+        const merged = mergePerField(localBundle, cloudSettings.data, localSettingsVers, cloudSettings.versions);
+        // Apply merged settings locally for any keys that changed
+        for (const key of Object.keys(merged.data)) {
+          if (!_syncFieldEqual(merged.data[key], localBundle[key])) {
+            await dbPut('settings', { key, value: merged.data[key] });
+            settingsChanges++;
+            if (key === 'houseDefaults') {
+              setHouseDefaults({...DEFAULT_HOUSE_VALUES, ...merged.data[key]});
+            }
+          }
+        }
+        // Persist merged versions and push back to cloud if changed
+        await dbPut('settings', { key:'appSettingsVersions', value: merged.versions });
+        if (JSON.stringify(merged.data) !== JSON.stringify(cloudSettings.data) ||
+            JSON.stringify(merged.versions) !== JSON.stringify(cloudSettings.versions)) {
+          sbAppSettingsPush(merged.data, merged.versions).catch(()=>{});
+        }
+      } else if (Object.keys(localBundle).length > 0) {
+        // Cloud has no settings but local does → push local up
+        const pushVers = {...localSettingsVers};
+        for (const key of Object.keys(localBundle)) {
+          if (!pushVers[key]) pushVers[key] = Date.now();
+        }
+        sbAppSettingsPush(localBundle, pushVers).catch(()=>{});
+        await dbPut('settings', { key:'appSettingsVersions', value: pushVers });
+      }
+      if (settingsChanges > 0) {
+        try { toast('☁️ Synced '+settingsChanges+' setting'+(settingsChanges>1?'s':'')+' from cloud','info',3000); } catch(e){}
+      }
+
+      console.log('[Sync] Auto-merge done:', profileChanges, 'profile changes,', policyChanges, 'policy changes,', settingsChanges, 'settings changes');
     } catch (err) {
       console.warn('[Sync] Cloud sync failed:', err);
       cloudSyncRanRef.current = false; // allow retry on next trigger
     }
   };
+  // Keep the ref pointing at the latest closure on every render
+  // so event-handler useEffects (which captured the closure once)
+  // can always invoke the freshest version.
+  runCloudSyncRef.current = runCloudSync;
 
   // Trigger cloud sync when local loading completes (catches the
   // case where auth fired BEFORE the load was done — in that case
@@ -6587,6 +6717,81 @@ function App() {
   useEffect(() => {
     if (loading) return;
     runCloudSync().catch(err => console.warn('[Sync] runCloudSync failed:', err));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading]);
+
+  // ── REALTIME SUBSCRIPTION (cross-device live updates) ──
+  // Subscribes to Supabase Realtime postgres_changes events on
+  // the three sync tables filtered by current user_id. When the
+  // OTHER device makes a change, this device receives the payload
+  // and applies it locally — no reload required.
+  //
+  // Self-changes (made on THIS device) also fire the event because
+  // Postgres doesn't distinguish "who" made the change — only that
+  // a row changed. We rely on per-field merge being idempotent:
+  // if local already has the merged result, the merge is a no-op
+  // and nothing changes. This is safe but slightly wasteful.
+  //
+  // Subscription cleanup runs on unmount AND on uid change so
+  // logging out / switching users doesn't leak channels.
+  useEffect(() => {
+    if (loading) return;
+    const uid = sbGetUserId();
+    if (!uid) return;
+    const sb = getSB();
+    if (!sb) return;
+
+    console.log('[Realtime] Subscribing to live updates for', uid);
+    const channel = sb.channel('user-data-' + uid)
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'user_policies',
+        filter: 'user_id=eq.' + uid,
+      }, async (payload) => {
+        try {
+          console.log('[Realtime] Policy event:', payload.eventType, payload.new?.id || payload.old?.id);
+          // Re-trigger a full cloud sync (it'll be fast — only
+          // pulls + merges what's actually different).
+          if (runCloudSyncRef.current) {
+            await runCloudSyncRef.current({ force: true });
+          }
+        } catch (err) { console.warn('[Realtime] Policy handler error:', err); }
+      })
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'user_client_profile',
+        filter: 'user_id=eq.' + uid,
+      }, async (payload) => {
+        try {
+          console.log('[Realtime] Profile event:', payload.eventType);
+          if (runCloudSyncRef.current) {
+            await runCloudSyncRef.current({ force: true });
+          }
+        } catch (err) { console.warn('[Realtime] Profile handler error:', err); }
+      })
+      .on('postgres_changes', {
+        event: '*',
+        schema: 'public',
+        table: 'user_app_settings',
+        filter: 'user_id=eq.' + uid,
+      }, async (payload) => {
+        try {
+          console.log('[Realtime] Settings event:', payload.eventType);
+          if (runCloudSyncRef.current) {
+            await runCloudSyncRef.current({ force: true });
+          }
+        } catch (err) { console.warn('[Realtime] Settings handler error:', err); }
+      })
+      .subscribe((status) => {
+        console.log('[Realtime] Channel status:', status);
+      });
+
+    return () => {
+      console.log('[Realtime] Unsubscribing');
+      try { sb.removeChannel(channel); } catch(e) { console.warn('[Realtime] Cleanup error:', e); }
+    };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading]);
 
@@ -6737,13 +6942,25 @@ function App() {
   // updates local state. Accepts a partial object — missing fields are kept
   // from the current in-memory houseDefaults (not DEFAULT_HOUSE_VALUES) so
   // individual toggles in Settings don't clobber other overrides.
+  // Also pushes to cloud sync — settings are part of the cross-device
+  // sync scope (they're FC-level firm preferences that should follow the
+  // user across devices).
   const saveHouseDefaults = async (patch) => {
     const next = {...houseDefaults, ...patch};
     setHouseDefaults(next);
     await dbPut('settings', {key:'houseDefaults', value:next});
+    // ── CLOUD SYNC ──
+    // Bump the houseDefaults timestamp in the appSettingsVersions
+    // bundle, then push the whole synced settings bundle to cloud.
+    const versionsRec = await dbGet('settings','appSettingsVersions').catch(()=>null);
+    const oldVersions = versionsRec?.value || {};
+    const newVersions = {...oldVersions, houseDefaults: Date.now()};
+    await dbPut('settings', {key:'appSettingsVersions', value:newVersions});
+    const bundle = { houseDefaults: next };
+    sbAppSettingsPush(bundle, newVersions).catch(()=>{});
   };
 
-  const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,deletePolicy,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,tab,setTab,presentMode,setPresentMode,houseDefaults,saveHouseDefaults};
+  const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,deletePolicy,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,tab,setTab,presentMode,setPresentMode,houseDefaults,saveHouseDefaults,runCloudSync:()=>runCloudSyncRef.current?.({force:true})};
 
   if(loading) return <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh'}}>
     <div style={{textAlign:'center'}}><LogoMark size={36} /><div style={{color:'var(--text2)',fontSize:14,marginTop:8}}>Loading PolicyLens…</div></div>
@@ -23110,6 +23327,106 @@ function ExtractCacheEditor() {
   );
 }
 
+// ═══════════════════════════════════════════════════════════════
+// MODULE: CLOUD SYNC CARD — manual sync trigger + status display
+// ═══════════════════════════════════════════════════════════════
+// Sits in Settings between Advisor Details and Admin Tools. Shows:
+//   • Current sign-in status (which lets the FC know whether sync
+//     is active at all — sync only works when authenticated)
+//   • Sync Now button — calls runCloudSync({force:true}) which
+//     bypasses the once-per-session ref guard and re-pulls from
+//     Supabase, applying per-field merge.
+//   • Last sync timestamp (read from a ref + state hook)
+function CloudSyncCard() {
+  const { runCloudSync, policies } = useContext(AppCtx);
+  const [syncing, setSyncing] = useState(false);
+  const [lastSync, setLastSync] = useState(null);
+  const [status, setStatus] = useState(null);
+  const userEmail = window._user?.email || null;
+  const userId = window._user?.id || null;
+
+  const handleSync = async () => {
+    if (!userId) {
+      setStatus({ kind: 'error', text: 'Not signed in — cloud sync requires login.' });
+      return;
+    }
+    setSyncing(true);
+    setStatus({ kind: 'info', text: 'Syncing…' });
+    try {
+      await runCloudSync();
+      setLastSync(new Date());
+      setStatus({ kind: 'success', text: 'Sync complete' });
+    } catch (err) {
+      console.error('[CloudSync] Manual sync failed:', err);
+      setStatus({ kind: 'error', text: 'Sync failed: ' + (err.message || err) });
+    } finally {
+      setSyncing(false);
+      // Clear status after a few seconds
+      setTimeout(() => setStatus(null), 4000);
+    }
+  };
+
+  return (
+    <div className="card" style={{marginBottom:16}}>
+      <h3 style={{fontSize:14,fontWeight:600,marginBottom:4}}>Cloud Sync</h3>
+      <p style={{fontSize:11,color:'var(--text3)',marginBottom:10}}>
+        Profile, policies, and house defaults sync across all your devices automatically.
+        Updates also propagate live via Realtime — no reload needed.
+      </p>
+      <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10,flexWrap:'wrap'}}>
+        <div style={{
+          fontSize:11,
+          padding:'4px 10px',
+          borderRadius:6,
+          background: userId ? 'rgba(91,168,160,.1)' : 'rgba(239,83,80,.08)',
+          color: userId ? 'var(--teal)' : 'var(--red)',
+          border: '1px solid ' + (userId ? 'rgba(91,168,160,.3)' : 'rgba(239,83,80,.3)'),
+        }}>
+          {userId
+            ? <>● Signed in {userEmail ? <>as <strong>{userEmail}</strong></> : ''}</>
+            : '○ Not signed in — sync disabled'}
+        </div>
+        {policies && (
+          <div style={{fontSize:11,color:'var(--text3)'}}>
+            {policies.length} polic{policies.length===1?'y':'ies'} on this device
+          </div>
+        )}
+      </div>
+      <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+        <button
+          className="btn-primary btn-sm"
+          onClick={handleSync}
+          disabled={syncing || !userId}
+          style={{minWidth:120}}
+        >
+          {syncing ? '🔄 Syncing…' : '☁️ Sync Now'}
+        </button>
+        {lastSync && (
+          <span style={{fontSize:10,color:'var(--text3)'}}>
+            Last sync: {lastSync.toLocaleTimeString()}
+          </span>
+        )}
+        {status && (
+          <span style={{
+            fontSize:11,
+            padding:'3px 8px',
+            borderRadius:4,
+            background: status.kind === 'success' ? 'rgba(91,168,160,.12)' : status.kind === 'error' ? 'rgba(239,83,80,.12)' : 'rgba(212,169,106,.1)',
+            color: status.kind === 'success' ? 'var(--green2)' : status.kind === 'error' ? 'var(--red)' : 'var(--gold)',
+          }}>
+            {status.text}
+          </span>
+        )}
+      </div>
+      {!userId && (
+        <div style={{fontSize:10,color:'var(--text3)',marginTop:8,fontStyle:'italic'}}>
+          Sign in to enable cross-device sync. Your local data stays available regardless.
+        </div>
+      )}
+    </div>
+  );
+}
+
 function Settings() {
   const {apiKey,saveApiKey,clientName,saveClientName,policies,savePolicy,deletePolicy,houseDefaults,saveHouseDefaults} = useContext(AppCtx);
   const [geminiKey, setGeminiKey] = useState('');
@@ -23204,6 +23521,9 @@ function Settings() {
           <div className="field"><label>Company</label><input value={advisorCompany} onChange={e=>setAdvisorCompany(e.target.value)} onBlur={e=>{dbPut('settings',{key:'advisorCompany',value:e.target.value});if(window.saveKeyToSupabase)saveKeyToSupabase('advisorCompany',e.target.value)}} placeholder="e.g. ABC Advisory" /></div>
         </div>
       </div>
+
+      {/* ═══ CLOUD SYNC ═══ */}
+      <CloudSyncCard />
 
       {/* ═══ ADMIN: REPOSITORY RESET ═══ */}
       {window._isAdmin && (
