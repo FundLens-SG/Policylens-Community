@@ -13485,6 +13485,25 @@ function Policies() {
   // initial restore completes — otherwise we'd wipe IDB on mount
   // before we got a chance to read from it.
   const hasRestoredStagedRef = useRef(false);
+
+  // ── TRIGGER-IN-FLIGHT GUARD (2026-04-09) ──
+  // True for the entire lifetime of a triggerProgressiveExtract call,
+  // including the micro-window between handleExtract returning and
+  // the wrapper's followup setStaged call. The defensive recovery
+  // effect checks this ref and bails if it's true, preventing a
+  // race where React commits a render during that gap with
+  // scanning=false and extractingRef=false, and the effect
+  // mistakenly reverts 'extracting' files to 'queued' before the
+  // wrapper can mark them 'done' (or catch an error).
+  //
+  // handleExtract internally catches most errors (it renders its
+  // own failure banner instead of throwing out), so my wrapper's
+  // try/catch can't distinguish success from internal failure.
+  // Without this ref, the defensive effect would fire during the
+  // commit window and the wrapper's success-path setStaged would
+  // race against the reverted state, producing the "flicker back
+  // to queued" symptom the user reported.
+  const triggerInFlightRef = useRef(false);
   // ── SCAN FAILURE BANNER ──
   // Persistent banner shown at the top of Policies when extraction dies mid-flight.
   // Unlike a toast, this sticks around until the user dismisses or retries —
@@ -13496,6 +13515,17 @@ function Policies() {
   // without forcing the FC to re-pick from the file dialog. Set to null on
   // catch paths where files came from a stale source and can't be retried.
   const [scanFailure, setScanFailure] = useState(null);
+  // Synchronous mirror of scanFailure for reads from within
+  // triggerProgressiveExtract's wrapper. State updates are async
+  // and not observable until after React commits, which can happen
+  // AFTER the wrapper's `await handleExtract()` resumes — we need
+  // a path that reads the current value synchronously.
+  //
+  // Every `setScanFailure(...)` call site in this component must
+  // also update this ref. There are three such sites in handleExtract
+  // (two failure branches setting a failure object, one success
+  // branch clearing to null) plus modal/button handlers.
+  const scanFailureRef = useRef(null);
 
   // ── Draft auto-save/restore ──
   const DRAFT_KEY = 'policylens_draft';
@@ -14078,10 +14108,16 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
     // 'extracting', then the inner handleExtract call would bail on
     // its own re-entry guard, and we'd mark the files as 'done'
     // even though nothing happened.
-    if (extractingRef.current) {
+    if (extractingRef.current || triggerInFlightRef.current) {
       console.log('[Progressive] Re-entry blocked — extraction already running');
       return;
     }
+    // Flip the in-flight guard IMMEDIATELY so the defensive recovery
+    // useEffect can't fire against the 'extracting' state we're
+    // about to set (before handleExtract has had a chance to flip
+    // its own extractingRef). Cleared in the finally block below.
+    triggerInFlightRef.current = true;
+    try {
     // Snapshot queued items via functional setState to avoid a
     // stale closure over `staged`. The setter is called inside a
     // render lifecycle but the result is used imperatively.
@@ -14098,19 +14134,35 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
     progressiveSessionRef.current = true;
     console.log('[Progressive] Triggered ('+triggerReason+'):', snapshot.length, 'files');
 
+    let threwOut = false;
     try {
       await handleExtract(snapshot.map(s => s.file));
-      // On success, mark the snapshot's files as 'done' (stay
-      // visible with a green badge). New staged items added during
-      // the run remain 'queued' for the next pass.
-      setStaged(prev => prev.map(s => markedKeys.has(s.file) ? {...s, _status: 'done'} : s));
     } catch (err) {
-      // Failure — revert snapshot to 'queued' so user can retry,
-      // and stop the auto-chain (don't burn API calls on a loop).
-      console.warn('[Progressive] Extraction failed, reverting snapshot to queued:', err);
+      // handleExtract catches most of its own errors internally
+      // (via its own try/catch at line ~16280), so this path only
+      // fires on REALLY unexpected throws. On either path we need
+      // to figure out whether extraction actually succeeded.
+      threwOut = true;
+      console.warn('[Progressive] handleExtract threw out (unexpected):', err);
+    }
+
+    // After handleExtract returns, inspect the actual outcome:
+    //   - scanFailure set → extraction failed, revert snapshot to queued
+    //   - threwOut=true → revert to queued
+    //   - otherwise → mark as done
+    // This works because handleExtract sets scanFailure inside its
+    // internal catch, so we can read it to distinguish success from
+    // failure even when no exception propagated.
+    const failedInternally = threwOut || scanFailureRef.current;
+    if (failedInternally) {
+      console.warn('[Progressive] Extraction failed (threwOut=' + threwOut + ', scanFailure=' + !!scanFailureRef.current + ') — reverting snapshot to queued');
       setStaged(prev => prev.map(s => markedKeys.has(s.file) ? {...s, _status: 'queued'} : s));
       return;
     }
+    // Success: mark the snapshot's files as 'done' (stay visible
+    // with a green badge). New staged items added during the run
+    // remain 'queued' for the next pass.
+    setStaged(prev => prev.map(s => markedKeys.has(s.file) ? {...s, _status: 'done'} : s));
 
     // ── CHAIN-ON-COMPLETE ──
     // If more files accumulated in 'queued' state during the run,
@@ -14148,6 +14200,14 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         console.log('[Progressive] No more queued items — session idle');
       }
     }, CHAIN_DELAY_MS);
+    } finally {
+      // Clear the in-flight guard so defensive recovery (and the
+      // next user click) can proceed. This runs as the async
+      // function's microtask unwinds — BEFORE the chain setTimeout
+      // fires — which is exactly right: the chain's recursive call
+      // will re-acquire the guard itself.
+      triggerInFlightRef.current = false;
+    }
   };
 
   // ── IDLE AUTO-TRIGGER ──
@@ -14288,19 +14348,24 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
   // handler couldn't update the unmounted state, and the IDB
   // persistence saved the partial 'extracting' state.
   //
-  // Detection: scanning is false AND extractingRef is false, but
-  // staged has items in 'extracting' state.
+  // Detection: scanning is false AND extractingRef is false AND
+  // triggerInFlightRef is false, but staged has items in 'extracting'.
   //
-  // Why this can't false-positive on the normal flow: when
-  // triggerProgressiveExtract runs, it calls setStaged to mark
-  // files as 'extracting' AND synchronously calls handleExtract
-  // which sets extractingRef.current=true BEFORE any await. So
-  // by the time React commits the state update and effects run,
-  // extractingRef is already true, and this effect's check bails.
+  // Why this can't false-positive on the normal flow:
+  //   • triggerInFlightRef is set synchronously at the very start
+  //     of triggerProgressiveExtract, BEFORE any setStaged call,
+  //     and cleared only in the outer finally. So any render that
+  //     happens during the wrapper's lifetime (including the gap
+  //     between handleExtract returning and the wrapper marking
+  //     files as 'done') sees triggerInFlightRef=true and bails.
+  //   • extractingRef is set synchronously inside handleExtract
+  //     before the first await, so the narrower window between
+  //     that and setScanning(true) committing is also covered.
   useEffect(() => {
     if (!hasRestoredStagedRef.current) return;
     if (scanning) return;
     if (extractingRef.current) return;
+    if (triggerInFlightRef.current) return;
     const stuckCount = staged.filter(s => s._status === 'extracting').length;
     if (stuckCount === 0) return;
     console.warn('[Progressive] Detected', stuckCount, 'files stuck in extracting state — reverting to queued');
@@ -14975,6 +15040,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
 
     // Clear any lingering failure banner from a previous attempt
     setScanFailure(null);
+    scanFailureRef.current = null;
 
     // Snapshot the files array for potential retry. We convert to a real
     // Array so a retry invocation still works even if the caller's source
@@ -15607,7 +15673,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
           // and surface a persistent banner so the FC notices.
           setScanning(false);
           setScanProgress(null);
-          setScanFailure({
+          const emptyFailPayload = {
             reason: wasBackgrounded
               ? 'Extraction returned empty — you tabbed away while it was running, which kills Chrome background fetches on mobile. Try again with PolicyLens in the foreground.'
               : 'AI could not extract policies from the uploaded documents. This usually means the images are unclear, the document is too short, or the AI hit a transient error. Try clearer photos or retry.',
@@ -15616,7 +15682,9 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
             completedBatches: 0,
             totalBatches,
             partialPolicies: 0,
-          });
+          };
+          setScanFailure(emptyFailPayload);
+          scanFailureRef.current = emptyFailPayload;
           return;
         }
 
@@ -16335,7 +16403,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       // the FC understands that Retry isn't starting from scratch — the
       // deterministic batch cache will instant-hit anything that already
       // completed, and the new run picks up from where we left off.
-      setScanFailure({
+      const mainFailPayload = {
         reason: (wasBackgrounded && !bgDiag?.overall)
           ? 'Chrome killed the extraction when you tabbed away. PolicyLens needs to stay in the foreground while scanning.'
           : msg.split('\n')[0] || 'Extraction failed. See details in the error toast.',
@@ -16346,7 +16414,9 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         completedBatches,
         totalBatches,
         partialPolicies: allExtracted.length,
-      });
+      };
+      setScanFailure(mainFailPayload);
+      scanFailureRef.current = mainFailPayload;
     } finally {
       // Release the synchronous re-entry guard first so any queued
       // retry can proceed if the user taps again immediately.
@@ -16591,6 +16661,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
                 <button onClick={()=>{
                   const files = scanFailure.files;
                   setScanFailure(null);
+                  scanFailureRef.current = null;
                   handleExtract(files);
                 }} style={{
                   fontSize:11,
@@ -16607,7 +16678,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
                   {hasProgress ? '▶ Resume Extraction' : '🔄 Retry Extraction'}
                 </button>
               )}
-              <button className="btn-secondary btn-sm" onClick={()=>setScanFailure(null)} style={{fontSize:11}}>
+              <button className="btn-secondary btn-sm" onClick={()=>{setScanFailure(null);scanFailureRef.current=null;}} style={{fontSize:11}}>
                 Dismiss
               </button>
             </div>
@@ -16683,7 +16754,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
                   // files but nothing's actually running, revert
                   // them to 'queued' first, then fall through to
                   // the normal trigger path.
-                  if (extractingCount > 0 && !scanning && !extractingRef.current) {
+                  if (extractingCount > 0 && !scanning && !extractingRef.current && !triggerInFlightRef.current) {
                     console.warn('[Progressive] Manual recovery — reverting', extractingCount, 'stuck extracting files to queued');
                     setStaged(prev => prev.map(s => s._status === 'extracting' ? {...s, _status: 'queued'} : s));
                     // Don't trigger immediately — let the state
@@ -16705,7 +16776,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
                 }}
                 disabled={scanning && !isProgressiveActive}
               >
-                {extractingCount > 0 && !scanning && !extractingRef.current
+                {extractingCount > 0 && !scanning && !extractingRef.current && !triggerInFlightRef.current
                   ? `🔄 Reset ${extractingCount} stuck`
                   : isProgressiveActive
                   ? (scanning ? (queuedCount > 0 ? `⏭ Extract ${queuedCount} more` : 'Extracting…') : (queuedCount > 0 ? `✓ Done — extract ${queuedCount} more` : '✓ Done'))
