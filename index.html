@@ -13694,13 +13694,27 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
     // flag-and-messaging layer works everywhere.
     const releaseWakeLock = await acquireWakeLock('policy-extraction');
     let wasBackgrounded = false;
+    // Hoisted: bgDiag is assigned further down (after the SW update
+    // check runs), but the visibility handler closure needs to read
+    // it to decide whether the "tabbed away" warning is relevant.
+    // When bg mode is ACTIVE, tabbing away is safe — the SW is
+    // handling the extraction and the warning is a false alarm.
+    let bgDiag = null;
     const onVisibilityChange = () => {
       if(document.visibilityState === 'hidden') {
         wasBackgrounded = true;
-        console.warn('[Extract] Tab backgrounded during extraction — request may fail');
+        if (bgDiag?.overall) {
+          console.log('[Extract] Tab backgrounded — SW multi path is active, extraction will continue');
+        } else {
+          console.warn('[Extract] Tab backgrounded during extraction — request may fail');
+        }
       } else if(document.visibilityState === 'visible' && wasBackgrounded) {
-        // User came back — warn them their extraction may have died
-        try { toast('⚠️ You tabbed away during extraction — the API call may have been killed by the browser. Check for an error below.', 'warning', 8000); } catch(e) {}
+        // Only warn if background mode was NOT active. When bg mode is
+        // active, the SW is handling the extraction and the user
+        // tabbing away is expected and safe.
+        if (!bgDiag?.overall) {
+          try { toast('⚠️ You tabbed away during extraction — the API call may have been killed by the browser. Check for an error below.', 'warning', 8000); } catch(e) {}
+        }
       }
     };
     document.addEventListener('visibilitychange', onVisibilityChange);
@@ -13976,7 +13990,8 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       }
     } catch(e) { console.warn('[Extract] SW update check failed:', e); }
     swExtractResetCache(); // force a fresh check each extraction
-    let bgDiag = null;
+    // bgDiag was hoisted above (before visibility handler) so the
+    // handler can read it. Here we just assign the result.
     try { bgDiag = await swExtractDiagnostic(); }
     catch (e) { console.warn('[Extract] Diagnostic failed:', e); }
     console.log('[Extract] Background mode:', bgDiag?.overall ? 'ACTIVE' : 'foreground-only', '—', bgDiag?.reason || 'unknown');
@@ -14742,14 +14757,25 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       try { sessionStorage.removeItem('policylens_pendingExtract'); } catch(e) {}
       setTimeout(()=>setScanProgress(null), 3000);
     } catch(e){
-      console.error('[Extract] Error:', e);
+      // Log the raw error so we can diagnose weird shapes (undefined
+      // message, thrown non-Error objects, etc.) that would otherwise
+      // show up as "Extraction error: undefined".
+      console.error('[Extract] Error:', e, 'typeof:', typeof e, 'keys:', e ? Object.keys(e) : '(no keys)');
       const hasAnthropicKey = !!(await dbGet('settings','anthropicKey').catch(()=>null))?.value;
-      let msg = 'Extraction error: ' + e.message;
-      const errMsg = (e.message||'').toLowerCase();
+      // Defensive message extraction — handles plain strings, Error
+      // objects, and bare objects with no .message property.
+      const rawErrMsg = (e && e.message) ||
+        (typeof e === 'string' ? e : null) ||
+        (e && e.toString && e.toString() !== '[object Object]' ? e.toString() : null) ||
+        'unknown error (see console)';
+      let msg = 'Extraction error: ' + rawErrMsg;
+      const errMsg = rawErrMsg.toLowerCase();
       // Check tab-backgrounded case FIRST — most common mobile failure mode.
-      // If the user tabbed away at any point and we ended up with a network-ish
-      // error, it's almost certainly the browser suspending the fetch.
-      if(wasBackgrounded && (errMsg.includes('networkerror') || errMsg.includes('failed to fetch') || errMsg.includes('network') || errMsg.includes('timed out') || errMsg.includes('abort') || e instanceof TypeError)) {
+      // If the user tabbed away at any point AND we're not in SW background
+      // mode AND we ended up with a network-ish error, it's almost certainly
+      // the browser suspending the fetch. When bg mode is active, tab-away
+      // is safe and the error is something else entirely.
+      if(wasBackgrounded && !bgDiag?.overall && (errMsg.includes('networkerror') || errMsg.includes('failed to fetch') || errMsg.includes('network') || errMsg.includes('timed out') || errMsg.includes('abort') || e instanceof TypeError)) {
         msg = '🚫 Extraction interrupted — you tabbed away from PolicyLens while files were still uploading.\n\nMobile Chrome suspends background tabs to save battery, which kills in-flight API calls to Gemini/Claude.\n\nFix: Tap Upload again and keep PolicyLens in the foreground until extraction completes. The screen wake lock should prevent this, but it was either unsupported or overridden.';
       } else if(errMsg.includes('networkerror') || errMsg.includes('failed to fetch') || errMsg.includes('network') || e instanceof TypeError) {
         msg = '🚫 Network Error — API calls are being blocked.\n\nCommon causes:\n\n';
@@ -14789,7 +14815,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       // deterministic batch cache will instant-hit anything that already
       // completed, and the new run picks up from where we left off.
       setScanFailure({
-        reason: wasBackgrounded
+        reason: (wasBackgrounded && !bgDiag?.overall)
           ? 'Chrome killed the extraction when you tabbed away. PolicyLens needs to stay in the foreground while scanning.'
           : msg.split('\n')[0] || 'Extraction failed. See details in the error toast.',
         files: filesSnapshot,
