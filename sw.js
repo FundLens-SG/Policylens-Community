@@ -22,7 +22,7 @@
 //     the Tier 1 in-page extraction with batch-level resume.
 // ═══════════════════════════════════════════════════════════════
 
-const CACHE_NAME = 'policylens-v1.0.3-tier2-multi';
+const CACHE_NAME = 'policylens-v1.0.4-reply-fix';
 const ASSETS = [
   './',
   './index.html',
@@ -197,7 +197,29 @@ async function broadcast(msg) {
 
 self.addEventListener('message', async (e) => {
   const data = e.data || {};
-  const reply = (msg) => { try { e.source && e.source.postMessage(msg); } catch (_) {} };
+  // Reply helper — prefers MessageChannel port when the caller passed
+  // one via transferables (the standard pattern for request/response),
+  // falls back to e.source.postMessage for simple fire-and-forget
+  // messages without a reply channel.
+  //
+  // BUG FIX: Previously this used e.source.postMessage unconditionally,
+  // which meant replies to messages sent via MessageChannel (like
+  // CHECK_SUPPORT) went to the client's navigator.serviceWorker.onmessage
+  // handler instead of the channel.port1 listener. Result: the reply
+  // was effectively discarded, the page timed out waiting for a
+  // response, and swExtractIsAvailable() returned false — disabling
+  // the entire SW Background Fetch path.
+  const reply = (msg) => {
+    try {
+      if (e.ports && e.ports[0]) {
+        e.ports[0].postMessage(msg);
+        return;
+      }
+      if (e.source && typeof e.source.postMessage === 'function') {
+        e.source.postMessage(msg);
+      }
+    } catch (_) { /* channel closed, source gone, etc. */ }
+  };
 
   switch (data.type) {
     case 'CHECK_SUPPORT': {

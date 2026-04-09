@@ -7455,10 +7455,13 @@ async function swExtractIsAvailable() {
   try {
     const reg = await navigator.serviceWorker.ready;
     if (!reg || !reg.active) { _swSupportCache = false; return false; }
-    // Ask the SW directly — it might have its own feature gates
+    // Ask the SW directly — it might have its own feature gates.
+    // 3s budget (was 1500ms) because a stopped SW can take 1-2s to
+    // wake on slower devices, and we want this check to succeed
+    // reliably when the SW is present but idle.
     const result = await new Promise((resolve) => {
       const channel = new MessageChannel();
-      const timeoutId = setTimeout(() => resolve(null), 1500);
+      const timeoutId = setTimeout(() => resolve(null), 3000);
       channel.port1.onmessage = (e) => {
         clearTimeout(timeoutId);
         resolve(e.data);
@@ -7473,6 +7476,101 @@ async function swExtractIsAvailable() {
     _swSupportCache = false;
     return false;
   }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// DIAGNOSTIC: returns a detailed state report for the SW multi-batch
+// background extraction path. Used by the Settings panel diagnostic
+// button and by the scan progress card to show the FC EXACTLY which
+// gate is failing when the SW path is disabled. No caching — runs
+// fresh every call so you can observe SW activation in real time.
+// ═══════════════════════════════════════════════════════════════
+async function swExtractDiagnostic() {
+  const report = {
+    platform: { isIOS: isIOS(), userAgent: (navigator.userAgent || '').slice(0, 80) },
+    apis: {
+      serviceWorker: 'serviceWorker' in navigator,
+      backgroundFetch: 'BackgroundFetchManager' in window,
+      notifications: 'Notification' in window,
+      notificationPermission: (typeof Notification !== 'undefined') ? Notification.permission : 'unavailable',
+    },
+    registration: { registered: false, active: false, scriptURL: null, scope: null, state: null, hasController: false },
+    checkSupport: { asked: false, responded: false, response: null, tookMs: null },
+    overall: false,
+    reason: null,
+  };
+  if (report.platform.isIOS) {
+    report.reason = 'iOS: Background Fetch is not supported in any iOS browser (Apple forces WebKit)';
+    return report;
+  }
+  if (!report.apis.serviceWorker) {
+    report.reason = 'This browser does not support Service Workers';
+    return report;
+  }
+  if (!report.apis.backgroundFetch) {
+    report.reason = 'This browser does not support the Background Fetch API (need Chrome/Edge/Opera ≥71)';
+    return report;
+  }
+  try {
+    const reg = await navigator.serviceWorker.getRegistration();
+    if (reg) {
+      report.registration.registered = true;
+      report.registration.active = !!reg.active;
+      report.registration.scriptURL = reg.active ? reg.active.scriptURL : (reg.installing ? reg.installing.scriptURL : (reg.waiting ? reg.waiting.scriptURL : null));
+      report.registration.scope = reg.scope;
+      report.registration.state = reg.active ? reg.active.state : (reg.installing ? 'installing' : (reg.waiting ? 'waiting' : 'unknown'));
+    }
+    report.registration.hasController = !!navigator.serviceWorker.controller;
+    if (!report.registration.registered) {
+      report.reason = 'Service Worker not registered — PolicyLens only registers SW on github.io domains';
+      return report;
+    }
+    if (!report.registration.active) {
+      report.reason = 'Service Worker registered but not yet active (state: '+report.registration.state+'). Hard-refresh the page or close all PolicyLens tabs and reopen';
+      return report;
+    }
+  } catch (e) {
+    report.reason = 'Failed to query SW registration: ' + e.message;
+    return report;
+  }
+  // Try CHECK_SUPPORT message with a 3s budget
+  try {
+    const started = Date.now();
+    const reg = await navigator.serviceWorker.ready;
+    report.checkSupport.asked = true;
+    const response = await new Promise((resolve) => {
+      const channel = new MessageChannel();
+      const timeoutId = setTimeout(() => resolve({ __timeout: true }), 3000);
+      channel.port1.onmessage = (e) => {
+        clearTimeout(timeoutId);
+        resolve(e.data);
+      };
+      reg.active.postMessage({ type: 'CHECK_SUPPORT' }, [channel.port2]);
+    });
+    report.checkSupport.tookMs = Date.now() - started;
+    if (response && response.__timeout) {
+      report.reason = 'The active Service Worker did not respond to CHECK_SUPPORT within 3s — likely an OLD sw.js is still controlling the tab. Close all PolicyLens tabs and reopen to activate the new one';
+      return report;
+    }
+    report.checkSupport.responded = true;
+    report.checkSupport.response = response;
+    if (!response || !response.bgFetch) {
+      report.reason = 'Service Worker responded but reports Background Fetch is unavailable: ' + JSON.stringify(response);
+      return report;
+    }
+    report.overall = true;
+    report.reason = 'All gates passed — background extraction is available';
+  } catch (e) {
+    report.reason = 'CHECK_SUPPORT message failed: ' + e.message;
+  }
+  return report;
+}
+
+// Force a re-check by clearing the cached result. Used by retry flows
+// and the Settings diagnostic button to pick up a freshly activated SW
+// without reloading the page.
+function swExtractResetCache() {
+  _swSupportCache = null;
 }
 
 // Send a request to the SW for background-fetch-powered extraction.
@@ -7675,6 +7773,70 @@ async function ensureNotificationPermission() {
     // Firefox throws on the legacy callback form in some versions — ignore
     console.warn('[Notifications] requestPermission failed:', e);
     try { localStorage.setItem('policylens_notif_asked', String(Date.now())); } catch(_) {}
+    return false;
+  }
+}
+
+// ── BATCH NOTIFICATION HELPER ──
+// Fires a per-batch notification when a batch completes extraction.
+// Prefers the Service Worker's showNotification (persistent, works
+// even if the tab is backgrounded/minimized) with a fallback to the
+// plain Notification constructor. Silently no-ops if:
+//   • Notifications API is unsupported
+//   • Permission hasn't been granted
+//   • Called in an iframe where notifications are blocked
+// Never throws — all failure paths return false.
+//
+// Uses tag = 'policylens-batch' so successive batch notifications
+// REPLACE each other rather than piling up (otherwise the user gets
+// 8+ notifications for an 8-batch extraction).
+async function notifyBatchComplete({ batchNum, totalBatches, policyCount, totalPolicies }) {
+  try {
+    if (typeof Notification === 'undefined') return false;
+    if (Notification.permission !== 'granted') return false;
+    const isComplete = batchNum >= totalBatches;
+    const title = isComplete
+      ? '✓ PolicyLens extraction complete'
+      : `PolicyLens: batch ${batchNum}/${totalBatches} done`;
+    const body = isComplete
+      ? `${totalPolicies} polic${totalPolicies === 1 ? 'y' : 'ies'} extracted across ${totalBatches} batch${totalBatches === 1 ? '' : 'es'}. Tap to review.`
+      : `+${policyCount} polic${policyCount === 1 ? 'y' : 'ies'} this batch · ${totalPolicies} total so far`;
+    // Prefer SW notification — survives tab backgrounding on mobile
+    if ('serviceWorker' in navigator) {
+      try {
+        const reg = await navigator.serviceWorker.getRegistration();
+        if (reg) {
+          await reg.showNotification(title, {
+            body,
+            tag: 'policylens-batch',
+            renotify: true, // replace previous batch notification
+            silent: !isComplete, // only final notification vibrates/chimes
+            icon: '/icon-192.png',
+            badge: '/icon-192.png',
+            data: { batchNum, totalBatches, at: Date.now() },
+          });
+          return true;
+        }
+      } catch (swErr) {
+        console.warn('[Notifications] SW showNotification failed, falling back:', swErr);
+      }
+    }
+    // Fallback: foreground Notification constructor
+    try {
+      const n = new Notification(title, {
+        body,
+        tag: 'policylens-batch',
+        silent: !isComplete,
+      });
+      // Auto-close non-terminal notifications after 4s to reduce clutter
+      if (!isComplete) setTimeout(() => { try { n.close(); } catch(_){} }, 4000);
+      return true;
+    } catch (ctorErr) {
+      console.warn('[Notifications] Notification() constructor failed:', ctorErr);
+      return false;
+    }
+  } catch (e) {
+    console.warn('[Notifications] notifyBatchComplete threw:', e);
     return false;
   }
 }
@@ -13611,7 +13773,27 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
     // doesn't wipe in-memory work.
     let completedBatches = 0;
 
-    setScanProgress({batch:0, totalBatches, totalFiles:allFiles.length, status:'Preparing...', pctComplete:0, startTime:Date.now()});
+    // ── BACKGROUND MODE DIAGNOSTIC ──
+    // Run the SW diagnostic up front so the progress card can tell the
+    // FC whether their extraction will survive tab-away. This runs
+    // BEFORE setScanning(true) so the initial progress card render has
+    // the result. Also requests notification permission unconditionally
+    // (not just when SW is available) so per-batch notifications work
+    // even on the in-page foreground path.
+    swExtractResetCache(); // force a fresh check each extraction
+    let bgDiag = null;
+    try { bgDiag = await swExtractDiagnostic(); }
+    catch (e) { console.warn('[Extract] Diagnostic failed:', e); }
+    console.log('[Extract] Background mode:', bgDiag?.overall ? 'ACTIVE' : 'foreground-only', '—', bgDiag?.reason || 'unknown');
+    // Request notification permission (idempotent, one-time per device)
+    ensureNotificationPermission().catch(()=>{});
+
+    setScanProgress({
+      batch:0, totalBatches, totalFiles:allFiles.length,
+      status:'Preparing...', pctComplete:0, startTime:Date.now(),
+      bgMode: bgDiag?.overall ? 'active' : 'foreground',
+      bgModeReason: bgDiag?.reason || null,
+    });
 
     // ── PRE-COMPUTE VIA SW MULTI (Fix #1) ──
     // When multiple batches AND Background Fetch is available, dispatch
@@ -13652,6 +13834,8 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
                   status: `Preparing batch ${b+1} of ${totalBatches} for background fetch...`,
                   pctComplete: Math.round((b/batches.length)*10), // first 10% is prep
                   startTime: Date.now(),
+                  bgMode: 'active',
+                  bgModeReason: bgDiag?.reason || null,
                 });
                 const content = [];
                 for (const file of batches[b]) {
@@ -13781,7 +13965,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
           );
         }
         const etaText = remaining > 60 ? `~${Math.ceil(remaining/60)} min left` : `~${remaining}s left`;
-        setScanProgress({batch:b+1, totalBatches, totalFiles:allFiles.length, status:`Extracting batch ${b+1} of ${totalBatches} (${batches[b].length} files)...`, pctComplete:Math.round(b/totalBatches*100), startTime:scanStartTime, eta:etaText});
+        setScanProgress({batch:b+1, totalBatches, totalFiles:allFiles.length, status:`Extracting batch ${b+1} of ${totalBatches} (${batches[b].length} files)...`, pctComplete:Math.round(b/totalBatches*100), startTime:scanStartTime, eta:etaText, bgMode: bgDiag?.overall ? 'active' : 'foreground', bgModeReason: bgDiag?.reason || null});
 
         // Pick up the precomputed rawText for this batch if the SW
         // multi path is active. Each resolver promise resolves when its
@@ -14310,7 +14494,22 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         setBulkExtracted([...allExtracted]);
       }
 
-      setScanProgress({batch:b+1, totalBatches, totalFiles:allFiles.length, status:b+1<totalBatches?`Batch ${b+1} done (${allExtracted.length} policies). Extracting next...`:`All ${totalBatches} batches complete! ${allExtracted.length} policies extracted.`, pctComplete:Math.round((b+1)/totalBatches*100)});
+      setScanProgress({batch:b+1, totalBatches, totalFiles:allFiles.length, status:b+1<totalBatches?`Batch ${b+1} done (${allExtracted.length} policies). Extracting next...`:`All ${totalBatches} batches complete! ${allExtracted.length} policies extracted.`, pctComplete:Math.round((b+1)/totalBatches*100), bgMode: bgDiag?.overall ? 'active' : 'foreground', bgModeReason: bgDiag?.reason || null});
+
+      // ── PER-BATCH NOTIFICATION ──
+      // Fires a notification after every batch completes. Uses tag
+      // 'policylens-batch' so successive batch notifications REPLACE
+      // each other on the lock screen (not a queue of 8 separate
+      // notifications for an 8-batch extraction). Only the final
+      // notification vibrates/chimes; intermediate ones are silent
+      // to avoid being annoying during a long scan. No-ops cleanly
+      // if permission wasn't granted.
+      notifyBatchComplete({
+        batchNum: b + 1,
+        totalBatches,
+        policyCount: processed.length,
+        totalPolicies: allExtracted.length,
+      }).catch(() => {});
       }
 
       // All batches done
@@ -14500,6 +14699,43 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
           <div style={{fontSize:10,color:'var(--text2)'}}>{scanProgress.status}</div>
           {scanProgress.pctComplete > 0 && scanProgress.pctComplete < 100 && (
             <div style={{fontSize:9,color:'var(--text3)',marginTop:4}}>You can review extracted policies below while remaining batches process</div>
+          )}
+          {/* ── BACKGROUND MODE STATUS BADGE ── */}
+          {/* Shows whether the extraction is running in SW Background
+              Fetch mode (safe to tab away) or foreground-only mode
+              (must keep app open). Computed by swExtractDiagnostic()
+              at the start of handleExtract and threaded through every
+              setScanProgress call. On iOS this is always foreground. */}
+          {scanProgress.bgMode && (
+            <div
+              title={scanProgress.bgModeReason || ''}
+              style={{
+                marginTop:8,padding:'6px 10px',
+                background: scanProgress.bgMode === 'active'
+                  ? 'rgba(91,168,160,0.08)'
+                  : 'rgba(212,169,106,0.08)',
+                border: '1px solid ' + (scanProgress.bgMode === 'active'
+                  ? 'rgba(91,168,160,0.3)'
+                  : 'rgba(212,169,106,0.3)'),
+                borderRadius:6,
+                display:'flex',alignItems:'center',gap:8,
+              }}
+            >
+              <span style={{fontSize:12}}>
+                {scanProgress.bgMode === 'active' ? '🟢' : '🟠'}
+              </span>
+              <div style={{fontSize:10,fontWeight:600,lineHeight:1.35,
+                color: scanProgress.bgMode === 'active' ? 'var(--teal)' : 'var(--gold)'}}>
+                {scanProgress.bgMode === 'active'
+                  ? 'Background mode ON — safe to tab away, extraction will continue'
+                  : 'Foreground only — keep PolicyLens open'}
+                {scanProgress.bgMode !== 'active' && scanProgress.bgModeReason && (
+                  <div style={{fontSize:8,color:'var(--text3)',fontWeight:400,marginTop:3}}>
+                    {scanProgress.bgModeReason}
+                  </div>
+                )}
+              </div>
+            </div>
           )}
           {/* ── KEEP IN FOREGROUND WARNING (iOS only) ── */}
           {/* Simpler rule per CK: iOS Safari/Chrome has no Background
