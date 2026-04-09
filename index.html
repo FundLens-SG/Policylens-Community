@@ -1708,18 +1708,29 @@ function fixOCRSpacing(text) {
 // use GEMINI_UTILITY_MODEL — a cheap/fast model since these are
 // lightweight non-vision tasks.
 //
-// Chain rationale:
-//   1. gemini-3-flash-preview — primary. Near-Pro reasoning, best
-//      quality on complex multimodal tasks like benefit illustrations.
-//      Preview model (may have breaking changes with 2 weeks notice).
-//   2. gemini-2.5-flash — stable fallback. Known-good on PolicyLens
-//      workload. Used by the old version of the app.
-//   3. gemini-3.1-flash-lite-preview — last resort. Fast and cheap
-//      but weaker at complex multi-page correlation. Acceptable
-//      quality floor when the other two are both overloaded.
+// Chain rationale (REVISED 2026-04-09 — see regression below):
+//   1. gemini-2.5-flash — PRIMARY. Known-good on PolicyLens's
+//      Singapore insurance workload. Handles specific product
+//      name extraction accurately.
+//   2. gemini-3-flash-preview — capacity-relief fallback. Near-
+//      Pro reasoning but different pool from 2.5, so when 2.5
+//      is throwing 503s, this routes around them.
+//   3. gemini-3.1-flash-lite-preview — last resort. Fast and
+//      cheap but weakest at complex multi-page correlation.
+//
+// REGRESSION NOTE: We briefly had gemini-3-flash-preview as the
+// primary. It returned GENERIC category-style productNames like
+// "AIA Investment Linked Policy" (which is a sub-type description,
+// not a real AIA product) instead of the actual product names
+// that appear in source documents ("Elite Investment Plan",
+// "Achiever Accumulator", etc). Likely a thought-signatures /
+// structured-output handling difference between 2.5 and 3. For
+// now, 2.5 is authoritative for product name extraction; we
+// only fall through to 3 when 2.5 is unavailable for capacity
+// reasons, which is exactly what a fallback should be.
 const GEMINI_EXTRACTION_CHAIN = [
-  'gemini-3-flash-preview',
   'gemini-2.5-flash',
+  'gemini-3-flash-preview',
   'gemini-3.1-flash-lite-preview',
 ];
 // Utility model for lightweight text-only tasks (note enrichment,
@@ -13260,6 +13271,9 @@ function Policies() {
 
 For EACH policy or instrument, return a JSON object with:
 
+PRODUCT NAME RULE (CRITICAL):
+productName must be the SPECIFIC marketed product name as written in the document — "Elite Investment Plan", "Pro Achiever", "Achiever Accumulator", "Platinum Wealth Elite", "LifeReady Plus", "PRUShield Premier", "GREAT TotalCare". NEVER return a generic sub-type or category description as the productName. The following are NOT valid productNames and must never be returned: "Investment Linked Policy", "Investment-Linked Policy", "Life Insurance Policy", "Whole Life Plan", "Term Life Plan", "Insurance Plan", "ILP", "Annuity Plan". Those are subTypes, not product names. If you genuinely cannot find a specific marketed product name in the document, set productName to an empty string "" — do NOT substitute a generic category label. The sub-type goes in the separate "subType" field, not in productName.
+
 CORE: insurer, productName, policyName, policyNumber, category (protection/savings/health/investment/retirement/maternity/cash_investments/other_assets), subType (Term Life/Whole Life/Universal Life (UL)/Indexed UL (IUL)/Variable UL (VUL)/Critical Illness/Personal Accident/Disability Income/Long-term Care/Endowment/Lifetime Endowment/Education Plan/Short-term Endowment/Integrated Shield Plan/Hospital Income/CareShield Life Supplement/ElderShield 300/ElderShield 400/ILP (Protection)/ILP (Investment)/Unit Trust/Retirement/Annuity/Maternity Coverage/Fixed Deposit/T-bill/Singapore Savings Bond/Corporate Bond/Money Market/Property/Stocks\/Equities/Gold\/Precious Metals/Fixed Coupon Note (FCN)/Equity Linked Note (ELN)/Options\/Futures/Cryptocurrency/Other), currency (default SGD), sumAssured (number), premiumAmount (number — the premium AS PAID, at whatever frequency it is billed. Do NOT convert or normalize. If document shows "$1,000 Monthly", return premiumAmount=1000. If document shows "$12,000 Annually", return premiumAmount=12000. If document shows "$50,000 Single Premium", return premiumAmount=50000. The frequency is captured in the separate premFrequency field below — NEVER multiply or divide the amount to match a different period), premFrequency (annual/monthly/single/unknown — MUST match the exact period of the premiumAmount value above. Singlife/SGFinDex portfolio reports have a "How Often You Pay" column — copy that verbatim: Monthly→monthly, Annually→annual, "Single Premium"→single. If unclear, use unknown), premiumStructure (Single Premium/Regular Premium/Limited Pay/Flexible Premium), paymentMethod (Cash/MediSave/SRS/MediSave+Cash/CPF OA/CPF SA)
 IMPORTANT: If document mentions CPFIS-OA, CPF-IS or CPF Investment Scheme, set paymentMethod to "CPF OA" or "CPF SA" accordingly. Standalone fund holdings (e.g. "Allianz Global High Payout", "First Sentier Bridge") without an insurance wrapper are category:investment, subType:"Unit Trust". If it mentions CPFIS, still category:investment subType:"Unit Trust".
 PAYMENT METHODS: Any insurance policy can be paid via Cash, CPF OA, CPF SA, or SRS. Look for clues:
@@ -14909,6 +14923,56 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
 
       // Process all policies uniformly
       const processed = arr.map(p => {
+        // ── GENERIC PRODUCT NAME BLACKLIST (2026-04-09) ──
+        // Some Gemini variants return sub-type descriptors like
+        // "AIA Investment Linked Policy" as the productName when
+        // they can't confidently identify the specific marketed
+        // product. The prompt explicitly forbids this (see PRODUCT
+        // NAME RULE in EXTRACT_PROMPT) but models occasionally
+        // ignore it. As a post-hoc safety net, detect the
+        // characteristic patterns and blank the productName so the
+        // FC sees an obviously-empty field that needs attention,
+        // rather than a silently-wrong generic label.
+        //
+        // Patterns are matched case-insensitively against the name
+        // with the insurer prefix optionally stripped. We require
+        // the WHOLE name to match one of these patterns — a name
+        // like "Elite Investment Linked Policy" would NOT be caught
+        // because "Elite" is clearly a marketed name.
+        const GENERIC_NAME_PATTERNS = [
+          /^investment[- ]linked policy$/i,
+          /^life insurance policy$/i,
+          /^whole life plan$/i,
+          /^term life (plan|insurance)$/i,
+          /^insurance plan$/i,
+          /^ilp$/i,
+          /^annuity plan$/i,
+          /^endowment plan$/i,
+          /^protection plan$/i,
+          /^savings plan$/i,
+          /^critical illness (plan|cover)$/i,
+        ];
+        if (p.productName && typeof p.productName === 'string') {
+          // Strip the insurer prefix if present so "AIA Investment Linked
+          // Policy" → "Investment Linked Policy" gets matched.
+          const insurerPrefix = (p.insurer || '').trim();
+          let nameCore = p.productName.trim();
+          if (insurerPrefix && nameCore.toLowerCase().startsWith(insurerPrefix.toLowerCase() + ' ')) {
+            nameCore = nameCore.slice(insurerPrefix.length + 1).trim();
+          }
+          const isGeneric = GENERIC_NAME_PATTERNS.some(rx => rx.test(nameCore));
+          if (isGeneric) {
+            console.warn('[Extract] Generic productName detected and blanked:', JSON.stringify(p.productName), '→ ""');
+            p.productName = '';
+            // Flag via _confidence so Quick Verify surfaces this to the FC
+            if (!Array.isArray(p._confidence)) p._confidence = [];
+            p._confidence.push({
+              field: 'productName',
+              level: 'low',
+              reason: 'AI returned a generic sub-type label instead of a specific product name — please enter the marketed product name from the document',
+            });
+          }
+        }
         // ── OCR SPACING FIX (2026-04-09) ──
         // Run product/policy names through the collapser BEFORE
         // spreading p into result, so every downstream consumer
