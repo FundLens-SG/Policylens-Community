@@ -15996,8 +15996,65 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       {/* Bulk Verification Modal */}
       {bulkExtracted && <BulkVerifyModal extracted={bulkExtracted} repo={repo} policies={policies} onSavePolicy={savePolicy} scanProgress={scanProgress} onClose={()=>{try{sessionStorage.removeItem('policylens_pendingExtract')}catch(e){}setBulkExtracted(null)}} onAccept={async(selected) => {
         let count = 0;
+        let mergedCount = 0;
+        // ── DEDUPE AT SAVE TIME (2026-04-09 fix) ──
+        // Previously every selected policy got a fresh genId() and
+        // was saved as a new entry, even when findExistingMatch had
+        // flagged it with _knownPolicyMatch during extraction. That's
+        // why the same policy number (U120857971, H223475933, etc)
+        // could appear 2-3 times in the Policies tab after an import.
+        //
+        // New behavior:
+        //   1. If _knownPolicyMatch.id exists, merge fields into that
+        //      existing policy and save under its original ID — no
+        //      duplicate row created.
+        //   2. Last-chance lookup by normalized policy number against
+        //      the CURRENT policies array — catches cases where a new
+        //      batch within the same run extracted the same policy
+        //      that a previous batch already saved (cross-batch races).
+        //   3. Only assign a fresh ID for genuinely new policies.
         for(const p of selected) {
-          const result = {...p, id:genId()};
+          // Strip UI-only fields before saving
+          const clean = {...p};
+          delete clean._selected; delete clean._expanded; delete clean._batch;
+          delete clean._dupOf; delete clean._matchesExisting; delete clean._repoMatch;
+          delete clean._mergeConflicts; delete clean._mergedFromPartial;
+          delete clean._recovered; delete clean._knownPolicyMatch;
+          delete clean._extractConfidence; delete clean._extractConfidenceReasons;
+          delete clean._mergeIntoExisting;
+
+          // Tier 1: explicit _knownPolicyMatch from extraction-time detection
+          let targetExisting = null;
+          if (p._knownPolicyMatch && p._knownPolicyMatch.id) {
+            targetExisting = policies.find(ep => ep.id === p._knownPolicyMatch.id);
+          }
+          // Tier 2: last-chance lookup by normalized policy number.
+          // Fresh normalize each call rather than assuming _knownPolicyMatch
+          // caught everything — extraction may have happened before the
+          // existing policy was in the array, or the match logic may have
+          // been too conservative.
+          if (!targetExisting) {
+            const incomingKey = normalizePolicyKey(clean.policyNumber);
+            if (incomingKey && incomingKey.length >= 4) {
+              targetExisting = policies.find(ep => normalizePolicyKey(ep.policyNumber) === incomingKey);
+            }
+          }
+
+          let result;
+          if (targetExisting) {
+            // Merge incoming fields into existing. mergePolicies prefers
+            // base's (existing's) non-empty values and fills in blanks
+            // from next (incoming) — so the existing record is the
+            // authoritative source of truth and only missing fields get
+            // filled. Keep the ORIGINAL id so dbPut updates in place.
+            const merged = mergePolicies(targetExisting, clean);
+            result = {...merged, id: targetExisting.id};
+            mergedCount++;
+            console.log('[Save] Merged duplicate into existing:', result.productName, '(', targetExisting.id, ')');
+          } else {
+            result = {...clean, id: genId()};
+          }
+
           if(result.premiumStructure==='Single Premium' || result.premFrequency==='single') result.premSingle = true;
           if(result.premStartAge && result.premTerm && !result.premEndAge) result.premEndAge = String(parseInt(result.premStartAge)+parseInt(result.premTerm));
           if(result.ageAtEntry && !result.premStartAge) result.premStartAge = result.ageAtEntry;
@@ -16005,7 +16062,11 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
           count++;
         }
         setBulkExtracted(null);
-        toast('Imported '+count+' policies','success');
+        const newCount = count - mergedCount;
+        const parts = [];
+        if (newCount > 0) parts.push(newCount + ' new');
+        if (mergedCount > 0) parts.push(mergedCount + ' merged into existing');
+        toast('Imported ' + (parts.join(', ') || count + ' policies'), 'success');
 
         // ── DEPENDANT CANDIDATE DETECTION ──
         // After policies are saved, scan the accepted batch for Life Insured
