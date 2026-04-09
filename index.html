@@ -14280,6 +14280,33 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
     });
   }, [staged]);
 
+  // ── STUCK-EXTRACTING RECOVERY (feature c, 2026-04-09) ──
+  // Defensive safety net for cases where staged files got marked
+  // as 'extracting' but extraction isn't actually running anymore.
+  // Most common cause: user tab-switched mid-extraction, React
+  // unmounted the Policies component, handleExtract's completion
+  // handler couldn't update the unmounted state, and the IDB
+  // persistence saved the partial 'extracting' state.
+  //
+  // Detection: scanning is false AND extractingRef is false, but
+  // staged has items in 'extracting' state.
+  //
+  // Why this can't false-positive on the normal flow: when
+  // triggerProgressiveExtract runs, it calls setStaged to mark
+  // files as 'extracting' AND synchronously calls handleExtract
+  // which sets extractingRef.current=true BEFORE any await. So
+  // by the time React commits the state update and effects run,
+  // extractingRef is already true, and this effect's check bails.
+  useEffect(() => {
+    if (!hasRestoredStagedRef.current) return;
+    if (scanning) return;
+    if (extractingRef.current) return;
+    const stuckCount = staged.filter(s => s._status === 'extracting').length;
+    if (stuckCount === 0) return;
+    console.warn('[Progressive] Detected', stuckCount, 'files stuck in extracting state — reverting to queued');
+    setStaged(prev => prev.map(s => s._status === 'extracting' ? {...s, _status: 'queued'} : s));
+  }, [scanning, staged]);
+
   // Listen for pending scans from welcome screen
   useEffect(() => {
     const handler = () => {
@@ -16639,10 +16666,31 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
               {/* Extract button — label depends on session state.
                   Fresh: "Extract All" (manual one-shot)
                   Progressive active: "Done taking photos" (flushes
-                  any remaining queued items immediately) */}
+                  any remaining queued items immediately).
+
+                  Also handles the STUCK-EXTRACTING recovery case:
+                  if files are marked 'extracting' but nothing is
+                  actually running (scanning=false, extractingRef=
+                  false), tapping the button reverts them to
+                  'queued' before triggering. The defensive useEffect
+                  also handles this on state changes, but an
+                  already-stuck component with no pending state
+                  change needs a user-action path to recover. */}
               <button
                 className="btn-primary btn-sm"
                 onClick={() => {
+                  // Stuck-state recovery: if there are 'extracting'
+                  // files but nothing's actually running, revert
+                  // them to 'queued' first, then fall through to
+                  // the normal trigger path.
+                  if (extractingCount > 0 && !scanning && !extractingRef.current) {
+                    console.warn('[Progressive] Manual recovery — reverting', extractingCount, 'stuck extracting files to queued');
+                    setStaged(prev => prev.map(s => s._status === 'extracting' ? {...s, _status: 'queued'} : s));
+                    // Don't trigger immediately — let the state
+                    // update flush, then the user can tap again OR
+                    // the idle timer will auto-fire.
+                    return;
+                  }
                   if (isProgressiveActive) {
                     // Progressive already running — force-flush any
                     // pending idle timer and trigger immediately
@@ -16657,7 +16705,9 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
                 }}
                 disabled={scanning && !isProgressiveActive}
               >
-                {isProgressiveActive
+                {extractingCount > 0 && !scanning && !extractingRef.current
+                  ? `🔄 Reset ${extractingCount} stuck`
+                  : isProgressiveActive
                   ? (scanning ? (queuedCount > 0 ? `⏭ Extract ${queuedCount} more` : 'Extracting…') : (queuedCount > 0 ? `✓ Done — extract ${queuedCount} more` : '✓ Done'))
                   : (scanning ? 'Extracting…' : '✨ Extract All')}
               </button>
