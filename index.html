@@ -2013,6 +2013,42 @@ function reconcilePolicyAgainstRepo(policy, repo) {
 }
 
 // Master function: takes a File, returns content blocks ready for AI
+// ── FILE READER WITH PROPER ERROR REPORTING ──
+// Wraps FileReader.readAsDataURL in a promise that rejects with a
+// proper Error containing the file name AND the underlying reason.
+// Previously the catch block saw raw ProgressEvent objects which
+// stringify to "[object ProgressEvent]" or expose undefined via
+// .message — masking the real cause of read failures on mobile
+// (out-of-memory, permission denied, interrupted file picker, etc.)
+const readFileAsBase64 = (file) => new Promise((res, rej) => {
+  const r = new FileReader();
+  r.onload = () => {
+    try {
+      const result = r.result;
+      if (typeof result !== 'string' || !result.includes(',')) {
+        rej(new Error('Unexpected FileReader result shape for ' + (file?.name || 'file')));
+        return;
+      }
+      res(result.split(',')[1]);
+    } catch (e) {
+      rej(new Error('FileReader result parse failed for ' + (file?.name || 'file') + ': ' + (e?.message || e)));
+    }
+  };
+  r.onerror = () => {
+    const errName = r.error?.name || 'ReadError';
+    const errMsg = r.error?.message || 'unknown';
+    rej(new Error('Failed to read file ' + (file?.name || 'unknown') + ' (' + (file?.size || 0) + ' bytes): ' + errName + ' — ' + errMsg));
+  };
+  r.onabort = () => {
+    rej(new Error('File read aborted: ' + (file?.name || 'unknown')));
+  };
+  try {
+    r.readAsDataURL(file);
+  } catch (e) {
+    rej(new Error('FileReader.readAsDataURL threw for ' + (file?.name || 'file') + ': ' + (e?.message || e)));
+  }
+});
+
 async function processFile(file) {
   const isPDF = file.type === 'application/pdf' || file.name?.toLowerCase().endsWith('.pdf');
   const isExcel = file.name?.match(/\.(xlsx|xls|csv)$/i) || file.type?.includes('spreadsheet') || file.type?.includes('excel');
@@ -2070,12 +2106,12 @@ async function processFile(file) {
       }
     } catch(e) { console.warn('[ProcessFile] Word parse error:', e); }
     // Fallback: send as document block for Claude (Gemini can't handle docx)
-    const b64 = await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file)});
+    const b64 = await readFileAsBase64(file);
     return [{type:'document', source:{type:'base64', media_type:file.type||'application/octet-stream', data:b64}, _forceAnthropic:true}];
   }
   // ── Word .doc / .rtf → force Anthropic ──
   if(isWord) {
-    const b64 = await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file)});
+    const b64 = await readFileAsBase64(file);
     return [{type:'document', source:{type:'base64', media_type:file.type||'application/octet-stream', data:b64}, _forceAnthropic:true}];
   }
 
@@ -2106,7 +2142,7 @@ async function processFile(file) {
         const images = await pdfToImages(doc);
         return images.map(b64 => ({type:'image', source:{type:'base64', media_type:'image/jpeg', data:b64}}));
       } else {
-        const b64 = await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file)});
+        const b64 = await readFileAsBase64(file);
         return [{type:'document', source:{type:'base64', media_type:'application/pdf', data:b64}}];
       }
     } catch(e) {
@@ -2118,13 +2154,13 @@ async function processFile(file) {
       }
       // For other errors (pdf.js not loaded, corrupt file), try sending raw to Gemini
       console.warn('[PDF] Falling back to raw PDF send');
-      const b64 = await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file)});
+      const b64 = await readFileAsBase64(file);
       return [{type:'document', source:{type:'base64', media_type:'application/pdf', data:b64}}];
     }
   }
   
   // ── Images (Gemini + Claude both handle these) ──
-  const b64 = await new Promise((res,rej)=>{const r=new FileReader();r.onload=()=>res(r.result.split(',')[1]);r.onerror=rej;r.readAsDataURL(file)});
+  const b64 = await readFileAsBase64(file);
   const mime = file.type || 'application/octet-stream';
   if(mime.startsWith('image/')) return [{type:'image', source:{type:'base64', media_type:mime, data:b64}}];
   
