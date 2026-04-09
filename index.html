@@ -12865,6 +12865,14 @@ function Policies() {
   const [scanResult, setScanResult] = useState(null);
   const [staged, setStaged] = useState([]);
   const [scanProgress, setScanProgress] = useState(null); // {batch, totalBatches, totalFiles, status, pctComplete}
+  // ── SYNCHRONOUS RE-ENTRY GUARD (2026-04-09 fix) ──
+  // `scanning` state is async — a dropzone event, SW recovery, or
+  // double-tap can fire handleExtract twice before React commits the
+  // setScanning(true). This ref flips synchronously so the second call
+  // bails immediately instead of launching a concurrent extraction
+  // that fights over shared mutable state (allExtracted, scanProgress,
+  // sessionStorage).
+  const extractingRef = useRef(false);
   const [draftBanner, setDraftBanner] = useState(false);
   const [bulkExtracted, setBulkExtracted] = useState(null); // for verification modal
   // ── SCAN FAILURE BANNER ──
@@ -12923,6 +12931,13 @@ function Policies() {
   // BulkVerifyModal exactly as they would for a normal scan.
   useEffect(() => {
     (async () => {
+      // Don't run recovery if an extraction is actively in flight —
+      // it would clobber the live bulkExtracted state with stale SW
+      // session data. (2026-04-09 fix)
+      if (extractingRef.current) {
+        console.log('[SW Recovery] Skipped — extraction already running');
+        return;
+      }
       // Shared helper: parse a Gemini rawText and apply minimal field
       // defaults so recovered policies render cleanly in the review
       // modal. Used for both single-session and multi-session recovery
@@ -13591,7 +13606,18 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
   //   • intermediate whitespace ("U 124 959 134" → "u124959134")
   //   • surrounding punctuation/brackets
   // This is what turns "U-124959134" and "u 124959134 " into the same key.
-  const normalizePolicyKey = (s) => (s || '').toString().toLowerCase().replace(/[^a-z0-9]/g, '');
+  // Normalizes a policy number for dedupe matching. Strips non-alphanumeric,
+  // then collapses the two most common OCR confusions (O↔0 and I/l↔1) so
+  // that "UO81228539" and "U081228539" — visually identical but byte-
+  // different because Gemini read consecutive photos slightly differently
+  // — dedupe as the same policy. Without this, the same policy appearing
+  // across photo batches came through as two separate entries (2026-04-09
+  // fix). S↔5 and B↔8 were considered but rejected — Singapore policies
+  // commonly start with S, which would cause false-positive merges.
+  const normalizePolicyKey = (s) => (s || '').toString().toLowerCase()
+    .replace(/[^a-z0-9]/g, '')
+    .replace(/o/g, '0')
+    .replace(/[il]/g, '1');
   const normalizeProductKey = (s) => (s || '').toString().toLowerCase().replace(/[^a-z0-9]/g, '');
 
   // ── MERGE TWO POLICIES ──
@@ -13759,9 +13785,49 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       }
     }
     const out = [...byPolNum.values(), ...byFp.values(), ...unmatched];
-    const removed = before - out.length;
-    if (removed > 0) console.log('[Dedupe] Merged '+removed+' duplicates ('+before+' → '+out.length+')');
-    return out;
+
+    // ── SUBSTRING FALLBACK PASS (2026-04-09 fix) ──
+    // Exact-match fingerprint bucketing misses pairs like
+    // "AIA INVEST EASY" vs "AIA INVEST EASY (CASH)" — same policy, one
+    // with an extra suffix. After the primary bucketing, walk the
+    // survivors and merge any pair with same insurer AND one product
+    // name is a substring of the other (min 6 chars to avoid false
+    // positives like "AIA" collapsing unrelated products). Skip entries
+    // that already have a policy number — those are authoritative and
+    // would have been merged in the primary pass if they belonged
+    // together. Runs O(n^2) on the surviving set which is typically
+    // <100 items so it's fine.
+    const finalOut = [];
+    for (const p of out) {
+      if (!p || typeof p !== 'object') { finalOut.push(p); continue; }
+      // Keep items with their own polNum as-is (authoritative)
+      const pNum = normalizePolicyKey(p.policyNumber);
+      if (pNum && pNum.length >= 4) { finalOut.push(p); continue; }
+      const pIns = normalizeProductKey(p.insurer);
+      const pName = normalizeProductKey(p.productName || p.policyName);
+      if (!pIns || !pName || pName.length < 6) { finalOut.push(p); continue; }
+      // Look for an existing entry in finalOut with same insurer and
+      // overlapping product name
+      let mergedInto = false;
+      for (let i = 0; i < finalOut.length; i++) {
+        const q = finalOut[i];
+        if (!q || typeof q !== 'object') continue;
+        if (normalizeProductKey(q.insurer) !== pIns) continue;
+        const qName = normalizeProductKey(q.productName || q.policyName);
+        if (!qName || qName.length < 6) continue;
+        if (qName.includes(pName) || pName.includes(qName)) {
+          finalOut[i] = smartMerge(q, p);
+          mergedInto = true;
+          console.log('[Dedupe] Substring merge:', p.insurer, p.productName, '↔', q.productName);
+          break;
+        }
+      }
+      if (!mergedInto) finalOut.push(p);
+    }
+
+    const removed = before - finalOut.length;
+    if (removed > 0) console.log('[Dedupe] Merged '+removed+' duplicates ('+before+' → '+finalOut.length+')');
+    return finalOut;
   };
 
   // Single-batch extraction (returns processed array)
@@ -14039,6 +14105,16 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
 
   const handleExtract = async (files) => {
     if(!files||!files.length) return;
+
+    // Synchronous re-entry guard — see extractingRef comment above.
+    // `scanning` state is async and can't block fast concurrent calls
+    // (dropzone + button tap, SW recovery + active loop, etc).
+    if (extractingRef.current) {
+      try { toast('⏳ Extraction already running — please wait for it to finish','warning',4000); } catch(_) {}
+      console.warn('[Extract] Re-entry blocked — an extraction is already in flight');
+      return;
+    }
+    extractingRef.current = true;
 
     // Clear any lingering failure banner from a previous attempt
     setScanFailure(null);
@@ -14452,8 +14528,22 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
     // to the normal per-batch path without regression. Single-batch
     // extractions skip this phase entirely and use the existing SW
     // single-dispatch path via swExtractRelay.
+    // ── FEATURE FLAG: SW MULTI PRE-FETCH (DISABLED 2026-04-09) ──
+    // The SW multi pre-fetch path was causing severe slowdowns and a
+    // "looping back to batch 1" symptom on mobile. Root cause: it runs
+    // a full pre-processing pass (processFile + base64 encoding) on
+    // EVERY batch upfront before the main loop starts, which on a 43-
+    // photo / 5-batch upload takes 30-60s showing "Preparing batch N..."
+    // progress. When the SW then stalls or times out per-batch (5 min),
+    // the main loop falls through to the normal in-page Gemini path and
+    // effectively re-extracts everything a second time. The old version
+    // of PolicyLens used only the sequential per-batch loop and worked
+    // fine — this path is additive complexity that became net-negative.
+    // Gated off via feature flag so the dead code stays readable for
+    // future debugging; can be re-enabled by flipping the constant.
+    const USE_SW_MULTI_PREFETCH = false;
     let precomputedPromises = null;
-    if (batches.length > 1) {
+    if (USE_SW_MULTI_PREFETCH && batches.length > 1) {
       try {
         const swAvailable = await swExtractIsAvailable();
         if (swAvailable) {
@@ -15260,6 +15350,9 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
         partialPolicies: allExtracted.length,
       });
     } finally {
+      // Release the synchronous re-entry guard first so any queued
+      // retry can proceed if the user taps again immediately.
+      extractingRef.current = false;
       // Always clean up the wake lock, visibility listener, and
       // beforeunload guard — whether extraction succeeded, failed, or was
       // interrupted. Without this the screen would stay on and the
