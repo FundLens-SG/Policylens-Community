@@ -22,7 +22,7 @@
 //     the Tier 1 in-page extraction with batch-level resume.
 // ═══════════════════════════════════════════════════════════════
 
-const CACHE_NAME = 'policylens-v1.0.4-reply-fix';
+const CACHE_NAME = 'policylens-v1.0.5-bgfetch-check';
 const ASSETS = [
   './',
   './index.html',
@@ -223,9 +223,19 @@ self.addEventListener('message', async (e) => {
 
   switch (data.type) {
     case 'CHECK_SUPPORT': {
+      // Feature detection for Background Fetch API inside a SW.
+      // CRITICAL: use 'backgroundFetch' (lowercase) — that's the
+      // property on ServiceWorkerRegistration that returns a
+      // BackgroundFetchManager instance. 'BackgroundFetchManager'
+      // (the constructor) is a global in the WINDOW context but is
+      // NOT a property of self.registration inside the SW, so the
+      // old check was always returning false.
+      const hasBackgroundFetch = 'backgroundFetch' in self.registration
+        && !!self.registration.backgroundFetch
+        && typeof self.registration.backgroundFetch.fetch === 'function';
       reply({
         type: 'SUPPORT_RESULT',
-        bgFetch: 'BackgroundFetchManager' in self.registration,
+        bgFetch: hasBackgroundFetch,
         version: CACHE_NAME,
       });
       break;
@@ -350,7 +360,12 @@ async function runExtraction(sessionId, requestSpec) {
     : 0;
 
   // Path A: Background Fetch
-  if ('BackgroundFetchManager' in self.registration && bodyBytes < MAX_BG_FETCH_BODY_BYTES) {
+  // Same fix as CHECK_SUPPORT: use 'backgroundFetch' (lowercase),
+  // not 'BackgroundFetchManager' (which is a window-only global).
+  const bgFetchAvailable = 'backgroundFetch' in self.registration
+    && !!self.registration.backgroundFetch
+    && typeof self.registration.backgroundFetch.fetch === 'function';
+  if (bgFetchAvailable && bodyBytes < MAX_BG_FETCH_BODY_BYTES) {
     try {
       const request = new Request(requestSpec.url, {
         method: 'POST',

@@ -19,7 +19,44 @@ console.error=function(){var m=arguments[0]||'';if(typeof m==='string'&&m.includ
 <meta name="apple-mobile-web-app-title" content="PolicyLens">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <script>
-if('serviceWorker' in navigator && location.hostname.includes('github.io')){window.addEventListener('load',()=>{navigator.serviceWorker.register('sw.js').then(r=>console.log('[SW] Registered:',r.scope)).catch(e=>console.warn('[SW] Failed:',e));});}
+if('serviceWorker' in navigator && location.hostname.includes('github.io')){
+  window.addEventListener('load', async () => {
+    try {
+      const reg = await navigator.serviceWorker.register('sw.js');
+      console.log('[SW] Registered:', reg.scope);
+      // Force an update check on every page load. Chrome's default is
+      // once per 24h which means freshly-deployed sw.js fixes can take
+      // up to a day to reach users. This forces an immediate re-fetch.
+      try { await reg.update(); } catch(_) {}
+      // Listen for new SW becoming available — fires after update()
+      // discovers a new version or when the site is reloaded with a
+      // new sw.js on the server.
+      reg.addEventListener('updatefound', () => {
+        const newSW = reg.installing;
+        if (!newSW) return;
+        console.log('[SW] New version found — installing');
+        newSW.addEventListener('statechange', () => {
+          if (newSW.state === 'installed' && navigator.serviceWorker.controller) {
+            console.log('[SW] New version installed — will take control on next navigation');
+            // Because sw.js calls self.skipWaiting() in its install
+            // handler, the new SW becomes active immediately. We just
+            // need to clear the capability cache so the next extraction
+            // re-checks support with the fresh SW.
+            try { if (typeof swExtractResetCache === 'function') swExtractResetCache(); } catch(_) {}
+          }
+        });
+      });
+      // Also listen for controller changes (new SW takes over) and
+      // clear the cache then too.
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        console.log('[SW] Controller changed — new SW is active');
+        try { if (typeof swExtractResetCache === 'function') swExtractResetCache(); } catch(_) {}
+      });
+    } catch (e) {
+      console.warn('[SW] Registration failed:', e);
+    }
+  });
+}
 </script>
 <script crossorigin="anonymous" src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
 <script crossorigin="anonymous" src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
@@ -13780,6 +13817,23 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
     // the result. Also requests notification permission unconditionally
     // (not just when SW is available) so per-batch notifications work
     // even on the in-page foreground path.
+    //
+    // Force an SW update check FIRST. Chrome normally only checks for
+    // a new sw.js every 24h, which means deployed fixes can take up
+    // to a day to reach users. Calling reg.update() forces an
+    // immediate re-fetch. Combined with self.skipWaiting() in sw.js
+    // install handler, a freshly-deployed sw.js takes over before
+    // this extraction starts.
+    try {
+      if ('serviceWorker' in navigator) {
+        const reg = await navigator.serviceWorker.getRegistration();
+        if (reg) {
+          await reg.update();
+          // Give the new SW a moment to install + take control
+          await new Promise(resolve => setTimeout(resolve, 300));
+        }
+      }
+    } catch(e) { console.warn('[Extract] SW update check failed:', e); }
     swExtractResetCache(); // force a fresh check each extraction
     let bgDiag = null;
     try { bgDiag = await swExtractDiagnostic(); }
