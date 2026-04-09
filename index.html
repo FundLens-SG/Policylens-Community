@@ -12322,6 +12322,11 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
     }
 
     let arr;
+    // Hoisted: `expectedCount` is assigned inside the normal-path branch
+    // below but referenced later by the reconciliation logs and cache-write
+    // gate. Declaring it at function scope prevents a ReferenceError on
+    // the precomputed path where the normal branch is skipped entirely.
+    let expectedCount;
     if (precomputedRawText != null) {
       // ── PRECOMPUTED PATH (SW multi pre-fetch) ──
       // Parse the rawText Gemini response directly, bypassing content
@@ -12362,7 +12367,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
       // Scan the text blocks for hints like "You have 16 active policies" before the AI call.
       // If the final extracted count is lower than this hint, we'll warn the user.
       const sourceText = content.filter(b => b.type === 'text').map(b => b.text).join('\n');
-      const expectedCount = parseExpectedPolicyCount(sourceText);
+      expectedCount = parseExpectedPolicyCount(sourceText);
       if(expectedCount) console.log('[Extract] Document hints at', expectedCount, 'policies');
 
       // ── REPO-GROUNDED PRIORS ──
