@@ -2199,6 +2199,98 @@ function reconcilePolicyAgainstRepo(policy, repo) {
 }
 
 // Master function: takes a File, returns content blocks ready for AI
+// ═══════════════════════════════════════════════════════════════
+// MODULE: IMAGE DOWNSCALER (cost optimization #1)
+// ═══════════════════════════════════════════════════════════════
+// Phone photos from FCs are typically 3-5MB at 4000+ pixels wide.
+// At full resolution they consume ~1500-2000 vision input tokens
+// per image and Gemini/Claude have to allocate substantial decode
+// time. For Singapore insurance documents (mostly printed text on
+// white backgrounds), there is essentially zero accuracy loss when
+// downscaling to ~1600px wide and recompressing as JPEG quality 80
+// — but token cost drops by ~80% and upload time drops similarly.
+//
+// Triggered automatically inside stagePhotos() for any image file
+// over a size threshold. Files that are already small (screenshots,
+// already-optimized images, PDFs, non-images) pass through untouched.
+//
+// Returns a new File object with the same name. The original is
+// discarded immediately so we don't keep two copies in memory.
+const IMAGE_PREPROCESS_MIN_BYTES = 400 * 1024; // 400KB — below this, don't bother
+const IMAGE_PREPROCESS_MAX_DIMENSION = 1600;   // px on longest edge
+const IMAGE_PREPROCESS_JPEG_QUALITY = 0.80;    // 80% JPEG quality
+
+async function preprocessImageFile(file) {
+  // Bail conditions: not an image, already small, or HEIC (which canvas can't decode reliably)
+  if (!file || !file.type || !file.type.startsWith('image/')) return file;
+  if (file.type === 'image/heic' || file.type === 'image/heif') return file; // browser can't decode
+  if (file.size <= IMAGE_PREPROCESS_MIN_BYTES) return file;
+
+  try {
+    // Decode via Image element (works in all browsers, HW accelerated)
+    const dataUrl = await new Promise((res, rej) => {
+      const r = new FileReader();
+      r.onload = () => res(r.result);
+      r.onerror = () => rej(new Error('FileReader failed'));
+      r.readAsDataURL(file);
+    });
+    const img = await new Promise((res, rej) => {
+      const i = new Image();
+      i.onload = () => res(i);
+      i.onerror = () => rej(new Error('Image decode failed'));
+      i.src = dataUrl;
+    });
+
+    // Compute target dimensions preserving aspect ratio
+    const longest = Math.max(img.naturalWidth, img.naturalHeight);
+    if (longest <= IMAGE_PREPROCESS_MAX_DIMENSION) {
+      // Already small enough — but still re-encode if it's a huge PNG
+      if (file.type !== 'image/png' || file.size < 1024 * 1024) return file;
+    }
+    const scale = Math.min(1, IMAGE_PREPROCESS_MAX_DIMENSION / longest);
+    const targetW = Math.round(img.naturalWidth * scale);
+    const targetH = Math.round(img.naturalHeight * scale);
+
+    // Draw to canvas
+    const canvas = document.createElement('canvas');
+    canvas.width = targetW;
+    canvas.height = targetH;
+    const ctx = canvas.getContext('2d');
+    // White background — JPEG can't do alpha and dark backgrounds hurt OCR
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, targetW, targetH);
+    ctx.drawImage(img, 0, 0, targetW, targetH);
+
+    // Encode as JPEG
+    const blob = await new Promise((res, rej) => {
+      canvas.toBlob(b => b ? res(b) : rej(new Error('Canvas toBlob returned null')),
+        'image/jpeg', IMAGE_PREPROCESS_JPEG_QUALITY);
+    });
+
+    if (!blob || blob.size >= file.size) {
+      // Recompression made it bigger — keep original
+      console.log('[ImagePreprocess] Skipped (recompression bigger):', file.name, file.size, '→', blob?.size);
+      return file;
+    }
+
+    // Wrap into a File preserving name + lastModified
+    const newName = file.name.replace(/\.(png|webp|tiff?|bmp|heic|heif)$/i, '.jpg');
+    const newFile = new File([blob], newName, {type:'image/jpeg', lastModified: file.lastModified});
+    console.log('[ImagePreprocess]', file.name, '·', img.naturalWidth+'×'+img.naturalHeight, '→', targetW+'×'+targetH, '·', (file.size/1024).toFixed(0)+'KB → '+(blob.size/1024).toFixed(0)+'KB ('+Math.round((1-blob.size/file.size)*100)+'% smaller)');
+    return newFile;
+  } catch (err) {
+    // Any failure → return original. Never block extraction over an optimization.
+    console.warn('[ImagePreprocess] Failed for', file.name, '— using original:', err.message);
+    return file;
+  }
+}
+
+// Batch helper — preprocess an array of files concurrently
+async function preprocessImageFiles(files) {
+  if (!files || !files.length) return files;
+  return await Promise.all(Array.from(files).map(preprocessImageFile));
+}
+
 // ── FILE READER WITH PROPER ERROR REPORTING + RETRY ──
 // Wraps FileReader.readAsDataURL in a promise. Retries ONCE on
 // NotReadableError/NetworkError because Android Chrome can
@@ -10034,6 +10126,215 @@ async function geminiStructuredExtract(geminiKey, systemPrompt, contentBlocks, m
 }
 
 // ═══════════════════════════════════════════════════════════════
+// MODULE: DOMAIN RULE VALIDATION (extraction quality #9)
+// ═══════════════════════════════════════════════════════════════
+// Post-extraction sanity check that catches AI logic errors which
+// schema validation alone won't catch. Examples:
+//   • Term Life with a non-zero cashValue (impossible — term has no SV)
+//   • Single Premium with frequency = monthly (contradictory)
+//   • premStartAge + premTerm ≠ premEndAge (arithmetic violation)
+//   • UT with empty fundAllocations (every UT has at least one fund)
+//   • ISP with no ispClass (must be A/B1/B2+)
+//
+// Two modes per rule:
+//   • AUTO-CORRECT: rule has a clear right answer → fix silently and
+//     log. Example: "Single Premium" forces premFrequency='single'.
+//   • FLAG: rule indicates uncertainty, no clear fix → push a low-
+//     confidence entry to _confidence so the FC sees it in Quick
+//     Verify. Example: Term Life with cashValue (could be a typo or
+//     could be the wrong subType — FC must decide).
+//
+// Returns the (possibly mutated) policy. Never throws — validation
+// failures degrade gracefully.
+function validateExtractedPolicy(p) {
+  if (!p || typeof p !== 'object') return p;
+  if (!Array.isArray(p._confidence)) p._confidence = [];
+  const flag = (field, level, reason) => {
+    // Don't double-flag if already present
+    if (!p._confidence.some(c => c.field === field)) {
+      p._confidence.push({field, level, reason});
+    }
+  };
+  const fix = (field, oldVal, newVal, reason) => {
+    console.log('[ValidatePolicy] Auto-fix', field, JSON.stringify(oldVal), '→', JSON.stringify(newVal), '·', reason);
+    p[field] = newVal;
+  };
+
+  const sub = (p.subType || '').toLowerCase();
+  const cat = (p.category || '').toLowerCase();
+  const struct = (p.premiumStructure || '').toLowerCase();
+
+  // ── R1: Single Premium → frequency must be 'single' ──
+  if (struct.includes('single')) {
+    if (p.premFrequency && p.premFrequency !== 'single') {
+      fix('premFrequency', p.premFrequency, 'single', 'premiumStructure="Single Premium" forces premFrequency=single');
+    } else if (!p.premFrequency) {
+      fix('premFrequency', null, 'single', 'inferred from premiumStructure');
+    }
+  }
+
+  // ── R2: Term Life cannot have a cash value ──
+  if (sub === 'term life' || sub === 'term') {
+    const cv = parseFloat(p.cashValue);
+    if (cv && cv > 0) {
+      flag('cashValue', 'medium', 'Term Life policies have no cash value — verify subType or remove cashValue');
+    }
+  }
+
+  // ── R3: Premium term arithmetic ──
+  // premStartAge + premTerm must equal premEndAge (off-by-one OK)
+  const ps = parseInt(p.premStartAge);
+  const pt = parseInt(p.premTerm);
+  const pe = parseInt(p.premEndAge);
+  if (ps && pt && pe) {
+    const expected = ps + pt;
+    if (Math.abs(expected - pe) > 1) {
+      flag('premTerm', 'medium', 'premStartAge('+ps+') + premTerm('+pt+') = '+expected+' but premEndAge='+pe);
+    }
+  } else if (ps && pt && !pe) {
+    // We can compute it
+    fix('premEndAge', null, ps + pt, 'computed from premStartAge + premTerm');
+  } else if (pe && pt && !ps) {
+    fix('premStartAge', null, pe - pt, 'computed from premEndAge - premTerm');
+  } else if (ps && pe && !pt) {
+    fix('premTerm', null, pe - ps, 'computed from premEndAge - premStartAge');
+  }
+
+  // ── R4: Unit Trust must have a fund holding ──
+  if (sub === 'unit trust') {
+    const funds = Array.isArray(p.fundAllocations) ? p.fundAllocations : [];
+    if (funds.length === 0) {
+      // The product name IS the fund for a single-fund UT — auto-populate
+      if (p.productName && p.productName.length > 3) {
+        fix('fundAllocations', [], [{fundName: p.productName, allocation: 100}],
+          'Unit Trust always has ≥1 fund — using productName as the fund name');
+      } else {
+        flag('fundAllocations', 'low', 'Unit Trust with no fund holdings — please add the fund name');
+      }
+    }
+    // Insurer should be a platform, not a fund house
+    const ins = (p.insurer || '').toLowerCase();
+    const fundHouseTokens = ['allianz', 'blackrock', 'first sentier', 'fidelity', 'jpmorgan', 'schroder', 'pimco', 'eastspring', 'amundi', 'invesco', 'franklin templeton'];
+    if (fundHouseTokens.some(t => ins === t)) {
+      flag('insurer', 'medium', 'For Unit Trusts the insurer should be the platform (iFAST, FSMOne, Endowus) not the fund house — verify');
+    }
+  }
+
+  // ── R5: ISP must have a ward class ──
+  if (sub === 'integrated shield plan' || sub === 'isp') {
+    if (!p.ispClass) {
+      flag('ispClass', 'medium', 'Integrated Shield Plan requires a ward class (A/B1/B2+)');
+    }
+  }
+
+  // ── R6: ILP/UL/IUL/VUL should have growth assumption or fund allocations ──
+  if (sub.includes('ilp') || sub.includes('ul') || sub === 'investment-linked policy (ilp)') {
+    const funds = Array.isArray(p.fundAllocations) ? p.fundAllocations : [];
+    const hasGrowth = parseFloat(p.ilpGrowth) > 0;
+    if (funds.length === 0 && !hasGrowth) {
+      flag('fundAllocations', 'low', 'Investment-Linked policy with no fund allocations and no growth assumption');
+    }
+  }
+
+  // ── R7: Annuity/Retirement should have payout details ──
+  if (sub.includes('annuity') || sub.includes('retirement') || cat === 'retirement') {
+    const payout = parseFloat(p.annuityPayout) || parseFloat(p.annuityMonthly);
+    if (!payout) {
+      flag('annuityPayout', 'medium', 'Retirement/Annuity plan missing payout amount');
+    }
+  }
+
+  // ── R8: Critical Illness should have a sum assured ──
+  if (sub.includes('critical illness') || sub.includes('ci')) {
+    const sa = parseFloat(p.sumAssured);
+    if (!sa || sa < 1000) {
+      flag('sumAssured', 'medium', 'Critical Illness policy missing or implausibly low sumAssured');
+    }
+  }
+
+  // ── R9: Premium amount sanity ──
+  // Regular protection premiums under $50/yr or over $200k/yr are almost certainly wrong
+  const premium = parseFloat(p.premiumAmount || p.annualPremium);
+  const freq = (p.premFrequency || '').toLowerCase();
+  if (premium && freq && freq !== 'single') {
+    const annualized = freq === 'monthly' ? premium * 12 : premium;
+    if (cat === 'protection' && annualized > 200000) {
+      flag('premiumAmount', 'medium', 'Annualized premium ('+annualized.toFixed(0)+') exceeds typical protection range — verify');
+    }
+    if (cat === 'protection' && annualized < 50 && annualized > 0) {
+      flag('premiumAmount', 'medium', 'Annualized premium ('+annualized.toFixed(0)+') below typical protection minimum — verify');
+    }
+  }
+
+  // ── R10: Fund allocations must sum to ~100% ──
+  if (Array.isArray(p.fundAllocations) && p.fundAllocations.length > 0) {
+    const sum = p.fundAllocations.reduce((s,f) => s + (parseFloat(f.allocation) || 0), 0);
+    if (sum > 0 && (sum < 95 || sum > 105)) {
+      flag('fundAllocations', 'medium', 'Fund allocations sum to '+sum.toFixed(0)+'% (expected ~100%)');
+    }
+  }
+
+  return p;
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MODULE: PRE-EXTRACTION INSURER CLASSIFIER (UX win #13)
+// ═══════════════════════════════════════════════════════════════
+// Fast Gemini Flash-Lite call that runs in parallel with the main
+// extraction. Asks ONLY "which insurer is this?" and returns the
+// answer in ~500ms. Used to:
+//   1. Show the insurer logo + "extracting..." in the UI immediately
+//      (instead of a blank spinner) so the FC has visual feedback
+//   2. Pre-warm the few-shot prompt builder with insurer context
+//   3. Catch obvious wrong-document uploads early ("this is a coffee
+//      cup photo, not a policy") before spending the full extraction
+//      cost
+//
+// Costs ~$0.0001 per call (50 input tokens × Flash-Lite at $0.10/M).
+// Returns null on failure — never blocks the main extraction.
+const INSURER_QUICK_CLASSIFY_TIMEOUT_MS = 8000;
+async function quickClassifyInsurer(geminiKey, contentBlocks) {
+  if (!geminiKey || !contentBlocks || !contentBlocks.length) return null;
+  // Take just the first image/document — we don't need all of them for this
+  const firstMedia = contentBlocks.find(b => b.type === 'image' || b.type === 'document');
+  if (!firstMedia) return null;
+  const parts = [{
+    text: 'You are looking at the first page of an insurance or finance document. Identify the insurer/platform/bank name visible on the document. Common Singapore options: AIA, Manulife, Prudential, Great Eastern, NTUC Income, Singlife, FWD, Tokio Marine, China Life, China Taiping, Allianz, AXA, Etiqa, Zurich, MSIG, Sompo, HSBC Life, iFAST, FSMOne, Endowus, Phillip POEMS, DBS, OCBC, UOB, Maybank, Standard Chartered, Citibank. Respond with ONLY the name (e.g. "AIA", "iFAST", "DBS"). If no insurer is visible or this is not a policy document, respond with "NONE". One word only, no punctuation, no explanation.'
+  }];
+  if (firstMedia.type === 'image') {
+    parts.push({inlineData:{mimeType:firstMedia.source.media_type, data:firstMedia.source.data}});
+  } else {
+    parts.push({inlineData:{mimeType:firstMedia.source.media_type||'application/pdf', data:firstMedia.source.data}});
+  }
+  try {
+    const ctrl = new AbortController();
+    const timeoutId = setTimeout(() => ctrl.abort(), INSURER_QUICK_CLASSIFY_TIMEOUT_MS);
+    const resp = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-lite:generateContent?key='+geminiKey, {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({
+        contents: [{parts}],
+        generationConfig: {maxOutputTokens: 20, temperature: 0},
+      }),
+      signal: ctrl.signal,
+    });
+    clearTimeout(timeoutId);
+    if (!resp.ok) return null;
+    const data = await resp.json();
+    const raw = (data.candidates?.[0]?.content?.parts?.[0]?.text || '').trim();
+    if (!raw || raw.toUpperCase() === 'NONE') return null;
+    // Sanitize: take first word only, normalize
+    const cleaned = raw.split(/[\s\n,.;:]/)[0].trim();
+    if (cleaned.length < 2 || cleaned.length > 30) return null;
+    console.log('[QuickClassify] Insurer detected:', cleaned);
+    return cleaned;
+  } catch (err) {
+    console.warn('[QuickClassify] Failed:', err.message);
+    return null;
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════
 // CLAUDE STRUCTURED EXTRACT — image+document vision fallback
 // ═══════════════════════════════════════════════════════════════
 // Gemini 2.5 Flash is the primary extraction engine because it's
@@ -10105,6 +10406,28 @@ async function claudeStructuredExtract(anthropicKey, systemPrompt, contentBlocks
     'No markdown, no backticks, no commentary, no preamble. The first character of your response ' +
     'MUST be [ and the last character MUST be ]. If extracting a single policy, wrap it in a one-element array.';
 
+  // ── PROMPT CACHING (cost optimization #2) ──
+  // The system prompt is ~16KB and IDENTICAL across every extraction
+  // call in a session. Anthropic's prompt caching gives 90% discount
+  // on cached tokens after the first request, which dramatically
+  // reduces input cost for sessions with multiple extractions.
+  //
+  // Format: send the system prompt as an array of content blocks
+  // with cache_control: {type:'ephemeral'} on the last (and only)
+  // block. The cache key is hashed from the block content, so as
+  // long as we always pass the same system prompt verbatim, all
+  // calls after the first hit the cache.
+  //
+  // Cache TTL: 5 minutes (Anthropic default). Each call refreshes
+  // the TTL, so a session of back-to-back extractions stays cached.
+  // First call has a 25% surcharge (cache write), subsequent calls
+  // have a 90% discount on the cached portion. Net win after ~2 calls.
+  const systemBlocks = [{
+    type: 'text',
+    text: augmentedSystem,
+    cache_control: { type: 'ephemeral' },
+  }];
+
   let lastErr = null;
   for(let i = 0; i < CLAUDE_VISION_CHAIN.length; i++) {
     const model = CLAUDE_VISION_CHAIN[i];
@@ -10121,7 +10444,7 @@ async function claudeStructuredExtract(anthropicKey, systemPrompt, contentBlocks
         body:JSON.stringify({
           model: model,
           max_tokens: maxTokens || 16000,
-          system: augmentedSystem,
+          system: systemBlocks,
           messages: [{role:'user', content: claudeContent}],
         }),
       });
@@ -13757,6 +14080,42 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
     }));
   }, [repo]);
 
+  // ── AUTO-IMPORT FOR HIGH-CONFIDENCE EXTRACTIONS (#3) ──
+  // When EVERY extracted policy has all fields at high confidence
+  // (zero entries in the _confidence array / zero verifiable fields
+  // in Quick Verify) AND extraction is complete (all batches done),
+  // auto-import without opening the full verify modal. Shows a brief
+  // toast so the FC knows what happened and can undo via edit.
+  //
+  // This massively speeds up the happy path where the AI got
+  // everything right: the FC drops photos, the policies appear in
+  // the list a few seconds later, no manual review step needed.
+  //
+  // Guard: fires once via ref. Skipped if any batch is still pending.
+  const autoImportFiredRef = useRef(false);
+  useEffect(() => {
+    // Don't auto-import if already fired
+    if (autoImportFiredRef.current) return;
+    // Don't auto-import while extraction is still in progress
+    if (scanProgress && scanProgress.pctComplete < 100) return;
+    // Need at least 1 item
+    if (!items || items.length === 0) return;
+    // Check: do ALL items have zero verifiable fields?
+    const allHighConfidence = items.every(it => {
+      const verifiable = getVerifiableFields(it);
+      return verifiable.length === 0;
+    });
+    if (!allHighConfidence) return;
+    // All policies are high confidence — auto-import
+    autoImportFiredRef.current = true;
+    console.log('[AutoImport] All', items.length, 'policies high confidence — auto-importing without verify modal');
+    try { toast('✅ All policies high confidence — auto-imported ' + items.length + ' polic' + (items.length === 1 ? 'y' : 'ies'), 'success', 4000); } catch(e) {}
+    // Small delay so the toast is visible before the modal closes
+    setTimeout(() => {
+      handleAccept();
+    }, 300);
+  }, [items, scanProgress?.pctComplete]);
+
   const toggleSelect = (idx) => setItems(prev => prev.map(it => it._idx===idx ? {...it, _selected:!it._selected} : it));
   // updateField: when the FC edits a field, that field is implicitly verified.
   // Clear its entry from _extractConfidence so the Quick Verify view stops
@@ -15313,13 +15672,35 @@ Setting this flag does NOT exempt you from correlation — you should STILL try 
 Return ONLY valid JSON. Start with { end with }. No markdown.`;
 
   // ── Stage camera photos ──
-  const stagePhotos = (files) => {
+  const stagePhotos = async (files) => {
     if(!files||!files.length) return;
+    // ── COST OPTIMIZATION: downscale large images before staging ──
+    const processed = await preprocessImageFiles(Array.from(files));
     const newStaged = [];
-    for(const f of Array.from(files)){
-      newStaged.push({file:f, preview:URL.createObjectURL(f), _status:'queued'});
+    for(const f of processed){
+      newStaged.push({file:f, preview:URL.createObjectURL(f), _status:'queued', _detectedInsurer:null});
     }
     setStaged(prev => [...prev, ...newStaged].slice(0,200));
+    // ── PRE-CLASSIFY: detect insurer from first image (UX #13) ──
+    // Runs in background — doesn't block staging. Result appears as
+    // a small badge on the staged strip and gets passed to the
+    // extraction prompt for few-shot context. ~$0.0001 per call.
+    const firstImage = processed.find(f => f.type && f.type.startsWith('image/'));
+    if (firstImage) {
+      const uid = window._user?.id || '';
+      const gk = ((await dbGet('settings','geminiKey_'+uid).catch(()=>null))?.value || (await dbGet('settings','geminiKey').catch(()=>null))?.value || '').trim();
+      if (gk) {
+        const b64 = await _readFileAsBase64Once(firstImage).catch(()=>null);
+        if (b64) {
+          quickClassifyInsurer(gk, [{type:'image', source:{media_type:'image/jpeg', data:b64}}]).then(insurer => {
+            if (insurer) {
+              setStaged(prev => prev.map(s => s.file === firstImage ? {...s, _detectedInsurer: insurer} : s));
+              try { toast('🔎 Detected: ' + insurer, 'info', 2000); } catch(e) {}
+            }
+          }).catch(() => {});
+        }
+      }
+    }
   };
   const removeStaged = (idx) => {
     setStaged(prev => { const n=[...prev]; URL.revokeObjectURL(n[idx].preview); n.splice(idx,1); return n; });
@@ -15665,7 +16046,26 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
 
     let text;
     try {
-      text = await callAI(EXTRACT_PROMPT, contentBlocks, 32000, POLICY_EXTRACTION_SCHEMA);
+      // ── FEW-SHOT INJECTION (#6) ──
+      // If we detected an insurer via quickClassifyInsurer (#13),
+      // pull 1-2 verified products from the repo for that insurer
+      // and prepend them as gold-standard examples. LLMs are
+      // dramatically better with concrete examples than rules alone.
+      let promptToUse = EXTRACT_PROMPT;
+      try {
+        const detectedInsurer = staged.find(s => s._detectedInsurer)?._detectedInsurer;
+        if (detectedInsurer && repo && repo.length) {
+          const matches = repo.filter(r => r.insurer && r.insurer.toLowerCase().includes(detectedInsurer.toLowerCase())).slice(0, 2);
+          if (matches.length) {
+            const examples = matches.map(m => 
+              '• ' + m.insurer + ' — ' + m.productName + ' (' + m.subType + '): ' + (m.notes || '').slice(0, 300)
+            ).join('\n');
+            promptToUse = EXTRACT_PROMPT + '\n\n═══ VERIFIED ' + detectedInsurer.toUpperCase() + ' EXAMPLES (use as gold-standard reference) ═══\n' + examples + '\n═══ END EXAMPLES ═══';
+            console.log('[FewShot] Injected', matches.length, detectedInsurer, 'examples into prompt');
+          }
+        }
+      } catch(e) { console.warn('[FewShot] Injection failed:', e.message); }
+      text = await callAI(promptToUse, contentBlocks, 32000, POLICY_EXTRACTION_SCHEMA);
     } catch(err) {
       // If the AI call itself fails and we still have room to split, try splitting
       // — sometimes oversize content throws before truncation detection.
@@ -17392,6 +17792,18 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
               }
             });
           }
+        }
+
+        // ── DOMAIN RULE VALIDATION (extraction quality #9) ──
+        // Run a final pass of constraint checks: arithmetic, category-
+        // specific required fields, sanity checks. Auto-fixes clear
+        // violations and flags ambiguous ones into _confidence so the
+        // FC sees them in Quick Verify. See validateExtractedPolicy
+        // for the full rule list.
+        try {
+          validateExtractedPolicy(result);
+        } catch (validateErr) {
+          console.warn('[Validate] Failed for policy', result.id, ':', validateErr.message);
         }
 
         return result;
