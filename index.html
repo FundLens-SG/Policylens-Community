@@ -1643,7 +1643,7 @@ async function pdfToImages(pdfDoc, maxPages=12) {
 // CLEAN even if the FC never actually reviewed anything. Bumping the version
 // forces a re-extraction next time those same files are uploaded, and the
 // one-time cleanup in App init purges the stale entries from IndexedDB.
-const EXTRACT_PIPELINE_VERSION = 'v8-2026-04-08-quick-verify-confidence';
+const EXTRACT_PIPELINE_VERSION = 'v9-2026-04-10-ut-platform-rules';
 
 // ═══════════════════════════════════════════════════════════════
 // OCR SPACING FIX (2026-04-09)
@@ -2844,11 +2844,11 @@ const InsurerSelect = ({value,onChange,style}) => {
   const isOther = value && !INSURERS[value] && value!=='';
   return React.createElement('div',null,
     React.createElement('select',{value:isOther?'__other':value||'',onChange:e=>{if(e.target.value==='__other'){onChange(other||'Other');setOther(other||'');}else{onChange(e.target.value);setOther('');}},style:{...style,color:getInsurer(value).color,fontWeight:600}},
-      React.createElement('option',{value:''},'Select insurer…'),
+      React.createElement('option',{value:''},'Select insurer/platform…'),
       INSURER_LIST.map(n=>React.createElement('option',{key:n,value:n},n)),
       React.createElement('option',{value:'__other'},'Other…')
     ),
-    isOther && React.createElement('input',{value:other,onChange:e=>{setOther(e.target.value);onChange(e.target.value);},placeholder:'Type insurer name',style:{marginTop:4,width:'100%',fontSize:12}})
+    isOther && React.createElement('input',{value:other,onChange:e=>{setOther(e.target.value);onChange(e.target.value);},placeholder:'Type insurer/platform name',style:{marginTop:4,width:'100%',fontSize:12}})
   );
 };
 
@@ -5811,7 +5811,15 @@ function mergePerField(localData, cloudData, localVersions, cloudVersions) {
       // versions.
       if (key in cleanLocal) result[key] = cleanLocal[key];
       else if (key in cleanCloud) result[key] = cleanCloud[key]; // fallback — prevents field loss
-      mergedVersions[key] = localT || cloudT;
+      // CRITICAL: only stamp versions that are actually non-zero.
+      // Including zero-value entries here would create extra keys
+      // in mergedVersions that aren't in the original local or
+      // cloud version maps, causing the deep-equal comparison to
+      // fail and triggering an infinite push-back loop. The
+      // convention everywhere else in the codebase is to store
+      // ONLY meaningful (non-zero) timestamps.
+      const v = localT || cloudT;
+      if (v > 0) mergedVersions[key] = v;
     }
   }
   return { data: result, versions: mergedVersions };
@@ -6511,6 +6519,19 @@ function App() {
   // missing legitimate cross-device events (the next user action
   // will re-trigger sync anyway).
   const lastSyncRef = useRef(0);
+  // Timestamp (ms) of the last self-push to ANY synced table.
+  // Stamped by savePolicy, saveProfile, saveHouseDefaults,
+  // deletePolicy. Realtime handlers check this BEFORE deciding
+  // to fire a sync — if we've pushed within the last few seconds,
+  // the incoming event is almost certainly our own echo and can
+  // be safely ignored. This prevents the "you uploaded a policy
+  // and got 4 sync toasts" UX issue: the user's own action
+  // triggers Realtime, which used to trigger a sync, which used
+  // to fire a "Synced N from cloud" toast even though nothing
+  // came from the cloud. With this ref in place, the realtime
+  // handler short-circuits and the user only sees toasts when
+  // a TRUE cross-device update happens.
+  const lastSelfPushRef = useRef(0);
   // Ref to the LATEST runCloudSync function. Updated on every
   // render so event handlers (which capture the closure once via
   // useEffect with []) can always call the freshest version with
@@ -6706,11 +6727,13 @@ function App() {
       if (policyChanges > 0) {
         const reloaded = await dbGetAll('policies');
         setPolicies(reloaded);
-        try { toast('☁️ Synced '+policyChanges+' policy update'+(policyChanges>1?'s':'')+' from cloud','info',3000); } catch(e){}
       }
-      if (profileChanges > 0 && policyChanges === 0) {
-        try { toast('☁️ Synced profile updates from cloud','info',3000); } catch(e){}
-      }
+      // No noisy per-table toasts. Cross-device updates are visible
+      // because the UI updates reactively. A single toast is shown
+      // ONCE at the end if there were any changes AND it's clearly
+      // not a self-echo (i.e. we haven't pushed anything in a while).
+      // The Sync Now button in Settings shows status separately for
+      // manual triggers.
 
       // ── APP SETTINGS PULL/MERGE ──
       // Settings are key-versioned in the same way as profile fields,
@@ -6755,7 +6778,17 @@ function App() {
         await dbPut('settings', { key:'appSettingsVersions', value: pushVers });
       }
       if (settingsChanges > 0) {
-        try { toast('☁️ Synced '+settingsChanges+' setting'+(settingsChanges>1?'s':'')+' from cloud','info',3000); } catch(e){}
+        // Settings change applied silently — UI re-renders via setHouseDefaults
+      }
+
+      // ── ONE QUIET TOAST for genuine cross-device updates ──
+      // Fire only if SOMETHING actually changed AND we're confident
+      // this isn't a self-echo (no recent self-push). Otherwise stay
+      // silent.
+      const totalChanges = profileChanges + policyChanges + settingsChanges;
+      const recentSelfPush = (Date.now() - lastSelfPushRef.current) < 5000;
+      if (totalChanges > 0 && !recentSelfPush) {
+        try { toast('☁️ Updates from another device', 'info', 2500); } catch(e){}
       }
 
       console.log('[Sync] Auto-merge done:', profileChanges, 'profile changes,', policyChanges, 'policy changes,', settingsChanges, 'settings changes');
@@ -6803,17 +6836,26 @@ function App() {
     if (!sb) return;
 
     console.log('[Realtime] Subscribing to live updates for', uid);
-    // Cooldown check shared by all three handlers — skip if we
-    // synced within the last 2 seconds. This absorbs self-echoes
-    // from our own sbPolicyPush / sbProfilePush / sbAppSettingsPush
-    // calls without blocking legitimate cross-device events for
-    // more than a couple seconds (the next user action re-triggers
-    // sync anyway).
-    const REALTIME_COOLDOWN_MS = 2000;
+    // Cooldown check shared by all three handlers — skip if EITHER:
+    //   1. We synced within the last 2 seconds (rapid event chains)
+    //   2. We pushed something to ANY synced table within the last
+    //      3 seconds (this event is almost certainly our own echo)
+    // The self-push cooldown is the more important one — it
+    // eliminates the "uploaded a policy and got 4 sync toasts"
+    // problem entirely. Cross-device events still propagate within
+    // a few seconds because the user's NEXT action (or the periodic
+    // mount-time sync) re-triggers a fresh round.
+    const REALTIME_SYNC_COOLDOWN_MS = 2000;
+    const REALTIME_PUSH_COOLDOWN_MS = 3000;
     const shouldSkipRealtime = () => {
-      const sinceLast = Date.now() - lastSyncRef.current;
-      if (sinceLast < REALTIME_COOLDOWN_MS) {
-        console.log('[Realtime] Skipping — synced', sinceLast, 'ms ago (cooldown)');
+      const sinceLastSync = Date.now() - lastSyncRef.current;
+      if (sinceLastSync < REALTIME_SYNC_COOLDOWN_MS) {
+        console.log('[Realtime] Skipping — synced', sinceLastSync, 'ms ago');
+        return true;
+      }
+      const sinceLastPush = Date.now() - lastSelfPushRef.current;
+      if (sinceLastPush < REALTIME_PUSH_COOLDOWN_MS) {
+        console.log('[Realtime] Skipping — self-push', sinceLastPush, 'ms ago (own echo)');
         return true;
       }
       return false;
@@ -6925,12 +6967,15 @@ function App() {
     setPolicies(prev => {const idx=prev.findIndex(x=>x.id===enriched.id);if(idx>=0){const n=[...prev];n[idx]=enriched;return n}return[...prev,enriched]});
     // Push to cloud (fire-and-forget — don't block save flow).
     // Cloud helper strips _fieldVersions before sending.
+    // Stamp self-push so Realtime echoes get ignored.
+    lastSelfPushRef.current = Date.now();
     sbPolicyPush(enriched, newVersions).catch(() => {});
   };
   const deletePolicy = async (id) => {
     await dbDel('policies', id);
     setPolicies(prev => prev.filter(x=>x.id!==id));
     // Cloud soft-delete (fire-and-forget)
+    lastSelfPushRef.current = Date.now();
     sbPolicyDelete(id).catch(() => {});
   };
 
@@ -6977,6 +7022,7 @@ function App() {
     await dbPut('settings',{key:'clientProfile',value:enriched});
     await dbPut('settings',{key:'clientName',value:enriched.name||''});
     // Push to cloud (fire-and-forget). Cloud helper strips _fieldVersions.
+    lastSelfPushRef.current = Date.now();
     sbProfilePush(enriched, newVersions).catch(() => {});
     // ── GLOBAL SYNC: Recalculate ageAtEntry for all policies ──
     // Triggers whenever the profile has ANY age source (real DOB
@@ -7034,6 +7080,7 @@ function App() {
     const newVersions = {...oldVersions, houseDefaults: Date.now()};
     await dbPut('settings', {key:'appSettingsVersions', value:newVersions});
     const bundle = { houseDefaults: next };
+    lastSelfPushRef.current = Date.now();
     sbAppSettingsPush(bundle, newVersions).catch(()=>{});
   };
 
@@ -9986,6 +10033,135 @@ async function geminiStructuredExtract(geminiKey, systemPrompt, contentBlocks, m
   return raw;
 }
 
+// ═══════════════════════════════════════════════════════════════
+// CLAUDE STRUCTURED EXTRACT — image+document vision fallback
+// ═══════════════════════════════════════════════════════════════
+// Gemini 2.5 Flash is the primary extraction engine because it's
+// 10× cheaper and has native PDF support. But Gemini is unreliable
+// during peak hours (capacity 503s) AND has known weaknesses on
+// edge cases like Singapore Unit Trust platform/fund-house
+// disambiguation, where it'll happily put "Allianz" as the insurer
+// of an Allianz fund held on iFAST instead of correctly putting
+// iFAST as the insurer.
+//
+// Claude vision (Sonnet 4.6) is the cross-provider fallback. It's
+// significantly more accurate on:
+//   • Mixed text + table layouts
+//   • Following structured JSON schemas exactly (Sonnet 4.6 is
+//     unusually strong at instruction adherence)
+//   • Distinguishing fund house vs platform vs insurer
+//   • Resisting hallucinated entries / duplicates
+//
+// Cost: ~10× more per token than Gemini Flash, but the chain only
+// reaches Claude when all Gemini models in the chain have failed
+// or returned obviously broken data — so the realistic cost increase
+// is single-digit percent over the all-Gemini baseline.
+//
+// Model selection strategy:
+//   • haiku-4-5: first try (3× Gemini cost, much better quality)
+//   • sonnet-4-6: second try if haiku also fails (10× Gemini cost,
+//     near-frontier quality, last-resort)
+//
+// Both calls send the SAME content blocks (images + PDFs base64'd)
+// and the SAME system prompt. The schema isn't enforced at the API
+// level (Claude doesn't have responseSchema) — instead we tell Claude
+// in the system prompt to return valid JSON only, and run the same
+// repairJSON pass we use elsewhere.
+const CLAUDE_VISION_CHAIN = [
+  'claude-haiku-4-5',     // ~$1/$5 per MTok — first try
+  'claude-sonnet-4-5',    // ~$3/$15 per MTok — second try (most stable Sonnet)
+];
+async function claudeStructuredExtract(anthropicKey, systemPrompt, contentBlocks, maxTokens) {
+  // Build Claude content array. Claude accepts:
+  //   • {type:'text', text:'...'}
+  //   • {type:'image', source:{type:'base64', media_type, data}}
+  //   • {type:'document', source:{type:'base64', media_type:'application/pdf', data}}
+  const claudeContent = [];
+  let mediaCount = 0;
+  for(const block of contentBlocks) {
+    if(block.type === 'text') {
+      claudeContent.push({type:'text', text:block.text});
+    } else if(block.type === 'image') {
+      claudeContent.push({
+        type:'image',
+        source:{type:'base64', media_type:block.source.media_type, data:block.source.data}
+      });
+      mediaCount++;
+    } else if(block.type === 'document') {
+      claudeContent.push({
+        type:'document',
+        source:{type:'base64', media_type:block.source.media_type||'application/pdf', data:block.source.data}
+      });
+      mediaCount++;
+    }
+  }
+  if(claudeContent.length === 0) throw new Error('No content for Claude vision extract');
+  console.log('[Claude Vision] Sending:', mediaCount, 'media blocks +', claudeContent.length-mediaCount, 'text blocks');
+
+  // System prompt — augment to demand JSON-only output since Claude
+  // doesn't enforce response schemas at the API level.
+  const augmentedSystem = systemPrompt + '\n\n' +
+    'CRITICAL OUTPUT FORMAT: Respond with ONLY a valid JSON array. Start with [ end with ]. ' +
+    'No markdown, no backticks, no commentary, no preamble. The first character of your response ' +
+    'MUST be [ and the last character MUST be ]. If extracting a single policy, wrap it in a one-element array.';
+
+  let lastErr = null;
+  for(let i = 0; i < CLAUDE_VISION_CHAIN.length; i++) {
+    const model = CLAUDE_VISION_CHAIN[i];
+    console.log('[Claude Vision] Trying model:', model);
+    try {
+      const resp = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
+        method:'POST',
+        headers:{
+          'Content-Type':'application/json',
+          'x-api-key':anthropicKey,
+          'anthropic-version':'2023-06-01',
+          'anthropic-dangerous-direct-browser-access':'true',
+        },
+        body:JSON.stringify({
+          model: model,
+          max_tokens: maxTokens || 16000,
+          system: augmentedSystem,
+          messages: [{role:'user', content: claudeContent}],
+        }),
+      });
+      if(!resp.ok) {
+        const errData = await resp.json().catch(()=>({}));
+        const errMsg = errData?.error?.message || resp.statusText || 'unknown';
+        console.warn('[Claude Vision] '+model+' API error '+resp.status+':', errMsg);
+        // Retry on overload/rate-limit; fail fast on auth/bad request
+        const isCapacity = resp.status === 529 || resp.status === 429 || resp.status >= 500;
+        if(isCapacity && i + 1 < CLAUDE_VISION_CHAIN.length) {
+          lastErr = new Error('Claude '+model+' '+resp.status+': '+errMsg);
+          try { toast('Claude '+model+' overloaded — switching to '+CLAUDE_VISION_CHAIN[i+1], 'info', 3000); } catch(_){}
+          continue;
+        }
+        throw new Error('Claude vision API error ('+resp.status+'): '+errMsg);
+      }
+      const data = await resp.json();
+      if(data.error) throw new Error('Claude: '+data.error.message);
+      const raw = data.content?.map(c => c.text || '').join('') || '';
+      if(!raw || raw.length < 5) throw new Error('Claude returned empty response');
+      console.log('[Claude Vision] Response:', raw.length, 'chars from', model);
+      // Strip any stray code fences just in case Claude added them
+      const cleaned = raw.replace(/```json\s*|```\s*/g, '').trim();
+      return cleaned;
+    } catch(err) {
+      lastErr = err;
+      const msg = (err.message || '').toLowerCase();
+      const isNetwork = err instanceof TypeError || msg.includes('network') || msg.includes('fetch') || msg.includes('timed out');
+      // Network errors → retry next model
+      if(isNetwork && i + 1 < CLAUDE_VISION_CHAIN.length) {
+        console.warn('[Claude Vision] '+model+' network error, trying next model:', err.message);
+        continue;
+      }
+      // Last model in chain or non-retryable → throw
+      if(i + 1 >= CLAUDE_VISION_CHAIN.length) throw err;
+    }
+  }
+  throw lastErr || new Error('Claude vision chain exhausted');
+}
+
 // ═══════════════════════════════════════════════════════════════════════
 // GEMINI GROUNDED NOTE FETCH — web-search fallback for missing notes
 // ═══════════════════════════════════════════════════════════════════════
@@ -10201,7 +10377,38 @@ async function callAI(systemPrompt, contentBlocks, maxTokens, responseSchema) {
       try { toast('🎯 Structured extraction succeeded (one-shot, schema-validated)','success',2500); } catch(e){}
       return result;
     } catch(structuredErr) {
-      console.warn('[AI] Structured extract failed:', structuredErr.message, '→ falling back to dual-AI pipeline');
+      console.warn('[AI] Structured extract failed:', structuredErr.message);
+      // ── CLAUDE VISION FALLBACK ──
+      // Gemini's full chain (2.5 → 3 → 3.1-lite) is exhausted. Before
+      // dropping to the legacy dual-AI / Gemini-only paths, try Claude
+      // vision directly with the same content + the same prompt. Claude
+      // is much more accurate on edge cases like UT platform/fund-house
+      // disambiguation and is on a separate provider — so when Gemini
+      // is having a capacity event, Claude is usually fine.
+      //
+      // Only attempts this when:
+      //   • Anthropic key is configured
+      //   • The error looks like a capacity/quality issue (not e.g. an
+      //     auth error that would also fail on Claude)
+      if(ck && hasMedia) {
+        const errMsg = (structuredErr.message || '').toLowerCase();
+        const isCapacityOrQuality = errMsg.includes('overload') || errMsg.includes('503') ||
+          errMsg.includes('429') || errMsg.includes('unavailable') || errMsg.includes('exhausted') ||
+          errMsg.includes('timed out') || errMsg.includes('network') || errMsg.includes('empty') ||
+          errMsg.includes('all models');
+        if(isCapacityOrQuality) {
+          console.log('[AI] ⤴ Falling back to Claude vision (cross-provider)');
+          try { toast('🤖 Switching to Claude vision (Gemini exhausted)','info',3000); } catch(e){}
+          try {
+            const claudeResult = await claudeStructuredExtract(ck, systemPrompt, contentBlocks, maxTokens);
+            try { toast('✓ Claude vision extraction succeeded','success',2500); } catch(e){}
+            return claudeResult;
+          } catch(claudeErr) {
+            console.warn('[AI] Claude vision also failed:', claudeErr.message, '→ falling through to legacy paths');
+            // Fall through to legacy paths below
+          }
+        }
+      }
       // Fall through to the legacy paths below — don't throw yet
     }
   }
@@ -14109,7 +14316,7 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
                 <input type="checkbox" checked={item._selected} onChange={()=>toggleSelect(item._idx)} style={{width:16,height:16,accentColor:'var(--gold)',flexShrink:0}} />
                 <input value={item.productName||''} onChange={e=>updateField(item._idx,'productName',e.target.value)} style={{flex:1,fontSize:12,padding:'4px 6px',background:'transparent',border:'1px solid var(--border)',borderRadius:4,fontWeight:600,minWidth:0}} />
                 <select value={item.insurer||''} onChange={e=>updateField(item._idx,'insurer',e.target.value)} style={{width:110,fontSize:10,padding:'4px 2px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:4,flexShrink:0}}>
-                  <option value="">Insurer</option>{INSURER_LIST.map(n=><option key={n} value={n}>{n}</option>)}
+                  <option value="">Insurer/Platform</option>{INSURER_LIST.map(n=><option key={n} value={n}>{n}</option>)}
                 </select>
               </div>
               {/* Row 2: Category + Sub-type */}
@@ -14749,6 +14956,48 @@ productName must be the SPECIFIC marketed product name as written in the documen
 
 CORE: insurer, productName, policyName, policyNumber, category (protection/savings/health/investment/retirement/maternity/cash_investments/other_assets), subType (Term Life/Whole Life/Universal Life (UL)/Indexed UL (IUL)/Variable UL (VUL)/Critical Illness/Personal Accident/Disability Income/Long-term Care/Endowment/Lifetime Endowment/Education Plan/Short-term Endowment/Integrated Shield Plan/Hospital Income/CareShield Life Supplement/ElderShield 300/ElderShield 400/ILP (Protection)/ILP (Investment)/Unit Trust/Retirement/Annuity/Maternity Coverage/Fixed Deposit/T-bill/Singapore Savings Bond/Corporate Bond/Money Market/Property/Stocks\/Equities/Gold\/Precious Metals/Fixed Coupon Note (FCN)/Equity Linked Note (ELN)/Options\/Futures/Cryptocurrency/Other), currency (default SGD), sumAssured (number), premiumAmount (number — the premium AS PAID, at whatever frequency it is billed. Do NOT convert or normalize. If document shows "$1,000 Monthly", return premiumAmount=1000. If document shows "$12,000 Annually", return premiumAmount=12000. If document shows "$50,000 Single Premium", return premiumAmount=50000. The frequency is captured in the separate premFrequency field below — NEVER multiply or divide the amount to match a different period), premFrequency (annual/monthly/single/unknown — MUST match the exact period of the premiumAmount value above. Singlife/SGFinDex portfolio reports have a "How Often You Pay" column — copy that verbatim: Monthly→monthly, Annually→annual, "Single Premium"→single. If unclear, use unknown), premiumStructure (Single Premium/Regular Premium/Limited Pay/Flexible Premium), paymentMethod (Cash/MediSave/SRS/MediSave+Cash/CPF OA/CPF SA)
 IMPORTANT: If document mentions CPFIS-OA, CPF-IS or CPF Investment Scheme, set paymentMethod to "CPF OA" or "CPF SA" accordingly. Standalone fund holdings (e.g. "Allianz Global High Payout", "First Sentier Bridge") without an insurance wrapper are category:investment, subType:"Unit Trust". If it mentions CPFIS, still category:investment subType:"Unit Trust".
+
+═══ UNIT TRUST RULES — READ CAREFULLY (CRITICAL) ═══
+For Unit Trusts (subType:"Unit Trust"), the "insurer" field is the PLATFORM/DISTRIBUTOR, NOT the fund house.
+
+Why: a Unit Trust is wrapped by a platform (iFAST, FSMOne, Endowus, Phillip POEMS, Stashaway, MoneyOwl, dollarDEX, OCBC RMS, DBS digiPortfolio, UOB UTrade, etc.) that holds the actual fund. The fund house (Allianz, BlackRock, First Sentier, Schroder, Fidelity, JPMorgan, etc.) manages the underlying fund but is NOT the entity the client has a contract with — the platform is.
+
+Detection signals for the PLATFORM (use this for "insurer"):
+- "iFAST Holdings: SGD ..." in remarks → insurer:"iFAST"
+- "FSMOne Holdings" / "Fundsupermart" → insurer:"FSMOne"
+- "Endowus Account" / "Endowus Cash" → insurer:"Endowus"
+- "POEMS account" / "Phillip Securities" → insurer:"Phillip POEMS"
+- "Stashaway portfolio" → insurer:"Stashaway"
+- "OCBC RMS" / "OCBC Wealth" → insurer:"OCBC RMS"
+- "DBS digiPortfolio" → insurer:"DBS"
+- "MoneyOwl" → insurer:"MoneyOwl"
+- "dollarDEX" → insurer:"dollarDEX"
+- If you see a holdings line like "iFAST Holdings: SGD 28,502.22 (Lee Siew hong Sheena)" → insurer is iFAST, the rest is metadata
+
+The fund house (Allianz, BlackRock, etc.) goes into the FUND HOLDING (fundAllocations array), NOT the insurer field.
+
+Example — Allianz Global High Payout AM SGD held on iFAST:
+  ✓ CORRECT:
+    {
+      "insurer": "iFAST",
+      "productName": "Allianz Global High Payout AM SGD",
+      "category": "investment",
+      "subType": "Unit Trust",
+      "fundAllocations": [{"fundName": "Allianz Global High Payout AM SGD", "allocation": 100}],
+      "notes": "iFAST Holdings: SGD 28,502.22 (Lee Siew hong Sheena)"
+    }
+  ✗ WRONG (do NOT do this):
+    {
+      "insurer": "Allianz",  // ← Allianz is the fund house, not the platform
+      "fundAllocations": []  // ← missing the fund holding
+    }
+
+If you cannot identify the platform from the document (rare for SG portfolio reports), default to insurer:"iFAST" since it's the most common SG retail UT platform — but ONLY when no other platform signals are present.
+
+ALWAYS populate fundAllocations for Unit Trusts. The fund name IS the productName for a single-fund UT. For multi-fund baskets, list each fund separately. Empty fundAllocations on a Unit Trust is a bug — every UT holds at least one underlying fund.
+
+═══ END UNIT TRUST RULES ═══
+
 PAYMENT METHODS: Any insurance policy can be paid via Cash, CPF OA, CPF SA, or SRS. Look for clues:
 - "CPF Ordinary Account" / "CPFIS-OA" / "CPF OA" → paymentMethod:"CPF OA"
 - "CPF Special Account" / "CPFIS-SA" / "CPF SA" → paymentMethod:"CPF SA"  
@@ -17923,7 +18172,7 @@ Return ONLY valid JSON. Start with { end with }. No markdown.`;
                         </th>
                       </tr>
                       <tr style={{fontSize:10,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.5px'}}>
-                        <th style={{width:32}}></th><th style={{textAlign:'left'}}>Policy</th><th>Sub-type</th><th>Insurer</th><th style={{textAlign:'right'}}>Sum Assured</th><th style={{textAlign:'right'}}>Premium</th><th>Actions</th>
+                        <th style={{width:32}}></th><th style={{textAlign:'left'}}>Policy</th><th>Sub-type</th><th>Insurer/Platform</th><th style={{textAlign:'right'}}>Sum Assured</th><th style={{textAlign:'right'}}>Premium</th><th>Actions</th>
                       </tr></thead>
                       <tbody>
                         {group.items.map(p => {
@@ -18699,7 +18948,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
           </div>
         )}
         <div className="grid-2">
-          <div className="field"><label>{isCashInvestment ? 'Provider / Bank' : 'Insurer'}</label><InsurerSelect value={form.insurer} onChange={v=>set('insurer',v)} /></div>
+          <div className="field"><label>{isCashInvestment ? 'Provider / Bank' : 'Insurer/Platform'}</label><InsurerSelect value={form.insurer} onChange={v=>set('insurer',v)} /></div>
           <div className="field"><label>Product Name</label><FuzzyInput value={form.productName} onChange={v=>set('productName',v)} 
             suggestions={repo.filter(r=>!form.insurer||form.insurer===''||r.insurer===form.insurer).map(r=>({label:r.productName,sub:r.insurer+' · '+r.subType+(r.notes?' · '+r.notes.substring(0,60)+'…':''),item:r}))}
             onSelect={item=>{if(item.item){set('insurer',item.item.insurer);set('subType',item.item.subType);set('category',item.item.category);if(item.item.currency)set('currency',item.item.currency);}}}
