@@ -1643,7 +1643,7 @@ async function pdfToImages(pdfDoc, maxPages=12) {
 // CLEAN even if the FC never actually reviewed anything. Bumping the version
 // forces a re-extraction next time those same files are uploaded, and the
 // one-time cleanup in App init purges the stale entries from IndexedDB.
-const EXTRACT_PIPELINE_VERSION = 'v9-2026-04-10-ut-platform-rules';
+const EXTRACT_PIPELINE_VERSION = 'v10-2026-04-10-smart-routing';
 
 // ═══════════════════════════════════════════════════════════════
 // OCR SPACING FIX (2026-04-09)
@@ -10684,10 +10684,173 @@ async function geminiExtract(geminiKey, systemPrompt, contentBlocks, maxTokens) 
   return raw.replace(/```json\s*|```\s*/g,'').trim();
 }
 
+
+// ═══════════════════════════════════════════════════════════════════════
+// SMART ROUTING CLASSIFIER  (v10-2026-04-10-smart-routing)
+// ───────────────────────────────────────────────────────────────────────
+// Inspects contentBlocks, classifies the dominant media type, and
+// dispatches to the cost-optimal pipeline BEFORE callAI's legacy
+// branches fire.  Returns the extracted text string on success, or
+// null to signal "fall through to existing callAI logic".
+//
+// Cost rationale:
+//   PDF  → Gemini native (258 tok/page) → Claude text extract (3.3× gap)
+//   Image → Claude direct vision (2.7× gap vs Gemini, but simpler & more
+//            accurate on edge cases; Haiku→Sonnet chain already built in)
+//   XLSX/CSV → Claude text extract (upstream already parsed via SheetJS)
+//   DOCX & other → null  (forceAnthropic path handles these)
+// ═══════════════════════════════════════════════════════════════════════
+async function routeExtraction(gk, ck, systemPrompt, contentBlocks, maxTokens, responseSchema) {
+  // Identify dominant media_type across all document/image blocks
+  const mediaBlocks = contentBlocks.filter(b => b.type === 'image' || b.type === 'document');
+  if (mediaBlocks.length === 0) return null; // text-only: fall through
+
+  // Count votes per category to find dominant type
+  let pdfCount = 0, imageCount = 0, xlsxCount = 0;
+  for (const b of mediaBlocks) {
+    const mt = (b.source?.media_type || '').toLowerCase();
+    if (mt === 'application/pdf') pdfCount++;
+    else if (/^image\/(jpeg|jpg|png|webp|heic|heif)/.test(mt)) imageCount++;
+    else if (mt === 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' || mt === 'text/csv') xlsxCount++;
+    // DOCX (_forceAnthropic) and other types → not counted → will return null
+  }
+
+  const dominant = pdfCount >= imageCount && pdfCount >= xlsxCount ? (pdfCount > 0 ? 'pdf' : null)
+    : imageCount >= xlsxCount ? (imageCount > 0 ? 'image' : null)
+    : (xlsxCount > 0 ? 'xlsx' : null);
+
+  if (!dominant) return null; // DOCX or unknown → fall through
+
+  // ─────────────────────────────────────────────────────────────
+  // PDF  →  geminiRead (cheap native OCR) + claudeExtract (text)
+  // ─────────────────────────────────────────────────────────────
+  if (dominant === 'pdf') {
+    if (!gk && !ck) return null;
+    try { toast('📄 PDF → Gemini read + Claude analyse (dual pipeline)', 'info', 3000); } catch(_){}
+    console.log('[Router] PDF path: geminiRead → claudeExtract');
+
+    // ── PRIMARY: Gemini read → Claude extract ──
+    if (gk && ck) {
+      let geminiText = null;
+      try {
+        geminiText = await geminiRead(gk, contentBlocks);
+        console.log('[Router] Gemini read OK:', geminiText.length, 'chars');
+      } catch (geminiReadErr) {
+        console.warn('[Router] PDF geminiRead failed:', geminiReadErr.message);
+        try { toast('⤴ Fallback: Gemini read failed → Claude vision direct', 'info', 3000); } catch(_){}
+        // ── FALLBACK A: Gemini read failed → Claude vision on original PDF ──
+        try {
+          const result = await claudeStructuredExtract(ck, systemPrompt, contentBlocks, maxTokens);
+          return result;
+        } catch (claudeVisionErr) {
+          console.warn('[Router] PDF Claude vision fallback also failed:', claudeVisionErr.message);
+          throw new Error('PDF extraction failed: Gemini read failed (' + geminiReadErr.message + ') and Claude vision also failed (' + claudeVisionErr.message + ')');
+        }
+      }
+
+      // Gemini read succeeded → Claude text extract
+      const textParts = contentBlocks.filter(b=>b.type==='text').map(b=>b.text).join('\n');
+      try {
+        const result = await claudeExtract(ck, systemPrompt, geminiText + (textParts ? '\n\n' + textParts : ''), maxTokens);
+        return result;
+      } catch (claudeExtractErr) {
+        console.warn('[Router] PDF claudeExtract failed:', claudeExtractErr.message);
+        try { toast('⤴ Fallback: Claude analyse failed → Gemini structured extract', 'info', 3000); } catch(_){}
+        // ── FALLBACK B: Claude extract failed but Gemini read succeeded
+        //    → geminiStructuredExtract on original PDF blocks (not the read text) ──
+        if (responseSchema) {
+          try {
+            const result = await geminiStructuredExtract(gk, systemPrompt, contentBlocks, maxTokens, responseSchema);
+            return result;
+          } catch (geminiStructErr) {
+            console.warn('[Router] PDF geminiStructuredExtract fallback failed:', geminiStructErr.message);
+            throw new Error('PDF extraction failed: claudeExtract failed (' + claudeExtractErr.message + ') and geminiStructuredExtract also failed (' + geminiStructErr.message + ')');
+          }
+        }
+        throw claudeExtractErr;
+      }
+    }
+
+    // Only one key available — fall through to legacy paths
+    return null;
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // IMAGE  →  Claude vision direct (Haiku→Sonnet chain)
+  // ─────────────────────────────────────────────────────────────
+  if (dominant === 'image') {
+    if (!ck) return null; // No Anthropic key → fall through to Gemini legacy path
+    try { toast('📷 Image → Claude vision direct', 'info', 3000); } catch(_){}
+    console.log('[Router] Image path: claudeStructuredExtract (Haiku→Sonnet)');
+    try {
+      const result = await claudeStructuredExtract(ck, systemPrompt, contentBlocks, maxTokens);
+      return result;
+    } catch (claudeErr) {
+      console.warn('[Router] Image claudeStructuredExtract exhausted:', claudeErr.message);
+      if (gk) {
+        try { toast('⤴ Fallback: Claude vision exhausted → Gemini structured extract', 'info', 3000); } catch(_){}
+        // ── FALLBACK: geminiStructuredExtract cross-provider ──
+        try {
+          if (responseSchema) {
+            const result = await geminiStructuredExtract(gk, systemPrompt, contentBlocks, maxTokens, responseSchema);
+            return result;
+          }
+          // No schema → geminiRead+extract text
+          const gemText = await geminiRead(gk, contentBlocks);
+          return gemText;
+        } catch (gemFallbackErr) {
+          console.warn('[Router] Image Gemini fallback also failed:', gemFallbackErr.message);
+          throw gemFallbackErr;
+        }
+      }
+      throw claudeErr;
+    }
+  }
+
+  // ─────────────────────────────────────────────────────────────
+  // XLSX / CSV  →  Claude text extract (SheetJS already parsed)
+  // ─────────────────────────────────────────────────────────────
+  if (dominant === 'xlsx') {
+    if (!ck && !gk) return null;
+    try { toast('📊 Excel → Claude text extract', 'info', 3000); } catch(_){}
+    console.log('[Router] XLSX/CSV path: claudeExtract text-only');
+    const textParts = contentBlocks.filter(b=>b.type==='text').map(b=>b.text).join('\n');
+    if (ck) {
+      try {
+        const result = await claudeExtract(ck, systemPrompt, textParts, maxTokens);
+        return result;
+      } catch (claudeErr) {
+        console.warn('[Router] XLSX claudeExtract failed:', claudeErr.message);
+        if (gk) {
+          try { toast('⤴ Fallback: Claude text failed → Gemini structured extract on raw file', 'info', 3000); } catch(_){}
+          // ── FALLBACK: geminiStructuredExtract on the raw XLSX blocks ──
+          try {
+            if (responseSchema) {
+              const result = await geminiStructuredExtract(gk, systemPrompt, contentBlocks, maxTokens, responseSchema);
+              return result;
+            }
+            const gemText = await geminiRead(gk, contentBlocks);
+            return gemText;
+          } catch (gemErr) {
+            throw gemErr;
+          }
+        }
+        throw claudeErr;
+      }
+    }
+    // No Anthropic key but have Gemini → fall through
+    return null;
+  }
+
+  return null; // safety net
+}
+
 // Main entry point — uses dual pipeline if both keys exist, Gemini-only otherwise.
 // If a responseSchema is provided AND Gemini is available, the structured-output path
 // is preferred (one call, guaranteed-valid JSON). Falls back through the dual-AI and
 // Gemini-only paths if the structured path fails.
+// Smart routing classifier (routeExtraction) fires FIRST for PDF/image/XLSX blocks,
+// before any legacy branch below. Returns null to fall through to existing logic.
 async function callAI(systemPrompt, contentBlocks, maxTokens, responseSchema) {
   console.log('[callAI] Starting. Blocks:', contentBlocks.length, 'types:', contentBlocks.map(b=>b.type).join(','), 'schema:', responseSchema?'yes':'no');
   const uid = window._user?.id || '';
@@ -10696,9 +10859,20 @@ async function callAI(systemPrompt, contentBlocks, maxTokens, responseSchema) {
   
   console.log('[callAI] Keys loaded — Gemini:', gk ? gk.substring(0,8)+'...' : 'NONE', 'Anthropic:', ck ? ck.substring(0,8)+'...' : 'NONE');
   if(!gk && !ck) throw new Error('Set your Gemini or Anthropic API key in Settings first');
-  
-  const hasMedia = contentBlocks.some(b=>b.type==='image'||b.type==='document');
+
+  // ── SMART ROUTING CLASSIFIER ──
+  // Dispatches PDF / image / XLSX to cost-optimal pipelines before any
+  // legacy branch fires. Returns null for DOCX (_forceAnthropic) and
+  // text-only blocks, which fall through to the existing branches below.
   const forceAnthropic = contentBlocks.some(b=>b._forceAnthropic);
+  if (!forceAnthropic) {
+    const routed = await routeExtraction(gk, ck, systemPrompt, contentBlocks, maxTokens, responseSchema);
+    if (routed !== null) return routed;
+    // null → fall through to legacy branches
+    console.log('[callAI] routeExtraction returned null → legacy path');
+  }
+
+  const hasMedia = contentBlocks.some(b=>b.type==='image'||b.type==='document');
   const textParts = contentBlocks.filter(b=>b.type==='text').map(b=>b.text).join('\n');
 
   // ── PREFERRED PATH: Gemini with structured output (responseSchema) ──
