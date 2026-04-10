@@ -1643,7 +1643,7 @@ async function pdfToImages(pdfDoc, maxPages=12) {
 // CLEAN even if the FC never actually reviewed anything. Bumping the version
 // forces a re-extraction next time those same files are uploaded, and the
 // one-time cleanup in App init purges the stale entries from IndexedDB.
-const EXTRACT_PIPELINE_VERSION = 'v14.3-2026-04-10-field-tool';
+const EXTRACT_PIPELINE_VERSION = 'v14.4-2026-04-10-final-accuracy';
 
 // ── v15: PROMPT VERSIONING ──
 const EXTRACT_PROMPT_VERSION = 'v14.1-2026-04-10-strict-fields';
@@ -1761,6 +1761,17 @@ async function buildInsurerFewShot(insurer) {
         const aiVal = c.aiValue == null ? 'null' : JSON.stringify(c.aiValue);
         const corrVal = c.correctedValue == null ? 'null' : JSON.stringify(c.correctedValue);
         lines.push('  • ' + (c.productName || '?') + ' → ' + c.field + ': AI returned ' + aiVal + ', correct value is ' + corrVal);
+      }
+    }
+  } catch (e) { /* non-fatal */ }
+  // 3. v14.4: Learned patterns from active learning
+  try {
+    const learned = await PolicyDB.getLearnedByInsurer(normalized);
+    if (learned && learned.length > 0) {
+      lines.push('Learned patterns for ' + normalized + ' (from ' + learned.reduce((s,l) => s + (l.exampleCount||0), 0) + ' corrections):');
+      for (const l of learned.slice(0, 5)) {
+        const [aiPart, userPart] = (l.pattern || '→').split('→');
+        lines.push('  • ' + l.fieldName + ': AI often says ' + aiPart + ', should be ' + userPart);
       }
     }
   } catch (e) { /* non-fatal */ }
@@ -2133,6 +2144,129 @@ const VALIDATE_RULES = [
       return 'Protection policy has no Sum Assured — check if SA was missed during extraction';
     },
   },
+  // ── v14.4: Arithmetic constraint validators ──
+  {
+    name: 'validate_total_paid_equals_premium_times_term',
+    run: (policy) => {
+      const total = parseFloat(policy.totalPremiumPaid) || 0;
+      const annual = parseFloat(policy.annualPremium) || 0;
+      const term = parseInt(policy.premTerm) || 0;
+      if (!total || !annual || !term) return null;
+      const expected = annual * term;
+      const diff = Math.abs(total - expected) / Math.max(total, expected);
+      if (diff > 0.05) {
+        if (!policy._constraintViolations) policy._constraintViolations = [];
+        policy._constraintViolations.push({ rule: 'total_paid_vs_premium_x_term', fields: ['totalPremiumPaid', 'annualPremium', 'premTerm'] });
+        return 'Premium math: $' + annual.toLocaleString() + ' × ' + term + 'yr = $' + expected.toLocaleString() + ', but total paid is $' + total.toLocaleString() + ' (' + Math.round(diff * 100) + '% off)';
+      }
+      return null;
+    },
+  },
+  {
+    name: 'validate_monthly_times_12_equals_annual',
+    run: (policy) => {
+      const annual = parseFloat(policy.annuityPayout) || 0;
+      const monthly = parseFloat(policy.annuityMonthly) || 0;
+      if (!annual || !monthly) return null;
+      const diff = Math.abs(annual - monthly * 12) / Math.max(annual, 1);
+      if (diff > 0.02) {
+        if (!policy._constraintViolations) policy._constraintViolations = [];
+        policy._constraintViolations.push({ rule: 'monthly_x12_vs_annual', fields: ['annuityPayout', 'annuityMonthly'] });
+        return 'Payout mismatch: $' + monthly.toLocaleString() + '/mth × 12 = $' + (monthly * 12).toLocaleString() + ', but annual payout is $' + annual.toLocaleString();
+      }
+      return null;
+    },
+  },
+  {
+    name: 'validate_maturity_after_inception',
+    run: (policy) => {
+      if (!policy.inceptionDate || !policy.maturityDate) return null;
+      const inc = new Date(policy.inceptionDate);
+      const mat = new Date(policy.maturityDate);
+      if (isNaN(inc.getTime()) || isNaN(mat.getTime())) return null;
+      if (mat <= inc) {
+        if (!policy._constraintViolations) policy._constraintViolations = [];
+        policy._constraintViolations.push({ rule: 'maturity_after_inception', fields: ['inceptionDate', 'maturityDate'] });
+        return 'Maturity date (' + policy.maturityDate + ') is on or before inception (' + policy.inceptionDate + ')';
+      }
+      return null;
+    },
+  },
+  {
+    name: 'validate_premium_term_within_policy_term',
+    run: (policy) => {
+      const premTerm = parseInt(policy.premTerm) || 0;
+      if (premTerm <= 0) return null;
+      // Infer policy term from inception→maturity or explicit field
+      let policyTerm = 0;
+      if (policy.inceptionDate && policy.maturityDate) {
+        const inc = new Date(policy.inceptionDate);
+        const mat = new Date(policy.maturityDate);
+        if (!isNaN(inc.getTime()) && !isNaN(mat.getTime())) {
+          policyTerm = Math.round((mat - inc) / (365.25 * 24 * 60 * 60 * 1000));
+        }
+      }
+      if (policyTerm <= 0) return null;
+      if (premTerm > policyTerm + 1) {
+        if (!policy._constraintViolations) policy._constraintViolations = [];
+        policy._constraintViolations.push({ rule: 'prem_term_lte_policy_term', fields: ['premTerm', 'inceptionDate', 'maturityDate'] });
+        return 'Premium term (' + premTerm + 'yr) exceeds policy term (' + policyTerm + 'yr)';
+      }
+      return null;
+    },
+  },
+  {
+    name: 'validate_rider_premium_lte_total_premium',
+    run: (policy) => {
+      const total = parseFloat(policy.annualPremium) || 0;
+      if (total <= 0) return null;
+      const riders = policy.riders;
+      if (!Array.isArray(riders) || riders.length === 0) return null;
+      const riderSum = riders.reduce((s, r) => s + (parseFloat(r.premium) || 0), 0);
+      if (riderSum > 0 && riderSum > total * 1.05) {
+        if (!policy._constraintViolations) policy._constraintViolations = [];
+        policy._constraintViolations.push({ rule: 'rider_prem_lte_total', fields: ['annualPremium', 'riders'] });
+        return 'Rider premiums ($' + riderSum.toLocaleString() + ') exceed total premium ($' + total.toLocaleString() + ')';
+      }
+      return null;
+    },
+  },
+  {
+    name: 'validate_age_at_entry_matches_dob',
+    run: (policy, clientProfile) => {
+      const age = parseInt(policy.ageAtEntry) || 0;
+      if (age <= 0 || !policy.inceptionDate) return null;
+      const dob = policy.dob || policy.liDob || (clientProfile && clientProfile.dob);
+      if (!dob) return null;
+      const inc = new Date(policy.inceptionDate);
+      const dobDate = new Date(dob);
+      if (isNaN(inc.getTime()) || isNaN(dobDate.getTime())) return null;
+      const computed = Math.floor((inc - dobDate) / (365.25 * 24 * 60 * 60 * 1000));
+      if (Math.abs(computed - age) > 1) {
+        if (!policy._constraintViolations) policy._constraintViolations = [];
+        policy._constraintViolations.push({ rule: 'age_vs_dob_inception', fields: ['ageAtEntry', 'inceptionDate', 'dob'] });
+        return 'Age at entry (' + age + ') differs from DOB→inception calc (' + computed + ')';
+      }
+      return null;
+    },
+  },
+  {
+    name: 'validate_surrender_value_lte_fund_value',
+    run: (policy) => {
+      const sv = parseFloat(policy.cashValue) || 0;
+      if (sv <= 0) return null;
+      const funds = policy.fundAllocations;
+      if (!Array.isArray(funds) || funds.length === 0) return null;
+      const totalFundValue = funds.reduce((s, f) => s + (parseFloat(f.value) || 0), 0);
+      if (totalFundValue <= 0) return null;
+      if (sv > totalFundValue * 1.05) {
+        if (!policy._constraintViolations) policy._constraintViolations = [];
+        policy._constraintViolations.push({ rule: 'sv_lte_fund_value', fields: ['cashValue', 'fundAllocations'] });
+        return 'Cash/surrender value ($' + sv.toLocaleString() + ') exceeds total fund value ($' + totalFundValue.toLocaleString() + ')';
+      }
+      return null;
+    },
+  },
 ];
 
 // ── runDerivePass: apply all DERIVE_RULES to one policy ──
@@ -2194,6 +2328,214 @@ function runValidatePass(policy, clientProfile) {
       warnings.join(' | '));
   }
   return policy;
+}
+
+// ── v14.4: TARGETED RE-EXTRACTION on flagged fields ──
+// After validate pass, collect fields that are null (required), violated constraints,
+// or have low extraction confidence. If 1-8 flagged fields, send a focused second
+// call asking ONLY about those fields. Reconcile answers with originals.
+const REQUIRED_FIELDS = ['productName','insurer','category','annualPremium','sumAssured'];
+
+function collectFlaggedFields(policy) {
+  const flagged = new Set();
+  // Required fields still null
+  for (const f of REQUIRED_FIELDS) {
+    const v = policy[f];
+    if (v == null || v === '' || v === 0 || v === 'unknown') flagged.add(f);
+  }
+  // Fields from constraint violations
+  if (Array.isArray(policy._constraintViolations)) {
+    for (const cv of policy._constraintViolations) {
+      if (Array.isArray(cv.fields)) cv.fields.forEach(f => flagged.add(f));
+    }
+  }
+  // Fields with low extraction confidence
+  const conf = policy._extractConfidence || {};
+  for (const [field, level] of Object.entries(conf)) {
+    if (level === 'low') flagged.add(field);
+  }
+  return [...flagged];
+}
+
+function buildTargetedPrompt(policy, flaggedFields) {
+  const violations = (policy._constraintViolations || []).map(cv =>
+    cv.rule + ': fields ' + (cv.fields || []).join(', ')
+  ).join('; ');
+  const questions = flaggedFields.map((f, i) =>
+    (i + 1) + '. What is the ' + f + '? (Current value: ' + JSON.stringify(policy[f]) + ')'
+  ).join('\n');
+  return `I extracted this policy (${policy.insurer || '?'} ${policy.productName || '?'}) but these fields are uncertain or inconsistent: ${flaggedFields.join(', ')}.
+
+Re-examine the images and answer ONLY these questions. Return a JSON object with ONLY the listed field names as keys. For each, return either the corrected value (with your reasoning) or null if you truly cannot determine it. Do NOT return any other fields.
+
+${violations ? 'Constraint violations detected: ' + violations + '\n' : ''}
+Questions:
+${questions}
+
+Return ONLY valid JSON like: {"${flaggedFields[0]}": <value>, ...}`;
+}
+
+async function runTargetedReExtraction(policy, contentBlocks) {
+  const flagged = collectFlaggedFields(policy);
+  if (flagged.length === 0 || flagged.length > 8) return policy;
+  console.log('[ReExtract] Running targeted re-extraction for', policy.productName || '?', '| fields:', flagged.join(', '));
+  try {
+    const prompt = buildTargetedPrompt(policy, flagged);
+    const result = await callAI(prompt, contentBlocks, 2000);
+    const text = typeof result === 'string' ? result : JSON.stringify(result);
+    let parsed;
+    try { parsed = JSON.parse(text.replace(/```json?\n?/g, '').replace(/```/g, '').trim()); } catch (_) { return policy; }
+    if (!parsed || typeof parsed !== 'object') return policy;
+    // Reconcile
+    const disputes = [];
+    for (const field of flagged) {
+      if (!(field in parsed)) continue;
+      const targeted = parsed[field];
+      const original = policy[field];
+      const origEmpty = original == null || original === '' || original === 0 || original === 'unknown';
+      const targEmpty = targeted == null || targeted === '' || targeted === 0;
+      if (targEmpty && origEmpty) continue; // both null → keep
+      if (!targEmpty && origEmpty) {
+        // Targeted found value, original was empty → use targeted
+        policy[field] = targeted;
+        console.log('[ReExtract] Filled', field, ':', JSON.stringify(targeted));
+      } else if (String(targeted) === String(original)) {
+        // Match → boost confidence
+        const conf = policy._extractConfidence || {};
+        delete conf[field]; // remove low/medium flag → treated as high
+        policy._extractConfidence = conf;
+        console.log('[ReExtract] Confirmed', field, ':', JSON.stringify(original));
+      } else if (!targEmpty && !origEmpty) {
+        // Dispute — store both for user to choose
+        disputes.push({ field, original, targeted });
+        console.log('[ReExtract] Dispute on', field, ':', JSON.stringify(original), 'vs', JSON.stringify(targeted));
+      }
+    }
+    if (disputes.length > 0) {
+      policy._reExtractDisputes = disputes;
+      if (!policy._reviewReasons) policy._reviewReasons = [];
+      for (const d of disputes) {
+        policy._reviewReasons.push('Re-check dispute on ' + d.field + ': original=' + JSON.stringify(d.original) + ' vs re-checked=' + JSON.stringify(d.targeted));
+      }
+    }
+    if (flagged.length > 0) policy._reExtracted = true;
+  } catch (err) {
+    console.warn('[ReExtract] Targeted re-extraction failed (non-fatal):', err.message);
+  }
+  return policy;
+}
+
+// ── v14.4 FIX 6: TWO-MODEL VOTING ──
+// For low-confidence extractions, run a second model and reconcile.
+// Criteria: >2 constraint violations OR >30% null fields OR gateScore < 60
+const VOTING_KEY_FIELDS = ['insurer','productName','category','subType','annualPremium','sumAssured','premFrequency','policyNumber','inceptionDate'];
+let _votingSessionCount = 0;
+let _votingSessionTotal = 0;
+const VOTING_TIEBREAKER_CAP_PCT = 5; // max 5% of clusters get tiebreaker
+
+function needsVoting(policy) {
+  const violations = (policy._constraintViolations || []).length;
+  if (violations > 2) return true;
+  const gateScore = policy._gateScore || 100;
+  if (gateScore < 60) return true;
+  // Count null key fields
+  const nullCount = VOTING_KEY_FIELDS.filter(f => {
+    const v = policy[f];
+    return v == null || v === '' || v === 0 || v === 'unknown';
+  }).length;
+  if (nullCount > Math.ceil(VOTING_KEY_FIELDS.length * 0.3)) return true;
+  return false;
+}
+
+function reconcileVotes(primary, secondary) {
+  const result = { ...primary };
+  const votingLog = [];
+  for (const field of VOTING_KEY_FIELDS) {
+    const pVal = primary[field];
+    const sVal = secondary[field];
+    const pEmpty = pVal == null || pVal === '' || pVal === 0 || pVal === 'unknown';
+    const sEmpty = sVal == null || sVal === '' || sVal === 0 || sVal === 'unknown';
+    if (pEmpty && !sEmpty) {
+      result[field] = sVal;
+      votingLog.push({ field, resolution: 'filled_from_secondary', value: sVal });
+    } else if (!pEmpty && !sEmpty && String(pVal) !== String(sVal)) {
+      // Both have values but disagree
+      const pNum = parseFloat(pVal), sNum = parseFloat(sVal);
+      if (!isNaN(pNum) && !isNaN(sNum) && Math.max(pNum, sNum) > 0) {
+        const diff = Math.abs(pNum - sNum) / Math.max(pNum, sNum);
+        if (diff < 0.02) {
+          // Within 2% — take median, tag as reconciled
+          result[field] = (pNum + sNum) / 2;
+          votingLog.push({ field, resolution: 'voting_reconciled', primary: pVal, secondary: sVal, median: result[field] });
+        } else {
+          // Significant disagreement — flag for user
+          votingLog.push({ field, resolution: 'disputed', primary: pVal, secondary: sVal });
+        }
+      } else if (String(pVal).toLowerCase() === String(sVal).toLowerCase()) {
+        // Case-insensitive match — keep primary
+        votingLog.push({ field, resolution: 'case_match', value: pVal });
+      } else {
+        votingLog.push({ field, resolution: 'disputed', primary: pVal, secondary: sVal });
+      }
+    } else if (!pEmpty && !sEmpty && String(pVal) === String(sVal)) {
+      votingLog.push({ field, resolution: 'agreed', value: pVal });
+    }
+  }
+  result._votingLog = votingLog;
+  // Boost confidence for agreed fields
+  const conf = result._extractConfidence || {};
+  for (const entry of votingLog) {
+    if (entry.resolution === 'agreed' || entry.resolution === 'voting_reconciled') {
+      delete conf[entry.field]; // remove any low/medium flag
+    }
+    if (entry.resolution === 'disputed') {
+      conf[entry.field] = 'low';
+    }
+  }
+  result._extractConfidence = conf;
+  // Add disputes to review reasons
+  const disputes = votingLog.filter(e => e.resolution === 'disputed');
+  if (disputes.length > 0) {
+    if (!result._reviewReasons) result._reviewReasons = [];
+    for (const d of disputes) {
+      result._reviewReasons.push('Voting dispute on ' + d.field + ': Model A=' + JSON.stringify(d.primary) + ' vs Model B=' + JSON.stringify(d.secondary));
+    }
+    result._votingDisputes = disputes;
+  }
+  const agreed = votingLog.filter(e => e.resolution === 'agreed').length;
+  const disputed = disputes.length;
+  console.log('[Voting] Reconciled:', agreed, 'agreed,', disputed, 'disputed,',
+    votingLog.filter(e => e.resolution === 'filled_from_secondary').length, 'filled from secondary');
+  return result;
+}
+
+// Entry point: check if voting is needed and attempt it
+// Returns the policy (possibly enriched with voting data) without blocking
+async function attemptVoting(policy, contentBlocks) {
+  if (!needsVoting(policy)) return policy;
+  _votingSessionTotal++;
+  // Check tiebreaker cap
+  if (_votingSessionCount > 0 && (_votingSessionCount / Math.max(_votingSessionTotal, 1)) * 100 >= VOTING_TIEBREAKER_CAP_PCT) {
+    console.log('[Voting] Tiebreaker cap reached (' + VOTING_TIEBREAKER_CAP_PCT + '%) — skipping');
+    return policy;
+  }
+  _votingSessionCount++;
+  console.log('[Voting] Low confidence detected for', policy.productName || '?', '— requesting second opinion');
+  try {
+    // Build a minimal prompt asking only for key fields
+    const keyFields = VOTING_KEY_FIELDS.join(', ');
+    const votingPrompt = 'Extract ONLY these fields from this insurance document: ' + keyFields + '. Return a JSON object with these exact keys. If a field is not determinable, return null for it. Be precise and conservative.';
+    const secondResult = await callAI(votingPrompt, contentBlocks, 4000);
+    const text = typeof secondResult === 'string' ? secondResult : JSON.stringify(secondResult);
+    let parsed;
+    try { parsed = JSON.parse(text.replace(/```json?\n?/g, '').replace(/```/g, '').trim()); } catch (_) { return policy; }
+    if (Array.isArray(parsed)) parsed = parsed[0];
+    if (!parsed || typeof parsed !== 'object') return policy;
+    return reconcileVotes(policy, parsed);
+  } catch (err) {
+    console.warn('[Voting] Second model call failed (non-fatal):', err.message);
+    return policy;
+  }
 }
 
 // ── v15: JOB QUEUE ENUMS ──
@@ -3152,6 +3494,112 @@ function classifyPageType(ocrText) {
   }
   if (bestCount > 0) console.log('[PageType]', best, '(' + bestCount + ' matches)');
   return best;
+}
+
+// ── v14.4 FIX 4: VISUAL REGION MASKING ──
+// Detects "camera photo of a phone screen" and crops to inner content.
+// Per-insurer chrome templates strip app headers/footers.
+const UI_CHROME_TEMPLATES = {
+  'aia':          { topCrop: 0.08, bottomCrop: 0.04, label: 'AIA app' },
+  'manulife':     { topCrop: 0.07, bottomCrop: 0.03, label: 'Manulife app' },
+  'prudential':   { topCrop: 0.08, bottomCrop: 0.04, label: 'Prudential app' },
+  'great eastern':{ topCrop: 0.07, bottomCrop: 0.03, label: 'Great Eastern app' },
+  'ntuc income':  { topCrop: 0.08, bottomCrop: 0.04, label: 'NTUC Income app' },
+  'income':       { topCrop: 0.08, bottomCrop: 0.04, label: 'Income app' },
+  'singlife':     { topCrop: 0.07, bottomCrop: 0.03, label: 'Singlife app' },
+  'hsbc':         { topCrop: 0.07, bottomCrop: 0.03, label: 'HSBC app' },
+};
+
+// Detect phone screen: portrait aspect ratio (>1.5) + dark bezels on top/bottom edges
+function detectPhoneScreen(imageData, width, height) {
+  const aspect = height / width;
+  if (aspect < 1.3 || aspect > 2.5) return false; // not phone-like
+  // Check top 3% of image for dark pixels (bezel/status bar)
+  const topRows = Math.floor(height * 0.03);
+  let darkCount = 0, totalChecked = 0;
+  for (let y = 0; y < topRows; y++) {
+    for (let x = Math.floor(width * 0.1); x < Math.floor(width * 0.9); x++) {
+      const idx = (y * width + x) * 4;
+      const luma = 0.299 * imageData[idx] + 0.587 * imageData[idx+1] + 0.114 * imageData[idx+2];
+      if (luma < 40) darkCount++;
+      totalChecked++;
+    }
+  }
+  return totalChecked > 0 && (darkCount / totalChecked) > 0.6;
+}
+
+// Detect insurer from top 15% of image text (simple string match)
+function detectInsurerFromText(text) {
+  if (!text) return null;
+  const upper = text.slice(0, Math.floor(text.length * 0.15)).toLowerCase();
+  for (const [key] of Object.entries(UI_CHROME_TEMPLATES)) {
+    if (upper.includes(key)) return key;
+  }
+  return null;
+}
+
+// Apply region masking: detect phone screen, apply insurer chrome crop
+async function applyRegionMask(file, detectedInsurer) {
+  if (!file || !file.type || !file.type.startsWith('image/')) return file;
+  try {
+    const bitmap = await createImageBitmap(file);
+    const w = bitmap.width, h = bitmap.height;
+    // Only process large enough images
+    if (w < 400 || h < 600) { if (typeof bitmap.close === 'function') bitmap.close(); return file; }
+    const canvas = typeof OffscreenCanvas === 'function'
+      ? new OffscreenCanvas(w, h)
+      : (() => { const c = document.createElement('canvas'); c.width = w; c.height = h; return c; })();
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(bitmap, 0, 0);
+    const imageData = ctx.getImageData(0, 0, w, h).data;
+    const isPhone = detectPhoneScreen(imageData, w, h);
+    // Determine crop ratios
+    let topPct = 0, bottomPct = 0, templateLabel = '';
+    if (isPhone) {
+      topPct = 0.05; bottomPct = 0.03; // default phone crop
+      templateLabel = 'phone screen';
+    }
+    // Apply insurer template if detected
+    const insKey = (detectedInsurer || '').toLowerCase();
+    const template = UI_CHROME_TEMPLATES[insKey];
+    if (template) {
+      topPct = Math.max(topPct, template.topCrop);
+      bottomPct = Math.max(bottomPct, template.bottomCrop);
+      templateLabel = template.label;
+    }
+    if (topPct === 0 && bottomPct === 0) {
+      if (typeof bitmap.close === 'function') bitmap.close();
+      return file; // no crop needed
+    }
+    // Crop
+    const cropTop = Math.floor(h * topPct);
+    const cropBottom = Math.floor(h * bottomPct);
+    const newH = h - cropTop - cropBottom;
+    if (newH < h * 0.7) { if (typeof bitmap.close === 'function') bitmap.close(); return file; } // sanity: don't crop >30%
+    const cropCanvas = typeof OffscreenCanvas === 'function'
+      ? new OffscreenCanvas(w, newH)
+      : (() => { const c = document.createElement('canvas'); c.width = w; c.height = newH; return c; })();
+    const cropCtx = cropCanvas.getContext('2d');
+    cropCtx.drawImage(bitmap, 0, cropTop, w, newH, 0, 0, w, newH);
+    if (typeof bitmap.close === 'function') bitmap.close();
+    let blob;
+    if (typeof cropCanvas.convertToBlob === 'function') {
+      blob = await cropCanvas.convertToBlob({ type: 'image/jpeg', quality: 0.85 });
+    } else {
+      blob = await new Promise(res => cropCanvas.toBlob(res, 'image/jpeg', 0.85));
+    }
+    if (!blob) return file;
+    const masked = new File([blob], file.name, { type: 'image/jpeg', lastModified: file.lastModified });
+    masked._masked = true;
+    masked._maskTemplate = templateLabel;
+    masked._originalFile = file; // keep original for display
+    const pctReduction = Math.round((1 - newH / h) * 100);
+    console.log('[Mask]', templateLabel, 'applied: cropped', w + '×' + h, '→', w + '×' + newH, '(-' + pctReduction + '% pixels)');
+    return masked;
+  } catch (e) {
+    console.warn('[Mask] Region masking failed (non-fatal):', e.message);
+    return file; // fallback to original
+  }
 }
 
 // ── FILE READER WITH PROPER ERROR REPORTING + RETRY ──
@@ -6861,7 +7309,7 @@ function isLikelyFundName(name) {
 // MODULE: INDEXEDDB — Database layer + batch operations
 // ═══════════════════════════════════════════════════════════════
 
-const DB_NAME='PolicyLensV4';const DB_VER=5;
+const DB_NAME='PolicyLensV4';const DB_VER=6;
 const openDB=()=>new Promise((res,rej)=>{
   const r=indexedDB.open(DB_NAME,DB_VER);
   r.onupgradeneeded=e=>{
@@ -6899,6 +7347,11 @@ const openDB=()=>new Promise((res,rej)=>{
     if(!db.objectStoreNames.contains('snap_captures')){
       const sc=db.createObjectStore('snap_captures',{keyPath:'id',autoIncrement:true});
       sc.createIndex('bySession','sessionId',{unique:false});
+    }
+    // ── v14.4: Learned few-shots store ──
+    if(!db.objectStoreNames.contains('learned_fewshots')){
+      const lf=db.createObjectStore('learned_fewshots',{keyPath:'id'});
+      lf.createIndex('byInsurer','insurer',{unique:false});
     }
   };
   r.onblocked=()=>{console.warn('[IDB] Blocked by another tab — close other PolicyLens tabs');try{toast('Close other PolicyLens tabs to complete the update','warning',8000)}catch(_){}};
@@ -7040,7 +7493,89 @@ const PolicyDB = {
     return (all || []).filter(c => !c.sent);
   },
   clearCaptures: () => PolicyDB.clearStore('snap_captures'),
+  // ── v14.4: Learned few-shots ──
+  putLearnedFewShot: (entry) => dbPut('learned_fewshots', {
+    ...entry,
+    id: entry.id || ('lf_' + (entry.insurer||'').replace(/\s/g,'_') + '_' + (entry.fieldName||'') + '_' + Date.now()),
+    generatedAt: entry.generatedAt || Date.now(),
+  }),
+  getLearnedByInsurer: async (insurer) => {
+    const db = await openDB();
+    return new Promise((res, rej) => {
+      try { const tx = db.transaction('learned_fewshots','readonly'); const r = tx.objectStore('learned_fewshots').index('byInsurer').getAll(insurer); r.onsuccess = e => res(e.target.result || []); r.onerror = e => rej(e.target.error); } catch(e) { rej(e); }
+    });
+  },
+  getAllLearnedFewShots: () => dbGetAll('learned_fewshots'),
+  clearLearnedFewShots: () => PolicyDB.clearStore('learned_fewshots'),
 };
+
+// ── v14.4 FIX 5: ACTIVE LEARNING — Pattern extraction from corrections ──
+// Clusters corrections by insurer+field, finds most common patterns,
+// generates one-line learned examples for few-shot injection.
+let _lastLearnRun = 0;
+const LEARN_INTERVAL_MS = 24 * 60 * 60 * 1000; // 24h
+
+async function runActiveLearning(force) {
+  if (!force && Date.now() - _lastLearnRun < LEARN_INTERVAL_MS) return;
+  _lastLearnRun = Date.now();
+  try {
+    const corrections = await PolicyDB.getAllCorrections();
+    if (!corrections || corrections.length < 5) {
+      console.log('[Learn] Not enough corrections to learn from (' + (corrections?.length || 0) + ')');
+      return { insurers: {}, total: 0 };
+    }
+    // Group by insurer
+    const byInsurer = {};
+    for (const c of corrections) {
+      const ins = c.insurer || 'unknown';
+      if (!byInsurer[ins]) byInsurer[ins] = [];
+      byInsurer[ins].push(c);
+    }
+    const results = {};
+    let totalPatterns = 0;
+    for (const [insurer, corrs] of Object.entries(byInsurer)) {
+      if (corrs.length < 3) continue; // need enough signal
+      // Group by field
+      const byField = {};
+      for (const c of corrs) {
+        const f = c.field || 'unknown';
+        if (!byField[f]) byField[f] = [];
+        byField[f].push(c);
+      }
+      const patterns = [];
+      for (const [field, fieldCorrs] of Object.entries(byField)) {
+        if (fieldCorrs.length < 2) continue;
+        // Find most common (aiValue → userValue) pattern
+        const patternCounts = {};
+        for (const c of fieldCorrs) {
+          const key = JSON.stringify(c.aiValue) + '→' + JSON.stringify(c.correctedValue);
+          patternCounts[key] = (patternCounts[key] || 0) + 1;
+        }
+        const sorted = Object.entries(patternCounts).sort((a, b) => b[1] - a[1]);
+        if (sorted.length === 0) continue;
+        const [topPattern, topCount] = sorted[0];
+        const [aiPart, userPart] = topPattern.split('→');
+        const example = 'For ' + insurer + ' ' + field + ': AI often returns ' + aiPart + ' but correct value is ' + userPart + ' (' + topCount + ' corrections)';
+        patterns.push({ field, pattern: topPattern, count: topCount, example });
+        // Store in IDB
+        await PolicyDB.putLearnedFewShot({
+          insurer, fieldName: field, pattern: topPattern,
+          exampleCount: topCount, lastSeen: Date.now(),
+        });
+        totalPatterns++;
+      }
+      results[insurer] = { corrections: corrs.length, patterns: patterns.length };
+    }
+    console.log('[Learn] Generated', totalPatterns, 'patterns from', corrections.length, 'corrections across', Object.keys(results).length, 'insurers');
+    return { insurers: results, total: totalPatterns };
+  } catch (e) {
+    console.warn('[Learn] Active learning failed:', e);
+    return { insurers: {}, total: 0 };
+  }
+}
+
+// Run learning on app start (non-blocking)
+setTimeout(() => runActiveLearning(false).catch(() => {}), 10000);
 
 // ═══════════════════════════════════════════════════════════════
 // MODULE: FUZZY — Fuzzy matching engine
@@ -18485,6 +19020,17 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
     const processed = await preprocessImageFiles(Array.from(files));
     // ── v14.3 C1: IMAGE QUALITY TRIAGE (non-blocking) ──
     triageAllImages(processed).catch(() => {});
+    // ── v14.4 FIX 4: REGION MASKING (non-blocking) ──
+    // Apply phone-screen detection + insurer chrome cropping in background.
+    // Uses the first staged item's detected insurer as a hint for all files in batch.
+    Promise.resolve().then(async () => {
+      try {
+        for (let i = 0; i < processed.length; i++) {
+          const masked = await applyRegionMask(processed[i], null);
+          if (masked !== processed[i]) processed[i] = masked;
+        }
+      } catch (e) { console.warn('[Mask] Batch masking failed (non-fatal):', e); }
+    });
     const newStaged = [];
     for(const f of processed){
       newStaged.push({file:f, preview:URL.createObjectURL(f), _status:'queued', _detectedInsurer:null});
@@ -27074,6 +27620,52 @@ function CorrectionMemoryDiagnostics() {
   );
 }
 
+function LearnedPatternsDiagnostics() {
+  const [stats, setStats] = useState(null);
+  const [running, setRunning] = useState(false);
+  useEffect(() => {
+    PolicyDB.getAllLearnedFewShots().then(all => {
+      if (!all || all.length === 0) { setStats({ total: 0, insurers: {} }); return; }
+      const byIns = {};
+      for (const l of all) {
+        const ins = l.insurer || 'unknown';
+        if (!byIns[ins]) byIns[ins] = { patterns: 0, corrections: 0 };
+        byIns[ins].patterns++;
+        byIns[ins].corrections += l.exampleCount || 0;
+      }
+      setStats({ total: all.length, insurers: byIns });
+    }).catch(() => setStats({ total: 0, insurers: {} }));
+  }, [running]);
+  return (
+    <div className="card" style={{marginBottom:16}}>
+      <h3 style={{fontSize:14,fontWeight:600,marginBottom:4}}>🎓 Learned Patterns</h3>
+      <p style={{fontSize:11,color:'var(--text3)',marginBottom:10}}>
+        Active learning clusters your correction history into reusable patterns that improve future extractions.
+      </p>
+      {stats && stats.total > 0 ? (
+        <div style={{fontSize:11,color:'var(--text2)',marginBottom:8}}>
+          {Object.entries(stats.insurers).map(([ins, s]) => (
+            <div key={ins}><strong>{ins}</strong> — {s.patterns} patterns from {s.corrections} corrections</div>
+          ))}
+        </div>
+      ) : (
+        <div style={{fontSize:11,color:'var(--text3)',marginBottom:8}}>No learned patterns yet.</div>
+      )}
+      <div style={{display:'flex',gap:8}}>
+        <button onClick={async () => { setRunning(true); await runActiveLearning(true); setRunning(false); try{toast('Learning complete','success')}catch(_){} }}
+          disabled={running}
+          style={{fontSize:10,padding:'4px 12px',borderRadius:6,border:'1px solid var(--border)',background:'var(--bg2)',color:'var(--gold)',cursor:'pointer'}}>
+          {running ? 'Learning…' : 'Run learning now'}
+        </button>
+        <button onClick={async () => { await PolicyDB.clearLearnedFewShots(); setRunning(r => !r); try{toast('Patterns cleared','success')}catch(_){} }}
+          style={{fontSize:10,padding:'4px 12px',borderRadius:6,border:'1px solid var(--border)',background:'var(--bg2)',color:'var(--red)',cursor:'pointer'}}>
+          Reset learned patterns
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ExtractDiagnostics() {
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState([]);
@@ -27825,6 +28417,9 @@ function Settings() {
 
       {/* ═══ v14.1: CORRECTION MEMORY DIAGNOSTICS ═══ */}
       <CorrectionMemoryDiagnostics />
+
+      {/* ═══ v14.4: LEARNED PATTERNS DIAGNOSTICS ═══ */}
+      <LearnedPatternsDiagnostics />
 
       {/* ═══ v15 STAGE 11: TELEMETRY DIAGNOSTICS ═══ */}
       <TelemetryDiagnostics />
