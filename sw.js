@@ -852,4 +852,4 @@ self.addEventListener('notificationclick', (e) => {
   })());
 });
 
-console.log('[SW] PolicyLens v1.0.3-tier2-multi loaded');
+console.log('[SW] PolicyLens v2.0.0 loaded');

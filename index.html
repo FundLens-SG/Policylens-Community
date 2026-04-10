@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="browsermode" content="application">
-<title>PolicyLens V1.0</title>
+<title>PolicyLens</title>
 <script>window.onerror=function(m,s){if(!s||m==='Script error.')return true;return false};window.onunhandledrejection=function(e){if(!e||!e.reason)return;var r=String(e.reason);if(r==='Script error.')e.preventDefault();};
 // Suppress noisy library warnings
 (function(){var _warn=console.warn,_error=console.error;
@@ -370,6 +370,21 @@ label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;lett
       <button class="abtn abtn-p" onclick="authLogin()">Sign In</button>
       <button class="abtn abtn-s" onclick="authShow('signup')">Create Account</button>
       <div class="auth-link" onclick="authShow('reset')">Forgot password?</div>
+      <div style="text-align:center;margin-top:24px;font-size:11px;opacity:0.6">
+        <span>PolicyLens v2.0.0</span>
+        <span style="margin:0 8px">&middot;</span>
+        <button onclick="document.getElementById('auth-changelog').style.display=document.getElementById('auth-changelog').style.display==='none'?'block':'none'" style="background:none;border:none;color:#c9a96e;cursor:pointer;font-size:11px;padding:0">Changelog</button>
+      </div>
+      <div id="auth-changelog" style="display:none;margin-top:12px;max-height:240px;overflow:auto;text-align:left;font-size:11px;color:#c8c8c8;background:rgba(26,35,50,.5);border-radius:8px;padding:12px;border:1px solid rgba(201,169,110,.15)">
+        <div style="font-weight:700;color:#c9a96e;margin-bottom:6px">v2.0.0 — Reasoning & Field-Tool Release</div>
+        <div style="color:#888;font-size:10px;margin-bottom:8px">2026-04-10</div>
+        <div style="margin-bottom:4px;font-weight:600;color:#c9a96e;font-size:10px">Extraction quality</div>
+        <div style="padding-left:8px;line-height:1.6">- AI explains low-confidence values<br>- Stricter rules prevent silent "Untitled policy" CLEAN cards<br>- Smarter deduplication</div>
+        <div style="margin-top:6px;margin-bottom:4px;font-weight:600;color:#c9a96e;font-size:10px">Reasoning layer</div>
+        <div style="padding-left:8px;line-height:1.6">- Auto-derives missing premiums, terms, death benefits<br>- Arithmetic constraint validator<br>- Targeted re-extraction on flagged fields</div>
+        <div style="margin-top:6px;margin-bottom:4px;font-weight:600;color:#c9a96e;font-size:10px">Field tool</div>
+        <div style="padding-left:8px;line-height:1.6">- Knowns vs Assumptions tab<br>- Snap-and-go camera mode<br>- Active learning from corrections</div>
+      </div>
     </div>
     <div id="auth-signup" style="display:none">
       <div class="af"><label>Full Name</label><input type="text" id="auth-sname" placeholder="Your name"></div>
@@ -693,6 +708,63 @@ document.addEventListener('DOMContentLoaded',function(){
 <div id="root"></div>
 <script type="text/babel">
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
+
+// ── APP VERSION (display only — NOT the extraction pipeline version) ──
+const APP_VERSION = 'v2.0.0';
+const APP_VERSION_DATE = '2026-04-10';
+const APP_VERSION_NAME = 'Reasoning & Field-Tool Release';
+
+const CHANGELOG = [
+  {
+    version: 'v2.0.0',
+    date: '2026-04-10',
+    name: 'Reasoning & Field-Tool Release',
+    sections: [
+      {
+        heading: 'Extraction quality',
+        items: [
+          'AI now explains when and why a value was extracted with low confidence',
+          'Stricter rules prevent silent "Untitled policy" cards being marked CLEAN',
+          'Smarter deduper merges policies the old system left as duplicates',
+          'Native structured output mode with both Gemini and Claude eliminates parse failures',
+        ]
+      },
+      {
+        heading: 'Reasoning layer',
+        items: [
+          'Auto-derives missing values: annual premium from total paid, premium term from date span, death benefit from sum assured',
+          'Estimates maturity value for endowments at 3% default yield',
+          'Reverse-engineers monthly payouts from cash value, yield, and duration',
+          'Arithmetic constraint validator catches silent hallucinations',
+          'Targeted re-extraction recovers individual flagged fields without rerunning the whole pipeline',
+        ]
+      },
+      {
+        heading: 'Field tool',
+        items: [
+          'New Knowns vs Assumptions tab makes every assumption visible and adjustable',
+          'Snap-and-go camera mode for rapid policy capture during fact-finds',
+          'Per-photo quality triage warns about blurry or dark images before extraction',
+          'Active learning from your corrections — the tool gets smarter over time',
+        ]
+      },
+      {
+        heading: 'Coverage modeling',
+        items: [
+          'Dynamic death benefit (higher of sum assured or cash value) for participating savings plans',
+          'Gap analysis now properly counts savings policies in death cover',
+        ]
+      },
+      {
+        heading: 'Internal',
+        items: [
+          'Extraction pipeline cache invalidates automatically when prompt or schema versions change',
+          'Two-model voting on low-confidence extractions',
+        ]
+      },
+    ]
+  }
+];
 
 // ╔═══════════════════════════════════════════════════════════════╗
 // ║  POLICYLENS — TABLE OF CONTENTS                              ║
@@ -1643,7 +1715,7 @@ async function pdfToImages(pdfDoc, maxPages=12) {
 // CLEAN even if the FC never actually reviewed anything. Bumping the version
 // forces a re-extraction next time those same files are uploaded, and the
 // one-time cleanup in App init purges the stale entries from IndexedDB.
-const EXTRACT_PIPELINE_VERSION = 'v14.4-2026-04-10-final-accuracy';
+const EXTRACT_PIPELINE_VERSION = 'v14.4-2026-04-10-final-accuracy-r3';
 
 // ── v15: PROMPT VERSIONING ──
 const EXTRACT_PROMPT_VERSION = 'v14.1-2026-04-10-strict-fields';
@@ -1714,6 +1786,10 @@ const INSURER_FEWSHOTS = {
     'PRU products: "PRUActive Saver" (savings), "PRUShield" (ISP), "PRUSafe" (term). The PRU prefix is part of the product name — keep it.',
     'PRULink fund pages show "Bid Price" and "Units" — extract both into fundAllocations. The allocation % is "Fund value %" column.',
     'Prudential apps may show "PruActive" without the space — the correct name is "PruActive Saver", "PruActive Retire", etc.',
+    'If "Basic premium" on the Benefits tab has NO period qualifier (no "/yr", "/mth", "Annually", "Monthly"), default to ANNUAL frequency, NOT single. Single premiums are explicitly labeled "Single Premium" and have premiumEndDate = inceptionDate.',
+    'If premiumEndDate is years after inceptionDate, the policy CANNOT be single premium. Compute term from (premiumEndDate - inceptionDate) and set frequency to Annual.',
+    'PruSave Max 10 = 10-year full pay annual. PruSave Max 15 = 15-year full pay annual. PruActive Saver Limited Pay 5 = 5-year limited pay annual. Premium amount with no qualifier = annual unless monthly is explicitly stated elsewhere.',
+    'PruActive Saver: if premium is 4-figure (e.g. $1,021.96) and face value is 5-figure (e.g. $62,000), the premium is likely MONTHLY. Annual premium would be ~1/10 of face value for a 10-year limited pay. Verify: (premium × 12 × premiumTerm) ≈ face value.',
   ],
   'Great Eastern': [
     'Great Eastern products start with "GREAT" in caps: "GREAT Flexi Life Cover", "GREAT SupremeHealth". Keep the casing.',
@@ -1794,6 +1870,10 @@ const DERIVE_RULES = [
   {
     name: 'derive_death_benefit_from_sum_assured',
     run: (policy) => {
+      // v14.4.1 Fix L1: Default deathBenefitDynamic for participating plans
+      if (policy.deathBenefitDynamic == null && typeof isParticipatingPlan === 'function') {
+        policy.deathBenefitDynamic = isParticipatingPlan(policy);
+      }
       const existing = parseFloat(policy.deathBenefit) || 0;
       if (existing > 0) return null;
       const sa = parseFloat(policy.sumAssured) || 0;
@@ -1859,6 +1939,16 @@ const DERIVE_RULES = [
         policy.premiumStatus = 'fully_paid';
         if (!policy.status || policy.status === 'inforce') policy.status = 'paid-up';
       }
+      // v14.4.1 Fix A: Write premiumTerm back if missing
+      if (!parseInt(policy.premTerm) && yearsActive > 0) {
+        policy.premTerm = yearsActive;
+        if (!policy._derived) policy._derived = {};
+        policy._derived.premTerm = {
+          rule: 'derive_annual_premium_from_total_paid', source: 'derived',
+          confidence: 0.8, inputs: { source: 'date_span', years: yearsActive },
+          caption: 'Derived from date span (' + yearsActive + ' years)',
+        };
+      }
       return {
         field: 'annualPremium',
         value: derived,
@@ -1881,8 +1971,9 @@ const DERIVE_RULES = [
       if (guar > 0) return null; // already has BI data
       const prem = parseFloat(policy.annualPremium) || 0;
       if (prem <= 0) return null;
-      const premTerm = parseInt(policy.premTerm) || 0;
-      if (premTerm <= 0) return null;
+      // v14.4.1 Fix I: Use effectivePremiumTerm fallback chain
+      const premTerm = (typeof effectivePremiumTerm === 'function') ? effectivePremiumTerm(policy) : (parseInt(policy.premTerm) || 0);
+      if (!premTerm || premTerm <= 0) return null;
       // Policy term: explicit or inferred from premTerm
       const startAge = parseInt(policy.premStartAge) || parseInt(policy.ageAtEntry) || 30;
       let policyTerm = 0;
@@ -1945,6 +2036,70 @@ const DERIVE_RULES = [
           confidence: 0.7,
           inputs: { cashValue: pv, startAge, endAge, currentAge, yieldPct: 3 },
           caption: 'Estimated at 3% yield from $' + pv.toLocaleString() + ' cash value — adjust yield to recalculate',
+        },
+      };
+    },
+  },
+  // ── v14.4.1 Fix B: Income-plan auto-classifier ──
+  {
+    name: 'derive_classify_income_plan',
+    run: (policy) => {
+      const cat = (policy.category || '').toLowerCase();
+      if (cat !== 'savings' && cat !== 'protection') return null;
+      const sub = (policy.subType || '').toLowerCase();
+      if (sub.includes('income') || sub.includes('annuit') || sub.includes('retirement')) return null; // already classified
+      const monthly = parseFloat(policy.annuityMonthly) || 0;
+      const annual = parseFloat(policy.annuityPayout) || 0;
+      if (monthly <= 0 && annual <= 0) return null;
+      const startAge = parseInt(policy.annuityStartAge) || 0;
+      const endAge = parseInt(policy.annuityEndAge) || 0;
+      if (startAge <= 0 || endAge <= 0) return null;
+      const duration = endAge - startAge;
+      if (duration <= 5) return null;
+      // Reclassify
+      policy.category = 'retirement';
+      policy.subType = 'Retirement';
+      return {
+        field: 'category',
+        value: 'retirement',
+        meta: {
+          confidence: 0.85,
+          inputs: { monthlyPayout: monthly || (annual / 12), payoutStartAge: startAge, payoutEndAge: endAge, payoutDuration: duration },
+          caption: 'Reclassified: ' + duration + '-year payout span ($' + (monthly || Math.round(annual/12)).toLocaleString() + '/mth from age ' + startAge + ' to ' + endAge + ') indicates income plan',
+        },
+      };
+    },
+  },
+  // ── v14.4.1 Fix H: Frequency-from-dates derive rule ──
+  {
+    name: 'derive_frequency_from_date_span',
+    run: (policy) => {
+      const freq = (policy.premFrequency || '').toLowerCase();
+      if (freq !== 'single') return null;
+      const inception = policy.inceptionDate ? new Date(policy.inceptionDate) : null;
+      const premEnd = (policy.lastPremiumDueDate || policy.premiumEndDate) ? new Date(policy.lastPremiumDueDate || policy.premiumEndDate) : null;
+      if (!inception || !premEnd || isNaN(inception.getTime()) || isNaN(premEnd.getTime())) return null;
+      const spanMs = premEnd - inception;
+      const spanYears = Math.round(spanMs / (365.25 * 24 * 60 * 60 * 1000));
+      if (spanYears <= 1) return null; // genuinely single premium
+      policy.premFrequency = 'annual';
+      // Also write premTerm if missing
+      if (!parseInt(policy.premTerm) && spanYears > 0) {
+        policy.premTerm = spanYears;
+        if (!policy._derived) policy._derived = {};
+        policy._derived.premTerm = {
+          rule: 'derive_frequency_from_date_span', source: 'derived',
+          confidence: 0.9, inputs: { spanYears },
+          caption: 'Premium term = ' + spanYears + ' years from date span',
+        };
+      }
+      return {
+        field: 'premFrequency',
+        value: 'annual',
+        meta: {
+          confidence: 0.9,
+          inputs: { inceptionDate: policy.inceptionDate, premEndDate: policy.lastPremiumDueDate || policy.premiumEndDate, spanYears },
+          caption: 'Premium end is ' + spanYears + ' years after inception — cannot be single premium. Reclassified as annual.',
         },
       };
     },
@@ -2267,7 +2422,135 @@ const VALIDATE_RULES = [
       return null;
     },
   },
+  // ── v14.4.1 Fix C: Flag mislabeled SA/payout ──
+  {
+    name: 'validate_likely_sa_payout_swap',
+    run: (policy) => {
+      const cat = (policy.category || '').toLowerCase();
+      if (cat !== 'retirement' && cat !== 'savings') return null;
+      const sa = parseFloat(policy.sumAssured) || 0;
+      if (sa <= 0 || sa >= 10000) return null;
+      const monthly = parseFloat(policy.annuityMonthly) || parseFloat(policy.annuityPayout) || 0;
+      if (monthly <= 0) return null;
+      const diff = Math.abs(sa - monthly) / Math.max(sa, monthly);
+      if (diff > 0.05) return null;
+      // Flag for review with action button
+      if (!policy._reviewActions) policy._reviewActions = [];
+      policy._reviewActions.push({
+        type: 'swap_sa_to_payout',
+        label: 'Swap: Sum Assured → Monthly Payout',
+        fromField: 'sumAssured', toField: 'annuityMonthly',
+        fromValue: sa,
+        description: 'Sum Assured $' + sa.toLocaleString() + ' ≈ monthly payout — likely mislabeled. The actual face value may be unknown.',
+      });
+      return 'Sum Assured ($' + sa.toLocaleString() + ') ≈ monthly payout — may be mislabeled as face value instead of income payout';
+    },
+  },
 ];
+
+// ── v14.4.1 Fix I: Premium term fallback chain ──
+function effectivePremiumTerm(policy) {
+  const direct = parseInt(policy.premTerm);
+  if (direct > 0) return direct;
+  const policyTerm = parseInt(policy.policyTerm || policy.endPolicyTerm);
+  if (policyTerm > 0) return policyTerm;
+  if (policy.inceptionDate && (policy.lastPremiumDueDate || policy.premiumEndDate)) {
+    const inc = new Date(policy.inceptionDate);
+    const end = new Date(policy.lastPremiumDueDate || policy.premiumEndDate);
+    if (!isNaN(inc.getTime()) && !isNaN(end.getTime()) && end > inc) {
+      return Math.round((end - inc) / (365.25 * 24 * 60 * 60 * 1000));
+    }
+  }
+  if (policy.inceptionDate && policy.maturityDate) {
+    const inc = new Date(policy.inceptionDate);
+    const mat = new Date(policy.maturityDate);
+    if (!isNaN(inc.getTime()) && !isNaN(mat.getTime()) && mat > inc) {
+      return Math.round((mat - inc) / (365.25 * 24 * 60 * 60 * 1000));
+    }
+  }
+  return null;
+}
+
+// ── v14.4.1 Fix E: Bidirectional yield solver ──
+// Given any 3 of {pmt, n, FV, r}, solve for the 4th.
+function solveYield(pmt, n, fv) {
+  // Bisection to find r where FV_annuity(pmt, n, r) = fv
+  if (!pmt || !n || !fv || pmt <= 0 || n <= 0 || fv <= 0) return null;
+  let lo = 0.001, hi = 0.12;
+  for (let i = 0; i < 50; i++) {
+    const mid = (lo + hi) / 2;
+    const computed = pmt * ((Math.pow(1 + mid, n) - 1) / mid);
+    if (computed < fv) lo = mid; else hi = mid;
+  }
+  return Math.round(((lo + hi) / 2) * 10000) / 100; // percent with 2 decimals
+}
+
+function solvePmt(r, n, fv) {
+  if (!r || !n || !fv || r <= 0 || n <= 0 || fv <= 0) return null;
+  return Math.round(fv / ((Math.pow(1 + r, n) - 1) / r));
+}
+
+function solveTerm(pmt, r, fv) {
+  if (!pmt || !r || !fv || pmt <= 0 || r <= 0 || fv <= 0) return null;
+  // n = ln(1 + FV*r/pmt) / ln(1+r)
+  const inner = 1 + (fv * r) / pmt;
+  if (inner <= 0) return null;
+  return Math.round(Math.log(inner) / Math.log(1 + r));
+}
+
+// ── v14.4.1 Fix L: Dynamic death benefit (higher of SA or CV) ──
+function inceptionYear(policy) {
+  if (!policy.inceptionDate) return new Date().getFullYear();
+  const d = new Date(policy.inceptionDate);
+  return isNaN(d.getTime()) ? new Date().getFullYear() : d.getFullYear();
+}
+
+const PARTICIPATING_CATEGORIES = new Set(['savings', 'retirement', 'investment']);
+
+function isParticipatingPlan(policy) {
+  const cat = (policy.category || '').toLowerCase();
+  const sub = (policy.subType || '').toLowerCase();
+  if (PARTICIPATING_CATEGORIES.has(cat)) return true;
+  if (cat === 'protection' && (sub.includes('whole life') || sub.includes('endowment'))) return true;
+  return false;
+}
+
+function computeProjectedCashValue(policy, atYear) {
+  const startYr = inceptionYear(policy);
+  const yearsFromStart = atYear - startYr;
+  if (yearsFromStart < 0) return 0;
+  const pmt = parseFloat(policy.annualPremium) || 0;
+  const r = (parseFloat(policy.yieldPct || policy.endEstYield) || 3) / 100;
+  const premTerm = effectivePremiumTerm(policy) || 0;
+  if (pmt <= 0 || premTerm <= 0) {
+    const cv = parseFloat(policy.cashValue) || 0;
+    return cv > 0 ? cv * Math.pow(1 + r, Math.max(0, yearsFromStart)) : 0;
+  }
+  const yearsContributed = Math.min(yearsFromStart, premTerm);
+  let cv = pmt * ((Math.pow(1 + r, yearsContributed) - 1) / r);
+  const yearsPaidUp = Math.max(0, yearsFromStart - premTerm);
+  cv = cv * Math.pow(1 + r, yearsPaidUp);
+  // Payout phase deduction (if applicable and not reinvesting)
+  const monthlyPayout = parseFloat(policy.annuityMonthly) || 0;
+  const payoutStartAge = parseInt(policy.annuityStartAge) || 0;
+  const entryAge = parseInt(policy.ageAtEntry) || 0;
+  if (monthlyPayout > 0 && payoutStartAge > 0 && entryAge > 0) {
+    const payoutStartYear = startYr + (payoutStartAge - entryAge);
+    if (atYear >= payoutStartYear && !policy.retPayoutMode?.includes?.('reinvest')) {
+      const yearsInPayout = atYear - payoutStartYear;
+      cv -= monthlyPayout * 12 * yearsInPayout;
+    }
+  }
+  return Math.max(0, cv);
+}
+
+function computeDynamicDeathBenefit(policy, atYear) {
+  const dynamic = policy.deathBenefitDynamic !== false && isParticipatingPlan(policy);
+  const sa = parseFloat(policy.sumAssured) || 0;
+  if (!dynamic) return sa;
+  const cv = computeProjectedCashValue(policy, atYear || new Date().getFullYear());
+  return Math.max(sa, cv);
+}
 
 // ── runDerivePass: apply all DERIVE_RULES to one policy ──
 function runDerivePass(policy, clientProfile) {
@@ -8176,7 +8459,7 @@ function OnboardingModal() {
       <div className="modal" onClick={e=>e.stopPropagation()} style={{maxWidth:560,padding:28}}>
         <div style={{textAlign:'center',marginBottom:20}}>
           <div style={{fontSize:40,marginBottom:8}}>✨</div>
-          <h2 style={{fontSize:20,fontWeight:700,marginBottom:6}}>Welcome to PolicyLens V1.0</h2>
+          <h2 style={{fontSize:20,fontWeight:700,marginBottom:6}}>Welcome to PolicyLens</h2>
           <p style={{color:'var(--text2)',fontSize:13,lineHeight:1.5}}>
             Your AI-powered policy review toolkit. Here's how to get started in 30 seconds:
           </p>
@@ -8405,6 +8688,7 @@ function App() {
   // client meetings so the FC can show portfolio summaries without exposing
   // working notes or spreadsheet-style forms.
   const [presentMode, setPresentMode] = useState(false);
+  const [showChangelog, setShowChangelog] = useState(false);
 
   // ── HOUSE-VIEW DEFAULTS ──
   // Firm-level baseline planning assumptions (retirement age, inflation rate,
@@ -9120,7 +9404,7 @@ function App() {
     sbAppSettingsPush(bundle, newVersions).catch(()=>{});
   };
 
-  const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,deletePolicy,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,tab,setTab,presentMode,setPresentMode,houseDefaults,saveHouseDefaults,runCloudSync:()=>runCloudSyncRef.current?.({force:true})};
+  const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,deletePolicy,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,tab,setTab,presentMode,setPresentMode,showChangelog,setShowChangelog,houseDefaults,saveHouseDefaults,runCloudSync:()=>runCloudSyncRef.current?.({force:true})};
 
   if(loading) return <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh'}}>
     <div style={{textAlign:'center'}}><LogoMark size={36} /><div style={{color:'var(--text2)',fontSize:14,marginTop:8}}>Loading PolicyLens…</div></div>
@@ -9147,6 +9431,7 @@ function App() {
       <ToastContainer />
       <CameraModal />
       <OnboardingModal />
+      {showChangelog && <ChangelogModal onClose={() => setShowChangelog(false)} />}
       {reconcileData && <ReconcileSyncModal
         data={reconcileData}
         onClose={() => setReconcileData(null)}
@@ -9322,36 +9607,38 @@ function PresentMode() {
   // bug where deathBenefit was never populated by the AI.
   let totalDeathSA = 0, totalCI = 0, totalTPD = 0, totalDI = 0;
   let hasISP = false, hasLife = false, hasCI = false, hasTPD = false, hasDI = false;
+  const currentYear = new Date().getFullYear();
   active.forEach(pol => {
     const sub = pol.subType || '';
     const cat = pol.category || '';
     const sa = parseFloat(pol.sumAssured) || 0;
     const deathBen = parseFloat(pol.deathBenefit) || 0;
-    // Base policy contributions — use deathBenefit if available
+    // v14.4.1 Fix G+L4: Use dynamic death benefit for participating plans
+    const dynDeath = (typeof computeDynamicDeathBenefit === 'function')
+      ? computeDynamicDeathBenefit(pol, currentYear) : (deathBen || sa);
+    let deathContrib = 0, sourceField = 'none';
+    // Base policy contributions — use deathBenefit (dynamic or static) if available
     if(cat === 'protection' && !['Personal Accident','Critical Illness','Disability Income'].includes(sub)) {
-      if (deathBen > 0) {
-        // v14.2: deathBenefit already includes SA + death riders from derive pass
-        const mult = parseFloat(pol.saMultiplier) || 1;
-        const multEnd = parseInt(pol.multiplierEndAge) || 70;
-        const clientAge = getProfileAge(clientProfile) ?? 35;
-        const effDeath = clientAge < multEnd ? deathBen * mult : deathBen;
-        totalDeathSA += effDeath;
-        totalTPD += (sa > 0 ? (clientAge < multEnd ? sa * mult : sa) : effDeath);
-      } else {
-        const mult = parseFloat(pol.saMultiplier) || 1;
-        const multEnd = parseInt(pol.multiplierEndAge) || 70;
-        const clientAge = getProfileAge(clientProfile) ?? 35;
-        const effSA = clientAge < multEnd ? sa * mult : sa;
-        totalDeathSA += effSA;
-        totalTPD += effSA;
-      }
+      const effectiveDeath = dynDeath > 0 ? dynDeath : (deathBen > 0 ? deathBen : sa);
+      sourceField = dynDeath > deathBen ? 'dynamicDeathBenefit' : (deathBen > 0 ? 'deathBenefit' : 'sumAssured');
+      const mult = parseFloat(pol.saMultiplier) || 1;
+      const multEnd = parseInt(pol.multiplierEndAge) || 70;
+      const clientAge = getProfileAge(clientProfile) ?? 35;
+      deathContrib = clientAge < multEnd ? effectiveDeath * mult : effectiveDeath;
+      totalDeathSA += deathContrib;
+      totalTPD += (sa > 0 ? (clientAge < multEnd ? sa * mult : sa) : deathContrib);
       hasLife = true;
-      if(sa > 0 || deathBen > 0) hasTPD = true;
+      if(sa > 0 || deathBen > 0 || dynDeath > 0) hasTPD = true;
     }
-    // v14.2: Also count deathBenefit for savings/retirement categories (endowments, etc.)
-    if ((cat === 'savings' || cat === 'retirement') && deathBen > 0) {
-      totalDeathSA += deathBen;
+    // v14.2+v14.4.1: Also count death benefit for savings/retirement categories
+    if ((cat === 'savings' || cat === 'retirement') && (dynDeath > 0 || deathBen > 0)) {
+      deathContrib = dynDeath > 0 ? dynDeath : deathBen;
+      sourceField = dynDeath > deathBen ? 'dynamicDeathBenefit' : 'deathBenefit';
+      totalDeathSA += deathContrib;
       hasLife = true;
+    }
+    if (deathContrib > 0) {
+      console.log('[Gap] Death cover for', pol.productName || '?', '=', deathContrib.toLocaleString(), 'category:', cat, 'source:', sourceField);
     }
     if(sub === 'Critical Illness') { totalCI += sa; hasCI = true; }
     if(sub === 'Disability Income') { totalDI += parseFloat(pol.diMonthlyBenefit) || 0; hasDI = true; }
@@ -9368,13 +9655,18 @@ function PresentMode() {
     } else {
       // Still count non-death riders separately
       (pol.riders || []).forEach(rd => {
-        const rsa = parseFloat(rd.sa) || 0;
+        let rsa = parseFloat(rd.sa) || 0;
+        // v14.4.1 Fix L6: TPD inherits from death benefit when SA is null
+        if (rd.type === 'tpd' && rsa <= 0 && typeof computeDynamicDeathBenefit === 'function') {
+          rsa = computeDynamicDeathBenefit(pol, currentYear);
+        }
         if(rd.type === 'tpd')    { totalTPD += rsa; if(rsa > 0) hasTPD = true; }
         else if(rd.type === 'ci')     { totalCI += rsa; if(rsa > 0) hasCI = true; }
         else if(rd.type === 'di')     { totalDI += rsa; if(rsa > 0) hasDI = true; }
       });
     }
   });
+  console.log('[Gap] Total death cover: $' + totalDeathSA.toLocaleString(), 'CI: $' + totalCI.toLocaleString(), 'TPD: $' + totalTPD.toLocaleString(), 'across', active.length, 'active policies');
 
   // Annual premium (aggregated, normalized to yearly)
   const annualPrem = active.reduce((s, pol) => {
@@ -14128,7 +14420,7 @@ ${topInsurers.map(([name,count]) => {
 </div>` : ''}
 
 <div class="footer">
-Generated by PolicyLens V1.0 · For discussion purposes only · Not financial advice<br/>
+Generated by PolicyLens v2.0.0 · For discussion purposes only · Not financial advice<br/>
 ${p.name?'Prepared for '+p.name+' by their financial consultant':''}
 </div>
 </div>
@@ -15190,7 +15482,7 @@ function Dashboard() {
         e.target.value='';
       }} />
       <LogoMark size={56} />
-      <h2 style={{fontSize:22,fontWeight:600,marginBottom:8}}>Welcome to PolicyLens V1.0</h2>
+      <h2 style={{fontSize:22,fontWeight:600,marginBottom:8}}>Welcome to PolicyLens</h2>
 
       {/* Getting-started checklist — replaces the generic tagline with an action-oriented flow */}
       <div style={{maxWidth:560, margin:'16px auto 20px', textAlign:'left'}}>
@@ -17698,6 +17990,25 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
                         <div style={{fontWeight:700,marginBottom:2}}>⚠ Why flagged:</div>
                         {whyReasons.map((r, ri) => (
                           <div key={ri} style={{color:'var(--text3)',paddingLeft:8}}>• {r}</div>
+                        ))}
+                        {/* v14.4.1 Fix C: Clickable review actions */}
+                        {item._reviewActions && item._reviewActions.length > 0 && item._reviewActions.map((action, ai) => (
+                          <button key={ai} onClick={(e) => {
+                            e.stopPropagation();
+                            setItems(prev => prev.map(it => {
+                              if (it._idx !== item._idx) return it;
+                              const next = {...it};
+                              next[action.toField] = action.fromValue;
+                              next[action.fromField] = null;
+                              next._reviewActions = (it._reviewActions || []).filter((_, j) => j !== ai);
+                              // Re-run derive + validate
+                              try { runDerivePass(next, null); runValidatePass(next, null); } catch(_){}
+                              return next;
+                            }));
+                            try { PolicyDB.putCorrection({ insurer: item.insurer || '', productName: item.productName || '', field: 'sumAssured_payout_swap', aiValue: action.fromValue, correctedValue: 'swapped' }); } catch(_){}
+                          }} style={{display:'block',marginTop:4,padding:'3px 8px',fontSize:10,fontWeight:600,background:'rgba(212,169,106,.15)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.3)',borderRadius:4,cursor:'pointer'}}>
+                            ↻ {action.label}
+                          </button>
                         ))}
                       </div>
                     );
@@ -23198,7 +23509,28 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
               </div>}
               {form.premSingle && <div style={{fontSize:9,color:'var(--gold)',marginTop:2}}>N/A — single premium</div>}
             </div>
-            <div className="field"><label>Premium End Age</label><input type="number" value={form.premWholeLife?'':form.premEndAge||''} disabled={form.premWholeLife||form.premSingle} onChange={e=>set('premEndAge',e.target.value)} placeholder={form.premWholeLife?'Whole Life':form.premSingle?'N/A':'auto: start + term'} style={form.premSingle?{opacity:.4}:{}} />{form.premWholeLife && <div style={{fontSize:10,color:'var(--gold)'}}>Whole Life</div>}</div>
+            <div className="field"><label>Premium End Age</label>
+              {(() => {
+                const age = parseInt(form.ageAtEntry || form.premStartAge) || 0;
+                const term = parseInt(form.premTerm) || 0;
+                const computed = age > 0 && term > 0 ? age + term : null;
+                const existing = parseInt(form.premEndAge) || 0;
+                const mismatch = computed && existing > 0 && Math.abs(existing - computed) > 1;
+                // v14.4.1 Fix D: auto-sync premEndAge when computed
+                if (computed && !mismatch && String(computed) !== String(form.premEndAge)) {
+                  setTimeout(() => set('premEndAge', String(computed)), 0);
+                }
+                return (
+                  <div>
+                    <input type="number" value={form.premWholeLife ? '' : (computed || form.premEndAge || '')}
+                      disabled style={{opacity:.6,background:'var(--bg4)',cursor:'not-allowed'}} />
+                    {form.premWholeLife && <div style={{fontSize:10,color:'var(--gold)'}}>Whole Life</div>}
+                    {!form.premWholeLife && !form.premSingle && computed && <div style={{fontSize:9,color:'var(--text3)',marginTop:1}}>Auto: age at entry + premium term</div>}
+                    {mismatch && <div style={{fontSize:9,color:'var(--orange)',marginTop:1}}>Existing: {existing}. Adjust premium term to recompute.</div>}
+                  </div>
+                );
+              })()}
+            </div>
           </div>
           <div className="grid-3" style={{marginTop:4}}>
             <div className="field"><label>Inception Date</label><input type="date" value={form.inceptionDate} onChange={e=>set('inceptionDate',e.target.value)} /></div>
@@ -24264,6 +24596,24 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
               </div>
             )}
 
+            {/* v14.4.1 Fix L3: Implicit death benefit row for participating plans */}
+            {(form.deathBenefitDynamic || (typeof isParticipatingPlan === 'function' && isParticipatingPlan(form))) && parseFloat(form.sumAssured) > 0 && (
+              <div style={{padding:'8px 10px',marginBottom:8,background:'rgba(201,169,110,.06)',borderRadius:6,border:'1px solid rgba(201,169,110,.15)',display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
+                <div style={{display:'flex',alignItems:'center',gap:6}}>
+                  <input type="checkbox" checked={form.deathBenefitDynamic !== false} onChange={e => set('deathBenefitDynamic', e.target.checked)} />
+                  <div>
+                    <div style={{fontSize:11,fontWeight:600,color:'#c9a96e'}}>🔒 Death Benefit (Higher of SA or CV)</div>
+                    <div style={{fontSize:9,color:'var(--text3)'}}>
+                      Implicit: pays max of {fmt(parseFloat(form.sumAssured),form.currency||'SGD')} (sum assured) or current cash value on death before maturity
+                    </div>
+                  </div>
+                </div>
+                <span style={{fontSize:10,color:'#c9a96e',fontWeight:600,whiteSpace:'nowrap'}}>
+                  {typeof computeDynamicDeathBenefit === 'function' ? fmt(computeDynamicDeathBenefit(form, new Date().getFullYear()),form.currency||'SGD') : fmt(parseFloat(form.sumAssured),form.currency||'SGD')}
+                </span>
+              </div>
+            )}
+
             {/* Rider table */}
             <div style={{overflowX:'auto'}}>
             <table style={{fontSize:12,minWidth:600}}>
@@ -24303,7 +24653,11 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                         </div>
                       )}
                     </td>
-                    <td>{rd.type!=='premium_waiver'?<input type="number" value={rd.sa||''} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],sa:e.target.value};set('riders',riders);}} style={{width:'100%',fontSize:11}} placeholder="$" />:<span style={{color:'var(--text3)',fontSize:10}}>N/A</span>}</td>
+                    <td>{rd.type!=='premium_waiver'?<div><input type="number" value={rd.sa||''} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],sa:e.target.value};set('riders',riders);}} style={{width:'100%',fontSize:11}} placeholder="$" />
+                      {rd.type === 'tpd' && !parseFloat(rd.sa) && parseFloat(form.sumAssured) > 0 && (
+                        <div style={{fontSize:8,color:'#c9a96e',marginTop:1}}>(inherits from death benefit: {typeof computeDynamicDeathBenefit === 'function' ? fmt(computeDynamicDeathBenefit(form, new Date().getFullYear()),form.currency||'SGD') : fmt(parseFloat(form.sumAssured),form.currency||'SGD')})</div>
+                      )}
+                    </div>:<span style={{color:'var(--text3)',fontSize:10}}>N/A</span>}</td>
                     <td style={{textAlign:'center'}}><input type="checkbox" checked={rd.bundled!==false} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],bundled:e.target.checked,premium:e.target.checked?'':riders[ri].premium};set('riders',riders);}} /></td>
                     <td>{rd.bundled!==false?<span style={{color:'var(--text3)',fontSize:10}}>incl.</span>:<input type="number" value={rd.premium||''} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],premium:e.target.value};set('riders',riders);}} style={{width:'100%',fontSize:11}} placeholder="$/yr" />}</td>
                     <td><input type="number" value={rd.expiryAge||''} onChange={e=>{const riders=[...(form.riders||[])];riders[ri]={...riders[ri],expiryAge:e.target.value};set('riders',riders);}} style={{width:'100%',fontSize:11}} /></td>
@@ -27038,7 +27392,7 @@ function ReportTab() {
           doc.setFillColor(...GOLD);doc.rect(0,283,W,0.5,'F');
           doc.setFillColor(...NAVY);doc.rect(0,283.5,W,14,'F');
           doc.setFontSize(7);doc.setTextColor(130,130,130);
-          doc.text('PolicyLens V1.0 — Confidential · For Financial Consultant Use Only',M,290);
+          doc.text('PolicyLens v2.0.0 — Confidential · For Financial Consultant Use Only',M,290);
           if(advisorName) doc.text('Prepared by '+advisorName+(advisorCompany?' | '+advisorCompany:''),W/2,290,{align:'center'});
           doc.setTextColor(...GOLD);doc.text('Page '+i+' of '+pageCount,W-M,290,{align:'right'});
         }
@@ -27503,7 +27857,7 @@ function ReportTab() {
       // Disclaimer
       doc.setFont('helvetica','italic');doc.setFontSize(7);doc.setTextColor(160,160,160);
       doc.text('This report is for illustrative purposes and does not constitute financial advice. All projections are estimates based on stated assumptions.',M,y);
-      doc.text('Please consult your financial advisor for personalised recommendations. Generated by PolicyLens V1.0.',M,y+4);
+      doc.text('Please consult your financial advisor for personalised recommendations. Generated by PolicyLens v2.0.0.',M,y+4);
 
       // ═══ FOOTERS ═══
       addFooters();
@@ -28143,8 +28497,60 @@ function TelemetryDiagnostics() {
   );
 }
 
+// ═══════════════════════════════════════════════════════════════
+// MODULE: CHANGELOG MODAL
+// ═══════════════════════════════════════════════════════════════
+function ChangelogModal({ onClose }) {
+  useEffect(() => {
+    const esc = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', esc);
+    return () => window.removeEventListener('keydown', esc);
+  }, [onClose]);
+  return (
+    <div onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+      style={{position:'fixed',inset:0,zIndex:10000,background:'rgba(0,0,0,.7)',display:'flex',alignItems:'center',justifyContent:'center',padding:16}}>
+      <div style={{background:'#1a2332',borderRadius:16,border:'1px solid rgba(201,169,110,.2)',maxWidth:600,width:'100%',maxHeight:'85vh',display:'flex',flexDirection:'column',boxShadow:'0 20px 60px rgba(0,0,0,.5)'}}>
+        {/* Header */}
+        <div style={{padding:'20px 24px 16px',borderBottom:'1px solid rgba(201,169,110,.15)',flexShrink:0}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start'}}>
+            <div>
+              <h2 style={{fontSize:18,fontWeight:700,color:'#e8e8e8',margin:0}}>What's new in PolicyLens</h2>
+              <div style={{fontSize:12,color:'#c9a96e',marginTop:4,fontWeight:600}}>{APP_VERSION} — {APP_VERSION_NAME}</div>
+            </div>
+            <button onClick={onClose} style={{background:'rgba(255,255,255,.08)',border:'none',color:'#999',fontSize:16,width:32,height:32,borderRadius:'50%',cursor:'pointer',flexShrink:0}}>✕</button>
+          </div>
+        </div>
+        {/* Body */}
+        <div style={{overflow:'auto',padding:'16px 24px 24px',flex:1}}>
+          {CHANGELOG.map((entry, ei) => (
+            <div key={ei} style={{marginBottom:ei < CHANGELOG.length - 1 ? 24 : 0}}>
+              {ei > 0 && <div style={{fontSize:14,fontWeight:700,color:'#e8e8e8',marginBottom:4}}>{entry.version} — {entry.name}</div>}
+              {ei > 0 && <div style={{fontSize:10,color:'#888',marginBottom:12}}>{entry.date}</div>}
+              {entry.sections.map((sec, si) => (
+                <div key={si} style={{marginBottom:14}}>
+                  <div style={{fontSize:12,fontWeight:700,color:'#c9a96e',marginBottom:6}}>{sec.heading}</div>
+                  {sec.items.map((item, ii) => (
+                    <div key={ii} style={{fontSize:11,color:'#c8c8c8',lineHeight:1.6,paddingLeft:12,position:'relative'}}>
+                      <span style={{position:'absolute',left:0,color:'#c9a96e'}}>-</span>
+                      {item}
+                    </div>
+                  ))}
+                </div>
+              ))}
+            </div>
+          ))}
+        </div>
+        {/* Footer */}
+        <div style={{padding:'12px 24px',borderTop:'1px solid rgba(201,169,110,.1)',textAlign:'center',flexShrink:0}}>
+          <div style={{fontSize:10,color:'#666'}}>Built for Singapore Financial Consultants</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Settings() {
-  const {apiKey,saveApiKey,clientName,saveClientName,policies,savePolicy,deletePolicy,houseDefaults,saveHouseDefaults} = useContext(AppCtx);
+  const {apiKey,saveApiKey,clientName,saveClientName,policies,savePolicy,deletePolicy,houseDefaults,saveHouseDefaults,setShowChangelog} = useContext(AppCtx);
   const [geminiKey, setGeminiKey] = useState('');
   const [anthropicKey, setAnthropicKey] = useState('');
   const [name, setName] = useState(clientName);
@@ -28425,7 +28831,16 @@ function Settings() {
       <TelemetryDiagnostics />
 
       <div className="card">
-        <h3 style={{fontSize:14,fontWeight:600,marginBottom:8}}>About PolicyLens V1.0</h3>
+        <h3 style={{fontSize:14,fontWeight:600,marginBottom:8}}>About PolicyLens {APP_VERSION}</h3>
+        <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:10}}>
+          <div style={{fontSize:12,color:'var(--text2)'}}>
+            <strong style={{color:'var(--gold)'}}>{APP_VERSION}</strong> — {APP_VERSION_NAME} <span style={{color:'var(--text3)',fontSize:10}}>({APP_VERSION_DATE})</span>
+          </div>
+          <button onClick={() => setShowChangelog(true)}
+            style={{fontSize:10,padding:'4px 12px',borderRadius:6,border:'1px solid rgba(201,169,110,.25)',background:'var(--gold-dim)',color:'var(--gold)',cursor:'pointer',fontWeight:600}}>
+            View changelog
+          </button>
+        </div>
         <div style={{fontSize:12,color:'var(--text2)',lineHeight:1.6}}>
           <p>Institutional-grade policy review toolkit for Singapore Financial Consultants. AI-powered document capture with rider-level extraction, shared cloud repository with role-based editing, and comprehensive portfolio analysis.</p>
           <p style={{marginTop:8}}>Coverage & Riders system with SA multipliers, multi-claim CI, ISP premium breakdown, ILP fund projections, and UL crediting structures. Gap analysis against LIA recommended coverage levels.</p>
