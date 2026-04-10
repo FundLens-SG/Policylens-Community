@@ -1643,7 +1643,7 @@ async function pdfToImages(pdfDoc, maxPages=12) {
 // CLEAN even if the FC never actually reviewed anything. Bumping the version
 // forces a re-extraction next time those same files are uploaded, and the
 // one-time cleanup in App init purges the stale entries from IndexedDB.
-const EXTRACT_PIPELINE_VERSION = 'v14.2-2026-04-10-derive-validate';
+const EXTRACT_PIPELINE_VERSION = 'v14.3-2026-04-10-field-tool';
 
 // ── v15: PROMPT VERSIONING ──
 const EXTRACT_PROMPT_VERSION = 'v14.1-2026-04-10-strict-fields';
@@ -1694,6 +1694,79 @@ async function buildCorrectionFewShot() {
     console.warn('[CorrectionMemory] Failed to load corrections:', e);
     return '';
   }
+}
+
+// ── v14.3 C6: BUILT-IN INSURER FEW-SHOT CORPUS ──
+// Hand-written examples per major SG insurer covering common extraction confusion points.
+// User-learned corrections from v14.1 correction memory are appended on top.
+const INSURER_FEWSHOTS = {
+  'AIA': [
+    'AIA app shows "Premium amount: SGD 0.00" for fully paid policies — derive annual premium from total premiums paid ÷ premium term.',
+    'AIA "Vitality" is a wellness programme, not a product name. The policy product name is separate (e.g. "AIA Pro Achiever 2.0").',
+    'AIA fund allocation pages list "Regular premium allocation %" and "Fund value %" — use "Regular premium allocation %" for the allocation field.',
+  ],
+  'Manulife': [
+    'Manulife "RetireReady Plus" and "RetireReady Plus – Limited Pay 5" are the SAME product with different premium structures. Use the full name including the Limited Pay suffix.',
+    'Manulife apps sometimes show product descriptions instead of product names. Look for the specific marketed name in the header or subject line.',
+    'Manulife "Ready" series: ReadyBuilder (savings), ReadyCompact (protection), RetireReady (retirement) — classify by the prefix.',
+  ],
+  'Prudential': [
+    'PRU products: "PRUActive Saver" (savings), "PRUShield" (ISP), "PRUSafe" (term). The PRU prefix is part of the product name — keep it.',
+    'PRULink fund pages show "Bid Price" and "Units" — extract both into fundAllocations. The allocation % is "Fund value %" column.',
+    'Prudential apps may show "PruActive" without the space — the correct name is "PruActive Saver", "PruActive Retire", etc.',
+  ],
+  'Great Eastern': [
+    'Great Eastern products start with "GREAT" in caps: "GREAT Flexi Life Cover", "GREAT SupremeHealth". Keep the casing.',
+    'GREAT SupremeHealth is the ISP; GREAT TotalCare is the rider. They appear together but are one policy entry with hasRider:true.',
+  ],
+  'NTUC Income': [
+    'NTUC Income rebranded to "Income Insurance" — both names refer to the same insurer. Use "NTUC Income" for consistency.',
+    'IncomeShield is the ISP; IncomeCare/Deluxe IncomeCare are riders on it.',
+  ],
+  'HSBC Life': [
+    'HSBC Life products: "HSBC Life Jade" (ILP), "HSBC Life Goal Access" (endowment). Extract the full product name after "HSBC Life".',
+  ],
+  'Tokio Marine': [
+    'Tokio Marine SG products: "TM Shield" (term), "TM Living" (CI). The "TM" prefix is standard.',
+  ],
+  'Singlife': [
+    'Singlife products: "Singlife Shield" (ISP), "Singlife Account" (savings). Singlife with Aviva products use "Singlife" as insurer.',
+  ],
+  'Etiqa': [
+    'Etiqa products: "Tiq" prefix indicates digital-first products (e.g. "Tiq Easy Save"). Keep the "Tiq" prefix in the product name.',
+  ],
+  'FWD': [
+    'FWD products: "FWD Term Life Plus", "FWD Cancer Insurance". The "FWD" prefix is part of the product name.',
+  ],
+};
+
+// Build combined few-shot string for a detected insurer (built-in corpus + user corrections)
+async function buildInsurerFewShot(insurer) {
+  if (!insurer) return '';
+  const normalized = insurer.trim();
+  const lines = [];
+  // 1. Built-in corpus
+  const builtIn = INSURER_FEWSHOTS[normalized] || INSURER_FEWSHOTS[Object.keys(INSURER_FEWSHOTS).find(k => k.toLowerCase() === normalized.toLowerCase())];
+  if (builtIn) {
+    lines.push('Built-in guidance for ' + normalized + ':');
+    for (const tip of builtIn) lines.push('  • ' + tip);
+  }
+  // 2. User corrections from IDB
+  try {
+    const corrections = await PolicyDB.getCorrectionsByInsurer(normalized);
+    if (corrections && corrections.length > 0) {
+      const recent = corrections.sort((a,b) => (b.timestamp||0) - (a.timestamp||0)).slice(0, 5);
+      lines.push('Prior FC corrections for ' + normalized + ':');
+      for (const c of recent) {
+        const aiVal = c.aiValue == null ? 'null' : JSON.stringify(c.aiValue);
+        const corrVal = c.correctedValue == null ? 'null' : JSON.stringify(c.correctedValue);
+        lines.push('  • ' + (c.productName || '?') + ' → ' + c.field + ': AI returned ' + aiVal + ', correct value is ' + corrVal);
+      }
+    }
+  } catch (e) { /* non-fatal */ }
+  if (lines.length === 0) return '';
+  console.log('[Learn] Built few-shot for', normalized, ':', lines.length, 'lines');
+  return '\n\n═══ INSURER-SPECIFIC GUIDANCE: ' + normalized.toUpperCase() + ' ═══\n' + lines.join('\n') + '\n═══ END INSURER GUIDANCE ═══';
 }
 
 // ══════════════════════════════════════════════════════════════════
@@ -2989,6 +3062,96 @@ async function preprocessImageFile(file) {
 async function preprocessImageFiles(files) {
   if (!files || !files.length) return files;
   return await Promise.all(Array.from(files).map(preprocessImageFile));
+}
+
+// ── v14.3 C1: IMAGE QUALITY TRIAGE ──
+// Cheap pre-check on preprocessed images: brightness, contrast, blur estimate.
+// Returns quality flags on the file object (file._qualityFlags).
+// Severe failures (2+ flags) should be held in a "needs retake" tray.
+async function triageImageQuality(file) {
+  if (!file || !file.type || !file.type.startsWith('image/')) return file;
+  try {
+    const bitmap = await createImageBitmap(file);
+    // Downsample to 64×64 for fast analysis
+    const sz = 64;
+    const canvas = typeof OffscreenCanvas === 'function'
+      ? new OffscreenCanvas(sz, sz)
+      : (() => { const c = document.createElement('canvas'); c.width = sz; c.height = sz; return c; })();
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+    ctx.drawImage(bitmap, 0, 0, sz, sz);
+    if (typeof bitmap.close === 'function') bitmap.close();
+    const data = ctx.getImageData(0, 0, sz, sz).data;
+    const n = sz * sz;
+    // Compute grayscale values
+    const gray = new Float32Array(n);
+    let sum = 0;
+    for (let i = 0; i < n; i++) {
+      const v = 0.299 * data[i*4] + 0.587 * data[i*4+1] + 0.114 * data[i*4+2];
+      gray[i] = v;
+      sum += v;
+    }
+    const mean = sum / n;
+    // Variance (contrast)
+    let varSum = 0;
+    for (let i = 0; i < n; i++) varSum += (gray[i] - mean) ** 2;
+    const stddev = Math.sqrt(varSum / n);
+    // Laplacian variance (blur estimate) — approximate via 2nd derivative
+    let lapVar = 0, lapCount = 0;
+    for (let y = 1; y < sz - 1; y++) {
+      for (let x = 1; x < sz - 1; x++) {
+        const idx = y * sz + x;
+        const lap = gray[idx-1] + gray[idx+1] + gray[idx-sz] + gray[idx+sz] - 4 * gray[idx];
+        lapVar += lap * lap;
+        lapCount++;
+      }
+    }
+    const blur = lapCount > 0 ? lapVar / lapCount : 0;
+    const flags = [];
+    if (mean < 60) flags.push('too_dark');
+    if (mean > 200) flags.push('too_bright');
+    if (stddev < 30) flags.push('low_contrast');
+    if (blur < 100) flags.push('blurry');
+    file._qualityFlags = flags;
+    file._qualityMeta = { brightness: Math.round(mean), contrast: Math.round(stddev), blur: Math.round(blur) };
+    if (flags.length > 0) {
+      console.log('[Quality]', file.name, ':', flags.join(', '), '| brightness=' + Math.round(mean), 'contrast=' + Math.round(stddev), 'blur=' + Math.round(blur));
+    }
+  } catch (e) {
+    // Non-fatal — skip quality check
+    console.warn('[Quality] Triage failed for', file.name, ':', e.message);
+  }
+  return file;
+}
+
+// Batch quality triage
+async function triageAllImages(files) {
+  if (!files || !files.length) return files;
+  return await Promise.all(files.map(triageImageQuality));
+}
+
+// ── v14.3 C4: PAGE-TYPE CLASSIFIER (deterministic on OCR text) ──
+// Classifies each page into a type using regex on the OCR text.
+// Returns one of: details, premium, coverage, funds, payout, value, beneficiary, unknown
+const PAGE_TYPE_RULES = [
+  { type: 'details',     re: /policy\s*number|inception\s*date|product\s*type|policy\s*details|plan\s*name|commencement/i },
+  { type: 'premium',     re: /premium\s*amount|payment\s*method|premium\s*frequency|premium\s*due|premium\s*paying|how\s*often\s*you\s*pay/i },
+  { type: 'coverage',    re: /sum\s*assured|coverage\s*amount|effective\s*date|benefit\s*amount|death\s*benefit/i },
+  { type: 'funds',       re: /fund\s*value|fund\s*allocation|bid\s*price|unit\s*price|unit\s*balance|nav\s*price/i },
+  { type: 'payout',      re: /payout\s*amount|annuity|dividend|maturity\s*value|endowment\s*value|projected\s*benefit/i },
+  { type: 'value',       re: /surrender\s*value|cash\s*value|net\s*asset|account\s*value|policy\s*value/i },
+  { type: 'beneficiary', re: /beneficiary|nomination|nominee|payor\s*benefit|assignee/i },
+];
+
+function classifyPageType(ocrText) {
+  if (!ocrText || typeof ocrText !== 'string') return 'unknown';
+  // Score each type — highest match count wins
+  let best = 'unknown', bestCount = 0;
+  for (const rule of PAGE_TYPE_RULES) {
+    const matches = (ocrText.match(new RegExp(rule.re.source, 'gi')) || []).length;
+    if (matches > bestCount) { best = rule.type; bestCount = matches; }
+  }
+  if (bestCount > 0) console.log('[PageType]', best, '(' + bestCount + ' matches)');
+  return best;
 }
 
 // ── FILE READER WITH PROPER ERROR REPORTING + RETRY ──
@@ -6698,7 +6861,7 @@ function isLikelyFundName(name) {
 // MODULE: INDEXEDDB — Database layer + batch operations
 // ═══════════════════════════════════════════════════════════════
 
-const DB_NAME='PolicyLensV4';const DB_VER=4;
+const DB_NAME='PolicyLensV4';const DB_VER=5;
 const openDB=()=>new Promise((res,rej)=>{
   const r=indexedDB.open(DB_NAME,DB_VER);
   r.onupgradeneeded=e=>{
@@ -6727,6 +6890,15 @@ const openDB=()=>new Promise((res,rej)=>{
       const cs=db.createObjectStore('extraction_corrections',{keyPath:'id'});
       cs.createIndex('byInsurer','insurer',{unique:false});
       cs.createIndex('byTimestamp','timestamp',{unique:false});
+    }
+    // ── v14.3: Client assumptions store ──
+    if(!db.objectStoreNames.contains('client_assumptions')){
+      db.createObjectStore('client_assumptions',{keyPath:'clientId'});
+    }
+    // ── v14.3: Snap-and-go captures store ──
+    if(!db.objectStoreNames.contains('snap_captures')){
+      const sc=db.createObjectStore('snap_captures',{keyPath:'id',autoIncrement:true});
+      sc.createIndex('bySession','sessionId',{unique:false});
     }
   };
   r.onblocked=()=>{console.warn('[IDB] Blocked by another tab — close other PolicyLens tabs');try{toast('Close other PolicyLens tabs to complete the update','warning',8000)}catch(_){}};
@@ -6852,6 +7024,22 @@ const PolicyDB = {
     });
   },
   clearCorrections: () => PolicyDB.clearStore('extraction_corrections'),
+  // ── v14.3: Client assumptions ──
+  getAssumptions: (clientId) => dbGet('client_assumptions', clientId || 'default').catch(() => null),
+  saveAssumptions: (a) => dbPut('client_assumptions', { ...a, clientId: a.clientId || 'default', updatedAt: Date.now() }),
+  // ── v14.3: Snap captures ──
+  putCapture: (entry) => dbPut('snap_captures', { ...entry, id: entry.id || ('sc_'+Date.now()+'_'+Math.random().toString(36).slice(2,6)), timestamp: entry.timestamp || Date.now() }),
+  getCapturesBySession: async (sessionId) => {
+    const db = await openDB();
+    return new Promise((res, rej) => {
+      try { const tx = db.transaction('snap_captures','readonly'); const r = tx.objectStore('snap_captures').index('bySession').getAll(sessionId); r.onsuccess = e => res(e.target.result || []); r.onerror = e => rej(e.target.error); } catch(e) { rej(e); }
+    });
+  },
+  getUnsentCaptures: async () => {
+    const all = await dbGetAll('snap_captures');
+    return (all || []).filter(c => !c.sent);
+  },
+  clearCaptures: () => PolicyDB.clearStore('snap_captures'),
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -8547,6 +8735,7 @@ function App() {
       <div style={{flex:1,overflow:'auto',padding:'12px clamp(10px, 3vw, 20px) 40px'}}>
         {tab==='profile' && <ErrorBoundary key="profile"><ProfileTab /></ErrorBoundary>}
         {tab==='dashboard' && <ErrorBoundary key="dashboard"><Dashboard /></ErrorBoundary>}
+        {tab==='knowns' && <ErrorBoundary key="knowns"><KnownsAssumptions /></ErrorBoundary>}
         <div style={{display:tab==='policies'?'block':'none'}}><Policies /></div>
         {tab==='repository' && <ErrorBoundary key="repo"><Repository /></ErrorBoundary>}
         {tab==='funds' && <FundLookup />}
@@ -9788,6 +9977,7 @@ function Header() {
   const tabs = [
     {id:'profile',label:'My Profile',icon:'👤'},
     {id:'dashboard',label:'Dashboard',icon:'📊'},
+    {id:'knowns',label:'Knowns / Assumptions',icon:'⚖️'},
     {id:'policies',label:'Policies',icon:'📋'},
     {id:'repository',label:'Repository',icon:'🗄️'},
     {id:'funds',label:'Funds',icon:'📉'},
@@ -15235,6 +15425,477 @@ function GapBar({label,current,rec,pct,fmt:fmtFn,color}) {
 }
 
 // ═══════════════════════════════════════════════════════════════
+// MODULE: KNOWNS / ASSUMPTIONS — Two-column fact vs assumption panel
+// ═══════════════════════════════════════════════════════════════
+
+// Lightweight field labels for the Knowns panel (FIELD_LABELS is defined later in Policies module)
+const KA_LABELS = {
+  productName:'Product',insurer:'Insurer',policyNumber:'Policy #',category:'Category',subType:'Sub-type',
+  sumAssured:'Sum Assured',annualPremium:'Annual Premium',premFrequency:'Frequency',
+  premTerm:'Premium Term',premStartAge:'Prem Start Age',premEndAge:'Prem End Age',
+  inceptionDate:'Inception',maturityDate:'Maturity',status:'Status',ageAtEntry:'Age at Entry',
+  deathBenefit:'Death Benefit',estimatedMaturity:'Est. Maturity',annuityMonthly:'Monthly Payout',
+  annuityPayout:'Annual Payout',cashValue:'Cash Value',totalPremiumPaid:'Total Paid',
+  paymentMethod:'Payment',premiumStructure:'Premium Structure',currency:'Currency',
+};
+
+const DEFAULT_ASSUMPTIONS = {
+  inflationPct: 2.5,
+  endowmentYieldPct: 3,
+  ilpYieldPct: 5,
+  cpfOaRate: 2.5,
+  cpfSaRate: 4,
+  retirementAge: 65,
+  lifeExpectancy: 85,
+};
+
+const ASSUMPTION_SLIDERS = [
+  { key: 'inflationPct', label: 'Inflation rate', unit: '%', min: 0, max: 6, step: 0.1, locked: false },
+  { key: 'endowmentYieldPct', label: 'Endowment yield', unit: '%', min: 1, max: 8, step: 0.1, locked: false },
+  { key: 'ilpYieldPct', label: 'ILP yield', unit: '%', min: 2, max: 10, step: 0.1, locked: false },
+  { key: 'cpfOaRate', label: 'CPF OA rate', unit: '%', min: 2.5, max: 2.5, step: 0, locked: true },
+  { key: 'cpfSaRate', label: 'CPF SA rate', unit: '%', min: 4, max: 4, step: 0, locked: true },
+  { key: 'retirementAge', label: 'Retirement age', unit: 'yrs', min: 55, max: 70, step: 1, locked: false },
+  { key: 'lifeExpectancy', label: 'Life expectancy', unit: 'yrs', min: 75, max: 95, step: 1, locked: false },
+];
+
+function KnownsAssumptions() {
+  const { policies, clientProfile, houseDefaults } = useContext(AppCtx);
+  const [assumptions, setAssumptions] = useState({ ...DEFAULT_ASSUMPTIONS });
+  const [overrides, setOverrides] = useState({}); // field key → locked value
+  const [shareMode, setShareMode] = useState(false);
+  const [dirty, setDirty] = useState(false);
+
+  // Load saved assumptions
+  useEffect(() => {
+    (async () => {
+      try {
+        const saved = await PolicyDB.getAssumptions('default');
+        if (saved) {
+          const merged = { ...DEFAULT_ASSUMPTIONS };
+          for (const k of Object.keys(DEFAULT_ASSUMPTIONS)) {
+            if (saved[k] != null) merged[k] = saved[k];
+          }
+          setAssumptions(merged);
+          if (saved.customOverrides) setOverrides(saved.customOverrides);
+          console.log('[Assume] Loaded saved assumptions');
+        }
+      } catch (e) { console.warn('[Assume] Load failed:', e); }
+    })();
+  }, []);
+
+  const updateAssumption = (key, val) => {
+    setAssumptions(prev => ({ ...prev, [key]: parseFloat(val) || 0 }));
+    setDirty(true);
+  };
+
+  const saveAssumptions = async () => {
+    try {
+      await PolicyDB.saveAssumptions({ ...assumptions, customOverrides: overrides, clientId: 'default' });
+      setDirty(false);
+      console.log('[Assume] Saved assumptions');
+      try { toast('Assumptions saved', 'success', 2000); } catch(_) {}
+    } catch (e) { console.warn('[Assume] Save failed:', e); }
+  };
+
+  // Active (non-matured) policies
+  const active = policies.filter(p => p.status !== 'matured' && p.status !== 'surrendered' && p.status !== 'lapsed');
+
+  // ── RECALCULATE DERIVED VALUES BASED ON CURRENT ASSUMPTIONS ──
+  // Build a snapshot of per-policy derived values using current slider values.
+  const derivedSnapshot = useMemo(() => {
+    const snap = [];
+    for (const pol of active) {
+      if (!pol._derived || Object.keys(pol._derived).length === 0) continue;
+      const fields = [];
+      for (const [field, meta] of Object.entries(pol._derived)) {
+        const val = pol[field];
+        if (val == null) continue;
+        fields.push({ field, value: val, meta });
+      }
+      if (fields.length > 0) {
+        snap.push({ id: pol.id, name: pol.productName || pol.insurer || '(unnamed)', insurer: pol.insurer, fields });
+      }
+    }
+    return snap;
+  }, [active]);
+
+  // ── CLIENT FACTS (left column) ──
+  const cp = clientProfile || {};
+  const clientFacts = [
+    { label: 'Name', value: cp.name },
+    { label: 'Date of birth', value: cp.dob },
+    { label: 'Gender', value: cp.gender },
+    { label: 'Smoker status', value: cp.smoker },
+    { label: 'Nationality', value: cp.nationality },
+    { label: 'Occupation', value: cp.occupation },
+    { label: 'Monthly income', value: cp.monthlyIncome ? '$' + parseFloat(cp.monthlyIncome).toLocaleString() : null },
+    { label: 'Dependants', value: Array.isArray(cp.dependants) && cp.dependants.length > 0 ? cp.dependants.length + ' dependant' + (cp.dependants.length > 1 ? 's' : '') : null },
+  ].filter(f => f.value);
+
+  // Coverage totals (facts from policies)
+  let totalDeathSA = 0, totalCI = 0, totalPremium = 0;
+  active.forEach(p => {
+    const sa = parseFloat(p.deathBenefit) || parseFloat(p.sumAssured) || 0;
+    const cat = (p.category || '').toLowerCase();
+    if (cat === 'protection' || cat === 'savings' || cat === 'retirement') totalDeathSA += sa;
+    if ((p.subType || '').toLowerCase().includes('critical')) totalCI += parseFloat(p.sumAssured) || 0;
+    totalPremium += parseFloat(p.annualPremium) || 0;
+  });
+  const fmt = (n) => '$' + Math.round(n).toLocaleString();
+
+  // ── SHARE MODE (client-facing) ──
+  if (shareMode) {
+    return (
+      <div style={{position:'fixed',inset:0,zIndex:9999,background:'#0b0f1a',color:'#e8e8e8',overflow:'auto',padding:20}}>
+        <div style={{maxWidth:900,margin:'0 auto'}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}>
+            <div>
+              <h2 style={{fontSize:22,fontWeight:700,color:'#c9a96e',margin:0}}>Here's what we know — and what we're assuming.</h2>
+              {cp.name && <div style={{fontSize:13,color:'var(--text3)',marginTop:4}}>Portfolio review for {cp.name}</div>}
+            </div>
+            <button onClick={() => setShareMode(false)} style={{background:'var(--bg3)',color:'var(--text2)',border:'1px solid var(--border)',padding:'8px 16px',borderRadius:8,cursor:'pointer',fontSize:12}}>✕ Exit</button>
+          </div>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(320px,1fr))',gap:20}}>
+            {/* Left: Facts */}
+            <div style={{background:'var(--bg2)',borderRadius:12,padding:16,border:'1px solid var(--border)'}}>
+              <h3 style={{fontSize:16,fontWeight:700,color:'var(--green2)',marginBottom:12}}>✓ What we know</h3>
+              {clientFacts.map(f => <div key={f.label} style={{display:'flex',justifyContent:'space-between',padding:'6px 0',borderBottom:'1px solid var(--border)',fontSize:14}}><span style={{color:'var(--text3)'}}>{f.label}</span><span style={{fontWeight:600}}>{f.value}</span></div>)}
+              <div style={{marginTop:12,padding:'8px 0',borderTop:'1px solid var(--border2)'}}>
+                <div style={{display:'flex',justifyContent:'space-between',fontSize:14,marginBottom:4}}><span style={{color:'var(--text3)'}}>Death cover</span><span style={{fontWeight:600}}>{fmt(totalDeathSA)}</span></div>
+                <div style={{display:'flex',justifyContent:'space-between',fontSize:14,marginBottom:4}}><span style={{color:'var(--text3)'}}>CI cover</span><span style={{fontWeight:600}}>{fmt(totalCI)}</span></div>
+                <div style={{display:'flex',justifyContent:'space-between',fontSize:14}}><span style={{color:'var(--text3)'}}>Annual premiums</span><span style={{fontWeight:600}}>{fmt(totalPremium)}</span></div>
+              </div>
+              <div style={{fontSize:11,color:'var(--text3)',marginTop:8}}>{active.length} active polic{active.length === 1 ? 'y' : 'ies'}</div>
+            </div>
+            {/* Right: Assumptions */}
+            <div style={{background:'var(--bg2)',borderRadius:12,padding:16,border:'1px solid rgba(201,169,110,.2)'}}>
+              <h3 style={{fontSize:16,fontWeight:700,color:'#c9a96e',marginBottom:12}}>🧮 What we're assuming</h3>
+              {ASSUMPTION_SLIDERS.map(s => (
+                <div key={s.key} style={{display:'flex',justifyContent:'space-between',padding:'6px 0',borderBottom:'1px solid var(--border)',fontSize:14}}>
+                  <span style={{color:'var(--text3)'}}>{s.label}</span>
+                  <span style={{fontWeight:600}}>{assumptions[s.key]}{s.unit}</span>
+                </div>
+              ))}
+              {derivedSnapshot.length > 0 && <div style={{marginTop:12,fontSize:12,color:'var(--text3)'}}>{derivedSnapshot.reduce((s,d) => s + d.fields.length, 0)} values derived from these assumptions</div>}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── NORMAL EDITOR MODE ──
+  return (
+    <div>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:16,gap:10,flexWrap:'wrap'}}>
+        <div>
+          <h2 style={{fontSize:18,fontWeight:700,margin:0}}>Here's what we know — and what we're assuming.</h2>
+          <p style={{fontSize:11,color:'var(--text3)',marginTop:2}}>Adjust any assumption to see the impact across the portfolio.</p>
+        </div>
+        <div style={{display:'flex',gap:6,alignItems:'center'}}>
+          {dirty && <button onClick={saveAssumptions} style={{background:'var(--gold)',color:'var(--bg)',border:'none',padding:'6px 14px',borderRadius:6,fontSize:11,fontWeight:700,cursor:'pointer'}}>Save assumptions</button>}
+          <button onClick={() => setShareMode(true)} style={{background:'var(--bg2)',color:'var(--gold)',border:'1px solid rgba(201,169,110,.25)',padding:'6px 14px',borderRadius:6,fontSize:11,fontWeight:600,cursor:'pointer'}}>📤 Show client</button>
+        </div>
+      </div>
+
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(320px,1fr))',gap:16}}>
+        {/* ═══ LEFT COLUMN: FACTS ═══ */}
+        <div>
+          <div className="card" style={{marginBottom:12}}>
+            <h3 style={{fontSize:13,fontWeight:700,color:'var(--green2)',marginBottom:8}}>✓ Client facts</h3>
+            {clientFacts.length === 0 ? (
+              <div style={{fontSize:11,color:'var(--text3)'}}>No client profile data yet. Fill in My Profile to see facts here.</div>
+            ) : clientFacts.map(f => (
+              <div key={f.label} style={{display:'flex',justifyContent:'space-between',padding:'4px 0',borderBottom:'1px solid var(--border)',fontSize:11}}>
+                <span style={{color:'var(--text3)'}}>{f.label}</span>
+                <span style={{fontWeight:600,color:'var(--text2)'}}>{f.value}</span>
+              </div>
+            ))}
+          </div>
+
+          <div className="card" style={{marginBottom:12}}>
+            <h3 style={{fontSize:13,fontWeight:700,color:'var(--green2)',marginBottom:8}}>✓ Coverage totals</h3>
+            <div style={{display:'flex',justifyContent:'space-between',padding:'4px 0',borderBottom:'1px solid var(--border)',fontSize:11}}><span style={{color:'var(--text3)'}}>Death / TI cover</span><span style={{fontWeight:600,color:'var(--text2)'}}>{fmt(totalDeathSA)}</span></div>
+            <div style={{display:'flex',justifyContent:'space-between',padding:'4px 0',borderBottom:'1px solid var(--border)',fontSize:11}}><span style={{color:'var(--text3)'}}>CI cover</span><span style={{fontWeight:600,color:'var(--text2)'}}>{fmt(totalCI)}</span></div>
+            <div style={{display:'flex',justifyContent:'space-between',padding:'4px 0',borderBottom:'1px solid var(--border)',fontSize:11}}><span style={{color:'var(--text3)'}}>Annual premiums</span><span style={{fontWeight:600,color:'var(--text2)'}}>{fmt(totalPremium)}</span></div>
+            <div style={{fontSize:10,color:'var(--text3)',marginTop:6}}>{active.length} active polic{active.length === 1 ? 'y' : 'ies'}</div>
+          </div>
+
+          {/* Per-policy facts (collapsible) */}
+          <div className="card">
+            <h3 style={{fontSize:13,fontWeight:700,color:'var(--green2)',marginBottom:8}}>✓ Per-policy extracted facts</h3>
+            {active.length === 0 ? (
+              <div style={{fontSize:11,color:'var(--text3)'}}>No active policies. Add policies to see extracted facts.</div>
+            ) : active.map(pol => (
+              <PolicyFactRow key={pol.id} policy={pol} />
+            ))}
+          </div>
+        </div>
+
+        {/* ═══ RIGHT COLUMN: ASSUMPTIONS ═══ */}
+        <div>
+          <div className="card" style={{marginBottom:12,borderLeft:'2px solid rgba(201,169,110,.3)'}}>
+            <h3 style={{fontSize:13,fontWeight:700,color:'#c9a96e',marginBottom:8}}>🧮 Global assumptions</h3>
+            {ASSUMPTION_SLIDERS.map(s => (
+              <div key={s.key} style={{marginBottom:8}}>
+                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:2}}>
+                  <span style={{fontSize:11,color:'var(--text3)'}}>{s.label}</span>
+                  <span style={{fontSize:12,fontWeight:700,color:s.locked ? 'var(--text3)' : '#c9a96e'}}>
+                    {s.locked ? '🔒 ' : ''}{assumptions[s.key]}{s.unit}
+                  </span>
+                </div>
+                {!s.locked && (
+                  <input type="range" min={s.min} max={s.max} step={s.step}
+                    value={assumptions[s.key]}
+                    onChange={e => updateAssumption(s.key, e.target.value)}
+                    style={{width:'100%',accentColor:'#c9a96e',height:4}} />
+                )}
+              </div>
+            ))}
+          </div>
+
+          {/* Per-policy derived values */}
+          <div className="card" style={{borderLeft:'2px solid rgba(201,169,110,.3)'}}>
+            <h3 style={{fontSize:13,fontWeight:700,color:'#c9a96e',marginBottom:8}}>🧮 Per-policy derived values</h3>
+            {derivedSnapshot.length === 0 ? (
+              <div style={{fontSize:11,color:'var(--text3)'}}>No derived values yet. Run AI extraction to populate.</div>
+            ) : derivedSnapshot.map(d => (
+              <DerivedPolicyRow key={d.id} data={d} overrides={overrides} setOverrides={setOverrides} setDirty={setDirty} />
+            ))}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Collapsible row showing extracted (non-derived) fields for one policy
+function PolicyFactRow({ policy }) {
+  const [open, setOpen] = useState(false);
+  const name = policy.productName || policy.insurer || '(unnamed)';
+  const prem = parseFloat(policy.annualPremium) || 0;
+  const sa = parseFloat(policy.sumAssured) || 0;
+  const derived = policy._derived || {};
+  // Count non-derived, non-empty meaningful fields
+  const factFields = Object.entries(policy).filter(([k, v]) => {
+    if (k.startsWith('_') || k === 'id' || k === 'riders' || k === 'highlights' || k === 'notes' || k === 'fundAllocations') return false;
+    if (v == null || v === '' || v === 0) return false;
+    if (derived[k]) return false; // skip derived
+    return true;
+  });
+  return (
+    <div style={{borderBottom:'1px solid var(--border)',paddingBottom:4,marginBottom:4}}>
+      <div onClick={() => setOpen(!open)} style={{display:'flex',justifyContent:'space-between',alignItems:'center',cursor:'pointer',padding:'3px 0'}}>
+        <div style={{fontSize:11,fontWeight:600,color:'var(--text2)',minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+          {policy.insurer ? policy.insurer + ' · ' : ''}{name}
+        </div>
+        <div style={{display:'flex',gap:6,alignItems:'center',flexShrink:0}}>
+          {sa > 0 && <span style={{fontSize:9,color:'var(--text3)'}}>SA ${sa.toLocaleString()}</span>}
+          {prem > 0 && <span style={{fontSize:9,color:'var(--text3)'}}>${prem.toLocaleString()}/yr</span>}
+          <span style={{fontSize:10,color:'var(--text3)'}}>{open ? '▾' : '▸'}</span>
+        </div>
+      </div>
+      {open && (
+        <div style={{paddingLeft:8,paddingTop:4}}>
+          {factFields.slice(0, 20).map(([k, v]) => (
+            <div key={k} style={{display:'flex',justifyContent:'space-between',fontSize:10,padding:'1px 0',color:'var(--text3)'}}>
+              <span>{KA_LABELS[k] || k}</span>
+              <span style={{color:'var(--text2)',fontWeight:500}}>{typeof v === 'number' ? v.toLocaleString() : String(v)}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Row showing derived values for one policy, with override toggle
+function DerivedPolicyRow({ data, overrides, setOverrides, setDirty }) {
+  const [open, setOpen] = useState(false);
+  const [showWhy, setShowWhy] = useState({});
+  return (
+    <div style={{borderBottom:'1px solid var(--border)',paddingBottom:4,marginBottom:4}}>
+      <div onClick={() => setOpen(!open)} style={{display:'flex',justifyContent:'space-between',cursor:'pointer',padding:'3px 0'}}>
+        <span style={{fontSize:11,fontWeight:600,color:'var(--text2)'}}>{data.insurer ? data.insurer + ' · ' : ''}{data.name}</span>
+        <div style={{display:'flex',gap:4,alignItems:'center'}}>
+          <span style={{fontSize:9,color:'#c9a96e'}}>{data.fields.length} derived</span>
+          <span style={{fontSize:10,color:'var(--text3)'}}>{open ? '▾' : '▸'}</span>
+        </div>
+      </div>
+      {open && data.fields.map(f => {
+        const overrideKey = data.id + ':' + f.field;
+        const isLocked = overrides[overrideKey] != null;
+        return (
+          <div key={f.field} style={{paddingLeft:8,paddingTop:4,paddingBottom:4,borderTop:'1px solid var(--border)'}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+              <div>
+                <span style={{fontSize:11,fontWeight:600,color:'var(--text2)'}}>{KA_LABELS[f.field] || f.field}</span>
+                <span style={{fontSize:10,color:'#c9a96e',marginLeft:6}}>
+                  {isLocked ? '🔒' : '🧮'} {typeof f.value === 'number' ? f.value.toLocaleString() : String(f.value)}
+                </span>
+              </div>
+              <button onClick={(e) => { e.stopPropagation(); setShowWhy(prev => ({...prev, [f.field]: !prev[f.field]})); }}
+                style={{fontSize:9,color:'var(--text3)',background:'none',border:'none',cursor:'pointer',textDecoration:'underline'}}>Why?</button>
+            </div>
+            {f.meta?.caption && <div style={{fontSize:9,color:'var(--text3)',fontStyle:'italic',marginTop:1}}>{f.meta.rule}</div>}
+            {showWhy[f.field] && f.meta?.caption && (
+              <div style={{fontSize:10,color:'var(--text3)',background:'rgba(201,169,110,.04)',padding:'4px 6px',borderRadius:4,marginTop:4}}>
+                {f.meta.caption}
+                {f.meta.inputs && <div style={{marginTop:2,fontSize:9}}>Inputs: {Object.entries(f.meta.inputs).map(([k,v]) => k+'='+v).join(', ')}</div>}
+              </div>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
+// MODULE: SNAP & GO — Rapid camera capture mode
+// ═══════════════════════════════════════════════════════════════
+
+function SnapGoCapture({ onDone }) {
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const streamRef = useRef(null);
+  const [captures, setCaptures] = useState([]);
+  const [error, setError] = useState(null);
+  const [flash, setFlash] = useState(false);
+  const sessionId = useRef('sg_' + Date.now()).current;
+
+  // Start camera
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { max: 30 } },
+          audio: false,
+        });
+        if (!mounted) { stream.getTracks().forEach(t => t.stop()); return; }
+        streamRef.current = stream;
+        if (videoRef.current) {
+          videoRef.current.srcObject = stream;
+          videoRef.current.play().catch(() => {});
+        }
+        console.log('[SnapGo] Camera started, session:', sessionId);
+      } catch (e) {
+        console.warn('[SnapGo] Camera failed:', e.message);
+        setError('Camera access denied: ' + e.message);
+      }
+    })();
+    return () => { mounted = false; stopStream(); };
+  }, []);
+
+  const stopStream = () => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach(t => t.stop());
+      streamRef.current = null;
+    }
+  };
+
+  const captureFrame = () => {
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    if (!video || !canvas || video.readyState < 2) return;
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0);
+    canvas.toBlob(async (blob) => {
+      if (!blob) return;
+      const file = new File([blob], 'snap_' + Date.now() + '.jpg', { type: 'image/jpeg' });
+      const preview = URL.createObjectURL(blob);
+      setCaptures(prev => [...prev, { file, preview, ts: Date.now() }]);
+      // Persist to IDB for offline resilience
+      try {
+        const arrayBuf = await blob.arrayBuffer();
+        await PolicyDB.putCapture({ sessionId, data: arrayBuf, fileName: file.name, sent: false });
+      } catch (e) { console.warn('[SnapGo] IDB write failed:', e); }
+      console.log('[SnapGo] Captured frame', captures.length + 1);
+    }, 'image/jpeg', 0.85);
+    // Visual feedback flash
+    setFlash(true);
+    setTimeout(() => setFlash(false), 80);
+  };
+
+  const handleDone = () => {
+    stopStream();
+    const files = captures.map(c => c.file);
+    console.log('[SnapGo] Done —', files.length, 'captures queued for extraction');
+    // Try exiting fullscreen
+    try { if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); } catch (_) {}
+    onDone(files);
+  };
+
+  const handleClose = () => {
+    stopStream();
+    try { if (document.fullscreenElement) document.exitFullscreen().catch(() => {}); } catch (_) {}
+    onDone([]);
+  };
+
+  // Try entering fullscreen on mount
+  useEffect(() => {
+    const el = document.documentElement;
+    try { el.requestFullscreen?.() || el.webkitRequestFullscreen?.(); } catch (_) {}
+  }, []);
+
+  if (error) {
+    return (
+      <div style={{position:'fixed',inset:0,zIndex:10000,background:'#000',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',color:'#fff',padding:20}}>
+        <div style={{fontSize:16,marginBottom:12}}>Camera Error</div>
+        <div style={{fontSize:12,color:'#999',marginBottom:20,textAlign:'center'}}>{error}</div>
+        <button onClick={handleClose} style={{background:'#c9a96e',color:'#000',border:'none',padding:'10px 24px',borderRadius:8,fontSize:14,fontWeight:700,cursor:'pointer'}}>Close</button>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{position:'fixed',inset:0,zIndex:10000,background:'#000'}}>
+      {/* Camera viewfinder */}
+      <video ref={videoRef} autoPlay playsInline muted style={{width:'100%',height:'100%',objectFit:'cover'}} />
+      <canvas ref={canvasRef} style={{display:'none'}} />
+
+      {/* Flash overlay */}
+      {flash && <div style={{position:'absolute',inset:0,background:'rgba(201,169,110,.3)',pointerEvents:'none',transition:'opacity 80ms'}} />}
+
+      {/* Top bar: counter + close */}
+      <div style={{position:'absolute',top:0,left:0,right:0,padding:'12px 16px',display:'flex',justifyContent:'space-between',alignItems:'center',background:'linear-gradient(180deg,rgba(0,0,0,.6) 0%,transparent 100%)'}}>
+        <span style={{color:'#fff',fontSize:14,fontWeight:700}}>📸 {captures.length} captured</span>
+        <button onClick={handleClose} style={{color:'#fff',background:'rgba(255,255,255,.15)',border:'none',width:32,height:32,borderRadius:'50%',fontSize:16,cursor:'pointer'}}>✕</button>
+      </div>
+
+      {/* Bottom bar: thumbnails + capture button + done */}
+      <div style={{position:'absolute',bottom:0,left:0,right:0,padding:'16px',display:'flex',alignItems:'center',justifyContent:'space-between',background:'linear-gradient(0deg,rgba(0,0,0,.7) 0%,transparent 100%)'}}>
+        {/* Last 3 thumbnails */}
+        <div style={{display:'flex',gap:4,width:120}}>
+          {captures.slice(-3).map((c, i) => (
+            <img key={i} src={c.preview} style={{width:36,height:36,borderRadius:4,objectFit:'cover',opacity:0.7,border:'1px solid rgba(255,255,255,.2)'}} />
+          ))}
+        </div>
+
+        {/* Capture button */}
+        <button onClick={captureFrame}
+          style={{width:64,height:64,borderRadius:'50%',border:'4px solid #fff',background:'rgba(201,169,110,.3)',cursor:'pointer',flexShrink:0,transition:'transform .1s',backdropFilter:'blur(4px)'}}
+          onMouseDown={e => e.target.style.transform = 'scale(0.9)'}
+          onMouseUp={e => e.target.style.transform = 'scale(1)'}
+          onTouchStart={e => e.target.style.transform = 'scale(0.9)'}
+          onTouchEnd={e => e.target.style.transform = 'scale(1)'}
+        />
+
+        {/* Done button */}
+        <button onClick={handleDone} disabled={captures.length === 0}
+          style={{background:captures.length > 0 ? '#c9a96e' : 'rgba(255,255,255,.15)',color:captures.length > 0 ? '#000' : '#666',border:'none',padding:'10px 20px',borderRadius:8,fontSize:13,fontWeight:700,cursor:captures.length > 0 ? 'pointer' : 'not-allowed',minWidth:80}}>
+          Done{captures.length > 0 ? ' (' + captures.length + ')' : ''}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════
 // MODULE: POLICIES — List, add, edit, scan, extract
 // ═══════════════════════════════════════════════════════════════
 
@@ -16925,6 +17586,12 @@ function Policies() {
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState(null);
   const [staged, setStaged] = useState([]);
+  const [snapGoActive, setSnapGoActive] = useState(false);
+  const [unsentCaptures, setUnsentCaptures] = useState([]);
+  // Check for unsent snap captures on mount
+  useEffect(() => {
+    PolicyDB.getUnsentCaptures().then(caps => { if (caps.length > 0) setUnsentCaptures(caps); }).catch(() => {});
+  }, []);
   // Synchronous mirror of staged for reads from inside async
   // callbacks (triggerProgressiveExtract, chain-on-complete
   // setTimeout, button onClick handlers). React's setState callback
@@ -17816,6 +18483,8 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
     if(!files||!files.length) return;
     // ── COST OPTIMIZATION: downscale large images before staging ──
     const processed = await preprocessImageFiles(Array.from(files));
+    // ── v14.3 C1: IMAGE QUALITY TRIAGE (non-blocking) ──
+    triageAllImages(processed).catch(() => {});
     const newStaged = [];
     for(const f of processed){
       newStaged.push({file:f, preview:URL.createObjectURL(f), _status:'queued', _detectedInsurer:null});
@@ -18244,6 +18913,14 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
         const correctionSuffix = await buildCorrectionFewShot();
         if (correctionSuffix) promptToUse += correctionSuffix;
       } catch(e) { console.warn('[CorrectionMemory] Injection failed:', e.message); }
+      // v14.3 C6: Append insurer-specific built-in + learned few-shot
+      try {
+        const detectedIns = staged.find(s => s._detectedInsurer)?._detectedInsurer;
+        if (detectedIns) {
+          const insurerFewShot = await buildInsurerFewShot(detectedIns);
+          if (insurerFewShot) promptToUse += insurerFewShot;
+        }
+      } catch(e) { console.warn('[Learn] Insurer few-shot injection failed:', e.message); }
       text = await callAI(promptToUse, contentBlocks, 32000, POLICY_EXTRACTION_SCHEMA);
     } catch(err) {
       // If the AI call itself fails and we still have room to split, try splitting
@@ -20481,6 +21158,8 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
 
   return (
     <div className="fade-in">
+      {/* ── v14.3: SNAP & GO CAPTURE OVERLAY ── */}
+      {snapGoActive && <SnapGoCapture onDone={(files) => { setSnapGoActive(false); if (files && files.length > 0) stagePhotos(files); }} />}
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:16,flexWrap:'wrap',gap:8}}>
         <div style={{display:'flex',alignItems:'center',gap:8}}>
           <h2 style={{fontSize:18,fontWeight:600}}>Policies</h2>
@@ -20492,6 +21171,10 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
         <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
           <input ref={cameraRef} type="file" accept="image/*" capture="environment" style={{display:'none'}} onChange={e=>{stagePhotos(e.target.files);e.target.value='';}} />
           <input ref={uploadRef} type="file" accept="image/*,.pdf,.xlsx,.xls,.csv,.doc,.docx,.html,.htm,.txt,.rtf" multiple style={{display:'none'}} onChange={e=>{stagePhotos(Array.from(e.target.files));e.target.value='';}} />
+          <button disabled={scanning} title="Rapid multi-photo capture mode" onClick={() => setSnapGoActive(true)}
+            style={{background:'linear-gradient(135deg,#d4a96a,#b8935a)',color:'#0b0f1a',border:'none',padding:'5px 12px',borderRadius:8,fontSize:11,fontWeight:700,cursor:scanning?'not-allowed':'pointer',opacity:scanning?.4:1}}>
+            📸 Snap & Go
+          </button>
           <button className="btn-secondary btn-sm" disabled={scanning} title={scanning?'Finish current extraction first':''} onClick={async()=>{const files=await openCameraModal();if(files&&files.length){stagePhotos(files);}}}>
             📷 Camera
           </button>
@@ -20541,6 +21224,36 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
             <div style={{display:'flex',gap:6}}>
               <button className="btn-primary btn-sm" onClick={restoreDraft}>Resume Editing</button>
               <button className="btn-danger btn-sm" onClick={dismissDraft}>Discard</button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── v14.3: UNSENT SNAP CAPTURES BANNER ── */}
+      {unsentCaptures.length > 0 && !showForm && (
+        <div className="card" style={{marginBottom:12,padding:14,borderLeft:'3px solid var(--gold)'}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+            <div>
+              <div style={{fontSize:13,fontWeight:600,color:'var(--gold)'}}>📸 {unsentCaptures.length} unsent captures from your last session</div>
+              <div style={{fontSize:12,color:'var(--text3)'}}>These photos were captured but not yet extracted</div>
+            </div>
+            <div style={{display:'flex',gap:6}}>
+              <button className="btn-primary btn-sm" onClick={async () => {
+                try {
+                  const files = await Promise.all(unsentCaptures.map(async c => {
+                    const blob = new Blob([c.data], { type: 'image/jpeg' });
+                    return new File([blob], c.fileName || 'snap.jpg', { type: 'image/jpeg' });
+                  }));
+                  stagePhotos(files);
+                  await PolicyDB.clearCaptures();
+                  setUnsentCaptures([]);
+                  console.log('[SnapGo] Resumed', files.length, 'unsent captures');
+                } catch (e) { toast('Failed to resume: ' + e.message, 'error'); }
+              }}>Resume</button>
+              <button className="btn-danger btn-sm" onClick={async () => {
+                await PolicyDB.clearCaptures();
+                setUnsentCaptures([]);
+              }}>Discard</button>
             </div>
           </div>
         </div>
@@ -20887,6 +21600,14 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
                     }}>
                     {badgeIcon} {i+1}
                   </div>
+                  {/* v14.3 C1: Quality warning chip */}
+                  {s.file?._qualityFlags?.length > 0 && (
+                    <div title={'Quality: ' + s.file._qualityFlags.join(', ')}
+                      style={{position:'absolute',top:2,left:2,background:'rgba(212,169,106,.9)',color:'#000',
+                        fontSize:8,padding:'1px 3px',borderRadius:3,fontWeight:700}}>
+                      ⚠ {s.file._qualityFlags.length}
+                    </div>
+                  )}
                 </div>
               );
             })}
