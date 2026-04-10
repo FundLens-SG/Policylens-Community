@@ -1643,7 +1643,50 @@ async function pdfToImages(pdfDoc, maxPages=12) {
 // CLEAN even if the FC never actually reviewed anything. Bumping the version
 // forces a re-extraction next time those same files are uploaded, and the
 // one-time cleanup in App init purges the stale entries from IndexedDB.
-const EXTRACT_PIPELINE_VERSION = 'v10-2026-04-10-smart-routing';
+const EXTRACT_PIPELINE_VERSION = 'v12-2026-04-10-dedup';
+// Dedup helpers — merge duplicate extracted policies by policyNumber+insurer
+const _dedupKey = (p) => {
+  const pn = (p?.policyNumber || '').trim().toUpperCase();
+  const ins = (p?.insurer || '').trim().toLowerCase();
+  if (!pn) return null;
+  return pn + '|' + ins;
+};
+const _dedupScore = (p) => {
+  if (!p) return 0;
+  const fields = ['riderList','riderPremium','sumAssured','premium','coverageBenefits','subType','category'];
+  let s = 0;
+  for (const f of fields) {
+    const v = p[f];
+    if (v !== null && v !== undefined && v !== '' && !(Array.isArray(v) && v.length===0)) s++;
+  }
+  return s;
+};
+const _dedupMerge = (winner, loser) => {
+  const out = {...winner};
+  for (const k of Object.keys(loser || {})) {
+    const wv = out[k];
+    const lv = loser[k];
+    const wEmpty = wv === null || wv === undefined || wv === '' || (Array.isArray(wv) && wv.length===0);
+    if (wEmpty && lv !== null && lv !== undefined && lv !== '') out[k] = lv;
+  }
+  return out;
+};
+const dedupPolicyArray = (arr) => {
+  const byKey = new Map();
+  const passthrough = [];
+  let merges = 0;
+  for (const p of (arr || [])) {
+    const k = _dedupKey(p);
+    if (!k) { passthrough.push(p); continue; }
+    const existing = byKey.get(k);
+    if (!existing) { byKey.set(k, p); continue; }
+    merges++;
+    const winner = _dedupScore(p) > _dedupScore(existing) ? p : existing;
+    const loser  = winner === p ? existing : p;
+    byKey.set(k, _dedupMerge(winner, loser));
+  }
+  return { deduped: [...passthrough, ...byKey.values()], merges };
+};
 
 // ═══════════════════════════════════════════════════════════════
 // OCR SPACING FIX (2026-04-09)
@@ -7051,11 +7094,21 @@ function App() {
 
   // Repo reload triggered manually via refreshRepo or on initial load
 
-  const savePolicy = async (p) => {
-    // ── CLOUD SYNC: bump field versions and push fire-and-forget ──
-    // Field versions track per-field timestamps so cross-device
-    // merges can resolve conflicts intelligently. Compare against
-    // the existing in-memory copy to bump only fields that changed.
+  const savePolicy = async (incomingP) => {
+    // Dedup pass — if an existing policy shares (policyNumber|insurer),
+    // merge into it rather than creating a duplicate row.
+    let p = incomingP;
+    const inKey = _dedupKey(p);
+    if (inKey) {
+      const dup = policies.find(x => x.id !== p.id && _dedupKey(x) === inKey);
+      if (dup) {
+        const winner = _dedupScore(p) >= _dedupScore(dup) ? p : dup;
+        const loser  = winner === p ? dup : p;
+        p = {..._dedupMerge(winner, loser), id: dup.id};
+        try { await dbOp('policies','readwrite',s=>s.delete(incomingP.id)); } catch(e){}
+        try { toast('🔀 Merged 1 duplicate policy','info',3500); } catch(e){}
+      }
+    }
     const oldData = policies.find(x => x.id === p.id);
     const oldVersions = oldData?._fieldVersions || {};
     const newVersions = bumpFieldVersions(p, oldData, oldVersions);
@@ -10781,7 +10834,15 @@ async function routeExtraction(gk, ck, systemPrompt, contentBlocks, maxTokens, r
       }
     }
 
-    // Only one key available — fall through to legacy paths
+    // Single-key PDF paths
+    if (ck) {
+      try { toast('📄 PDF → Claude (single-key direct)', 'info', 3000); } catch(_){}
+      return await claudeStructuredExtract(ck, systemPrompt, contentBlocks, maxTokens);
+    }
+    if (gk) {
+      try { toast('📄 PDF → Gemini (single-key direct)', 'info', 3000); } catch(_){}
+      return await geminiStructuredExtract(gk, systemPrompt, contentBlocks, maxTokens, responseSchema);
+    }
     return null;
   }
 
@@ -10789,32 +10850,41 @@ async function routeExtraction(gk, ck, systemPrompt, contentBlocks, maxTokens, r
   // IMAGE  →  Claude vision direct (Haiku→Sonnet chain)
   // ─────────────────────────────────────────────────────────────
   if (dominant === 'image') {
-    if (!ck) return null; // No Anthropic key → fall through to Gemini legacy path
-    try { toast('📷 Image → Claude vision direct', 'info', 3000); } catch(_){}
-    console.log('[Router] Image path: claudeStructuredExtract (Haiku→Sonnet)');
-    try {
-      const result = await claudeStructuredExtract(ck, systemPrompt, contentBlocks, maxTokens);
-      return result;
-    } catch (claudeErr) {
-      console.warn('[Router] Image claudeStructuredExtract exhausted:', claudeErr.message);
-      if (gk) {
-        try { toast('⤴ Fallback: Claude vision exhausted → Gemini structured extract', 'info', 3000); } catch(_){}
-        // ── FALLBACK: geminiStructuredExtract cross-provider ──
-        try {
-          if (responseSchema) {
-            const result = await geminiStructuredExtract(gk, systemPrompt, contentBlocks, maxTokens, responseSchema);
-            return result;
+    if (!ck) return null;
+    const textBlocks = contentBlocks.filter(b => b.type === 'text');
+    const imageBlocks = contentBlocks.filter(b => b.type !== 'text');
+    const CHUNK_SIZE = 4;
+    const chunks = [];
+    for (let i = 0; i < imageBlocks.length; i += CHUNK_SIZE) {
+      chunks.push(imageBlocks.slice(i, i + CHUNK_SIZE));
+    }
+    if (chunks.length === 0) chunks.push([]);
+    console.log('[Router] Image path: chunked Claude vision, ' + chunks.length + ' chunk(s)');
+    const merged = [];
+    for (let ci = 0; ci < chunks.length; ci++) {
+      const chunkBlocks = [...textBlocks, ...chunks[ci]];
+      try { toast('📷 Image batch → Claude vision (chunk ' + (ci+1) + '/' + chunks.length + ')', 'info', 3000); } catch(_){}
+      let chunkResult = null;
+      try {
+        chunkResult = await claudeStructuredExtract(ck, systemPrompt, chunkBlocks, maxTokens);
+      } catch (claudeErr) {
+        console.warn('[Router] Chunk ' + (ci+1) + ' Claude exhausted:', claudeErr.message);
+        if (gk) {
+          try { toast('⤴ Chunk ' + (ci+1) + ' fallback: Claude exhausted → Gemini', 'info', 3000); } catch(_){}
+          try {
+            chunkResult = await geminiStructuredExtract(gk, systemPrompt, chunkBlocks, maxTokens, responseSchema);
+          } catch (gemErr) {
+            console.warn('[Router] Chunk ' + (ci+1) + ' Gemini fallback also failed:', gemErr.message);
+            continue;
           }
-          // No schema → geminiRead+extract text
-          const gemText = await geminiRead(gk, contentBlocks);
-          return gemText;
-        } catch (gemFallbackErr) {
-          console.warn('[Router] Image Gemini fallback also failed:', gemFallbackErr.message);
-          throw gemFallbackErr;
+        } else {
+          continue;
         }
       }
-      throw claudeErr;
+      if (Array.isArray(chunkResult)) merged.push(...chunkResult);
+      else if (chunkResult) merged.push(chunkResult);
     }
+    return merged.length === 1 && !Array.isArray(merged[0]) ? merged[0] : merged;
   }
 
   // ─────────────────────────────────────────────────────────────
