@@ -1643,7 +1643,14 @@ async function pdfToImages(pdfDoc, maxPages=12) {
 // CLEAN even if the FC never actually reviewed anything. Bumping the version
 // forces a re-extraction next time those same files are uploaded, and the
 // one-time cleanup in App init purges the stale entries from IndexedDB.
-const EXTRACT_PIPELINE_VERSION = 'v12-2026-04-10-dedup';
+const EXTRACT_PIPELINE_VERSION = 'v13-2026-04-10-batch-gate';
+
+// ── MODULE-LEVEL ABORT CONTROLLER (v13) ──
+// Allows the Cancel button to abort in-flight Gemini/Claude requests.
+// Set at the start of handleExtract, cleared in its finally block.
+// fetchWithTimeout links to this so every API call is cancellable
+// without threading the signal through every intermediate function.
+let _extractAbortController = null;
 // Dedup helpers — merge duplicate extracted policies by policyNumber+insurer
 const _dedupKey = (p) => {
   const pn = (p?.policyNumber || '').trim().toUpperCase();
@@ -9000,16 +9007,27 @@ const POLICY_EXTRACTION_SCHEMA = {
 async function fetchWithTimeout(url, options = {}, timeoutMs = 120000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
+  // ── v13: Link to extraction-level AbortController ──
+  // If the user hits Cancel, _extractAbortController.abort() fires,
+  // which cascades into this controller and kills the in-flight fetch.
+  const extSignal = _extractAbortController?.signal;
+  if (extSignal?.aborted) throw new DOMException('Extraction cancelled', 'AbortError');
+  const onExtAbort = () => controller.abort();
+  extSignal?.addEventListener('abort', onExtAbort);
   try {
     const resp = await fetch(url, {...options, signal: controller.signal});
     return resp;
   } catch(err) {
     if(err.name === 'AbortError') {
+      if (extSignal?.aborted) {
+        throw new DOMException('Extraction cancelled', 'AbortError');
+      }
       throw new Error('Request timed out after '+Math.round(timeoutMs/1000)+'s. If you tabbed out of the app during extraction, mobile Chrome may have suspended the request. Please try again and keep the app in the foreground.');
     }
     throw err;
   } finally {
     clearTimeout(timer);
+    extSignal?.removeEventListener('abort', onExtAbort);
   }
 }
 
@@ -10795,6 +10813,7 @@ async function routeExtraction(gk, ck, systemPrompt, contentBlocks, maxTokens, r
         console.warn('[Router] PDF geminiRead failed:', geminiReadErr.message);
         try { toast('⤴ Fallback: Gemini read failed → Claude vision direct', 'info', 3000); } catch(_){}
         // ── FALLBACK A: Gemini read failed → Claude vision on original PDF ──
+        await new Promise(r => setTimeout(r, Math.min(30000, 2000))); // v13: hop backoff
         try {
           const result = await claudeStructuredExtract(ck, systemPrompt, contentBlocks, maxTokens);
           return result;
@@ -10814,6 +10833,7 @@ async function routeExtraction(gk, ck, systemPrompt, contentBlocks, maxTokens, r
         try { toast('⤴ Fallback: Claude analyse failed → Gemini structured extract', 'info', 3000); } catch(_){}
         // ── FALLBACK B: Claude extract failed but Gemini read succeeded
         //    → geminiStructuredExtract on original PDF blocks (not the read text) ──
+        await new Promise(r => setTimeout(r, Math.min(30000, 4000))); // v13: hop backoff (2nd hop)
         if (responseSchema) {
           try {
             const result = await geminiStructuredExtract(gk, systemPrompt, contentBlocks, maxTokens, responseSchema);
@@ -10940,6 +10960,18 @@ async function callAI(systemPrompt, contentBlocks, maxTokens, responseSchema) {
   console.log('[callAI] Keys loaded — Gemini:', gk ? gk.substring(0,8)+'...' : 'NONE', 'Anthropic:', ck ? ck.substring(0,8)+'...' : 'NONE');
   if(!gk && !ck) throw new Error('Set your Gemini or Anthropic API key in Settings first');
 
+  // ── v13: EXPONENTIAL BACKOFF BETWEEN FALLBACK HOPS ──
+  // Instant Gemini→Claude→Gemini ping-pong exhausts both providers.
+  // Wait 2s × 2^hopCount before each cross-provider hop, capped at 30s.
+  // Reset per file (callAI is called once per file/batch).
+  let hopCount = 0;
+  const hopBackoff = async (from, to) => {
+    const delay = Math.min(30000, 2000 * Math.pow(2, hopCount));
+    hopCount++;
+    console.log('[callAI] Hop backoff #'+hopCount+' ('+from+' → '+to+'): waiting '+delay+'ms');
+    await new Promise(r => setTimeout(r, delay));
+  };
+
   // ── SMART ROUTING CLASSIFIER ──
   // Dispatches PDF / image / XLSX to cost-optimal pipelines before any
   // legacy branch fires. Returns null for DOCX (_forceAnthropic) and
@@ -10987,6 +11019,7 @@ async function callAI(systemPrompt, contentBlocks, maxTokens, responseSchema) {
         if(isCapacityOrQuality) {
           console.log('[AI] ⤴ Falling back to Claude vision (cross-provider)');
           try { toast('🤖 Switching to Claude vision (Gemini exhausted)','info',3000); } catch(e){}
+          await hopBackoff('Gemini', 'Claude');
           try {
             const claudeResult = await claudeStructuredExtract(ck, systemPrompt, contentBlocks, maxTokens);
             try { toast('✓ Claude vision extraction succeeded','success',2500); } catch(e){}
@@ -11013,6 +11046,7 @@ async function callAI(systemPrompt, contentBlocks, maxTokens, responseSchema) {
         const msg = (claudeErr.message||'').toLowerCase();
         if(msg.includes('fetch') || msg.includes('network') || msg.includes('failed') || msg.includes('overload') || msg.includes('529') || msg.includes('rate') || claudeErr instanceof TypeError) {
           console.log('[AI] Falling back to Gemini for text extraction');
+          await hopBackoff('Claude', 'Gemini');
           return await geminiExtract(gk, systemPrompt, [{type:'text',text:textParts}], maxTokens);
         }
       }
@@ -11044,7 +11078,7 @@ async function callAI(systemPrompt, contentBlocks, maxTokens, responseSchema) {
       return data.content?.map(c=>c.text||'').join('') || '';
     } catch(claudeErr) {
       console.warn('[AI] Claude forceAnthropic failed:', claudeErr.message, '→ falling back to Gemini');
-      if(gk) return await geminiExtract(gk, systemPrompt, contentBlocks, maxTokens);
+      if(gk) { await hopBackoff('Claude', 'Gemini'); return await geminiExtract(gk, systemPrompt, contentBlocks, maxTokens); }
       throw claudeErr;
     }
   }
@@ -15256,6 +15290,15 @@ function Policies() {
   // that fights over shared mutable state (allExtracted, scanProgress,
   // sessionStorage).
   const extractingRef = useRef(false);
+  // ── v13: BATCH MERGE GATE ──
+  // Accumulates ALL batches' extracted policies before flushing to
+  // the BulkVerifyModal. This means dedupePolicies sees all duplicates
+  // from all batches at once instead of per-batch, fixing the 3× dup.
+  const pendingBatchRef = useRef([]);
+  // ── v13: CANCEL EXTRACTION ──
+  // Stores the AbortController for the current extraction run.
+  // The Cancel button calls .abort() on this to kill in-flight requests.
+  const extractAbortRef = useRef(null);
   const [draftBanner, setDraftBanner] = useState(false);
   const [bulkExtracted, setBulkExtracted] = useState(null); // for verification modal
   // ── PROGRESSIVE EXTRACTION (feature c, 2026-04-09) ──
@@ -16989,6 +17032,16 @@ Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. E
     const beforeUnloadHandler = (e) => { e.preventDefault(); e.returnValue = ''; return ''; };
     window.addEventListener('beforeunload', beforeUnloadHandler);
 
+    // ── v13: ABORT CONTROLLER ──
+    // Creates a cancellation signal threaded through all fetch calls
+    // via the module-level _extractAbortController. The Cancel button
+    // calls .abort() on this, which cascades through fetchWithTimeout.
+    const abortCtrl = new AbortController();
+    extractAbortRef.current = abortCtrl;
+    _extractAbortController = abortCtrl;
+    // Reset pendingBatchRef for this run
+    pendingBatchRef.current = [];
+
     // ── MOBILE EXTRACTION RELIABILITY ──
     // On Android Chrome (and iOS Safari), backgrounding the tab or letting
     // the screen sleep during a long fetch causes the browser to suspend
@@ -17555,6 +17608,10 @@ Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. E
 
     try {
       for(let b=0; b<batches.length; b++) {
+        // ── v13: Check cancellation before starting next batch ──
+        if (abortCtrl.signal.aborted) {
+          throw new DOMException('Extraction cancelled', 'AbortError');
+        }
         const elapsed = Date.now() - scanStartTime;
         // Count remaining files across all remaining batches
         let filesRemaining = 0;
@@ -18208,18 +18265,21 @@ Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. E
         );
       } catch(e) { /* storage quota or private mode — non-fatal */ }
 
-      // Show first batch results immediately so user can start reviewing
+      // ── v13: BATCH MERGE GATE ──
+      // Accumulate in pendingBatchRef instead of flushing to modal per-batch.
+      // This ensures dedupePolicies sees ALL duplicates from ALL batches at
+      // once, fixing the 3× duplication when "PruSave Max 10" appears in
+      // batches 1, 2, and 3. The modal only opens after the final batch.
+      pendingBatchRef.current = [...allExtracted];
       if(!firstBatchShown) {
         firstBatchShown = true;
+        // Single-file single-batch: still show inline result immediately
         if(processed.length === 1 && totalBatches === 1) {
           setScanResult(processed[0]);
-        } else {
-          setBulkExtracted([...allExtracted]);
         }
-      } else {
-        // Subsequent batches — append to existing bulk modal
-        setBulkExtracted([...allExtracted]);
+        // Multi-file: defer setBulkExtracted until all batches done
       }
+      // (no per-batch setBulkExtracted — flushed after final batch below)
 
       setScanProgress({batch:b+1, totalBatches, totalFiles:allFiles.length, status:b+1<totalBatches?`Batch ${b+1} done (${allExtracted.length} policies). Extracting next...`:`All ${totalBatches} batches complete! ${allExtracted.length} policies extracted.`, pctComplete:Math.round((b+1)/totalBatches*100), bgMode: bgDiag?.overall ? 'active' : 'foreground', bgModeReason: bgDiag?.reason || null});
 
@@ -18252,6 +18312,21 @@ Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. E
       }
 
       // All batches done
+      // ── v13: FLUSH BATCH MERGE GATE ──
+      // Now that ALL batches are complete, run one final dedupe across
+      // the full accumulated set and flush to the BulkVerifyModal.
+      // This is where the cross-batch dedup finally works correctly.
+      const finalPolicies = dedupePolicies(pendingBatchRef.current);
+      const dupsRemoved = pendingBatchRef.current.length - finalPolicies.length;
+      pendingBatchRef.current = [];
+      if (finalPolicies.length > 0) {
+        setBulkExtracted([...finalPolicies]);
+        sessionBulkRef.current = [...finalPolicies];
+        try {
+          toast('✅ Imported ' + finalPolicies.length + ' policies' + (dupsRemoved > 0 ? ' (' + dupsRemoved + ' duplicates merged)' : ''), 'success', 5000);
+        } catch(_) {}
+      }
+
       // In progressive mode, DON'T clear staged — the triggering
       // wrapper (triggerProgressiveExtract) will mark the extracted
       // files as 'done' so they stay visible with a green badge,
@@ -18311,7 +18386,16 @@ Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. E
       // mode AND we ended up with a network-ish error, it's almost certainly
       // the browser suspending the fetch. When bg mode is active, tab-away
       // is safe and the error is something else entirely.
-      if(wasBackgrounded && !bgDiag?.overall && (errMsg.includes('networkerror') || errMsg.includes('failed to fetch') || errMsg.includes('network') || errMsg.includes('timed out') || errMsg.includes('abort') || e instanceof TypeError)) {
+      // ── v13: CANCELLATION CHECK ──
+      if(e && e.name === 'AbortError' && errMsg.includes('cancelled')) {
+        msg = '🛑 Extraction cancelled — no policies imported.';
+      // ── v13: RATE-LIMIT ERROR CLASSIFICATION ──
+      // Detect HTTP 429/503/529 from Gemini and Claude separately from
+      // true network errors (TypeError: Failed to fetch / CORS failures).
+      // Rate-limit errors contain status codes in their message string.
+      } else if(errMsg.includes('429') || errMsg.includes('503') || errMsg.includes('529') || errMsg.includes('overload') || errMsg.includes('exhausted') || errMsg.includes('rate') || errMsg.includes('all models in fallback') || errMsg.includes('all models')) {
+        msg = '⏳ Both AI providers rate-limited. Wait 60s and retry with fewer files (try 5).\n\nThis happens during peak hours when Gemini and Claude are both overloaded. Smaller batches reduce the chance of hitting quotas.';
+      } else if(wasBackgrounded && !bgDiag?.overall && (errMsg.includes('networkerror') || errMsg.includes('failed to fetch') || errMsg.includes('network') || errMsg.includes('timed out') || errMsg.includes('abort') || e instanceof TypeError)) {
         msg = '🚫 Extraction interrupted — you tabbed away from PolicyLens while files were still uploading.\n\nMobile Chrome suspends background tabs to save battery, which kills in-flight API calls to Gemini/Claude.\n\nFix: Tap Upload again and keep PolicyLens in the foreground until extraction completes. The screen wake lock should prevent this, but it was either unsupported or overridden.';
       } else if(errMsg.includes('networkerror') || errMsg.includes('failed to fetch') || errMsg.includes('network') || e instanceof TypeError) {
         msg = '🚫 Network Error — API calls are being blocked.\n\nCommon causes:\n\n';
@@ -18332,11 +18416,18 @@ Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. E
       } else if(errMsg.includes('timed out') || errMsg.includes('timeout')) {
         msg = '⏱ Extraction timed out.\n\nThis usually happens when:\n\n1. The tab was backgrounded (mobile Chrome suspends fetches)\n2. The files are very large and the AI is slow to respond\n3. Network connection is unstable\n\nFix: Try again with the app in foreground, or upload fewer files per batch.';
       }
-      toast(msg,'warning',7000);
-      // If some batches succeeded, show partial results
-      if(allExtracted.length > 0) {
-        setBulkExtracted([...allExtracted]);
-        toast(allExtracted.length + ' policies extracted before error — review now','warning',5000);
+      // ── v13: On cancel, drop pendingBatchRef (no partial writes) ──
+      const wasCancelled = e && e.name === 'AbortError' && errMsg.includes('cancelled');
+      if (wasCancelled) {
+        toast(msg, 'info', 5000);
+        pendingBatchRef.current = [];
+      } else {
+        toast(msg,'warning',7000);
+        // If some batches succeeded, show partial results
+        if(allExtracted.length > 0) {
+          setBulkExtracted([...allExtracted]);
+          toast(allExtracted.length + ' policies extracted before error — review now','warning',5000);
+        }
       }
       setScanning(false); setScanProgress(null);
       // ── PERSISTENT FAILURE BANNER WITH RESUME STATE ──
@@ -18350,24 +18441,29 @@ Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. E
       // the FC understands that Retry isn't starting from scratch — the
       // deterministic batch cache will instant-hit anything that already
       // completed, and the new run picks up from where we left off.
-      const mainFailPayload = {
-        reason: (wasBackgrounded && !bgDiag?.overall)
-          ? 'Chrome killed the extraction when you tabbed away. PolicyLens needs to stay in the foreground while scanning.'
-          : msg.split('\n')[0] || 'Extraction failed. See details in the error toast.',
-        files: filesSnapshot,
-        at: Date.now(),
-        // Resume progress — each of these may be undefined on very early
-        // failures. The banner UI guards for that.
-        completedBatches,
-        totalBatches,
-        partialPolicies: allExtracted.length,
-      };
-      setScanFailure(mainFailPayload);
-      scanFailureRef.current = mainFailPayload;
+      // v13: Skip failure banner on user-initiated cancel — staged photos
+      // remain so user can retry, but no partial-write confusion.
+      if (!wasCancelled) {
+        const mainFailPayload = {
+          reason: (wasBackgrounded && !bgDiag?.overall)
+            ? 'Chrome killed the extraction when you tabbed away. PolicyLens needs to stay in the foreground while scanning.'
+            : msg.split('\n')[0] || 'Extraction failed. See details in the error toast.',
+          files: filesSnapshot,
+          at: Date.now(),
+          completedBatches,
+          totalBatches,
+          partialPolicies: allExtracted.length,
+        };
+        setScanFailure(mainFailPayload);
+        scanFailureRef.current = mainFailPayload;
+      }
     } finally {
       // Release the synchronous re-entry guard first so any queued
       // retry can proceed if the user taps again immediately.
       extractingRef.current = false;
+      // ── v13: Clear abort controller ──
+      extractAbortRef.current = null;
+      _extractAbortController = null;
       // Always clean up the wake lock, visibility listener, and
       // beforeunload guard — whether extraction succeeded, failed, or was
       // interrupted. Without this the screen would stay on and the
@@ -18408,16 +18504,16 @@ Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. E
         <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
           <input ref={cameraRef} type="file" accept="image/*" capture="environment" style={{display:'none'}} onChange={e=>{stagePhotos(e.target.files);e.target.value='';}} />
           <input ref={uploadRef} type="file" accept="image/*,.pdf,.xlsx,.xls,.csv,.doc,.docx,.html,.htm,.txt,.rtf" multiple style={{display:'none'}} onChange={e=>{stagePhotos(Array.from(e.target.files));e.target.value='';}} />
-          <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length){stagePhotos(files);}}}>
+          <button className="btn-secondary btn-sm" disabled={scanning} title={scanning?'Finish current extraction first':''} onClick={async()=>{const files=await openCameraModal();if(files&&files.length){stagePhotos(files);}}}>
             📷 Camera
           </button>
-          <button className="btn-secondary btn-sm" onClick={()=>{const inp=document.createElement('input');inp.type='file';inp.accept='image/*';inp.multiple=true;inp.onchange=e=>{const files=Array.from(e.target.files);if(files.length){stagePhotos(files);}};inp.click();}}>
+          <button className="btn-secondary btn-sm" disabled={scanning} title={scanning?'Finish current extraction first':''} onClick={()=>{const inp=document.createElement('input');inp.type='file';inp.accept='image/*';inp.multiple=true;inp.onchange=e=>{const files=Array.from(e.target.files);if(files.length){stagePhotos(files);}};inp.click();}}>
             🖼 Gallery
           </button>
-          <button className="btn-secondary btn-sm" onClick={()=>uploadRef.current?.click()}>
+          <button className="btn-secondary btn-sm" disabled={scanning} title={scanning?'Finish current extraction first':''} onClick={()=>uploadRef.current?.click()}>
             📄 Upload
           </button>
-          <button className="btn-secondary btn-sm" onClick={async()=>{
+          <button className="btn-secondary btn-sm" disabled={scanning} title={scanning?'Finish current extraction first':''} onClick={async()=>{
             try {
               const items = await navigator.clipboard.read();
               const files = [];
@@ -18429,10 +18525,10 @@ Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. E
               if(files.length > 0) { stagePhotos(files); }
               else { const text = await navigator.clipboard.readText(); if(text && text.length > 20) { stagePhotos([new File([text],'paste.txt',{type:'text/plain'})]); } else { toast('No content in clipboard — copy a screenshot or text first','warning'); } }
             } catch(e) { toast('Clipboard access denied — try Ctrl+V on the drop zone','error'); }
-          }} title="Paste from clipboard">
+          }} title={scanning?'Finish current extraction first':'Paste from clipboard'}>
             📋 Paste
           </button>
-          <button className="btn-primary btn-sm" onClick={()=>{setEditing(null);setScanResult(null);setShowForm(true)}}>+ Add</button>
+          <button className="btn-primary btn-sm" disabled={scanning} title={scanning?'Finish current extraction first':''} onClick={()=>{setEditing(null);setScanResult(null);setShowForm(true)}}>+ Add</button>
           {selected.size > 0 && <button className="btn-danger btn-sm" onClick={deleteSelected}>🗑 Delete ({selected.size})</button>}
           {policies.length > 0 && selected.size === 0 && <button className="btn-danger btn-sm" style={{opacity:.7}} onClick={async()=>{
             if(!confirm('⚠️ Delete ALL '+policies.length+' policies?\n\nThis cannot be undone. Client profile will not be affected.')) return;
@@ -18466,7 +18562,19 @@ Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. E
       {scanProgress && (
         <div className="card" style={{marginBottom:12,padding:14,borderLeft:'3px solid var(--gold)'}}>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
-            <div style={{fontSize:12,fontWeight:600,color:'var(--gold)'}}>✨ AI Extraction</div>
+            <div style={{display:'flex',alignItems:'center',gap:8}}>
+              <div style={{fontSize:12,fontWeight:600,color:'var(--gold)'}}>✨ AI Extraction</div>
+              {/* ── v13: CANCEL BUTTON ── */}
+              <button onClick={() => {
+                if (extractAbortRef.current) {
+                  extractAbortRef.current.abort();
+                }
+              }} style={{
+                fontSize:10,fontWeight:600,padding:'2px 8px',borderRadius:4,
+                border:'1px solid var(--red)',background:'rgba(239,83,80,0.12)',
+                color:'var(--red)',cursor:'pointer',
+              }}>Cancel</button>
+            </div>
             <div style={{fontSize:11,color:'var(--text3)'}}>{scanProgress.batch}/{scanProgress.totalBatches} batches · {scanProgress.totalFiles} files{scanProgress.eta ? ' · '+scanProgress.eta : ''}</div>
           </div>
           <div style={{height:6,background:'var(--bg4)',borderRadius:3,overflow:'hidden',marginBottom:6}}>
