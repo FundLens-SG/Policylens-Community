@@ -1731,7 +1731,12 @@ function fixOCRSpacing(text) {
 // reasons, which is exactly what a fallback should be.
 const GEMINI_EXTRACTION_CHAIN = [
   'gemini-2.5-flash',
-  'gemini-3-flash-preview',
+  // gemini-3-flash-preview REMOVED 2026-04-10: it produces generic
+  // category-style productNames and adds ~60s of wasted retries
+  // before giving up. Claude Haiku handles overload cases far better
+  // and is reached via callAI's cross-provider fallback after this
+  // chain bails. gemini-3.1-flash-lite-preview kept as absolute
+  // last-ditch in case both Gemini AND Claude are down.
   'gemini-3.1-flash-lite-preview',
 ];
 // Utility model for lightweight text-only tasks (note enrichment,
@@ -9999,9 +10004,15 @@ async function geminiStructuredExtract(geminiKey, systemPrompt, contentBlocks, m
   // with the original error so we don't waste time retrying a
   // malformed request.
   const RETRY_STATUSES = new Set([429, 500, 502, 503, 504]);
-  const MAX_RETRIES = 5; // was 3
+  // CUT 2026-04-10: was 5 retries (~62s per model). The new fallback
+  // strategy is "fail fast to Claude" — Claude vision is more accurate
+  // than Gemini 3 anyway, and waiting 60s on a known-overloaded
+  // model just to fall through is poor UX. 2 retries = 2s + 4s = ~6s
+  // before bailing to the next model (or to Claude via callAI).
+  const MAX_RETRIES = 2;
   // Delay schedule in ms — index [attempt] gives the wait before
-  // retry (attempt+1). 2s, 4s, 8s, 16s, 32s.
+  // retry (attempt+1). 2s, 4s only — kept the longer values commented
+  // for reference in case we need to tune.
   const BACKOFF_SCHEDULE = [2000, 4000, 8000, 16000, 32000];
   // Returns a jittered delay: base ± 25%. Stops multiple in-flight
   // batches from retrying in lockstep and hammering the same worker.
@@ -10087,7 +10098,7 @@ async function geminiStructuredExtract(geminiKey, systemPrompt, contentBlocks, m
           // Fall through to next model in chain
           const nextModel = MODEL_FALLBACK_CHAIN[modelIdx + 1];
           console.warn('[Gemini Structured] '+currentModel+' exhausted with capacity error — falling back to '+nextModel);
-          try { toast('Gemini '+currentModel+' overloaded — switching to '+nextModel, 'info', 3500); } catch(_) {}
+          try { toast('Gemini overloaded — switching to Claude vision (faster + more accurate)', 'info', 3500); } catch(_) {}
           hadCapacityError = true;
           break;
         }
