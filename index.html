@@ -1643,7 +1643,7 @@ async function pdfToImages(pdfDoc, maxPages=12) {
 // CLEAN even if the FC never actually reviewed anything. Bumping the version
 // forces a re-extraction next time those same files are uploaded, and the
 // one-time cleanup in App init purges the stale entries from IndexedDB.
-const EXTRACT_PIPELINE_VERSION = 'v13-2026-04-10-batch-gate';
+const EXTRACT_PIPELINE_VERSION = 'v14-2026-04-10-vision-normalize';
 
 // ── MODULE-LEVEL ABORT CONTROLLER (v13) ──
 // Allows the Cancel button to abort in-flight Gemini/Claude requests.
@@ -1651,6 +1651,46 @@ const EXTRACT_PIPELINE_VERSION = 'v13-2026-04-10-batch-gate';
 // fetchWithTimeout links to this so every API call is cancellable
 // without threading the signal through every intermediate function.
 let _extractAbortController = null;
+
+// ── v14: NORMALIZE CLAUDE/GEMINI RESPONSE TO STRING ──
+// Claude vision can return content blocks [{type:'text',text:'...'},...],
+// a raw response object, or (from the chunked image path) an array of
+// JSON strings. This helper coerces all shapes to a single string before
+// any .trim() / JSON.parse / regex touches the value.
+function normalizeClaudeText(resp) {
+  if (typeof resp === 'string') return resp;
+  if (Array.isArray(resp)) {
+    // Array of strings (chunked path) → try to merge as JSON arrays
+    const strings = resp
+      .filter(b => b != null)
+      .map(b => {
+        if (typeof b === 'string') return b;
+        if (b && b.type === 'text' && typeof b.text === 'string') return b.text;
+        if (b && typeof b === 'object') return JSON.stringify(b);
+        return '';
+      })
+      .filter(Boolean);
+    if (strings.length === 0) return '';
+    // If each element looks like a JSON array, merge contents into one array
+    const jsonArrays = [];
+    let allArrays = true;
+    for (const s of strings) {
+      const trimmed = s.trim();
+      if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+        try { const parsed = JSON.parse(trimmed); if (Array.isArray(parsed)) { jsonArrays.push(...parsed); continue; } } catch(_) {}
+      }
+      allArrays = false;
+    }
+    if (allArrays && jsonArrays.length > 0) return JSON.stringify(jsonArrays);
+    return strings.join('\n');
+  }
+  if (resp && typeof resp === 'object') {
+    if (typeof resp.text === 'string') return resp.text;
+    if (Array.isArray(resp.content)) return normalizeClaudeText(resp.content);
+  }
+  return '';
+}
+
 // Dedup helpers — merge duplicate extracted policies by policyNumber+insurer
 const _dedupKey = (p) => {
   const pn = (p?.policyNumber || '').trim().toUpperCase();
@@ -10901,10 +10941,18 @@ async function routeExtraction(gk, ck, systemPrompt, contentBlocks, maxTokens, r
           continue;
         }
       }
-      if (Array.isArray(chunkResult)) merged.push(...chunkResult);
-      else if (chunkResult) merged.push(chunkResult);
+      // v14: normalise chunk result to string before accumulating.
+      // claudeStructuredExtract and geminiStructuredExtract both return
+      // raw JSON strings — push them into merged for later joining.
+      const normalized = normalizeClaudeText(chunkResult);
+      if (normalized) merged.push(normalized);
     }
-    return merged.length === 1 && !Array.isArray(merged[0]) ? merged[0] : merged;
+    // v14: Merge all chunk JSON strings into one JSON array string.
+    // Previously returned an Array of strings which crashed .trim()
+    // in runExtractionWithRecovery.
+    if (merged.length === 0) return '[]';
+    if (merged.length === 1) return merged[0];
+    return normalizeClaudeText(merged);
   }
 
   // ─────────────────────────────────────────────────────────────
@@ -15299,6 +15347,12 @@ function Policies() {
   // Stores the AbortController for the current extraction run.
   // The Cancel button calls .abort() on this to kill in-flight requests.
   const extractAbortRef = useRef(null);
+  // ── v14: PER-FILE FAILURE COUNTER ──
+  // Tracks consecutive failures per file to break the infinite retry loop.
+  // Key: file object identity (or name+size), Value: {count, signature}.
+  // After 2 consecutive failures with the same error signature, the file
+  // is marked 'failed' instead of reverting to 'queued'.
+  const fileFailureRef = useRef(new Map());
   const [draftBanner, setDraftBanner] = useState(false);
   const [bulkExtracted, setBulkExtracted] = useState(null); // for verification modal
   // ── PROGRESSIVE EXTRACTION (feature c, 2026-04-09) ──
@@ -16116,9 +16170,32 @@ Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. E
     // failure even when no exception propagated.
     const failedInternally = threwOut || scanFailureRef.current;
     if (failedInternally) {
-      console.warn('[Progressive] Extraction failed (threwOut=' + threwOut + ', scanFailure=' + !!scanFailureRef.current + ') — reverting snapshot to queued');
-      setStaged(prev => prev.map(s => markedKeys.has(s.file) ? {...s, _status: 'queued'} : s));
+      // v14: Per-file failure counter — after 2 consecutive failures with
+      // the same error signature, mark as 'failed' instead of 'queued'
+      // to break the infinite retry loop.
+      const failReason = scanFailureRef.current?.reason || '';
+      const errSig = failReason.slice(0, 80);
+      console.warn('[Progressive] Extraction failed (threwOut=' + threwOut + ', scanFailure=' + !!scanFailureRef.current + ', sig=' + errSig + ') — checking failure counts');
+      const MAX_CONSECUTIVE_FAILURES = 2;
+      setStaged(prev => prev.map(s => {
+        if (!markedKeys.has(s.file)) return s;
+        const fKey = (s.file?.name || '') + ':' + (s.file?.size || 0);
+        const prior = fileFailureRef.current.get(fKey);
+        const sameSignature = prior && prior.signature === errSig;
+        const newCount = sameSignature ? prior.count + 1 : 1;
+        fileFailureRef.current.set(fKey, { count: newCount, signature: errSig });
+        if (newCount >= MAX_CONSECUTIVE_FAILURES) {
+          console.warn('[Progressive] File', fKey, 'failed', newCount, 'times with same error — marking as failed');
+          return {...s, _status: 'failed', _failReason: errSig};
+        }
+        return {...s, _status: 'queued'};
+      }));
       return;
+    }
+    // Success — clear failure counters for completed files
+    for (const s of snapshot) {
+      const fKey = (s.file?.name || '') + ':' + (s.file?.size || 0);
+      fileFailureRef.current.delete(fKey);
     }
     // Success: mark the snapshot's files as 'done' (stay visible
     // with a green badge). New staged items added during the run
@@ -16327,8 +16404,19 @@ Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. E
     if (triggerInFlightRef.current) return;
     const stuckCount = staged.filter(s => s._status === 'extracting').length;
     if (stuckCount === 0) return;
-    console.warn('[Progressive] Detected', stuckCount, 'files stuck in extracting state — reverting to queued');
-    setStaged(prev => prev.map(s => s._status === 'extracting' ? {...s, _status: 'queued'} : s));
+    // v14: Respect per-file failure counter — don't revert to queued
+    // if the file has already failed MAX_CONSECUTIVE_FAILURES times.
+    console.warn('[Progressive] Detected', stuckCount, 'files stuck in extracting state — checking failure counts');
+    setStaged(prev => prev.map(s => {
+      if (s._status !== 'extracting') return s;
+      const fKey = (s.file?.name || '') + ':' + (s.file?.size || 0);
+      const prior = fileFailureRef.current.get(fKey);
+      if (prior && prior.count >= 2) {
+        console.warn('[Progressive] File', fKey, 'already failed', prior.count, 'times — marking as failed');
+        return {...s, _status: 'failed', _failReason: prior.signature || 'repeated failure'};
+      }
+      return {...s, _status: 'queued'};
+    }));
   }, [scanning, staged]);
 
   // Listen for pending scans from welcome screen
@@ -16412,6 +16500,10 @@ Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. E
     let looksTruncated = text == null; // treat size-error path as truncated
 
     if(text != null) {
+      // v14: Normalise response to string — the chunked Claude vision
+      // path can return an array of JSON strings, which crashes .trim().
+      console.log('[Extract]', label, 'vision response type:', typeof text, Array.isArray(text) ? '(array, len='+text.length+')' : '');
+      text = normalizeClaudeText(text);
       console.log('[Extract]', label, 'response:', text.length, 'chars, tail:', text.slice(-80));
       const trimmed = text.trim();
       const lastChar = trimmed.slice(-1);
@@ -18395,9 +18487,13 @@ Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. E
       // Rate-limit errors contain status codes in their message string.
       } else if(errMsg.includes('429') || errMsg.includes('503') || errMsg.includes('529') || errMsg.includes('overload') || errMsg.includes('exhausted') || errMsg.includes('rate') || errMsg.includes('all models in fallback') || errMsg.includes('all models')) {
         msg = '⏳ Both AI providers rate-limited. Wait 60s and retry with fewer files (try 5).\n\nThis happens during peak hours when Gemini and Claude are both overloaded. Smaller batches reduce the chance of hitting quotas.';
-      } else if(wasBackgrounded && !bgDiag?.overall && (errMsg.includes('networkerror') || errMsg.includes('failed to fetch') || errMsg.includes('network') || errMsg.includes('timed out') || errMsg.includes('abort') || e instanceof TypeError)) {
+      // v14: Only treat TypeError as network error when the message
+      // indicates a genuine fetch failure ("Failed to fetch", "NetworkError").
+      // Other TypeErrors (e.g. ".trim is not a function") are code bugs
+      // and must NOT show the misleading "API calls are being blocked" toast.
+      } else if(wasBackgrounded && !bgDiag?.overall && (errMsg.includes('networkerror') || errMsg.includes('failed to fetch') || errMsg.includes('timed out') || errMsg.includes('abort') || (e instanceof TypeError && (errMsg.includes('fetch') || errMsg.includes('network'))))) {
         msg = '🚫 Extraction interrupted — you tabbed away from PolicyLens while files were still uploading.\n\nMobile Chrome suspends background tabs to save battery, which kills in-flight API calls to Gemini/Claude.\n\nFix: Tap Upload again and keep PolicyLens in the foreground until extraction completes. The screen wake lock should prevent this, but it was either unsupported or overridden.';
-      } else if(errMsg.includes('networkerror') || errMsg.includes('failed to fetch') || errMsg.includes('network') || e instanceof TypeError) {
+      } else if(errMsg.includes('networkerror') || errMsg.includes('failed to fetch') || (e instanceof TypeError && (errMsg.includes('fetch') || errMsg.includes('network')))) {
         msg = '🚫 Network Error — API calls are being blocked.\n\nCommon causes:\n\n';
         msg += '1. You tabbed away during extraction (mobile Chrome suspends background tabs)\n';
         msg += '2. Firefox Enhanced Tracking Protection — click the shield 🛡️ icon → turn OFF for this site\n';
