@@ -1643,7 +1643,7 @@ async function pdfToImages(pdfDoc, maxPages=12) {
 // CLEAN even if the FC never actually reviewed anything. Bumping the version
 // forces a re-extraction next time those same files are uploaded, and the
 // one-time cleanup in App init purges the stale entries from IndexedDB.
-const EXTRACT_PIPELINE_VERSION = 'v11-2026-04-10-deep-repo-priors';
+const EXTRACT_PIPELINE_VERSION = 'v10-2026-04-10-smart-routing';
 
 // ═══════════════════════════════════════════════════════════════
 // OCR SPACING FIX (2026-04-09)
@@ -2072,26 +2072,9 @@ function buildRepoPriorBlock(matches, maxInclude) {
     lines.push('  subType: ' + (r.subType || 'unknown'));
     if(r.currency) lines.push('  currency: ' + r.currency);
     if(r.notes) {
-      // Truncate long notes — 800 chars to include specimen rider data from enriched repo
-      const notesShort = r.notes.length > 800 ? r.notes.slice(0, 800).trim() + '…' : r.notes;
+      // Truncate long notes to keep prior block compact (max ~400 chars per product)
+      const notesShort = r.notes.length > 400 ? r.notes.slice(0, 400).trim() + '…' : r.notes;
       lines.push('  notes: ' + notesShort);
-    }
-    // Extract known rider names from notes so AI knows exactly what to look for
-    if(r.notes) {
-      const riderHints = [];
-      const riderPatterns = [
-        /Riders?:\s*([^.]+)/i,
-        /Rider names?:\s*([^.]+)/i,
-        /riders? available:\s*([^.]+)/i
-      ];
-      for(const rp of riderPatterns) {
-        const rm = r.notes.match(rp);
-        if(rm) { riderHints.push(rm[1].trim()); break; }
-      }
-      if(riderHints.length > 0) {
-        lines.push('  KNOWN RIDERS: ' + riderHints[0]);
-        lines.push('  ↑ Look for these exact rider names in the document. Capture each as a rider[] entry.');
-      }
     }
     lines.push('  match: ' + m.score.toFixed(2) + ' confidence (' + m.matchType + ')');
     lines.push('');
@@ -9051,7 +9034,7 @@ async function claudeExtract(anthropicKey, systemPrompt, rawText, maxTokens) {
     resp = await fetchWithTimeout('https://api.anthropic.com/v1/messages',{
       method:'POST',
       headers:{'Content-Type':'application/json','x-api-key':anthropicKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
-      body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:maxTokens||8000,
+      body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:maxTokens||8000,
         system:systemPrompt+'\n\nRespond with ONLY a valid JSON array of policy objects. Start with [ and end with ]. No markdown, no backticks.',
         messages:[{role:'user',content:rawText}]
       })
@@ -10397,8 +10380,8 @@ async function quickClassifyInsurer(geminiKey, contentBlocks) {
 // in the system prompt to return valid JSON only, and run the same
 // repairJSON pass we use elsewhere.
 const CLAUDE_VISION_CHAIN = [
-  'claude-haiku-4-5',     // ~$1/$5 per MTok — first try
-  'claude-sonnet-4-5',    // ~$3/$15 per MTok — second try (most stable Sonnet)
+  'claude-haiku-4-5-20251001',  // ~$1/$5 per MTok — first try
+  'claude-sonnet-4-6',          // ~$3/$15 per MTok — second try
 ];
 async function claudeStructuredExtract(anthropicKey, systemPrompt, contentBlocks, maxTokens) {
   // Build Claude content array. Claude accepts:
@@ -10981,7 +10964,7 @@ async function callAI(systemPrompt, contentBlocks, maxTokens, responseSchema) {
         method:'POST',
         headers:{'Content-Type':'application/json','x-api-key':ck,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
         body:JSON.stringify({
-          model:'claude-sonnet-4-20250514', max_tokens:maxTokens||8000,
+          model:'claude-sonnet-4-6', max_tokens:maxTokens||8000,
           system:systemPrompt,
           messages:[{role:'user', content:claudeContent}]
         })
@@ -16282,37 +16265,21 @@ Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. E
     let text;
     try {
       // ── FEW-SHOT INJECTION (#6) ──
-      // Pull up to 4 verified products from the repo for the detected insurer
-      // and prepend them as gold-standard examples. More examples + longer notes
-      // = dramatically better field accuracy, especially for rider names and
-      // benefit structures that the AI otherwise misses or hallucates.
+      // If we detected an insurer via quickClassifyInsurer (#13),
+      // pull 1-2 verified products from the repo for that insurer
+      // and prepend them as gold-standard examples. LLMs are
+      // dramatically better with concrete examples than rules alone.
       let promptToUse = EXTRACT_PROMPT;
       try {
         const detectedInsurer = staged.find(s => s._detectedInsurer)?._detectedInsurer;
         if (detectedInsurer && repo && repo.length) {
-          // Get up to 4 diverse examples — prefer products with richer notes (more specimen data)
-          const insurerProducts = repo.filter(r => r.insurer && r.insurer.toLowerCase().includes(detectedInsurer.toLowerCase()));
-          // Sort by notes length desc so richest examples come first
-          insurerProducts.sort((a, b) => ((b.notes||'').length) - ((a.notes||'').length));
-          // Pick from different categories for diversity
-          const seen = new Set();
-          const matches = [];
-          for (const r of insurerProducts) {
-            const cat = r.category || 'unknown';
-            if (!seen.has(cat) && matches.length < 4) { matches.push(r); seen.add(cat); }
-          }
-          // Fill remaining slots if under 4
-          for (const r of insurerProducts) {
-            if (matches.length >= 4) break;
-            if (!matches.includes(r)) matches.push(r);
-          }
+          const matches = repo.filter(r => r.insurer && r.insurer.toLowerCase().includes(detectedInsurer.toLowerCase())).slice(0, 2);
           if (matches.length) {
-            const examples = matches.map(m => {
-              const notesSlice = (m.notes || '').slice(0, 500);
-              return '• ' + m.insurer + ' — ' + m.productName + ' (category:' + (m.category||'?') + ', subType:' + (m.subType||'?') + '):\n  ' + notesSlice;
-            }).join('\n\n');
-            promptToUse = EXTRACT_PROMPT + '\n\n═══ VERIFIED ' + detectedInsurer.toUpperCase() + ' EXAMPLES (use as gold-standard reference for product names, categories, rider names, and benefit structures) ═══\n' + examples + '\n═══ END EXAMPLES ═══';
-            console.log('[FewShot] Injected', matches.length, detectedInsurer, 'examples into prompt (diverse categories)');
+            const examples = matches.map(m => 
+              '• ' + m.insurer + ' — ' + m.productName + ' (' + m.subType + '): ' + (m.notes || '').slice(0, 300)
+            ).join('\n');
+            promptToUse = EXTRACT_PROMPT + '\n\n═══ VERIFIED ' + detectedInsurer.toUpperCase() + ' EXAMPLES (use as gold-standard reference) ═══\n' + examples + '\n═══ END EXAMPLES ═══';
+            console.log('[FewShot] Injected', matches.length, detectedInsurer, 'examples into prompt');
           }
         }
       } catch(e) { console.warn('[FewShot] Injection failed:', e.message); }
@@ -16740,31 +16707,7 @@ Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. E
           content.push({type:'text', text: priorBlock});
         }
       } else {
-        // ── IMAGE-ONLY FALLBACK: inject insurer-level repo context ──
-        // For image-only scans (photos of policy docs), sourceText is empty so
-        // text-based matching can't fire. Fall back to the detected insurer from
-        // quickClassifyInsurer and inject top products for that insurer as context.
-        // This gives the AI known product names + rider names to look for even
-        // when it can't text-match against the document.
-        const detectedInsurer = staged.find(s => s._detectedInsurer)?._detectedInsurer;
-        if (detectedInsurer && repo && repo.length > 0) {
-          const insurerProducts = repo.filter(r => r.insurer && r.insurer.toLowerCase().includes(detectedInsurer.toLowerCase()));
-          if (insurerProducts.length > 0) {
-            // Sort by notes richness, pick top 6
-            insurerProducts.sort((a, b) => ((b.notes||'').length) - ((a.notes||'').length));
-            const fakeMatches = insurerProducts.slice(0, 6).map(r => ({ repo: r, score: 0.60, matchType: 'insurer-fallback' }));
-            const priorBlock = buildRepoPriorBlock(fakeMatches, 6);
-            if (priorBlock) {
-              content.push({type:'text', text: priorBlock.replace(
-                'REPOSITORY PRIOR KNOWLEDGE — AUTHORITATIVE UNLESS DOCUMENT CONTRADICTS',
-                'REPOSITORY CONTEXT FOR ' + detectedInsurer.toUpperCase() + ' (insurer detected from image — use as reference for product names, rider names, and classification)'
-              )});
-              console.log('[PriorInjection] Image-only fallback: injected', Math.min(insurerProducts.length, 6), detectedInsurer, 'products as context');
-            }
-          }
-        } else {
-          console.log('[PriorInjection] No repo matches in source text (length='+sourceText.length+', repo size='+repo.length+')');
-        }
+        console.log('[PriorInjection] No repo matches in source text (length='+sourceText.length+', repo size='+repo.length+')');
       }
 
       content.push({type:'text',text:'Extract ALL insurance policies AND financial instruments from these documents. CRITICAL RULES:\n1. Multiple photos may show DIFFERENT PAGES of the SAME policy — correlate them by policy number, insurer+product name, or context clues. Merge information from multiple pages into ONE policy entry.\n2. Multiple photos may also show DIFFERENT policies — extract each as a separate entry.\n3. NEVER skip or merge genuinely different policies. Two policies from the same insurer with different product names = 2 entries.\n4. If the same fund (e.g. "Allianz Global High Payout") appears under DIFFERENT accounts (CPFIS-OA vs Cash), these are SEPARATE entries — differentiate by appending the account type in policyName.\n5. Look across ALL images for related data — page 1 might have the policy name while page 3 has the premium details.\n6. If REPOSITORY PRIOR KNOWLEDGE is provided above, treat those products\' canonical category/subType as authoritative — do not reclassify them based on document appearance.\nReturn ONLY valid JSON array or object.'});
@@ -24187,7 +24130,7 @@ function ExtractDiagnostics() {
           method:'POST',
           headers:{'Content-Type':'application/json','x-api-key':ck,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
           body: JSON.stringify({
-            model:'claude-sonnet-4-20250514', max_tokens:30,
+            model:'claude-sonnet-4-6', max_tokens:30,
             messages:[{role:'user', content:'Reply with the word OK only.'}]
           })
         });
@@ -24675,7 +24618,7 @@ function Settings() {
             <button className="btn-secondary btn-sm" onClick={async()=>{
               const k=((await dbGet('settings','anthropicKey').catch(()=>null))?.value||'').trim();
               if(!k){toast('No Anthropic key stored','warning');return;}
-              try{const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json','x-api-key':k,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:30,messages:[{role:'user',content:'Say hello'}]})});
+              try{const r=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',headers:{'Content-Type':'application/json','x-api-key':k,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},body:JSON.stringify({model:'claude-sonnet-4-6',max_tokens:30,messages:[{role:'user',content:'Say hello'}]})});
               const d=await r.json();if(d.error)toast(d.error.message,'error');else toast('Claude connected — working!','success');}catch(e){toast(e.message,'error');}
             }}>Test</button>
           </div>
