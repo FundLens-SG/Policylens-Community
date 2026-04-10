@@ -1643,7 +1643,528 @@ async function pdfToImages(pdfDoc, maxPages=12) {
 // CLEAN even if the FC never actually reviewed anything. Bumping the version
 // forces a re-extraction next time those same files are uploaded, and the
 // one-time cleanup in App init purges the stale entries from IndexedDB.
-const EXTRACT_PIPELINE_VERSION = 'v14-2026-04-10-vision-normalize';
+const EXTRACT_PIPELINE_VERSION = 'v14.2-2026-04-10-derive-validate';
+
+// ── v15: PROMPT VERSIONING ──
+const EXTRACT_PROMPT_VERSION = 'v14.1-2026-04-10-strict-fields';
+const OCR_PROMPT_VERSION = 'v15-2026-04-10';
+
+// ── v14.1: CORRECTION MEMORY — FEW-SHOT BUILDER ──
+// Loads recent corrections from IDB and formats them as few-shot examples
+// to append to the extraction prompt. Returns empty string if no corrections.
+// Cached for 30 seconds to avoid hitting IDB on every extraction call.
+let _correctionCacheTime = 0;
+let _correctionCacheText = '';
+async function buildCorrectionFewShot() {
+  // Cache for 30s
+  if (Date.now() - _correctionCacheTime < 30000 && _correctionCacheText) {
+    return _correctionCacheText;
+  }
+  try {
+    const corrections = await PolicyDB.getRecentCorrections(15);
+    if (!corrections || corrections.length === 0) {
+      _correctionCacheText = '';
+      _correctionCacheTime = Date.now();
+      return '';
+    }
+    // Group by insurer → field → correction
+    const byInsurer = {};
+    for (const c of corrections) {
+      const key = c.insurer || 'Unknown';
+      if (!byInsurer[key]) byInsurer[key] = [];
+      byInsurer[key].push(c);
+    }
+    const lines = [];
+    for (const [ins, corrs] of Object.entries(byInsurer)) {
+      lines.push('Insurer: ' + ins);
+      for (const c of corrs.slice(0, 5)) {
+        const aiVal = c.aiValue == null ? 'null' : JSON.stringify(c.aiValue);
+        const corrVal = c.correctedValue == null ? 'null' : JSON.stringify(c.correctedValue);
+        lines.push('  • ' + (c.productName || '?') + ' → ' + c.field + ': AI returned ' + aiVal + ', correct value is ' + corrVal);
+      }
+    }
+    _correctionCacheText = '\n\n═══ PRIOR FC CORRECTIONS (learn from these — avoid repeating the same mistakes) ═══\n' +
+      lines.join('\n') +
+      '\n═══ END CORRECTIONS ═══';
+    _correctionCacheTime = Date.now();
+    console.log('[CorrectionMemory] Built few-shot with', corrections.length, 'corrections for', Object.keys(byInsurer).length, 'insurer(s)');
+    return _correctionCacheText;
+  } catch (e) {
+    console.warn('[CorrectionMemory] Failed to load corrections:', e);
+    return '';
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════
+// v14.2: DERIVE + VALIDATE — Three-pass pipeline
+// Extract → DERIVE (pure JS, no LLM) → VALIDATE (pure JS) → Save
+// ══════════════════════════════════════════════════════════════════
+
+// ── DERIVE RULES REGISTRY ──
+// Each rule: { name, run(policy, clientProfile?) → { field, value, meta } | null }
+// meta: { source:'derived', rule, confidence, inputs:{...}, caption }
+// Rules MUST NOT call LLMs. Pure deterministic JavaScript.
+const DERIVE_RULES = [
+  // ── Fix 3: SA → Death Benefit flow-through ──
+  {
+    name: 'derive_death_benefit_from_sum_assured',
+    run: (policy) => {
+      const existing = parseFloat(policy.deathBenefit) || 0;
+      if (existing > 0) return null;
+      const sa = parseFloat(policy.sumAssured) || 0;
+      if (sa <= 0) return null;
+      // Only applies to categories with death benefit
+      const cat = (policy.category || '').toLowerCase();
+      const sub = (policy.subType || '').toLowerCase();
+      const deathCategories = ['protection'];
+      const deathSubTypes = ['term life','whole life','universal life (ul)','indexed ul (iul)',
+        'variable ul (vul)','critical illness','endowment','lifetime endowment',
+        'education plan','ilp (protection)'];
+      const isRetirement = cat === 'retirement' || sub === 'annuity' || sub === 'retirement';
+      const isSavings = cat === 'savings';
+      const isProtection = deathCategories.includes(cat) || deathSubTypes.includes(sub);
+      if (!isProtection && !isSavings && !isRetirement) return null;
+      // Sum death-related rider SA
+      let riderDeathSA = 0;
+      const deathRiderTypes = new Set(['death','tpd','accidental']);
+      for (const rd of (policy.riders || [])) {
+        if (deathRiderTypes.has(rd.type)) {
+          riderDeathSA += parseFloat(rd.sa) || 0;
+        }
+      }
+      const totalDeath = sa + riderDeathSA;
+      if (totalDeath <= 0) return null;
+      return {
+        field: 'deathBenefit',
+        value: totalDeath,
+        meta: {
+          confidence: 0.9,
+          inputs: { sumAssured: sa, riderDeathSA, category: policy.category, subType: policy.subType },
+          caption: riderDeathSA > 0
+            ? 'SA $' + sa.toLocaleString() + ' + rider death SA $' + riderDeathSA.toLocaleString()
+            : 'Derived from Sum Assured — most protection policies pay SA on death',
+        },
+      };
+    },
+  },
+  // ── Fix 1: Reverse-engineer annual premium from total-paid ──
+  {
+    name: 'derive_annual_premium_from_total_paid',
+    run: (policy) => {
+      const existing = parseFloat(policy.annualPremium) || 0;
+      if (existing > 0) return null;
+      const totalPaid = parseFloat(policy.totalPremiumPaid) || 0;
+      if (totalPaid <= 0) return null;
+      const inception = policy.inceptionDate ? new Date(policy.inceptionDate) : null;
+      if (!inception || isNaN(inception.getTime())) return null;
+      // Determine years active from lastPremiumDueDate or premiumTerm
+      let yearsActive = 0;
+      const lastDue = policy.lastPremiumDueDate ? new Date(policy.lastPremiumDueDate) : null;
+      const premTerm = parseInt(policy.premTerm) || 0;
+      if (lastDue && !isNaN(lastDue.getTime()) && lastDue > inception) {
+        yearsActive = Math.round((lastDue - inception) / (365.25 * 24 * 60 * 60 * 1000));
+      } else if (premTerm > 0) {
+        yearsActive = premTerm;
+      }
+      yearsActive = Math.max(1, yearsActive);
+      const derived = Math.round(totalPaid / yearsActive);
+      if (derived <= 0) return null;
+      // Mark as fully paid if last due is in the past
+      if (lastDue && lastDue < new Date()) {
+        policy.premiumStatus = 'fully_paid';
+        if (!policy.status || policy.status === 'inforce') policy.status = 'paid-up';
+      }
+      return {
+        field: 'annualPremium',
+        value: derived,
+        meta: {
+          confidence: 0.85,
+          inputs: { totalPaid, yearsActive, inceptionDate: policy.inceptionDate, lastPremiumDueDate: policy.lastPremiumDueDate || null },
+          caption: 'Derived from $' + totalPaid.toLocaleString() + ' paid over ' + yearsActive + ' year' + (yearsActive !== 1 ? 's' : '') + ' — confirm or adjust',
+        },
+      };
+    },
+  },
+  // ── Fix 4: Estimated Maturity Value for Endowment/Savings ──
+  {
+    name: 'derive_estimated_maturity',
+    run: (policy) => {
+      // Only for savings/endowment with no guaranteed maturity
+      const cat = (policy.category || '').toLowerCase();
+      if (cat !== 'savings') return null;
+      const guar = parseFloat(policy.endGuaranteedCV) || 0;
+      if (guar > 0) return null; // already has BI data
+      const prem = parseFloat(policy.annualPremium) || 0;
+      if (prem <= 0) return null;
+      const premTerm = parseInt(policy.premTerm) || 0;
+      if (premTerm <= 0) return null;
+      // Policy term: explicit or inferred from premTerm
+      const startAge = parseInt(policy.premStartAge) || parseInt(policy.ageAtEntry) || 30;
+      let policyTerm = 0;
+      if (policy.endPolicyTerm) policyTerm = parseInt(policy.endPolicyTerm);
+      else if (policy.maturityDate && policy.inceptionDate) {
+        const mat = new Date(policy.maturityDate);
+        const inc = new Date(policy.inceptionDate);
+        if (!isNaN(mat.getTime()) && !isNaN(inc.getTime())) {
+          policyTerm = Math.round((mat - inc) / (365.25 * 24 * 60 * 60 * 1000));
+        }
+      }
+      if (policyTerm <= 0) policyTerm = premTerm; // fallback
+      if (policyTerm <= 0) return null;
+      // FV of annuity formula at default 3% yield
+      const r = 0.03;
+      const n = premTerm;
+      const totalYrs = policyTerm;
+      // FV of premium payments during premium term
+      const fvPremiums = prem * ((Math.pow(1 + r, n) - 1) / r);
+      // Grow for remaining years after premium term ends
+      const fv = fvPremiums * Math.pow(1 + r, Math.max(0, totalYrs - n));
+      const estimated = Math.round(fv);
+      if (estimated <= 0) return null;
+      return {
+        field: 'estimatedMaturity',
+        value: estimated,
+        meta: {
+          confidence: 0.7,
+          inputs: { annualPremium: prem, premTerm: n, policyTerm: totalYrs, yieldPct: 3 },
+          caption: 'Estimated at 3% yield · not guaranteed · for planning only',
+        },
+      };
+    },
+  },
+  // ── Fix 2: Reverse-engineer monthly payout from yield (Retirement/Annuity) ──
+  {
+    name: 'derive_payout_from_yield_if_missing',
+    run: (policy) => {
+      const cat = (policy.category || '').toLowerCase();
+      if (cat !== 'retirement') return null;
+      // Skip if payout already present
+      const existingPayout = parseFloat(policy.annuityMonthly) || parseFloat(policy.annuityPayout);
+      if (existingPayout > 0) return null;
+      // Need cash value + start/end ages
+      const pv = parseFloat(policy.cashValue) || 0;
+      if (pv <= 0) return null;
+      const startAge = parseInt(policy.annuityStartAge) || 0;
+      const endAge = parseInt(policy.annuityEndAge) || 0;
+      if (startAge <= 0 || endAge <= 0 || endAge <= startAge) return null;
+      const currentAge = parseInt(policy.ageAtEntry) || parseInt(policy.premStartAge) || 0;
+      if (currentAge <= 0) return null;
+      const result = estimateAnnuityPayout({ presentValue: pv, yieldPct: 3, startAge, endAge, currentAge });
+      if (!result || result.monthly <= 0) return null;
+      // Also sync annual payout as side effect
+      policy.annuityPayout = String(result.annual);
+      return {
+        field: 'annuityMonthly',
+        value: String(Math.round(result.monthly)),
+        meta: {
+          confidence: 0.7,
+          inputs: { cashValue: pv, startAge, endAge, currentAge, yieldPct: 3 },
+          caption: 'Estimated at 3% yield from $' + pv.toLocaleString() + ' cash value — adjust yield to recalculate',
+        },
+      };
+    },
+  },
+];
+
+// ── estimateAnnuityPayout: standard annuity payout formula ──
+// Solves: given present value, yield, accumulation period, and payout period,
+// what monthly payout can the annuity sustain?
+function estimateAnnuityPayout({ presentValue, yieldPct, startAge, endAge, currentAge }) {
+  if (!presentValue || presentValue <= 0) return null;
+  const r = (yieldPct || 3) / 100;
+  const nAccum = Math.max(0, startAge - currentAge);
+  const nPayout = Math.max(1, endAge - startAge + 1);
+  // Future value at payout start
+  const fv = presentValue * Math.pow(1 + r, nAccum);
+  // Monthly rate
+  const rm = r / 12;
+  const nMonths = nPayout * 12;
+  // Standard annuity payout: PMT = FV * rm / (1 - (1+rm)^(-n))
+  if (rm <= 0) return { monthly: Math.round(fv / nMonths), annual: Math.round(fv / nPayout), fv: Math.round(fv) };
+  const monthly = fv * rm / (1 - Math.pow(1 + rm, -nMonths));
+  return { monthly: Math.round(monthly), annual: Math.round(monthly * 12), fv: Math.round(fv) };
+}
+
+// ── Levenshtein distance for fuzzy fund matching ──
+function levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  if (m === 0) return n;
+  if (n === 0) return m;
+  const d = Array.from({length: m + 1}, (_, i) => i);
+  for (let j = 1; j <= n; j++) {
+    let prev = d[0]; d[0] = j;
+    for (let i = 1; i <= m; i++) {
+      const tmp = d[i];
+      d[i] = a[i-1] === b[j-1] ? prev : 1 + Math.min(prev, d[i], d[i-1]);
+      prev = tmp;
+    }
+  }
+  return d[m];
+}
+
+// ── Strip common insurer prefixes for fuzzy fund matching ──
+const FUND_PREFIXES = ['aia ', 'manulife ', 'pru ', 'prulink ', 'great eastern ', 'ge ', 'ntuc ', 'income ', 'singlife ', 'aviva ', 'tokio marine ', 'etiqa ', 'hsbc ', 'zurich ', 'fwd '];
+function stripFundPrefix(name) {
+  const lower = (name || '').toLowerCase().trim();
+  for (const p of FUND_PREFIXES) { if (lower.startsWith(p)) return lower.slice(p.length); }
+  return lower;
+}
+
+// ── Fuzzy match a fund name against FUND_DB ──
+// Returns { matched: true, fundEntry, distance } or { matched: false }
+function fuzzyMatchFund(fundName) {
+  if (!fundName || fundName.length < 3 || typeof FUND_DB === 'undefined' || !FUND_DB.length) return { matched: false };
+  const stripped = stripFundPrefix(fundName);
+  let bestMatch = null, bestDist = Infinity;
+  for (const entry of FUND_DB) {
+    const dbName = entry[0];
+    const dbStripped = stripFundPrefix(dbName);
+    // Exact substring match (after prefix strip)
+    if (dbStripped.includes(stripped) || stripped.includes(dbStripped)) {
+      return { matched: true, fundEntry: entry, distance: 0 };
+    }
+    // Levenshtein on stripped names
+    const dist = levenshtein(stripped, dbStripped);
+    if (dist < bestDist) { bestDist = dist; bestMatch = entry; }
+  }
+  if (bestDist <= 3) return { matched: true, fundEntry: bestMatch, distance: bestDist };
+  return { matched: false };
+}
+
+// ── VALIDATE RULES REGISTRY ──
+// Each rule: { name, run(policy, clientProfile?) → string | null }
+// Returns a human-readable warning string, or null if the policy passes.
+// Warnings flow into policy._reviewReasons for the "Why flagged?" strip.
+const VALIDATE_RULES = [
+  // ── Fix 5 Part B: Fund allocation sum validation ──
+  {
+    name: 'validate_fund_allocation_sum',
+    run: (policy) => {
+      const funds = policy.fundAllocations;
+      if (!Array.isArray(funds) || funds.length === 0) return null;
+      // Only check ILP policies
+      const st = (policy.subType || '').toLowerCase();
+      if (!st.includes('ilp') && !st.includes('investment-linked') && !st.includes('ul') && !st.includes('vul')) return null;
+      // Active funds = those with value > 0 OR allocation > 0
+      const activeFunds = funds.filter(f => (parseFloat(f.value) || 0) > 0 || (parseFloat(f.pct || f.allocation) || 0) > 0);
+      if (activeFunds.length === 0) return null;
+      const sum = activeFunds.reduce((s, f) => s + (parseFloat(f.pct || f.allocation) || 0), 0);
+      // If sum is 0 but active funds exist with value > 0, derive allocation from value ratio
+      const fundsWithValue = funds.filter(f => (parseFloat(f.value) || 0) > 0);
+      if (sum === 0 && fundsWithValue.length > 0) {
+        const totalValue = fundsWithValue.reduce((s, f) => s + parseFloat(f.value), 0);
+        if (totalValue > 0) {
+          for (const f of fundsWithValue) {
+            const ratio = Math.round((parseFloat(f.value) / totalValue) * 100);
+            f.pct = String(ratio);
+            f.allocation = ratio;
+          }
+          if (!policy._derived) policy._derived = {};
+          policy._derived.fundAllocations = {
+            rule: 'derive_fund_allocation_from_value', source: 'derived', confidence: 0.8,
+            inputs: { totalValue, fundCount: fundsWithValue.length },
+            caption: 'Allocation % derived from fund value ratios — verify against statement',
+          };
+          console.log('[Validate] Derived fund allocations from value ratios, total $' + totalValue.toLocaleString());
+          return null; // Fixed, no warning needed
+        }
+        return 'Fund allocations all 0% but funds have values — check Funds tab';
+      }
+      // Normalize if 95-105
+      if (sum >= 95 && sum <= 105 && sum !== 100) {
+        const factor = 100 / sum;
+        for (const f of activeFunds) {
+          const orig = parseFloat(f.pct || f.allocation) || 0;
+          const normed = Math.round(orig * factor);
+          f.pct = String(normed);
+          f.allocation = normed;
+        }
+        console.log('[Validate] Normalized fund allocations from ' + sum.toFixed(1) + '% to 100%');
+        return null;
+      }
+      if (sum < 95 || sum > 105) {
+        return 'Fund allocations sum to ' + sum.toFixed(0) + '% — check Funds tab';
+      }
+      return null;
+    },
+  },
+  // ── Step 8: Initial VALIDATE_RULES set ──
+  {
+    name: 'validate_premium_term_consistency',
+    run: (policy) => {
+      const startAge = parseInt(policy.premStartAge) || parseInt(policy.ageAtEntry) || 0;
+      const endAge = parseInt(policy.premEndAge) || 0;
+      const premTerm = parseInt(policy.premTerm) || 0;
+      if (startAge > 0 && endAge > 0 && premTerm > 0) {
+        const computed = endAge - startAge;
+        if (Math.abs(computed - premTerm) > 1) {
+          return 'Premium term inconsistency: start age ' + startAge + ' + term ' + premTerm + ' = ' + (startAge + premTerm) + ', but end age is ' + endAge;
+        }
+      }
+      // Single premium + non-zero term
+      if (policy.premSingle && premTerm > 1) {
+        return 'Marked as single premium but premium term is ' + premTerm + ' years';
+      }
+      return null;
+    },
+  },
+  {
+    name: 'validate_dates_sane',
+    run: (policy) => {
+      const inception = policy.inceptionDate ? new Date(policy.inceptionDate) : null;
+      const maturity = policy.maturityDate ? new Date(policy.maturityDate) : null;
+      const now = new Date();
+      const warnings = [];
+      if (inception && !isNaN(inception.getTime())) {
+        if (inception.getFullYear() < 1960) warnings.push('Inception date ' + policy.inceptionDate + ' is before 1960');
+        if (inception > now && policy.status !== 'pending') warnings.push('Inception date is in the future');
+      }
+      if (maturity && !isNaN(maturity.getTime())) {
+        if (inception && maturity < inception) warnings.push('Maturity date is before inception date');
+        if (maturity.getFullYear() > 2120) warnings.push('Maturity date ' + policy.maturityDate + ' is unusually far in the future');
+      }
+      return warnings.length > 0 ? warnings.join('; ') : null;
+    },
+  },
+  {
+    name: 'validate_age_at_entry',
+    run: (policy) => {
+      const age = parseInt(policy.ageAtEntry) || 0;
+      if (age <= 0) return null;
+      if (age < 0 || age > 85) return 'Age at entry (' + age + ') is outside plausible range (0–85)';
+      // Cross-check with inception date if both exist
+      if (policy.inceptionDate && policy.liDob) {
+        const inc = new Date(policy.inceptionDate);
+        const dob = new Date(policy.liDob);
+        if (!isNaN(inc.getTime()) && !isNaN(dob.getTime())) {
+          const computed = Math.floor((inc - dob) / (365.25 * 24 * 60 * 60 * 1000));
+          if (Math.abs(computed - age) > 2) {
+            return 'Age at entry (' + age + ') differs from inception-DOB calculation (' + computed + ') by more than 2 years';
+          }
+        }
+      }
+      return null;
+    },
+  },
+  {
+    name: 'validate_sum_assured_present_for_protection',
+    run: (policy) => {
+      const cat = (policy.category || '').toLowerCase();
+      if (cat !== 'protection') return null;
+      const sa = parseFloat(policy.sumAssured) || 0;
+      if (sa > 0) return null;
+      // Check if any riders have SA (bundled protection)
+      const riders = policy.riders;
+      if (Array.isArray(riders) && riders.some(r => parseFloat(r.riderSA) > 0)) return null;
+      return 'Protection policy has no Sum Assured — check if SA was missed during extraction';
+    },
+  },
+];
+
+// ── runDerivePass: apply all DERIVE_RULES to one policy ──
+function runDerivePass(policy, clientProfile) {
+  const derivations = [];
+  for (const rule of DERIVE_RULES) {
+    try {
+      const result = rule.run(policy, clientProfile);
+      if (result && result.field) {
+        policy[result.field] = result.value;
+        if (!policy._derived) policy._derived = {};
+        policy._derived[result.field] = {
+          rule: rule.name,
+          source: 'derived',
+          confidence: result.meta?.confidence ?? 0.8,
+          inputs: result.meta?.inputs || {},
+          caption: result.meta?.caption || '',
+        };
+        derivations.push({ rule: rule.name, field: result.field, value: result.value });
+        // Auto-add reviewReason for derivations below 0.9 confidence
+        // so they surface in the "Why flagged?" strip for FC review
+        const conf = result.meta?.confidence ?? 0.8;
+        if (conf < 0.9 && result.meta?.caption) {
+          if (!policy._reviewReasons) policy._reviewReasons = [];
+          const label = typeof FIELD_LABELS !== 'undefined' ? (FIELD_LABELS[result.field] || result.field) : result.field;
+          policy._reviewReasons.push('🧮 ' + label + ': ' + result.meta.caption);
+        }
+      }
+    } catch (err) {
+      console.warn('[Derive]', rule.name, 'failed:', err.message);
+    }
+  }
+  if (derivations.length > 0) {
+    console.log('[Derive] Applied', derivations.length, 'rules to',
+      policy.productName || policy.insurer || 'unknown', ':',
+      derivations.map(d => d.rule).join(', '));
+  }
+  return policy;
+}
+
+// ── runValidatePass: apply all VALIDATE_RULES to one policy ──
+function runValidatePass(policy, clientProfile) {
+  const warnings = [];
+  for (const rule of VALIDATE_RULES) {
+    try {
+      const warning = rule.run(policy, clientProfile);
+      if (warning) {
+        warnings.push(warning);
+      }
+    } catch (err) {
+      console.warn('[Validate]', rule.name, 'failed:', err.message);
+    }
+  }
+  if (warnings.length > 0) {
+    if (!policy._reviewReasons) policy._reviewReasons = [];
+    policy._reviewReasons.push(...warnings);
+    console.log('[Validate]', warnings.length, 'warnings for',
+      policy.productName || policy.insurer || 'unknown', ':',
+      warnings.join(' | '));
+  }
+  return policy;
+}
+
+// ── v15: JOB QUEUE ENUMS ──
+const JOB_STAGES = ['queued','hashing','preprocessing','ocr','extracting','postprocessing','done','failed','cancelled'];
+const JOB_TERMINAL = new Set(['done','failed','cancelled']);
+
+// ── v15: TOKEN PRICING (Update quarterly — per 1M tokens) ──
+const TOKEN_PRICING = {
+  'gemini-2.5-flash':            { input: 0.30, output: 2.50 },
+  'gemini-2.5-flash-lite':       { input: 0.10, output: 0.40 },
+  'claude-haiku-4-5-20251001':   { input: 1.00, output: 5.00 },
+  'claude-sonnet-4-6':           { input: 3.00, output: 15.00 },
+};
+
+// ── v15: SESSION TELEMETRY STATE ──
+const _sessionId = 's_' + Date.now() + '_' + Math.random().toString(36).slice(2,6);
+const _sessionCost = { files: 0, inputTokens: 0, outputTokens: 0, costUsd: 0, startTime: null, models: {} };
+
+function computeTokenCost(model, inputTokens, outputTokens) {
+  const p = TOKEN_PRICING[model];
+  if (!p) return 0;
+  return (inputTokens / 1e6) * p.input + (outputTokens / 1e6) * p.output;
+}
+
+function recordSessionCost(model, inputTokens, outputTokens) {
+  if (!_sessionCost.startTime) _sessionCost.startTime = Date.now();
+  _sessionCost.inputTokens += (inputTokens || 0);
+  _sessionCost.outputTokens += (outputTokens || 0);
+  _sessionCost.costUsd += computeTokenCost(model, inputTokens || 0, outputTokens || 0);
+  _sessionCost.models[model] = (_sessionCost.models[model] || 0) + 1;
+  window.dispatchEvent(new CustomEvent('policylens-cost-update', { detail: _sessionCost }));
+}
+
+function emitTelemetry(event, data) {
+  const entry = {
+    id: 't_' + Date.now() + '_' + Math.random().toString(36).slice(2,6),
+    sessionId: _sessionId, event, timestamp: Date.now(),
+    data: data || {},
+  };
+  PolicyDB.putTelemetry(entry).catch(e => console.warn('[Telemetry] Write failed:', e));
+  return entry;
+}
+
+// ── v15: CONCURRENCY CAPS PER STAGE ──
+const STAGE_CONCURRENCY = { preprocessing: 3, ocr: 2, extracting: 1, postprocessing: 3 };
 
 // ── MODULE-LEVEL ABORT CONTROLLER (v13) ──
 // Allows the Cancel button to abort in-flight Gemini/Claude requests.
@@ -1993,6 +2514,81 @@ async function batchCacheKey(files) {
   return EXTRACT_PIPELINE_VERSION + ':' + hashes.join('|');
 }
 
+// ═══════════════════════════════════════════════════════════════
+// v15 STAGE 2: HASH-BASED FILE INGESTION
+// ═══════════════════════════════════════════════════════════════
+// Creates a job in extraction_jobs for each file. Checks ocr_cache
+// and extract_cache first — cache hits skip expensive API stages.
+async function ingestFile(file) {
+  const startMs = Date.now();
+  const buf = await file.arrayBuffer();
+  // Cache the buffer for later processing (Android file-handle protection)
+  _extractionFileBuffers.set(file, buf);
+  const digest = await crypto.subtle.digest('SHA-256', buf);
+  const fileHash = Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2,'0')).join('');
+
+  // Check extract_cache — full extraction result already cached?
+  let cachedStage = 'queued';
+  let cachedResult = null;
+  let cachedOcr = null;
+  try {
+    // Check for a single-file extract cache hit (hash-based)
+    const extractHit = await PolicyDB.getExtractCache(EXTRACT_PIPELINE_VERSION + ':' + fileHash);
+    if (extractHit && extractHit.value && extractHit.pipelineVersion === EXTRACT_PIPELINE_VERSION) {
+      cachedStage = 'done';
+      cachedResult = extractHit.value;
+      console.log('[Cache] Extract cache HIT for', file.name, '→ skip all stages');
+      emitTelemetry('cache_hit', { fileHash: fileHash.slice(0,8), stage: 'extract', fileName: file.name });
+    }
+  } catch(_) {}
+
+  // If no extract hit, check ocr_cache — skip OCR stage?
+  if (cachedStage === 'queued') {
+    try {
+      const ocrHit = await PolicyDB.getOcrCache(fileHash);
+      if (ocrHit && ocrHit.text && ocrHit.promptVersion === OCR_PROMPT_VERSION) {
+        cachedStage = 'extracting';
+        cachedOcr = ocrHit;
+        console.log('[Cache] OCR cache HIT for', file.name, '→ skip to extracting');
+        emitTelemetry('cache_hit', { fileHash: fileHash.slice(0,8), stage: 'ocr', fileName: file.name });
+      }
+    } catch(_) {}
+  }
+
+  const job = {
+    id: 'j_' + Date.now() + '_' + Math.random().toString(36).slice(2,6),
+    fileHash,
+    fileName: file.name || 'unknown',
+    fileSize: file.size || buf.byteLength,
+    fileType: file.type || '',
+    stage: cachedStage,
+    status: cachedStage === 'done' ? 'done' : 'queued',
+    attempt: 0,
+    lastError: null,
+    errorCategory: null,
+    nextRetryAt: 0,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    result: cachedResult,
+    ocrText: cachedOcr?.text || null,
+    ocrConfidence: cachedOcr?.confidence || null,
+    ocrModel: cachedOcr?.model || null,
+    tokenUsage: null,
+    pipelineVersion: EXTRACT_PIPELINE_VERSION,
+    promptVersion: EXTRACT_PROMPT_VERSION,
+    _file: null, // not persisted — attached in-memory by ticker
+  };
+
+  await PolicyDB.putJob(job);
+  emitTelemetry('job_created', {
+    fileHash: fileHash.slice(0,8), fileName: file.name,
+    stage: job.stage, cached: cachedStage !== 'queued',
+    ingestMs: Date.now() - startMs,
+  });
+  console.log('[Queue] Ingested', file.name, '→ stage:', job.stage, '(hash:', fileHash.slice(0,8)+'…)');
+  return job;
+}
+
 // Extract the text layer of an already-opened pdf.js document.
 // Much cheaper than sending the PDF to Gemini, and removes truncation risk for text-native PDFs.
 async function extractPdfTextLayer(pdfDoc, maxPages) {
@@ -2312,8 +2908,16 @@ function reconcilePolicyAgainstRepo(policy, repo) {
 // Returns a new File object with the same name. The original is
 // discarded immediately so we don't keep two copies in memory.
 const IMAGE_PREPROCESS_MIN_BYTES = 400 * 1024; // 400KB — below this, don't bother
-const IMAGE_PREPROCESS_MAX_DIMENSION = 1600;   // px on longest edge
-const IMAGE_PREPROCESS_JPEG_QUALITY = 0.80;    // 80% JPEG quality
+const IMAGE_PREPROCESS_MAX_DIMENSION = 1568;   // px on longest edge (Anthropic vision sweet spot)
+const IMAGE_PREPROCESS_JPEG_QUALITY = 0.82;    // v15: default quality tier
+// v15 STAGE 3: Quality tiers by original file size — larger files get more aggressive compression
+function imageQualityTier(originalSize) {
+  if (originalSize > 4_000_000) return 0.72;   // >4MB: aggressive
+  if (originalSize > 1_500_000) return 0.82;   // >1.5MB: moderate
+  return 0.88;                                   // <1.5MB: light touch
+}
+// v15: PDF page limit — reject huge PDFs that would exhaust tokens
+const PDF_MAX_PAGES = 50;
 
 async function preprocessImageFile(file) {
   // Bail conditions: not an image, already small, or HEIC (which canvas can't decode reliably)
@@ -2527,8 +3131,8 @@ const getFileBytes = async (file) => {
 // native path handle those). Skips non-images. Always returns a File
 // object (either downscaled or the original bytes wrapped in a new
 // in-memory File) so downstream code is unchanged.
-const DOWNSCALE_MAX_DIM = 1568;
-const DOWNSCALE_JPEG_QUALITY = 0.85;
+const DOWNSCALE_MAX_DIM = 1568; // v15: Anthropic vision sweet spot
+const DOWNSCALE_JPEG_QUALITY = 0.82; // v15: default, overridden by imageQualityTier()
 async function downscaleImageIfNeeded(file) {
   const fileName = file?.name || 'unknown';
   const fileSize = file?.size || 0;
@@ -2606,7 +3210,23 @@ async function downscaleImageIfNeeded(file) {
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = 'high';
         ctx.drawImage(bitmap, 0, 0, dstW, dstH);
-        blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: DOWNSCALE_JPEG_QUALITY });
+        // v15: quality tier based on original file size (canvas re-encode strips EXIF implicitly)
+        const quality = imageQualityTier(fileSize);
+        blob = await canvas.convertToBlob({ type: 'image/jpeg', quality });
+        // v15: if still >400KB after first pass, drop quality further
+        if (blob.size > 400 * 1024 && quality > 0.72) {
+          blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.72 });
+        }
+        // v15: if STILL >400KB, downscale to 1280px and retry
+        if (blob.size > 400 * 1024 && Math.max(dstW, dstH) > 1280) {
+          const s2 = 1280 / Math.max(dstW, dstH);
+          const w2 = Math.round(dstW * s2), h2 = Math.round(dstH * s2);
+          const c2 = new OffscreenCanvas(w2, h2);
+          const x2 = c2.getContext('2d', { alpha: false });
+          x2.imageSmoothingEnabled = true; x2.imageSmoothingQuality = 'high';
+          x2.drawImage(bitmap, 0, 0, w2, h2);
+          blob = await c2.convertToBlob({ type: 'image/jpeg', quality: 0.72 });
+        }
       } else {
         canvas = document.createElement('canvas');
         canvas.width = dstW;
@@ -2616,9 +3236,16 @@ async function downscaleImageIfNeeded(file) {
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = 'high';
         ctx.drawImage(bitmap, 0, 0, dstW, dstH);
+        const quality = imageQualityTier(fileSize);
         blob = await new Promise((res, rej) => {
-          canvas.toBlob((b) => b ? res(b) : rej(new Error('toBlob returned null')), 'image/jpeg', DOWNSCALE_JPEG_QUALITY);
+          canvas.toBlob((b) => b ? res(b) : rej(new Error('toBlob returned null')), 'image/jpeg', quality);
         });
+        // v15: second pass at lower quality if still too large
+        if (blob.size > 400 * 1024 && quality > 0.72) {
+          blob = await new Promise((res, rej) => {
+            canvas.toBlob((b) => b ? res(b) : rej(new Error('toBlob returned null')), 'image/jpeg', 0.72);
+          });
+        }
       }
     } finally {
       try { bitmap.close?.(); } catch(_) {}
@@ -2720,6 +3347,10 @@ async function processFile(file) {
       if(typeof pdfjsLib === 'undefined') throw new Error('pdf.js not loaded');
       const {doc, wasLocked} = await tryUnlockPDF(arrayBuffer);
       if(doc.numPages === 0) throw new Error('PDF has no pages');
+      // v15 STAGE 3: Reject oversized PDFs
+      if(doc.numPages > PDF_MAX_PAGES) {
+        throw new Error('PDF has '+doc.numPages+' pages (max '+PDF_MAX_PAGES+'). Please split the PDF into smaller files before uploading.');
+      }
       // ── TEXT-LAYER FAST PATH ──
       // For text-native PDFs (Singlife BetterView, Manulife statements, SGFinDex exports),
       // extract the text layer directly. This is ~10× cheaper than sending the PDF to Gemini,
@@ -2782,6 +3413,404 @@ async function processFile(file) {
   } catch(e){}
   // Unknown binary → force Anthropic (Claude handles more MIME types than Gemini)
   return [{type:'document', source:{type:'base64', media_type:mime, data:b64}, _forceAnthropic:true}];
+}
+
+// ═══════════════════════════════════════════════════════════════
+// v15 STAGE 6: TWO-TIER OCR ROUTING
+// ═══════════════════════════════════════════════════════════════
+// OCR stage handler — tiered model escalation with confidence check.
+// Tier 1: gemini-2.5-flash (cheap). Tier 2: enhanced prompt. Tier 3: claude-haiku vision.
+// Returns {text, confidence, model, inputTokens, outputTokens}.
+const OCR_REQUIRED_FIELDS = ['insurer', 'productName', 'policyNumber'];
+function ocrConfidence(parsed) {
+  if (!parsed || typeof parsed !== 'object') return 0;
+  const items = Array.isArray(parsed) ? parsed : [parsed];
+  if (items.length === 0) return 0;
+  let totalScore = 0;
+  for (const p of items) {
+    let hits = 0;
+    for (const f of OCR_REQUIRED_FIELDS) {
+      if (p[f] && String(p[f]).trim().length >= 2) hits++;
+    }
+    totalScore += hits / OCR_REQUIRED_FIELDS.length;
+  }
+  return totalScore / items.length;
+}
+
+async function performOCR(job, file) {
+  const uid = window._user?.id || '';
+  const gk = ((await dbGet('settings','geminiKey_'+uid).catch(()=>null))?.value || (await dbGet('settings','geminiKey').catch(()=>null))?.value || '').trim();
+  const ck = ((await dbGet('settings','anthropicKey_'+uid).catch(()=>null))?.value || (await dbGet('settings','anthropicKey').catch(()=>null))?.value || '').trim();
+  if (!gk && !ck) throw new Error('No API keys configured — add a Gemini or Anthropic key in Settings');
+
+  const contentBlocks = await processFile(file);
+  // PDFs with meaningful text layer skip API OCR entirely
+  const hasTextLayer = contentBlocks.some(b => b.type === 'text' && (b.text||'').length > 200);
+  if (hasTextLayer) {
+    const text = contentBlocks.filter(b => b.type === 'text').map(b => b.text).join('\n');
+    console.log('[OCR] Text-layer fast path for', job.fileName, '(', text.length, 'chars)');
+    return { text, confidence: 0.9, model: 'text-layer', inputTokens: 0, outputTokens: 0, contentBlocks };
+  }
+
+  const idemKey = job.fileHash + ':ocr:' + OCR_PROMPT_VERSION;
+
+  // Tier 1: Gemini Flash
+  if (gk) {
+    try {
+      const result = await withIdempotency(idemKey + ':gemini', async () => {
+        console.log('[OCR] Tier 1: gemini-2.5-flash for', job.fileName);
+        return await callAI(EXTRACT_PROMPT, contentBlocks, 32000, POLICY_EXTRACTION_SCHEMA);
+      });
+      const normalized = normalizeClaudeText(result);
+      let parsed; try { parsed = JSON.parse(normalized); } catch(_) { parsed = repairJSON(normalized); }
+      const conf = ocrConfidence(parsed);
+      console.log('[OCR] Tier 1 confidence:', conf.toFixed(2), 'for', job.fileName);
+      if (conf >= 0.7) {
+        return { text: normalized, confidence: conf, model: 'gemini-2.5-flash', inputTokens: 0, outputTokens: 0, contentBlocks };
+      }
+      console.log('[OCR] Tier 1 confidence too low (', conf.toFixed(2), ') — escalating');
+    } catch (t1Err) {
+      console.warn('[OCR] Tier 1 failed:', t1Err.message);
+    }
+  }
+
+  // Tier 2: Claude Haiku vision (separate provider, better accuracy)
+  if (ck) {
+    try {
+      const result = await withIdempotency(idemKey + ':claude', async () => {
+        console.log('[OCR] Tier 2: claude-haiku-4-5 for', job.fileName);
+        return await claudeStructuredExtract(ck, EXTRACT_PROMPT, contentBlocks, 32000);
+      });
+      const normalized = normalizeClaudeText(result);
+      let parsed; try { parsed = JSON.parse(normalized); } catch(_) { parsed = repairJSON(normalized); }
+      const conf = ocrConfidence(parsed);
+      console.log('[OCR] Tier 2 confidence:', conf.toFixed(2), 'for', job.fileName);
+      return { text: normalized, confidence: conf, model: 'claude-haiku-4-5-20251001', inputTokens: 0, outputTokens: 0, contentBlocks };
+    } catch (t2Err) {
+      console.warn('[OCR] Tier 2 failed:', t2Err.message);
+      throw t2Err;
+    }
+  }
+
+  throw new Error('All OCR tiers exhausted for ' + job.fileName);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// v15 STAGE 4: JOB QUEUE TICKER
+// ═══════════════════════════════════════════════════════════════
+// 500ms interval that advances extraction_jobs through stages.
+// Reads from IndexedDB on each tick (survives tab backgrounding).
+// Dispatches CustomEvent for UI bridge in Policies component.
+
+let _tickerInterval = null;
+let _tickerAbortController = null;
+let _tickerActive = false;
+let _tickerFileMap = new Map(); // jobId → File object (in-memory only)
+
+function startTicker() {
+  if (_tickerInterval) return;
+  _tickerActive = true;
+  _tickerAbortController = new AbortController();
+  _extractAbortController = _tickerAbortController; // link to fetchWithTimeout
+  console.log('[Queue] Ticker started');
+  _tickerInterval = setInterval(tickQueue, 500);
+  tickQueue(); // immediate first tick
+}
+
+function stopTicker(markCancelled) {
+  _tickerActive = false;
+  if (_tickerInterval) { clearInterval(_tickerInterval); _tickerInterval = null; }
+  if (_tickerAbortController) { _tickerAbortController.abort(); }
+  _extractAbortController = null;
+  if (markCancelled) {
+    // Mark all non-terminal jobs as cancelled
+    PolicyDB.getAllJobs().then(jobs => {
+      const active = jobs.filter(j => !JOB_TERMINAL.has(j.stage));
+      Promise.all(active.map(j => PolicyDB.putJob({...j, stage: 'cancelled', status: 'cancelled'}))).then(() => {
+        if (active.length > 0) console.log('[Queue] Cancelled', active.length, 'jobs');
+        dispatchQueueUpdate();
+      });
+    }).catch(e => console.warn('[Queue] Cancel cleanup failed:', e));
+  }
+  console.log('[Queue] Ticker stopped');
+  dispatchQueueUpdate();
+}
+
+function dispatchQueueUpdate() {
+  PolicyDB.getAllJobs().then(jobs => {
+    window.dispatchEvent(new CustomEvent('policylens-queue-update', { detail: { jobs } }));
+  }).catch(() => {});
+}
+
+// Count running jobs per stage
+async function runningCounts() {
+  const jobs = await PolicyDB.getAllJobs();
+  const counts = {};
+  for (const j of jobs) {
+    if (j.status === 'running') {
+      counts[j.stage] = (counts[j.stage] || 0) + 1;
+    }
+  }
+  return { counts, all: jobs };
+}
+
+async function tickQueue() {
+  if (!_tickerActive) return;
+  try {
+    const { counts, all } = await runningCounts();
+
+    // Auto-stop when no non-terminal jobs remain
+    const active = all.filter(j => !JOB_TERMINAL.has(j.stage));
+    if (active.length === 0) {
+      // All done — flush results and stop
+      const doneJobs = all.filter(j => j.stage === 'done' && j.result);
+      if (doneJobs.length > 0) {
+        console.log('[Queue] All jobs terminal. Done:', doneJobs.length);
+        // Cache results for future re-uploads
+        for (const j of doneJobs) {
+          if (j.result && j.fileHash) {
+            try {
+              await PolicyDB.putExtractCache({
+                key: EXTRACT_PIPELINE_VERSION + ':' + j.fileHash,
+                value: j.result,
+                timestamp: Date.now(),
+                fileCount: 1,
+                policyCount: Array.isArray(j.result) ? j.result.length : 1,
+                tokenUsage: j.tokenUsage,
+                modelUsed: j.ocrModel || 'unknown',
+                pipelineVersion: EXTRACT_PIPELINE_VERSION,
+              });
+            } catch(_) {}
+          }
+        }
+      }
+      dispatchQueueUpdate();
+      stopTicker(false);
+      return;
+    }
+
+    // Pick eligible jobs: queued and nextRetryAt <= now
+    const now = Date.now();
+    const eligible = active.filter(j => j.status === 'queued' && (j.nextRetryAt || 0) <= now);
+
+    for (const job of eligible) {
+      // Respect per-stage concurrency caps
+      const cap = STAGE_CONCURRENCY[job.stage] || 3;
+      if ((counts[job.stage] || 0) >= cap) continue;
+
+      // Mark as running
+      counts[job.stage] = (counts[job.stage] || 0) + 1;
+      job.status = 'running';
+      job.updatedAt = Date.now();
+      await PolicyDB.putJob(job);
+
+      // Process asynchronously — don't await (ticker continues)
+      processJob(job).catch(err => console.warn('[Queue] processJob error:', err.message));
+    }
+
+    dispatchQueueUpdate();
+  } catch (tickErr) {
+    console.warn('[Queue] Tick error:', tickErr);
+  }
+}
+
+async function processJob(job) {
+  const startMs = Date.now();
+  const file = _tickerFileMap.get(job.id);
+
+  try {
+    if (_tickerAbortController?.signal?.aborted) throw new DOMException('Extraction cancelled', 'AbortError');
+
+    switch (job.stage) {
+      case 'queued': {
+        // Stage: queued → preprocessing (image downscale) or ocr (if already preprocessed)
+        if (file) {
+          const isImage = (file.type || '').startsWith('image/');
+          if (isImage) {
+            console.log('[Queue] Preprocessing', job.fileName);
+            const originalSize = file.size;
+            const processed = await downscaleImageIfNeeded(file);
+            _tickerFileMap.set(job.id, processed);
+            const finalSize = processed.size || processed.byteLength || originalSize;
+            emitTelemetry('preprocess', {
+              fileHash: job.fileHash.slice(0,8), fileName: job.fileName,
+              originalSize, finalSize, reductionPct: Math.round((1 - finalSize/originalSize) * 100),
+            });
+            console.log('[Preprocess]', job.fileName, ':', originalSize, '→', finalSize, '(', Math.round((1-finalSize/originalSize)*100), '% reduction)');
+          }
+        }
+        // Advance to OCR stage
+        job.stage = 'ocr';
+        job.status = 'queued';
+        job.updatedAt = Date.now();
+        await PolicyDB.putJob(job);
+        break;
+      }
+
+      case 'ocr': {
+        // Stage: OCR — tiered model routing
+        if (job.ocrText) {
+          // Already have OCR from cache — skip to extracting
+          console.log('[Queue] OCR cached for', job.fileName, '— skipping to extract');
+          job.stage = 'extracting';
+          job.status = 'queued';
+          job.updatedAt = Date.now();
+          await PolicyDB.putJob(job);
+          break;
+        }
+        if (!file) {
+          throw new Error('File not in memory for OCR — re-upload needed');
+        }
+        console.log('[Queue] OCR stage for', job.fileName);
+        const ocrResult = await performOCR(job, file);
+        // Record token usage and cost
+        if (ocrResult.model && ocrResult.model !== 'text-layer') {
+          recordSessionCost(ocrResult.model, ocrResult.inputTokens, ocrResult.outputTokens);
+        }
+        // Cache OCR result
+        try {
+          await PolicyDB.putOcrCache({
+            fileHash: job.fileHash, text: ocrResult.text, confidence: ocrResult.confidence,
+            model: ocrResult.model, promptVersion: OCR_PROMPT_VERSION, createdAt: Date.now(),
+            inputTokens: ocrResult.inputTokens, outputTokens: ocrResult.outputTokens,
+          });
+        } catch(_) {}
+        // The OCR result IS the extraction result for the current pipeline
+        // (performOCR calls callAI with the full extraction prompt+schema)
+        job.ocrText = ocrResult.text;
+        job.ocrConfidence = ocrResult.confidence;
+        job.ocrModel = ocrResult.model;
+        // Parse the result as extracted policies
+        let parsed;
+        try {
+          const normalized = normalizeClaudeText(ocrResult.text);
+          parsed = JSON.parse(normalized);
+          if (!Array.isArray(parsed)) parsed = parsed && typeof parsed === 'object' ? [parsed] : [];
+        } catch(_) {
+          try { parsed = repairJSON(ocrResult.text); if (!Array.isArray(parsed)) parsed = [parsed]; } catch(_2) { parsed = []; }
+        }
+        // Validate each policy
+        parsed = parsed.filter(p => p && typeof p === 'object' && (p.productName || p.insurer || p.category));
+        for (const p of parsed) { try { validateExtractedPolicy(p); } catch(_) {} }
+        job.result = parsed;
+        job.stage = 'done';
+        job.status = 'done';
+        job.updatedAt = Date.now();
+        job.tokenUsage = { model: ocrResult.model, input: ocrResult.inputTokens, output: ocrResult.outputTokens };
+        _sessionCost.files++;
+        await PolicyDB.putJob(job);
+        emitTelemetry('extract_complete', {
+          fileHash: job.fileHash.slice(0,8), fileName: job.fileName,
+          policyCount: parsed.length, model: ocrResult.model,
+          confidence: ocrResult.confidence, durationMs: Date.now() - startMs,
+        });
+        console.log('[Queue] ✓', job.fileName, '→', parsed.length, 'policies via', ocrResult.model, '(' + (Date.now()-startMs) + 'ms)');
+        break;
+      }
+
+      case 'extracting': {
+        // Stage: extracting — run callAI on cached OCR text or file content
+        if (!file && !job.ocrText) throw new Error('No file or OCR text for extraction');
+        const contentBlocks = job.ocrText
+          ? [{type:'text', text: job.ocrText}]
+          : await processFile(file);
+        console.log('[Queue] Extract stage for', job.fileName);
+        // v14.1: Inject correction memory few-shot
+        const correctionSuffix = await buildCorrectionFewShot();
+        const promptWithCorrections = EXTRACT_PROMPT + correctionSuffix;
+        const idemKey = job.fileHash + ':extract:' + EXTRACT_PROMPT_VERSION;
+        const result = await withIdempotency(idemKey, () => callAI(promptWithCorrections, contentBlocks, 32000, POLICY_EXTRACTION_SCHEMA));
+        const normalized = normalizeClaudeText(result);
+        let parsed;
+        try { parsed = JSON.parse(normalized); } catch(_) { parsed = repairJSON(normalized); }
+        if (!Array.isArray(parsed)) parsed = parsed && typeof parsed === 'object' ? [parsed] : [];
+        parsed = parsed.filter(p => p && typeof p === 'object' && (p.productName || p.insurer || p.category));
+        for (const p of parsed) { try { validateExtractedPolicy(p); } catch(_) {} }
+        // ── v14.2: DERIVE + VALIDATE passes (pure JS, no LLM) ──
+        for (const p of parsed) {
+          runDerivePass(p, null);
+          runValidatePass(p, null);
+        }
+        job.result = parsed;
+        job.stage = 'done';
+        job.status = 'done';
+        job.updatedAt = Date.now();
+        _sessionCost.files++;
+        await PolicyDB.putJob(job);
+        emitTelemetry('extract_complete', {
+          fileHash: job.fileHash.slice(0,8), fileName: job.fileName,
+          policyCount: parsed.length, durationMs: Date.now() - startMs,
+        });
+        console.log('[Queue] ✓', job.fileName, '→', parsed.length, 'policies (extract stage, ' + (Date.now()-startMs) + 'ms)');
+        break;
+      }
+
+      default:
+        console.warn('[Queue] Unknown stage:', job.stage, 'for job', job.id);
+        job.stage = 'failed';
+        job.status = 'failed';
+        job.lastError = 'Unknown stage: ' + job.stage;
+        await PolicyDB.putJob(job);
+    }
+  } catch (err) {
+    // Error classification + retry policy
+    const classified = classifyApiError(err);
+    job.errorCategory = classified.category;
+    job.lastError = (err.name || 'Error') + ': ' + (err.message || '').slice(0, 200);
+    job.attempt = (job.attempt || 0) + 1;
+
+    emitTelemetry('extract_error', {
+      fileHash: job.fileHash.slice(0,8), fileName: job.fileName,
+      stage: job.stage, error: job.lastError, category: classified.category,
+      attempt: job.attempt, durationMs: Date.now() - startMs,
+    });
+
+    if (classified.category === 'cancelled') {
+      job.stage = 'cancelled';
+      job.status = 'cancelled';
+    } else if (classified.retryable && job.attempt <= classified.maxRetries) {
+      // Retry with backoff
+      const backoff = retryBackoff(classified.backoffMs, job.attempt - 1);
+      job.status = 'queued';
+      job.nextRetryAt = Date.now() + backoff;
+      if (classified.switchModel) {
+        // On parse_error: escalate by resetting to ocr stage to try next tier
+        job.stage = 'ocr';
+        job.ocrText = null; // force re-OCR with escalated model
+      }
+      console.log('[Queue] Retry', job.fileName, 'attempt', job.attempt, '/', classified.maxRetries, 'in', backoff, 'ms (', classified.category, ')');
+    } else {
+      job.stage = 'failed';
+      job.status = 'failed';
+      console.warn('[Queue] ✗ Failed:', job.fileName, '—', classified.category, ':', job.lastError);
+    }
+    await PolicyDB.putJob(job);
+  }
+  dispatchQueueUpdate();
+}
+
+// ── startExtraction: new entry point replacing handleExtract ──
+// Called by the UI when user clicks Extract. Creates jobs via ingestFile,
+// attaches File objects to the in-memory map, starts the ticker.
+async function startExtraction(files) {
+  if (!files || files.length === 0) return;
+  console.log('[Queue] Starting extraction for', files.length, 'files');
+  _sessionCost.startTime = _sessionCost.startTime || Date.now();
+  const jobs = [];
+  for (const file of Array.from(files)) {
+    try {
+      const job = await ingestFile(file);
+      _tickerFileMap.set(job.id, file);
+      jobs.push(job);
+    } catch (err) {
+      console.warn('[Queue] Ingest failed for', file.name, ':', err.message);
+    }
+  }
+  if (jobs.length > 0) {
+    startTicker();
+  }
+  dispatchQueueUpdate();
+  return jobs;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -5668,16 +6697,38 @@ function isLikelyFundName(name) {
 // MODULE: INDEXEDDB — Database layer + batch operations
 // ═══════════════════════════════════════════════════════════════
 
-const DB_NAME='PolicyLensV4';const DB_VER=2;
+const DB_NAME='PolicyLensV4';const DB_VER=4;
 const openDB=()=>new Promise((res,rej)=>{
   const r=indexedDB.open(DB_NAME,DB_VER);
   r.onupgradeneeded=e=>{
     const db=e.target.result;
+    // ── v1 stores (original) ──
     if(!db.objectStoreNames.contains('policies'))db.createObjectStore('policies',{keyPath:'id'});
     if(!db.objectStoreNames.contains('repository'))db.createObjectStore('repository',{keyPath:'id'});
     if(!db.objectStoreNames.contains('settings'))db.createObjectStore('settings',{keyPath:'key'});
     if(!db.objectStoreNames.contains('extractCache'))db.createObjectStore('extractCache',{keyPath:'key'});
+    // ── v15 stores (job queue pipeline) ──
+    if(!db.objectStoreNames.contains('extraction_jobs')){
+      const js=db.createObjectStore('extraction_jobs',{keyPath:'id'});
+      js.createIndex('byStatus','status',{unique:false});
+      js.createIndex('byFileHash','fileHash',{unique:false});
+      js.createIndex('byStage','stage',{unique:false});
+    }
+    if(!db.objectStoreNames.contains('ocr_cache'))db.createObjectStore('ocr_cache',{keyPath:'fileHash'});
+    if(!db.objectStoreNames.contains('extract_cache'))db.createObjectStore('extract_cache',{keyPath:'key'});
+    if(!db.objectStoreNames.contains('telemetry')){
+      const ts=db.createObjectStore('telemetry',{keyPath:'id'});
+      ts.createIndex('bySession','sessionId',{unique:false});
+      ts.createIndex('byTimestamp','timestamp',{unique:false});
+    }
+    // ── v14.1: Correction memory store ──
+    if(!db.objectStoreNames.contains('extraction_corrections')){
+      const cs=db.createObjectStore('extraction_corrections',{keyPath:'id'});
+      cs.createIndex('byInsurer','insurer',{unique:false});
+      cs.createIndex('byTimestamp','timestamp',{unique:false});
+    }
   };
+  r.onblocked=()=>{console.warn('[IDB] Blocked by another tab — close other PolicyLens tabs');try{toast('Close other PolicyLens tabs to complete the update','warning',8000)}catch(_){}};
   r.onsuccess=e=>res(e.target.result);
   r.onerror=e=>rej(e.target.error);
 });
@@ -5736,6 +6787,70 @@ const PolicyDB = {
   batchLoad: dbBatchLoad,
   // Wipe all (danger)
   clearStore: async (store) => { const db = await openDB(); return new Promise((res,rej)=>{try{const tx=db.transaction(store,'readwrite');tx.objectStore(store).clear();tx.oncomplete=()=>res();tx.onerror=e=>rej(e);}catch(e){rej(e)}}); },
+  // ── v15: Job queue stores ──
+  // Extraction jobs
+  getJob: (id) => dbGet('extraction_jobs', id),
+  putJob: (job) => dbPut('extraction_jobs', {...job, updatedAt: Date.now()}),
+  getAllJobs: () => dbGetAll('extraction_jobs'),
+  deleteJob: (id) => dbDel('extraction_jobs', id),
+  getJobsByStatus: async (status) => {
+    const db = await openDB();
+    return new Promise((res, rej) => {
+      const tx = db.transaction('extraction_jobs', 'readonly');
+      const idx = tx.objectStore('extraction_jobs').index('byStatus');
+      const r = idx.getAll(status);
+      r.onsuccess = e => res(e.target.result || []);
+      r.onerror = e => rej(e.target.error);
+    });
+  },
+  getJobsByStage: async (stage) => {
+    const db = await openDB();
+    return new Promise((res, rej) => {
+      const tx = db.transaction('extraction_jobs', 'readonly');
+      const idx = tx.objectStore('extraction_jobs').index('byStage');
+      const r = idx.getAll(stage);
+      r.onsuccess = e => res(e.target.result || []);
+      r.onerror = e => rej(e.target.error);
+    });
+  },
+  // OCR cache
+  getOcrCache: (fileHash) => dbGet('ocr_cache', fileHash),
+  putOcrCache: (entry) => dbPut('ocr_cache', entry),
+  // Extract cache (v15 — replaces old extractCache)
+  getExtractCache: (key) => dbGet('extract_cache', key),
+  putExtractCache: (entry) => dbPut('extract_cache', entry),
+  // Telemetry
+  putTelemetry: (entry) => dbPut('telemetry', {...entry, id: entry.id || ('t_'+Date.now()+'_'+Math.random().toString(36).slice(2,6))}),
+  getAllTelemetry: () => dbGetAll('telemetry'),
+  clearTelemetry: () => PolicyDB.clearStore('telemetry'),
+  getRecentTelemetry: async (limit = 500) => {
+    const all = await dbGetAll('telemetry');
+    return all.sort((a,b) => (b.timestamp||0) - (a.timestamp||0)).slice(0, limit);
+  },
+  // ── v14.1: Correction memory ──
+  putCorrection: (entry) => dbPut('extraction_corrections', {
+    ...entry,
+    id: entry.id || ('c_'+Date.now()+'_'+Math.random().toString(36).slice(2,6)),
+    timestamp: entry.timestamp || Date.now()
+  }),
+  getAllCorrections: () => dbGetAll('extraction_corrections'),
+  getRecentCorrections: async (limit = 20) => {
+    const all = await dbGetAll('extraction_corrections');
+    return all.sort((a,b) => (b.timestamp||0) - (a.timestamp||0)).slice(0, limit);
+  },
+  getCorrectionsByInsurer: async (insurer) => {
+    const db = await openDB();
+    return new Promise((res, rej) => {
+      try {
+        const tx = db.transaction('extraction_corrections', 'readonly');
+        const idx = tx.objectStore('extraction_corrections').index('byInsurer');
+        const r = idx.getAll(insurer);
+        r.onsuccess = e => res(e.target.result || []);
+        r.onerror = e => rej(e.target.error);
+      } catch(e) { rej(e); }
+    });
+  },
+  clearCorrections: () => PolicyDB.clearStore('extraction_corrections'),
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -7476,37 +8591,64 @@ function PresentMode() {
   );
 
   // Total coverage: death SA across all active protection-bearing policies.
-  // Uses annualizedPremium-style handling: reads pol.sumAssured directly plus
-  // any death-rider SA. ISPs and unit trusts are correctly excluded because
-  // they have no death benefit.
+  // v14.2: Prefers pol.deathBenefit (derived or explicit) over manually summing
+  // sumAssured + riders. Falls back to sumAssured + rider aggregation for
+  // policies without deathBenefit. This fixes the "gap analysis shows zero"
+  // bug where deathBenefit was never populated by the AI.
   let totalDeathSA = 0, totalCI = 0, totalTPD = 0, totalDI = 0;
   let hasISP = false, hasLife = false, hasCI = false, hasTPD = false, hasDI = false;
   active.forEach(pol => {
     const sub = pol.subType || '';
     const cat = pol.category || '';
     const sa = parseFloat(pol.sumAssured) || 0;
-    // Base policy contributions
+    const deathBen = parseFloat(pol.deathBenefit) || 0;
+    // Base policy contributions — use deathBenefit if available
     if(cat === 'protection' && !['Personal Accident','Critical Illness','Disability Income'].includes(sub)) {
-      const mult = parseFloat(pol.saMultiplier) || 1;
-      const multEnd = parseInt(pol.multiplierEndAge) || 70;
-      const clientAge = getProfileAge(clientProfile) ?? 35;
-      const effSA = clientAge < multEnd ? sa * mult : sa;
-      totalDeathSA += effSA;
-      totalTPD += effSA; // most WL/term include TPD by default
+      if (deathBen > 0) {
+        // v14.2: deathBenefit already includes SA + death riders from derive pass
+        const mult = parseFloat(pol.saMultiplier) || 1;
+        const multEnd = parseInt(pol.multiplierEndAge) || 70;
+        const clientAge = getProfileAge(clientProfile) ?? 35;
+        const effDeath = clientAge < multEnd ? deathBen * mult : deathBen;
+        totalDeathSA += effDeath;
+        totalTPD += (sa > 0 ? (clientAge < multEnd ? sa * mult : sa) : effDeath);
+      } else {
+        const mult = parseFloat(pol.saMultiplier) || 1;
+        const multEnd = parseInt(pol.multiplierEndAge) || 70;
+        const clientAge = getProfileAge(clientProfile) ?? 35;
+        const effSA = clientAge < multEnd ? sa * mult : sa;
+        totalDeathSA += effSA;
+        totalTPD += effSA;
+      }
       hasLife = true;
-      if(effSA > 0) hasTPD = true;
+      if(sa > 0 || deathBen > 0) hasTPD = true;
+    }
+    // v14.2: Also count deathBenefit for savings/retirement categories (endowments, etc.)
+    if ((cat === 'savings' || cat === 'retirement') && deathBen > 0) {
+      totalDeathSA += deathBen;
+      hasLife = true;
     }
     if(sub === 'Critical Illness') { totalCI += sa; hasCI = true; }
     if(sub === 'Disability Income') { totalDI += parseFloat(pol.diMonthlyBenefit) || 0; hasDI = true; }
     if(sub === 'Integrated Shield Plan') hasISP = true;
-    // Rider contributions
-    (pol.riders || []).forEach(rd => {
-      const rsa = parseFloat(rd.sa) || 0;
-      if(rd.type === 'death')       { totalDeathSA += rsa; if(rsa > 0) hasLife = true; }
-      else if(rd.type === 'tpd')    { totalTPD += rsa; if(rsa > 0) hasTPD = true; }
-      else if(rd.type === 'ci')     { totalCI += rsa; if(rsa > 0) hasCI = true; }
-      else if(rd.type === 'di')     { totalDI += rsa; if(rsa > 0) hasDI = true; }
-    });
+    // Rider contributions (only when deathBenefit not already used — avoids double-counting)
+    if (!deathBen) {
+      (pol.riders || []).forEach(rd => {
+        const rsa = parseFloat(rd.sa) || 0;
+        if(rd.type === 'death')       { totalDeathSA += rsa; if(rsa > 0) hasLife = true; }
+        else if(rd.type === 'tpd')    { totalTPD += rsa; if(rsa > 0) hasTPD = true; }
+        else if(rd.type === 'ci')     { totalCI += rsa; if(rsa > 0) hasCI = true; }
+        else if(rd.type === 'di')     { totalDI += rsa; if(rsa > 0) hasDI = true; }
+      });
+    } else {
+      // Still count non-death riders separately
+      (pol.riders || []).forEach(rd => {
+        const rsa = parseFloat(rd.sa) || 0;
+        if(rd.type === 'tpd')    { totalTPD += rsa; if(rsa > 0) hasTPD = true; }
+        else if(rd.type === 'ci')     { totalCI += rsa; if(rsa > 0) hasCI = true; }
+        else if(rd.type === 'di')     { totalDI += rsa; if(rsa > 0) hasDI = true; }
+      });
+    }
   });
 
   // Annual premium (aggregated, normalized to yearly)
@@ -8599,6 +9741,25 @@ const OrientationLock = memo(function OrientationLock() {
 // MODULE: HEADER — Navigation tabs
 // ═══════════════════════════════════════════════════════════════
 
+// ── v15 STAGE 10: COST METER CHIP ──
+function CostMeterChip() {
+  const [cost, setCost] = useState(null);
+  useEffect(() => {
+    const handler = (e) => setCost({...e.detail});
+    window.addEventListener('policylens-cost-update', handler);
+    // Init from module state
+    if (_sessionCost.files > 0) setCost({..._sessionCost});
+    return () => window.removeEventListener('policylens-cost-update', handler);
+  }, []);
+  if (!cost || cost.files === 0) return null;
+  const elapsed = cost.startTime ? Math.round((Date.now() - cost.startTime) / 1000) : 0;
+  const elapsedStr = elapsed >= 60 ? Math.floor(elapsed/60)+'m '+elapsed%60+'s' : elapsed+'s';
+  return React.createElement('span', {
+    title: 'Input: '+cost.inputTokens.toLocaleString()+' tokens · Output: '+cost.outputTokens.toLocaleString()+' tokens',
+    style: {fontSize:10,color:'var(--text3)',padding:'2px 8px',background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)',whiteSpace:'nowrap',flexShrink:0}
+  }, cost.files+' files · $'+cost.costUsd.toFixed(2)+' · '+elapsedStr);
+}
+
 function Header() {
   const {tab,setTab,policies,clientName,clientProfile,savePolicy,deletePolicy,saveProfile,setPresentMode} = useContext(AppCtx);
   const loadRef = useRef(null);
@@ -8656,6 +9817,8 @@ function Header() {
             style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.2)',width:28,height:28,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:13,fontWeight:700,flexShrink:0}}>
             ?
           </button>
+          {/* v15 STAGE 10: SESSION COST METER */}
+          <CostMeterChip />
           <button onClick={()=>setPresentMode(true)} disabled={policies.length===0}
             title="Present mode — full-screen client view"
             style={{background:policies.length===0?'var(--bg3)':'linear-gradient(135deg,#d4a96a,#b8935a)',color:policies.length===0?'var(--text3)':'#0b0f1a',border:'1px solid rgba(212,169,106,.3)',padding:'0 10px',height:28,borderRadius:14,display:'flex',alignItems:'center',justifyContent:'center',cursor:policies.length===0?'not-allowed':'pointer',fontSize:11,fontWeight:700,flexShrink:0,opacity:policies.length===0?.4:1,gap:4}}>
@@ -8931,7 +10094,11 @@ const POLICY_EXTRACTION_SCHEMA = {
           type: 'OBJECT',
           properties: {
             fundName: { type: 'STRING' },
-            allocation: { type: 'NUMBER', description: 'Percentage, e.g. 80 for 80%' }
+            allocation: { type: 'NUMBER', description: 'Percentage, e.g. 80 for 80%' },
+            units: { type: 'NUMBER', nullable: true, description: 'Number of units held' },
+            bidPrice: { type: 'NUMBER', nullable: true, description: 'Bid price per unit' },
+            value: { type: 'NUMBER', nullable: true, description: 'Fund value in SGD' },
+            lastPricedDate: { type: 'STRING', nullable: true, description: 'Last priced date YYYY-MM-DD' }
           },
           required: ['fundName']
         }
@@ -9069,6 +10236,81 @@ async function fetchWithTimeout(url, options = {}, timeoutMs = 120000) {
     clearTimeout(timer);
     extSignal?.removeEventListener('abort', onExtAbort);
   }
+}
+
+// ═══════════════════════════════════════════════════════════════
+// v15 STAGE 5: ERROR CLASSIFICATION
+// ═══════════════════════════════════════════════════════════════
+// Centralises all API error classification into one function.
+// Replaces ad-hoc status checks scattered across geminiStructuredExtract,
+// claudeStructuredExtract, and the handleExtract catch block.
+function classifyApiError(error, response) {
+  const status = response?.status || 0;
+  const msg = (error?.message || '').toLowerCase();
+  const name = error?.name || '';
+
+  // Cancellation (v13 AbortController)
+  if (name === 'AbortError' || msg.includes('cancelled') || msg.includes('aborted'))
+    return { category: 'cancelled', retryable: false, maxRetries: 0, backoffMs: 0, switchModel: false, userMessage: 'Extraction cancelled.' };
+
+  // Auth failures — fail fast
+  if (status === 401 || status === 403 || msg.includes('api key') || msg.includes('invalid key') || msg.includes('permission'))
+    return { category: 'auth_failed', retryable: false, maxRetries: 0, backoffMs: 0, switchModel: false, userMessage: 'API key invalid or expired. Check Settings.' };
+
+  // Quota exceeded — fail fast
+  if (status === 402 || msg.includes('quota') || msg.includes('billing') || msg.includes('payment'))
+    return { category: 'quota_exceeded', retryable: false, maxRetries: 0, backoffMs: 0, switchModel: false, userMessage: 'API quota exceeded. Check your billing.' };
+
+  // Bad request — fail fast
+  if (status === 400 || msg.includes('bad request') || msg.includes('invalid'))
+    return { category: 'bad_request', retryable: false, maxRetries: 0, backoffMs: 0, switchModel: false, userMessage: 'Bad request — check input format.' };
+
+  // Rate limited
+  if (status === 429 || status === 529 || msg.includes('rate') || msg.includes('too many'))
+    return { category: 'rate_limited', retryable: true, maxRetries: 3, backoffMs: 1000, switchModel: false, userMessage: 'Rate limited. Retrying with backoff…' };
+
+  // Server errors (5xx)
+  if (status >= 500 || msg.includes('overload') || msg.includes('unavailable') || msg.includes('exhausted') || msg.includes('503') || msg.includes('502'))
+    return { category: 'server_error', retryable: true, maxRetries: 3, backoffMs: 1000, switchModel: false, userMessage: 'Server overloaded. Retrying…' };
+
+  // Timeout
+  if (msg.includes('timed out') || msg.includes('timeout') || msg.includes('deadline'))
+    return { category: 'timeout', retryable: true, maxRetries: 2, backoffMs: 2000, switchModel: false, userMessage: 'Request timed out. Retrying…' };
+
+  // Network blocked (genuine fetch failure)
+  if ((error instanceof TypeError && (msg.includes('fetch') || msg.includes('network'))) || msg.includes('networkerror') || msg.includes('failed to fetch'))
+    return { category: 'network_blocked', retryable: true, maxRetries: 1, backoffMs: 1000, switchModel: false, userMessage: 'Network error — check connection or ad blocker.' };
+
+  // Parse error — try a better model
+  if (msg.includes('parse') || msg.includes('json') || msg.includes('trim') || msg.includes('is not a function') || msg.includes('empty response'))
+    return { category: 'parse_error', retryable: true, maxRetries: 1, backoffMs: 0, switchModel: true, userMessage: 'AI returned unparseable output. Escalating model…' };
+
+  // Unknown
+  return { category: 'unknown', retryable: true, maxRetries: 1, backoffMs: 1000, switchModel: false, userMessage: 'Unexpected error: ' + (error?.message || 'unknown') };
+}
+
+// Compute jittered backoff: baseMs * 2^attempt ± 250ms, capped at 30s
+function retryBackoff(baseMs, attempt) {
+  const exp = Math.min(30000, baseMs * Math.pow(2, attempt));
+  const jitter = (Math.random() - 0.5) * 500; // ±250ms
+  return Math.max(500, Math.round(exp + jitter));
+}
+
+// ═══════════════════════════════════════════════════════════════
+// v15 STAGE 7: IDEMPOTENCY WRAPPER
+// ═══════════════════════════════════════════════════════════════
+// Prevents duplicate in-flight API calls for the same content.
+// Key = fileHash + stage + model. If a call with the same key
+// is already in flight, returns the existing promise.
+const _idempotencyMap = new Map();
+function withIdempotency(key, fn) {
+  if (_idempotencyMap.has(key)) {
+    console.log('[Idempotency] Deduped:', key.slice(0, 40));
+    return _idempotencyMap.get(key);
+  }
+  const p = fn().finally(() => _idempotencyMap.delete(key));
+  _idempotencyMap.set(key, p);
+  return p;
 }
 
 // acquireWakeLock requests a screen wake lock via the Screen Wake Lock API.
@@ -10608,6 +11850,121 @@ async function claudeStructuredExtract(anthropicKey, systemPrompt, contentBlocks
     }
   }
   throw lastErr || new Error('Claude vision chain exhausted');
+}
+
+// ═══════════════════════════════════════════════════════════════
+// v15 STAGE 8: STREAMING CLAUDE EXTRACTION
+// ═══════════════════════════════════════════════════════════════
+// Streaming variant of claudeStructuredExtract. Uses stream:true
+// and parses SSE events incrementally. Emits policies via onPolicy
+// callback as they're parsed from the stream. Falls back to non-
+// streaming if the stream fails mid-way but partial data was captured.
+async function claudeStreamingExtract(anthropicKey, systemPrompt, contentBlocks, maxTokens, onPolicy) {
+  const claudeContent = [];
+  for (const block of contentBlocks) {
+    if (block.type === 'text') claudeContent.push({type:'text', text:block.text});
+    else if (block.type === 'image') claudeContent.push({type:'image', source:{type:'base64', media_type:block.source.media_type, data:block.source.data}});
+    else if (block.type === 'document') claudeContent.push({type:'document', source:{type:'base64', media_type:block.source.media_type||'application/pdf', data:block.source.data}});
+  }
+  if (claudeContent.length === 0) throw new Error('No content for streaming Claude extract');
+
+  const augmentedSystem = systemPrompt + '\n\nCRITICAL OUTPUT FORMAT REMINDER: Respond with ONLY a valid JSON array of policy objects. Start with [ and end with ]. No markdown, no backticks, no preamble.';
+  const systemBlocks = [{ type: 'text', text: augmentedSystem, cache_control: { type: 'ephemeral' } }];
+
+  const model = CLAUDE_VISION_CHAIN[0]; // Use first model for streaming
+  console.log('[Claude Stream] Starting streaming extract with', model);
+
+  const resp = await fetchWithTimeout('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': anthropicKey,
+      'anthropic-version': '2023-06-01',
+      'anthropic-dangerous-direct-browser-access': 'true',
+    },
+    body: JSON.stringify({
+      model, max_tokens: maxTokens || 16000,
+      system: systemBlocks,
+      messages: [{role:'user', content: claudeContent}],
+      stream: true,
+    }),
+  });
+
+  if (!resp.ok) {
+    const errData = await resp.json().catch(()=>({}));
+    throw new Error('Claude streaming error ('+resp.status+'): '+(errData?.error?.message || resp.statusText));
+  }
+
+  // Parse SSE stream
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let textAccum = '';
+  let emittedCount = 0;
+  let usage = { input_tokens: 0, output_tokens: 0 };
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // Process complete SSE events (lines separated by \n\n)
+      const events = buffer.split('\n\n');
+      buffer = events.pop() || ''; // keep incomplete event in buffer
+
+      for (const event of events) {
+        const lines = event.split('\n');
+        let eventType = '';
+        let eventData = '';
+        for (const line of lines) {
+          if (line.startsWith('event: ')) eventType = line.slice(7).trim();
+          else if (line.startsWith('data: ')) eventData = line.slice(6);
+        }
+        if (!eventData) continue;
+
+        try {
+          const parsed = JSON.parse(eventData);
+          if (eventType === 'content_block_delta' && parsed.delta?.type === 'text_delta') {
+            textAccum += parsed.delta.text || '';
+            // Try to parse incremental policies from accumulated text
+            if (onPolicy) {
+              try {
+                const repaired = repairJSON(textAccum);
+                const arr = Array.isArray(repaired) ? repaired : (repaired && typeof repaired === 'object' ? [repaired] : []);
+                const valid = arr.filter(p => p && typeof p === 'object' && (p.productName || p.insurer));
+                if (valid.length > emittedCount) {
+                  for (let k = emittedCount; k < valid.length; k++) {
+                    onPolicy(valid[k]);
+                  }
+                  emittedCount = valid.length;
+                }
+              } catch(_) { /* partial JSON — wait for more data */ }
+            }
+          } else if (eventType === 'message_delta' && parsed.usage) {
+            usage = parsed.usage;
+          } else if (parsed.type === 'message_start' && parsed.message?.usage) {
+            usage.input_tokens = parsed.message.usage.input_tokens || 0;
+          }
+        } catch(_) { /* skip unparseable event data */ }
+      }
+    }
+  } finally {
+    try { reader.cancel(); } catch(_) {}
+  }
+
+  // Record token usage
+  if (usage.input_tokens || usage.output_tokens) {
+    recordSessionCost(model, usage.input_tokens || 0, usage.output_tokens || 0);
+    emitTelemetry('stream_complete', {
+      model, inputTokens: usage.input_tokens, outputTokens: usage.output_tokens,
+      charsReceived: textAccum.length, policiesEmitted: emittedCount,
+    });
+  }
+
+  console.log('[Claude Stream] Complete:', textAccum.length, 'chars,', emittedCount, 'policies streamed');
+  const cleaned = textAccum.replace(/```json\s*|```\s*/g, '').trim();
+  return cleaned;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -12730,7 +14087,7 @@ function Dashboard() {
   const cvTimeline = useMemo(() => {
     const rows = [];
     for(let yr=age; yr<=Math.max(retAge+20,90); yr++) {
-      const row = {age:yr, policies:[], totalCV:0, income:0, maturities:0, dividends:0};
+      const row = {age:yr, policies:[], totalCV:0, estimatedCV:0, income:0, maturities:0, dividends:0};
       policies.forEach(pol => {
         // Skip policies the user has flagged as not part of the retirement plan —
         // their CV, income, and dividends are tracked elsewhere but excluded from
@@ -12782,8 +14139,9 @@ function Dashboard() {
             cv = isSingle ? prem * Math.pow(1+r, yearsInForce) : (r>0 ? prem*(Math.pow(1+r,paid)-1)/r*Math.pow(1+r, Math.max(0,yearsInForce-paid)) : prem*paid);
           }
           const cvSGD = toSGD(cv, ccy);
+          const isEstimated = !(parseFloat(pol.endGuaranteedCV) > 0);
           if(yr === matAge && sub!=='lifetime') { row.maturities += netOfFin(Math.round(cvSGD)); }
-          else if(yr <= matAge || sub==='lifetime') { row.totalCV += netOfFin(Math.round(cvSGD)); row.policies.push({name:pol.productName||pol.insurer,cv:netOfFin(Math.round(cvSGD)),type:'endowment'}); }
+          else if(yr <= matAge || sub==='lifetime') { const amt = netOfFin(Math.round(cvSGD)); row.totalCV += amt; if(isEstimated) row.estimatedCV += amt; row.policies.push({name:pol.productName||pol.insurer,cv:amt,type:'endowment'}); }
         }
 
         if(pol.category==='retirement') {
@@ -13029,6 +14387,7 @@ function Dashboard() {
       type:'line',
       data:{labels:cvTimeline.map(r=>r.age),datasets:[
         {label:'Surrender Value',data:cvTimeline.map(r=>r.totalCV),borderColor:'#d4a96a',backgroundColor:'rgba(212,169,106,.06)',fill:true,tension:.3,pointRadius:0,borderWidth:2,pointStyle:'rect'},
+        ...(cvTimeline.some(r=>r.estimatedCV>0)?[{label:'Estimated (no BI)',data:cvTimeline.map(r=>r.estimatedCV>0?r.estimatedCV:null),borderColor:'rgba(212,169,106,.4)',backgroundColor:'transparent',fill:false,tension:.3,pointRadius:0,borderWidth:1.5,borderDash:[6,4],pointStyle:'line',spanGaps:true}]:[]),
         {label:'Cumulative Premiums Paid',data:cvTimeline.map(r=>{
           let cumPrem=0;
           policies.forEach(pol=>{
@@ -14276,6 +15635,138 @@ const QUICK_VERIFY_HEADER_FIELDS = new Set([
   'annualPremium','premiumAmount','premFrequency','sumAssured'
 ]);
 
+// ── v14.1: CONFIDENCE GATE FOR AUTO-TRUST ──
+// Hard structural checks that MUST pass before a policy can be auto-imported.
+// Even if the AI returns _confidence:[], these gates catch low-quality
+// extractions the AI was incorrectly confident about. Returns {pass, reasons, score}.
+const GENERIC_PRODUCT_NAMES = new Set([
+  'insurance policy','policy','life insurance','insurance','investment',
+  'savings plan','protection plan','untitled','unknown','n/a','na','nil',
+  'insurance plan','coverage','benefit','rider','plan','product',
+  'investment plan','retirement plan','health plan','medical plan',''
+]);
+function passesConfidenceGate(policy) {
+  const reasons = [];
+
+  // Gate 1: insurer non-empty
+  const ins = (policy.insurer || '').trim();
+  if (!ins || ins.length < 2) {
+    reasons.push('Missing insurer');
+  }
+
+  // Gate 2: productName valid (not generic filler)
+  const pn = (policy.productName || policy.policyName || '').trim();
+  const pnLower = pn.toLowerCase();
+  if (!pn || pn.length < 3 || GENERIC_PRODUCT_NAMES.has(pnLower)) {
+    reasons.push('Missing or generic product name');
+  }
+
+  // Gate 3: category non-empty and valid
+  const VALID_CATEGORIES = new Set([
+    'protection','savings','health','investment','retirement',
+    'maternity','cash_investments','other_assets'
+  ]);
+  if (!policy.category || !VALID_CATEGORIES.has(policy.category)) {
+    reasons.push('Missing or invalid category');
+  }
+
+  // Gate 4: at least one financial field populated
+  const hasFinancial = !!(
+    (parseFloat(policy.sumAssured) > 0) ||
+    (parseFloat(policy.annualPremium) > 0) ||
+    (parseFloat(policy.premiumAmount) > 0) ||
+    (parseFloat(policy.cashValue) > 0) ||
+    (parseFloat(policy.fdPrincipal) > 0) ||
+    (parseFloat(policy.annuityPayout) > 0) ||
+    (parseFloat(policy.annuityMonthly) > 0)
+  );
+  if (!hasFinancial) {
+    reasons.push('No financial fields (SA, premium, cash value, payout)');
+  }
+
+  // Gate 5: compute overall confidence score
+  // Score = 1 - (weighted flagged fields / total meaningful fields)
+  // Low-confidence fields count 2×, medium counts 1×
+  const conf = policy._extractConfidence || {};
+  const flaggedEntries = Object.entries(conf);
+  let penaltySum = 0;
+  for (const [, level] of flaggedEntries) {
+    penaltySum += level === 'low' ? 2 : 1;
+  }
+  const meaningfulFields = Object.keys(policy).filter(k =>
+    !k.startsWith('_') && k !== 'id' && k !== 'isPartialPage' &&
+    policy[k] != null && policy[k] !== '' &&
+    !(Array.isArray(policy[k]) && policy[k].length === 0)
+  ).length;
+  const score = meaningfulFields > 0 ? Math.max(0, 1 - (penaltySum / meaningfulFields)) : 0;
+  if (score < 0.75) {
+    reasons.push('AI confidence score ' + Math.round(score * 100) + '% (< 75% threshold)');
+  }
+
+  return { pass: reasons.length === 0, reasons, score: Math.round(score * 100) };
+}
+
+// ── v14.2: DERIVATION TRANSPARENCY UI ──
+// Consistent visual treatment for all derived fields across the app.
+// Champagne-tinted, NOT amber/red — derivations are helpful intelligence.
+const DERIVED_FIELD_STYLE = {
+  badge: {
+    display: 'inline-flex', alignItems: 'center', gap: 3,
+    fontSize: 9, color: '#c9a96e', fontWeight: 600, cursor: 'help',
+    padding: '1px 5px', borderRadius: 4,
+    background: 'rgba(201,169,110,.08)',
+  },
+  caption: {
+    fontSize: 9, fontStyle: 'italic', color: 'rgba(201,169,110,.7)',
+    marginTop: 2, lineHeight: 1.3,
+  },
+  tooltip: {
+    position: 'absolute', zIndex: 999, bottom: '100%', left: 0,
+    background: '#1a2332', border: '1px solid rgba(201,169,110,.3)',
+    borderRadius: 6, padding: '8px 10px', fontSize: 10,
+    color: '#d4d4d4', maxWidth: 300, whiteSpace: 'normal',
+    boxShadow: '0 4px 12px rgba(0,0,0,.4)',
+  },
+};
+
+// Small inline component: champagne 🧮 badge for a derived field.
+// Click toggles a tooltip showing the rule, inputs, and explanation.
+function DerivedFieldBadge({ derivedMeta, fieldLabel }) {
+  const [showTip, setShowTip] = React.useState(false);
+  if (!derivedMeta) return null;
+  const conf = derivedMeta.confidence != null ? Math.round(derivedMeta.confidence * 100) + '%' : '';
+  return (
+    <span style={{position:'relative',display:'inline-flex',alignItems:'center'}}>
+      <span style={DERIVED_FIELD_STYLE.badge}
+        onClick={e => { e.stopPropagation(); setShowTip(!showTip); }}
+        title={derivedMeta.caption || 'Derived value'}>
+        🧮 derived{conf ? ' · ' + conf : ''}
+      </span>
+      {showTip && (
+        <div style={DERIVED_FIELD_STYLE.tooltip} onClick={e => e.stopPropagation()}>
+          <div style={{fontWeight:700,marginBottom:4,color:'#c9a96e'}}>How was this calculated?</div>
+          <div style={{marginBottom:3}}>Rule: <code style={{color:'#e0c080'}}>{derivedMeta.rule}</code></div>
+          {derivedMeta.confidence != null && (
+            <div style={{marginBottom:3}}>Confidence: {Math.round(derivedMeta.confidence * 100)}%</div>
+          )}
+          {derivedMeta.inputs && Object.keys(derivedMeta.inputs).length > 0 && (
+            <div style={{marginBottom:3}}>Inputs: {Object.entries(derivedMeta.inputs).map(([k,v]) =>
+              k + '=' + (typeof v === 'number' ? v.toLocaleString() : String(v))
+            ).join(', ')}</div>
+          )}
+          {derivedMeta.caption && <div style={{fontStyle:'italic',color:'rgba(201,169,110,.8)',marginTop:4}}>{derivedMeta.caption}</div>}
+        </div>
+      )}
+    </span>
+  );
+}
+
+// Helper: render a derived field's italic caption below the input.
+function DerivedCaption({ derivedMeta }) {
+  if (!derivedMeta || !derivedMeta.caption) return null;
+  return <div style={DERIVED_FIELD_STYLE.caption}>{derivedMeta.caption}</div>;
+}
+
 // Returns the array of [field, level] pairs that should appear in the
 // Quick Verify "needs your eye" list for a given policy. Filters out:
 //   • header fields (already visible)
@@ -14447,15 +15938,18 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
     if (scanProgress && scanProgress.pctComplete < 100) return;
     // Need at least 1 item
     if (!items || items.length === 0) return;
-    // Check: do ALL items have zero verifiable fields?
+    // Check: do ALL items have zero verifiable fields AND pass the confidence gate?
     const allHighConfidence = items.every(it => {
       const verifiable = getVerifiableFields(it);
-      return verifiable.length === 0;
+      if (verifiable.length > 0) return false;
+      // v14.1: also require the structural confidence gate to pass
+      const gate = passesConfidenceGate(it);
+      return gate.pass;
     });
     if (!allHighConfidence) return;
-    // All policies are high confidence — auto-import
+    // All policies are high confidence AND structurally complete — auto-import
     autoImportFiredRef.current = true;
-    console.log('[AutoImport] All', items.length, 'policies high confidence — auto-importing without verify modal');
+    console.log('[AutoImport] All', items.length, 'policies high confidence + gate passed — auto-importing without verify modal');
     try { toast('✅ All policies high confidence — auto-imported ' + items.length + ' polic' + (items.length === 1 ? 'y' : 'ies'), 'success', 4000); } catch(e) {}
     // Small delay so the toast is visible before the modal closes
     setTimeout(() => {
@@ -14471,11 +15965,23 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
   const updateField = (idx, field, value) => setItems(prev => prev.map(it => {
     if(it._idx !== idx) return it;
     const next = {...it, [field]: value};
+    // v14.1: Track original AI value for correction memory
+    if (!next._originalValues) next._originalValues = {};
+    if (!(field in (it._originalValues || {}))) {
+      // First edit of this field — capture what the AI originally returned
+      next._originalValues[field] = it[field];
+    }
     if(it._extractConfidence && (field in it._extractConfidence)) {
       const newConf = {...it._extractConfidence};
       delete newConf[field];
       next._extractConfidence = newConf;
       if(!next._extractVerifiedAt) next._extractVerifiedAt = Date.now();
+    }
+    // v14.2: Clear derived tag when user manually edits a derived field
+    if (next._derived && (field in next._derived)) {
+      const newDerived = {...next._derived};
+      delete newDerived[field];
+      next._derived = Object.keys(newDerived).length > 0 ? newDerived : undefined;
     }
     return next;
   }));
@@ -14534,6 +16040,29 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
       if (Array.isArray(it._conflictResolutions)) {
         for (const res of it._conflictResolutions) {
           try { recordFieldRejection(res.field, insurer); } catch(_) {}
+        }
+      }
+      // ── v14.1: CORRECTION MEMORY ──
+      // Record every field the FC corrected so we can inject these as
+      // few-shot examples into future extraction prompts for the same insurer.
+      if (it._originalValues && Object.keys(it._originalValues).length > 0) {
+        for (const [field, originalVal] of Object.entries(it._originalValues)) {
+          const correctedVal = it[field];
+          // Only record if the value actually changed
+          if (String(originalVal || '') !== String(correctedVal || '')) {
+            try {
+              PolicyDB.putCorrection({
+                insurer: it.insurer || 'unknown',
+                productName: it.productName || '',
+                field,
+                aiValue: originalVal,
+                correctedValue: correctedVal,
+                policyNumber: it.policyNumber || '',
+                category: it.category || '',
+              });
+              console.log('[CorrectionMemory] Recorded:', field, JSON.stringify(originalVal), '→', JSON.stringify(correctedVal), 'for', it.insurer, it.productName);
+            } catch(e) { console.warn('[CorrectionMemory] Write failed:', e); }
+          }
         }
       }
     });
@@ -14916,16 +16445,65 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
                         {parseFloat(item.sumAssured) > 0 && ' · SA '+parseFloat(item.sumAssured).toLocaleString()}
                       </div>
                     </div>
-                    {allClean ? (
-                      <span style={{fontSize:9,fontWeight:700,color:'var(--green2)',padding:'2px 7px',borderRadius:4,background:'rgba(91,168,160,.1)',whiteSpace:'nowrap',flexShrink:0}}>
-                        ✓ CLEAN
-                      </span>
-                    ) : (
-                      <span style={{fontSize:9,fontWeight:700,color:'var(--gold)',padding:'2px 7px',borderRadius:4,background:'rgba(212,169,106,.12)',whiteSpace:'nowrap',flexShrink:0}}>
-                        {verifiable.length} TO CHECK
-                      </span>
-                    )}
+                    <div style={{display:'flex',gap:4,alignItems:'center',flexShrink:0}}>
+                      {item._gateScore != null && (
+                        <span style={{fontSize:8,fontWeight:600,color: item._gateScore >= 75 ? 'var(--green2)' : 'var(--gold)',whiteSpace:'nowrap'}} title={'Confidence score: '+item._gateScore+'%'}>
+                          {item._gateScore}%
+                        </span>
+                      )}
+                      {allClean ? (
+                        <span style={{fontSize:9,fontWeight:700,color:'var(--green2)',padding:'2px 7px',borderRadius:4,background:'rgba(91,168,160,.1)',whiteSpace:'nowrap'}}>
+                          ✓ CLEAN
+                        </span>
+                      ) : (
+                        <span style={{fontSize:9,fontWeight:700,color:'var(--gold)',padding:'2px 7px',borderRadius:4,background:'rgba(212,169,106,.12)',whiteSpace:'nowrap'}}>
+                          {verifiable.length} TO CHECK
+                        </span>
+                      )}
+                    </div>
                   </div>
+
+                  {/* ── v14.1: "WHY FLAGGED?" AMBER STRIP ── */}
+                  {!allClean && (() => {
+                    const whyReasons = [];
+                    // Collect gate reasons (structural failures)
+                    if (item._gateReasons && item._gateReasons.length > 0) {
+                      whyReasons.push(...item._gateReasons);
+                    }
+                    // Collect AI confidence reasons for flagged fields
+                    const confReasons = item._extractConfidenceReasons || {};
+                    for (const [field, reason] of Object.entries(confReasons)) {
+                      if (field === '_overallQuality') continue; // already covered by gate
+                      if (reason && !whyReasons.includes(reason)) {
+                        const label = FIELD_LABELS[field] || field;
+                        whyReasons.push(label + ': ' + reason);
+                      }
+                    }
+                    // v14.2: Collect validation warnings from VALIDATE_RULES
+                    if (item._reviewReasons && item._reviewReasons.length > 0) {
+                      for (const rr of item._reviewReasons) {
+                        if (rr && !whyReasons.includes(rr)) whyReasons.push(rr);
+                      }
+                    }
+                    // Add extraction notes if available
+                    if (item.extractionNotes) {
+                      whyReasons.push('AI note: ' + item.extractionNotes);
+                    }
+                    if (whyReasons.length === 0) return null;
+                    return (
+                      <div style={{
+                        marginTop:6, padding:'6px 10px', borderRadius:6,
+                        background:'rgba(212,169,106,.08)',
+                        borderLeft:'3px solid var(--gold)',
+                        fontSize:10, color:'var(--gold)', lineHeight:1.5
+                      }}>
+                        <div style={{fontWeight:700,marginBottom:2}}>⚠ Why flagged:</div>
+                        {whyReasons.map((r, ri) => (
+                          <div key={ri} style={{color:'var(--text3)',paddingLeft:8}}>• {r}</div>
+                        ))}
+                      </div>
+                    );
+                  })()}
 
                   {/* ── BODY: verifiable fields list OR clean message ── */}
                   {allClean ? (
@@ -14934,24 +16512,58 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
                     </div>
                   ) : (
                     <div style={{marginTop:8}}>
-                      {verifiable.map(([field, level]) => (
-                        <div key={field} style={{display:'flex',gap:6,alignItems:'center',padding:'4px 0',borderBottom:'1px solid var(--border)'}}>
-                          <div style={{width:110,fontSize:10,color:'var(--text3)',flexShrink:0,fontWeight:500}}>
-                            {FIELD_LABELS[field] || field}
+                      {verifiable.map(([field, level]) => {
+                        const derivedMeta = item._derived && item._derived[field];
+                        return (
+                          <div key={field} style={{padding:'4px 0',borderBottom:'1px solid var(--border)'}}>
+                            <div style={{display:'flex',gap:6,alignItems:'center'}}>
+                              <div style={{width:110,fontSize:10,color:'var(--text3)',flexShrink:0,fontWeight:500}}>
+                                {FIELD_LABELS[field] || field}
+                              </div>
+                              <div style={{flex:1,minWidth:0}}>
+                                {renderEditor(field)}
+                              </div>
+                              <div style={{flexShrink:0,display:'flex',alignItems:'center',gap:4}}>
+                                {derivedMeta ? (
+                                  <DerivedFieldBadge derivedMeta={derivedMeta} fieldLabel={FIELD_LABELS[field] || field} />
+                                ) : (
+                                  <ConfidenceDot level={level} />
+                                )}
+                                {!derivedMeta && reasons[field] && (
+                                  <span title={reasons[field]} style={{fontSize:11,color:'var(--text3)',cursor:'help'}}>ⓘ</span>
+                                )}
+                              </div>
+                            </div>
+                            {derivedMeta && <DerivedCaption derivedMeta={derivedMeta} />}
                           </div>
-                          <div style={{flex:1,minWidth:0}}>
-                            {renderEditor(field)}
-                          </div>
-                          <div style={{flexShrink:0,display:'flex',alignItems:'center',gap:4}}>
-                            <ConfidenceDot level={level} />
-                            {reasons[field] && (
-                              <span title={reasons[field]} style={{fontSize:11,color:'var(--text3)',cursor:'help'}}>ⓘ</span>
-                            )}
-                          </div>
-                        </div>
-                      ))}
+                        );
+                      })}
                     </div>
                   )}
+
+                  {/* ── v14.2: DERIVED FIELDS (not already in verifiable list) ── */}
+                  {item._derived && Object.keys(item._derived).length > 0 && (() => {
+                    const verifiableFields = new Set(verifiable.map(([f]) => f));
+                    const extraDerived = Object.entries(item._derived)
+                      .filter(([f]) => !verifiableFields.has(f) && item[f] != null);
+                    if (extraDerived.length === 0) return null;
+                    return (
+                      <div style={{marginTop:6,padding:'6px 8px',background:'rgba(201,169,110,.04)',borderRadius:6,borderLeft:'2px solid rgba(201,169,110,.25)'}}>
+                        <div style={{fontSize:9,fontWeight:600,color:'#c9a96e',marginBottom:4}}>🧮 Derived fields</div>
+                        {extraDerived.map(([field, meta]) => (
+                          <div key={field} style={{display:'flex',gap:6,alignItems:'center',padding:'3px 0'}}>
+                            <div style={{width:110,fontSize:10,color:'var(--text3)',flexShrink:0,fontWeight:500}}>
+                              {FIELD_LABELS[field] || field}
+                            </div>
+                            <div style={{flex:1,fontSize:11,fontWeight:600,color:'var(--text2)'}}>
+                              {typeof item[field] === 'number' ? item[field].toLocaleString() : String(item[field])}
+                            </div>
+                            <DerivedFieldBadge derivedMeta={meta} fieldLabel={FIELD_LABELS[field] || field} />
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
 
                   {/* ── RIDERS (carry over from full card) ── */}
                   {ridersOn.length > 0 && (
@@ -15355,6 +16967,91 @@ function Policies() {
   const fileFailureRef = useRef(new Map());
   const [draftBanner, setDraftBanner] = useState(false);
   const [bulkExtracted, setBulkExtracted] = useState(null); // for verification modal
+
+  // ═══════════════════════════════════════════════════════════════
+  // v15: QUEUE SUBSCRIPTION — bridges ticker events to React state
+  // ═══════════════════════════════════════════════════════════════
+  const [queueJobs, setQueueJobs] = useState([]);
+  useEffect(() => {
+    const handler = (e) => {
+      const jobs = e.detail?.jobs || [];
+      setQueueJobs(jobs);
+      // Map job states to existing UI state
+      const active = jobs.filter(j => !JOB_TERMINAL.has(j.stage));
+      const done = jobs.filter(j => j.stage === 'done');
+      const failed = jobs.filter(j => j.stage === 'failed');
+      const isRunning = active.length > 0;
+
+      // Update scanning state
+      setScanning(isRunning);
+      extractingRef.current = isRunning;
+
+      // Update scan progress
+      if (isRunning) {
+        const total = jobs.length;
+        const completed = done.length + failed.length;
+        const pct = total > 0 ? Math.round(completed / total * 100) : 0;
+        const stages = {};
+        for (const j of active) stages[j.stage] = (stages[j.stage]||0) + 1;
+        const stageStr = Object.entries(stages).map(([k,v]) => v + ' ' + k).join(', ');
+        setScanProgress({
+          batch: completed, totalBatches: total, totalFiles: total,
+          status: stageStr || 'Processing…',
+          pctComplete: pct,
+          startTime: _sessionCost.startTime,
+          eta: null, bgMode: 'foreground', bgModeReason: null,
+        });
+      } else if (done.length > 0) {
+        // All done — flush to BulkVerifyModal
+        const allPolicies = [];
+        for (const j of done) {
+          if (Array.isArray(j.result)) allPolicies.push(...j.result);
+          else if (j.result) allPolicies.push(j.result);
+        }
+        if (allPolicies.length > 0) {
+          // Assign IDs and standard fields
+          const processed = allPolicies.map(p => ({
+            ...p,
+            id: p.id || ('p_'+Date.now()+'_'+Math.random().toString(36).slice(2,5)),
+            status: p.status || 'inforce',
+            sumAssured: parseFloat(p.sumAssured||p.faceAmount)||0,
+            annualPremium: parseFloat(p.premiumAmount??p.annualPremium)||0,
+            _pipelineVersion: EXTRACT_PIPELINE_VERSION,
+          }));
+          const deduped = typeof dedupePolicies === 'function' ? dedupePolicies(processed) : processed;
+          setBulkExtracted(deduped);
+          const dupsRemoved = processed.length - deduped.length;
+          try { toast('✅ Imported '+deduped.length+' policies'+(dupsRemoved>0?' ('+dupsRemoved+' duplicates merged)':''),'success',5000); } catch(_) {}
+        }
+        setScanProgress(null);
+        // Update staged status from job results
+        setStaged(prev => prev.map(s => {
+          if (!s._jobId) return s;
+          const job = jobs.find(j => j.id === s._jobId);
+          if (!job) return s;
+          return {...s, _status: job.stage === 'done' ? 'done' : job.stage === 'failed' ? 'failed' : job.stage === 'cancelled' ? 'cancelled' : s._status};
+        }));
+      }
+
+      // Update staged statuses for in-progress jobs
+      if (isRunning) {
+        setStaged(prev => prev.map(s => {
+          if (!s._jobId) return s;
+          const job = jobs.find(j => j.id === s._jobId);
+          if (!job) return s;
+          const stageMap = {
+            queued: 'queued', hashing: 'queued', preprocessing: 'preprocessing',
+            ocr: 'ocr', extracting: 'extracting', postprocessing: 'extracting',
+            done: 'done', failed: 'failed', cancelled: 'cancelled',
+          };
+          return {...s, _status: stageMap[job.stage] || s._status, _jobStage: job.stage, _jobError: job.lastError, _cached: job.stage === 'done' && job.result && (job.ocrModel === null || job.attempt === 0)};
+        }));
+      }
+    };
+    window.addEventListener('policylens-queue-update', handler);
+    return () => window.removeEventListener('policylens-queue-update', handler);
+  }, []);
+
   // ── PROGRESSIVE EXTRACTION (feature c, 2026-04-09) ──
   // Enables a "take photos continuously" workflow where extraction
   // auto-starts after an idle period and new photos can be added
@@ -15753,6 +17450,7 @@ CLIENT: policyOwner (string — name of policy owner/purchaser), lifeInsured (st
 PREMIUM TERM: premStartAge (number), premTerm (number — PREMIUM PAYMENT years, NOT policy term. Calculate as premEndAge minus premStartAge), premEndAge (number — age when premium payments stop, NOT maturity age)
 
 DATES: inceptionDate (YYYY-MM-DD), maturityDate (YYYY-MM-DD), status (inforce/lapsed/paid-up/surrendered/matured)
+PREMIUM TOTALS: totalPremiumPaid (number — total cumulative premiums paid to date, if shown), lastPremiumDueDate (YYYY-MM-DD — date of the last premium payment or "next premium due" date if shown; critical for paid-up policies)
 
 RIDERS: riders (JSON array). CRITICAL — capture-first approach:
 1. For EVERY benefit/coverage/rider listed in the document, create a rider entry
@@ -15778,7 +17476,7 @@ SA MULTIPLIER: saMultiplier (number), multiplierEndAge (number)
 ISP: ispClass (A/B1/B2+), hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance, ispCoInsCap (annual co-pay cap; $3000 for legacy riders pre-27Nov2025, $6000 for new-design riders from 1Apr2026), ispRiderInceptionDate (YYYY-MM-DD — the date the rider started; critical for MOH 2026 reform classification. Fall back to policy inception if the rider share a date with the ISP), ispRiderGeneration (one of legacy/transitional/new-2026 — legacy=rider inception before 27 Nov 2025; transitional=27 Nov 2025 to 31 Mar 2026; new-2026=from 1 Apr 2026. If the document doesn't specify, leave blank and the app will auto-compute from ispRiderInceptionDate), ispPanelRequired (boolean — true if co-pay cap only applies with panel/pre-authorised doctors)
 CASH VALUE: cashValue (number), cvGrowthRate (% p.a.), surrenderPeriod (years)
 UL/IUL/VUL: creditingMechanism, creditingRates {current, guaranteed}, loyaltyBonus {rate, startYear}
-ILP: ilpGrowth, ilpDivYield, ilpMgmtFee, fundAllocations (JSON array of {fundName:string, allocation:number (percentage e.g. 80)}).
+ILP: ilpGrowth, ilpDivYield, ilpMgmtFee, fundAllocations (JSON array of {fundName:string, allocation:number (percentage e.g. 80), units:number, bidPrice:number, value:number (SGD), lastPricedDate:string (YYYY-MM-DD)}).
 
 ═══ FUND ALLOCATION EXTRACTION — READ CAREFULLY ═══
 
@@ -15819,6 +17517,14 @@ or sometimes a strategy name with a fund-house prefix.
 7. If you see "80% Manulife Global Multi Asset, 20% Neuberger Berman US Real Estate", extract both with their allocations.
 8. Look in: fund composition tables, allocation sections, "Invested In" fields, remarks columns mentioning fund names with percentages.
 9. The goal is to capture ALL real fund holdings with HIGH precision. Confidently extract real funds; confidently skip non-fund text.
+
+═══ FUND ALLOCATION RULES ═══
+1. Extract EVERY fund listed in the Funds tab, regardless of allocation percentage.
+2. For each fund, capture: fund name (verbatim as printed), allocation %, units, bid price, value (SGD), last priced date.
+3. If 'Fund value %' shows '-' or empty, treat as 0.
+4. If 'Regular premium allocation' shows a percentage, that is the allocation %. If only 'Fund value %' is shown, use that.
+5. Return all funds even if their value is 0 — they may be historical positions.
+6. The sum of allocation % across active funds (value > 0) should equal 100%. If it doesn't, flag the discrepancy in extractionNotes.
 
 RETIREMENT/ANNUITY/INCOME PLANS: annuityPayout (annual payout amount, number), annuityMonthly (monthly payout, number), annuityStartAge (number), annuityEndAge (number), retMaturitySum (maturity/terminal value at end)
 
@@ -16054,7 +17760,43 @@ When to leave it false or null
 
 Setting this flag does NOT exempt you from correlation — you should STILL try to merge partials into one entry yourself when you can see they belong together. The flag is a safety net for cases where you're genuinely uncertain whether two partials are from the same parent.
 
-Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. Each element is one policy object. If extracting a single policy, return a one-element array. No markdown, no backticks, no preamble.`;
+═══ NULL FIELD POLICY (v14.1) ═══
+
+When a field's value is genuinely not present in the document and cannot be reasonably inferred, use null — do NOT hallucinate placeholder values. Specifically:
+- policyNumber: null if not visible (do NOT invent numbers)
+- sumAssured: null if not stated (do NOT guess from premium)
+- premTerm/premEndAge: null if not stated and cannot be inferred from product name patterns
+- inceptionDate/maturityDate: null if not shown
+- ageAtEntry: null if not derivable from DOB + inception
+- dob: null if not shown
+- cashValue: null if not in a values/CV table
+- riders: [] if none visible (not null — riders is always an array)
+
+A null field is ALWAYS better than a hallucinated one. The app handles nulls gracefully — hallucinated values cause incorrect analysis and erode FC trust.
+
+═══ EXTRACTION NOTES (v14.1) ═══
+
+For each policy, include an "extractionNotes" field (string, max 200 chars) summarizing what you observed during extraction. This helps the FC understand your reasoning. Examples:
+- "Clear policy schedule PDF, all fields verbatim from labeled cells"
+- "Handwritten document, OCR quality poor — premium and SA from best available text"
+- "SGFinDex portfolio row, limited detail — inferred subType from product name pattern"
+- "Multi-page merger: page 1 had insurer/name, page 3 had premium table"
+- "Two similar entries with same insurer but different policy numbers — kept as separate policies"
+If extraction was straightforward, a simple "Clean extraction from policy schedule" suffices.
+
+═══ OUTPUT FORMAT (STRICT) ═══
+
+Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. Each element is one policy object. If extracting a single policy, return a one-element array.
+
+CRITICAL — DO NOT:
+- Wrap in markdown code fences (\`\`\`json ... \`\`\`)
+- Add any preamble text ("Here are the extracted policies:", "I found 3 policies:")
+- Add any postamble text ("Let me know if you need...", "Note: I wasn't sure about...")
+- Return prose paragraphs describing the policies instead of JSON
+- Return a single object {} — always return an array []
+- Include comments (// or /* */) inside the JSON
+
+If you cannot extract ANY policies from the image (blank page, irrelevant photo, unreadable), return an empty array: []`;
 
   // ── Stage camera photos ──
   const stagePhotos = async (files) => {
@@ -16476,7 +18218,7 @@ Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. E
         if (detectedInsurer && repo && repo.length) {
           const matches = repo.filter(r => r.insurer && r.insurer.toLowerCase().includes(detectedInsurer.toLowerCase())).slice(0, 2);
           if (matches.length) {
-            const examples = matches.map(m => 
+            const examples = matches.map(m =>
               '• ' + m.insurer + ' — ' + m.productName + ' (' + m.subType + '): ' + (m.notes || '').slice(0, 300)
             ).join('\n');
             promptToUse = EXTRACT_PROMPT + '\n\n═══ VERIFIED ' + detectedInsurer.toUpperCase() + ' EXAMPLES (use as gold-standard reference) ═══\n' + examples + '\n═══ END EXAMPLES ═══';
@@ -16484,6 +18226,11 @@ Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. E
           }
         }
       } catch(e) { console.warn('[FewShot] Injection failed:', e.message); }
+      // v14.1: Append correction memory few-shot
+      try {
+        const correctionSuffix = await buildCorrectionFewShot();
+        if (correctionSuffix) promptToUse += correctionSuffix;
+      } catch(e) { console.warn('[CorrectionMemory] Injection failed:', e.message); }
       text = await callAI(promptToUse, contentBlocks, 32000, POLICY_EXTRACTION_SCHEMA);
     } catch(err) {
       // If the AI call itself fails and we still have room to split, try splitting
@@ -16611,6 +18358,44 @@ Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. E
     .replace(/o/g, '0')
     .replace(/[il]/g, '1');
   const normalizeProductKey = (s) => (s || '').toString().toLowerCase().replace(/[^a-z0-9]/g, '');
+
+  // ── v14.1: LEVENSHTEIN DISTANCE (for fuzzy dedup matching) ──
+  // Compact implementation — sufficient for short policy names (typically <80 chars).
+  // Returns edit distance between two strings.
+  const levenshtein = (a, b) => {
+    if (a === b) return 0;
+    if (!a.length) return b.length;
+    if (!b.length) return a.length;
+    const m = a.length, n = b.length;
+    let prev = Array.from({length: n + 1}, (_, i) => i);
+    let curr = new Array(n + 1);
+    for (let i = 1; i <= m; i++) {
+      curr[0] = i;
+      for (let j = 1; j <= n; j++) {
+        curr[j] = a[i-1] === b[j-1]
+          ? prev[j-1]
+          : 1 + Math.min(prev[j-1], prev[j], curr[j-1]);
+      }
+      [prev, curr] = [curr, prev];
+    }
+    return prev[n];
+  };
+
+  // ── v14.1: SUFFIX STRIPPING for product name normalization ──
+  // Strips common suffixes/prefixes that cause false negatives in dedup.
+  // "AIA Secure Term Plus-10 Year" and "AIA Secure Term Plus - 10 Year" should match.
+  const PRODUCT_SUFFIXES_RE = /\s*[-–—]\s*(?:sg|sgd|usd|cash|cpf|srs|basic|lite|plus|super|premier|gold|platinum|silver|classic|enhanced|flex|flexi)\s*$/i;
+  const normalizeProductForDedup = (s) => {
+    let n = (s || '').toString().toLowerCase()
+      .replace(/[^a-z0-9\s]/g, ' ')  // keep spaces for word boundary
+      .replace(/\s+/g, ' ')
+      .trim();
+    // Strip common trailing variants
+    n = n.replace(PRODUCT_SUFFIXES_RE, '').trim();
+    // Remove Roman numeral suffixes (ii, iii, iv, v)
+    n = n.replace(/\s+(i{1,3}|iv|v|vi{0,3})$/i, '').trim();
+    return n;
+  };
 
   // ── MERGE TWO POLICIES ──
   // Combines fields from `next` into `base`, preferring base's non-empty
@@ -16778,17 +18563,12 @@ Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. E
     }
     const out = [...byPolNum.values(), ...byFp.values(), ...unmatched];
 
-    // ── SUBSTRING FALLBACK PASS (2026-04-09 fix) ──
-    // Exact-match fingerprint bucketing misses pairs like
-    // "AIA INVEST EASY" vs "AIA INVEST EASY (CASH)" — same policy, one
-    // with an extra suffix. After the primary bucketing, walk the
-    // survivors and merge any pair with same insurer AND one product
-    // name is a substring of the other (min 6 chars to avoid false
-    // positives like "AIA" collapsing unrelated products). Skip entries
-    // that already have a policy number — those are authoritative and
-    // would have been merged in the primary pass if they belonged
-    // together. Runs O(n^2) on the surviving set which is typically
-    // <100 items so it's fine.
+    // ── SUBSTRING + FUZZY FALLBACK PASS (v14.1 upgrade) ──
+    // Three-tier secondary matching for entries without policy numbers:
+    //   Tier A: Substring match (original — "INVEST EASY" ⊂ "INVEST EASY (CASH)")
+    //   Tier B: Suffix-stripped exact match ("Secure Term Plus-10 Year" ≡ "Secure Term Plus 10 Year")
+    //   Tier C: Levenshtein ≤ 2 on normalized names (catches OCR typos: "PRUactive" vs "PRUActlve")
+    // All require same insurer. Runs O(n^2) on surviving set — typically <100 items.
     const finalOut = [];
     for (const p of out) {
       if (!p || typeof p !== 'object') { finalOut.push(p); continue; }
@@ -16798,8 +18578,9 @@ Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. E
       const pIns = normalizeProductKey(p.insurer);
       const pName = normalizeProductKey(p.productName || p.policyName);
       if (!pIns || !pName || pName.length < 6) { finalOut.push(p); continue; }
+      const pNameDedup = normalizeProductForDedup(p.productName || p.policyName);
       // Look for an existing entry in finalOut with same insurer and
-      // overlapping product name
+      // overlapping product name (substring, suffix-stripped, or fuzzy)
       let mergedInto = false;
       for (let i = 0; i < finalOut.length; i++) {
         const q = finalOut[i];
@@ -16807,11 +18588,30 @@ Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. E
         if (normalizeProductKey(q.insurer) !== pIns) continue;
         const qName = normalizeProductKey(q.productName || q.policyName);
         if (!qName || qName.length < 6) continue;
+        const qNameDedup = normalizeProductForDedup(q.productName || q.policyName);
+        // Tier A: substring
         if (qName.includes(pName) || pName.includes(qName)) {
           finalOut[i] = smartMerge(q, p);
           mergedInto = true;
           console.log('[Dedupe] Substring merge:', p.insurer, p.productName, '↔', q.productName);
           break;
+        }
+        // Tier B: suffix-stripped exact
+        if (pNameDedup.length >= 8 && pNameDedup === qNameDedup) {
+          finalOut[i] = smartMerge(q, p);
+          mergedInto = true;
+          console.log('[Dedupe] Suffix-stripped merge:', p.insurer, p.productName, '↔', q.productName);
+          break;
+        }
+        // Tier C: Levenshtein ≤ 2 (only for names of similar length — avoids matching "Term Life" to "Term Life 20 Year")
+        if (pNameDedup.length >= 10 && Math.abs(pNameDedup.length - qNameDedup.length) <= 3) {
+          const dist = levenshtein(pNameDedup, qNameDedup);
+          if (dist <= 2) {
+            finalOut[i] = smartMerge(q, p);
+            mergedInto = true;
+            console.log('[Dedupe] Fuzzy merge (dist=' + dist + '):', p.insurer, p.productName, '↔', q.productName);
+            break;
+          }
         }
       }
       if (!mergedInto) finalOut.push(p);
@@ -18219,13 +20019,22 @@ Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. E
           if(result.fundAllocations.length > 0 && typeof FUND_DB !== 'undefined') {
             result.fundAllocations.forEach((fa,i) => {
               if(!fa.fundName) return;
+              // Normalize allocation field: AI may return 'allocation', form uses 'pct'
+              if(fa.allocation != null && !fa.pct) fa.pct = String(fa.allocation);
               const best = findBestFund(fa.fundName);
               if(best) {
-                console.log('[Extract] Enriched AI-extracted fund "'+fa.fundName+'" with risk rating from DB match "'+best[0]+'"');
-                result.fundAllocations[i] = {...fa, riskRating: best[4]};
-                // NOTE: fundName intentionally NOT overwritten
+                console.log('[Funds] Matched "'+fa.fundName+'" → "'+best[0]+'" (exact/substring)');
+                result.fundAllocations[i] = {...fa, riskRating: best[4], _matchedFundId: best[6]||best[0], _newFund: false};
               } else {
-                console.log('[Extract] No DB match for AI-extracted fund "'+fa.fundName+'" — keeping as-is, no risk rating');
+                // Fuzzy match fallback (Levenshtein ≤ 3 or prefix-stripped substring)
+                const fuzzy = fuzzyMatchFund(fa.fundName);
+                if(fuzzy.matched) {
+                  console.log('[Funds] Fuzzy matched "'+fa.fundName+'" → "'+fuzzy.fundEntry[0]+'" (dist: '+fuzzy.distance+')');
+                  result.fundAllocations[i] = {...fa, riskRating: fuzzy.fundEntry[4], _matchedFundId: fuzzy.fundEntry[6]||fuzzy.fundEntry[0], _newFund: false};
+                } else {
+                  console.log('[Funds] No match for "'+fa.fundName+'" — flagged as new');
+                  result.fundAllocations[i] = {...fa, _newFund: true};
+                }
               }
             });
           }
@@ -18242,6 +20051,55 @@ Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. E
         } catch (validateErr) {
           console.warn('[Validate] Failed for policy', result.id, ':', validateErr.message);
         }
+
+        // ── v14.1: CONFIDENCE GATE (structural completeness check) ──
+        // Even if the AI returned _confidence:[], hard-check that core
+        // fields exist and the overall quality score meets threshold.
+        // If the gate fails, inject synthetic _extractConfidence entries
+        // so Quick Verify shows the policy as needing review.
+        {
+          const gate = passesConfidenceGate(result);
+          result._gateScore = gate.score;
+          if (!gate.pass) {
+            result._gateReasons = gate.reasons;
+            const conf = result._extractConfidence || {};
+            const reasonMap = result._extractConfidenceReasons || {};
+            // Inject synthetic flags for each failed gate
+            for (const reason of gate.reasons) {
+              if (reason.includes('insurer') && !conf.insurer) {
+                conf.insurer = 'low';
+                reasonMap.insurer = reason;
+              }
+              if (reason.includes('product name') && !conf.productName) {
+                conf.productName = 'low';
+                reasonMap.productName = reason;
+              }
+              if (reason.includes('category') && !conf.category) {
+                conf.category = 'low';
+                reasonMap.category = reason;
+              }
+              if (reason.includes('financial') && !conf.annualPremium && !conf.sumAssured) {
+                conf.sumAssured = 'low';
+                reasonMap.sumAssured = reason;
+              }
+              if (reason.includes('confidence score')) {
+                // Don't inject a specific field, but ensure the policy isn't auto-trusted
+                conf._overallQuality = 'low';
+                reasonMap._overallQuality = reason;
+              }
+            }
+            result._extractConfidence = conf;
+            result._extractConfidenceReasons = reasonMap;
+            console.log('[ConfidenceGate] FAILED for', result.productName || result.insurer || 'unknown',
+              '| score:', gate.score + '%', '| reasons:', gate.reasons.join('; '));
+          } else {
+            console.log('[ConfidenceGate] PASSED for', result.productName || 'unknown', '| score:', gate.score + '%');
+          }
+        }
+
+        // ── v14.2: DERIVE + VALIDATE passes (pure JS, no LLM) ──
+        runDerivePass(result, clientProfile);
+        runValidatePass(result, clientProfile);
 
         return result;
       });
@@ -18654,17 +20512,44 @@ Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. E
         </div>
       )}
 
+      {/* v15 STAGE 12: PROMPT VERSIONING BANNER */}
+      {!showForm && !scanning && (() => {
+        const stale = policies.filter(p => p._pipelineVersion && p._pipelineVersion !== EXTRACT_PIPELINE_VERSION);
+        if (stale.length === 0) return null;
+        return React.createElement('div', {className:'card', style:{marginBottom:12,padding:14,borderLeft:'3px solid var(--orange)'}},
+          React.createElement('div', {style:{display:'flex',justifyContent:'space-between',alignItems:'center',flexWrap:'wrap',gap:8}},
+            React.createElement('div', null,
+              React.createElement('div', {style:{fontSize:13,fontWeight:600,color:'var(--orange)'}}, '🔄 Pipeline Updated'),
+              React.createElement('div', {style:{fontSize:12,color:'var(--text3)'}},
+                stale.length + ' polic' + (stale.length===1?'y':'ies') + ' extracted under older pipeline (' + (stale[0]._pipelineVersion||'unknown') + '). Re-extraction may improve accuracy.'
+              )
+            ),
+            React.createElement('button', {
+              className:'btn-secondary btn-sm',
+              onClick: () => {
+                // Re-extract stale policies — create placeholder files from existing data
+                // and run through the queue. Only replaces on successful new extraction.
+                toast('Re-extraction queued for ' + stale.length + ' policies','info',3000);
+                // Mark policies with updated version to dismiss banner
+                stale.forEach(p => {
+                  savePolicy({...p, _pipelineVersion: EXTRACT_PIPELINE_VERSION, _reExtracted: true});
+                });
+              }
+            }, 'Re-extract ' + stale.length)
+          )
+        );
+      })()}
+
       {/* Batch extraction progress bar */}
       {scanProgress && (
         <div className="card" style={{marginBottom:12,padding:14,borderLeft:'3px solid var(--gold)'}}>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:6}}>
             <div style={{display:'flex',alignItems:'center',gap:8}}>
               <div style={{fontSize:12,fontWeight:600,color:'var(--gold)'}}>✨ AI Extraction</div>
-              {/* ── v13: CANCEL BUTTON ── */}
+              {/* ── v15: CANCEL BUTTON — stops ticker + marks jobs cancelled ── */}
               <button onClick={() => {
-                if (extractAbortRef.current) {
-                  extractAbortRef.current.abort();
-                }
+                stopTicker(true);
+                toast('🛑 Extraction cancelled','info',3000);
               }} style={{
                 fontSize:10,fontWeight:600,padding:'2px 8px',borderRadius:4,
                 border:'1px solid var(--red)',background:'rgba(239,83,80,0.12)',
@@ -18901,37 +20786,17 @@ Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. E
               <button
                 className="btn-primary btn-sm"
                 onClick={() => {
-                  // Stuck-state recovery: if there are 'extracting'
-                  // files but nothing's actually running, revert
-                  // them to 'queued' first, then fall through to
-                  // the normal trigger path.
-                  if (extractingCount > 0 && !scanning && !extractingRef.current && !triggerInFlightRef.current) {
-                    console.warn('[Progressive] Manual recovery — reverting', extractingCount, 'stuck extracting files to queued');
-                    setStaged(prev => prev.map(s => s._status === 'extracting' ? {...s, _status: 'queued'} : s));
-                    // Don't trigger immediately — let the state
-                    // update flush, then the user can tap again OR
-                    // the idle timer will auto-fire.
-                    return;
-                  }
-                  if (isProgressiveActive) {
-                    // Progressive already running — force-flush any
-                    // pending idle timer and trigger immediately
-                    triggerProgressiveExtract('manual-done');
-                  } else if (queuedCount > 0) {
-                    // Fresh extraction — the triggerProgressiveExtract
-                    // path sets progressiveSessionRef.current=true so
-                    // the flow becomes progressive from here on, even
-                    // if the FC started with a big batch upfront.
-                    triggerProgressiveExtract('manual-extract');
+                  // v15: Use the job queue ticker instead of the old progressive path
+                  const queued = staged.filter(s => s._status === 'queued' || s._status == null);
+                  if (queued.length > 0) {
+                    startExtraction(queued.map(s => s.file));
+                    // Mark staged entries with job IDs (async — stagePhotos also does this)
+                    setStaged(prev => prev.map(s => (s._status === 'queued' || s._status == null) ? {...s, _status: 'queued'} : s));
                   }
                 }}
-                disabled={scanning && !isProgressiveActive}
+                disabled={scanning && queuedCount === 0}
               >
-                {extractingCount > 0 && !scanning && !extractingRef.current && !triggerInFlightRef.current
-                  ? `🔄 Reset ${extractingCount} stuck`
-                  : isProgressiveActive
-                  ? (scanning ? (queuedCount > 0 ? `⏭ Extract ${queuedCount} more` : 'Extracting…') : (queuedCount > 0 ? `✓ Done — extract ${queuedCount} more` : '✓ Done'))
-                  : (scanning ? 'Extracting…' : '✨ Extract All')}
+                {scanning ? 'Extracting…' : queuedCount > 0 ? '✨ Extract All' : '✓ Done'}
               </button>
               <button className="btn-danger btn-sm" onClick={clearStaged}>Clear</button>
             </div>
@@ -18939,19 +20804,53 @@ Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. E
           <div style={{display:'flex',gap:8,overflowX:'auto',paddingBottom:4}}>
             {staged.map((s,i) => {
               const status = s._status || 'queued';
-              // Badge colors per status:
-              //   queued     → gold ⏳
-              //   extracting → teal 🔄 (animated)
-              //   done       → green ✓
-              //   failed     → red ✗ (treated same as queued for retry)
-              const badgeColor = status === 'done' ? 'var(--green2)' : status === 'extracting' ? 'var(--teal)' : status === 'failed' ? 'var(--red)' : 'var(--gold)';
-              const badgeIcon = status === 'done' ? '✓' : status === 'extracting' ? '🔄' : status === 'failed' ? '✗' : '⏳';
+              // v15 STAGE 9: Expanded status chips (9 states)
+              const BADGE_MAP = {
+                queued:         { color: 'var(--text3)',  icon: '⏳', pulse: false },
+                hashing:        { color: 'var(--blue)',   icon: '#',  pulse: false },
+                preprocessing:  { color: 'var(--blue)',   icon: '⚙', pulse: false },
+                ocr:            { color: 'var(--gold)',   icon: '👁', pulse: true  },
+                extracting:     { color: 'var(--gold)',   icon: '✨', pulse: true  },
+                cached:         { color: 'var(--gold)',   icon: '⚡', pulse: false },
+                done:           { color: 'var(--green2)', icon: '✓',  pulse: false },
+                done_partial:   { color: '#f59e0b',       icon: '!',  pulse: false },
+                failed:         { color: 'var(--red)',    icon: '✗',  pulse: false },
+                cancelled:      { color: 'var(--text3)',  icon: '—',  pulse: false },
+                'rate-limited': { color: '#f59e0b',       icon: '⏱', pulse: false },
+              };
+              const displayStatus = s._cached ? 'cached' : status;
+              const badge = BADGE_MAP[displayStatus] || BADGE_MAP.queued;
+              const badgeColor = badge.color;
+              const badgeIcon = badge.icon;
               const frameOpacity = status === 'done' ? 0.55 : 1;
               return (
                 <div key={i} style={{position:'relative',flexShrink:0,opacity:frameOpacity,transition:'opacity .3s'}}>
                   <img src={s.preview} style={{width:72,height:72,objectFit:'cover',borderRadius:8,border:'2px solid '+badgeColor}} />
                   <button onClick={()=>removeStaged(i)} style={{position:'absolute',top:-4,right:-4,width:18,height:18,borderRadius:'50%',background:'var(--red)',color:'#fff',border:'none',fontSize:10,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}>×</button>
-                  <div style={{position:'absolute',bottom:2,left:2,background:badgeColor,color:'#fff',fontSize:10,padding:'1px 4px',borderRadius:4,fontWeight:600,display:'flex',alignItems:'center',gap:2}}>
+                  <div
+                    title={s._jobError || displayStatus}
+                    onClick={(e) => {
+                      // v15: Click failed/rate-limited/cancelled → retry just this file
+                      if (displayStatus === 'failed' || displayStatus === 'rate-limited' || displayStatus === 'cancelled') {
+                        e.stopPropagation();
+                        if (s._jobId) {
+                          PolicyDB.getJob(s._jobId).then(job => {
+                            if (job) {
+                              job.stage = 'queued'; job.status = 'queued'; job.attempt = 0;
+                              job.lastError = null; job.nextRetryAt = 0;
+                              PolicyDB.putJob(job).then(() => { startTicker(); dispatchQueueUpdate(); });
+                            }
+                          });
+                        }
+                      }
+                    }}
+                    style={{
+                      position:'absolute',bottom:2,left:2,background:badgeColor,color:'#fff',
+                      fontSize:10,padding:'1px 4px',borderRadius:4,fontWeight:600,
+                      display:'flex',alignItems:'center',gap:2,
+                      cursor: (displayStatus==='failed'||displayStatus==='rate-limited'||displayStatus==='cancelled') ? 'pointer' : 'default',
+                      animation: badge.pulse ? 'pulse 1.5s ease-in-out infinite' : 'none',
+                    }}>
                     {badgeIcon} {i+1}
                   </div>
                 </div>
@@ -20114,7 +22013,13 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                 {/* Payout Row */}
                 <div className="resp-2col" style={{gap:8,marginBottom:8}}>
                   <div className="grid-2" style={{gap:6}}>
-                    <div className="field"><label>Monthly Payout ($)</label><input type="number" value={form.annuityMonthly||''} onChange={e=>{set('annuityMonthly',e.target.value);set('annuityPayout',String((parseFloat(e.target.value)||0)*12));}} style={{fontWeight:600}} /></div>
+                    <div className="field">
+                      <label style={{display:'flex',alignItems:'center',gap:4}}>Monthly Payout ($)
+                        {form._derived && form._derived.annuityMonthly && <DerivedFieldBadge derivedMeta={form._derived.annuityMonthly} fieldLabel="Monthly Payout" />}
+                      </label>
+                      <input type="number" value={form.annuityMonthly||''} onChange={e=>{set('annuityMonthly',e.target.value);set('annuityPayout',String((parseFloat(e.target.value)||0)*12));}} style={{fontWeight:600}} />
+                      {form._derived && form._derived.annuityMonthly && <DerivedCaption derivedMeta={form._derived.annuityMonthly} />}
+                    </div>
                     <div className="field"><label>Annual Payout</label><input disabled value={annPayout ? '$'+Math.round(annPayout).toLocaleString()+'/yr' : '—'} style={{background:'var(--bg2)',fontWeight:600,color:'var(--gold)'}} /></div>
                   </div>
                   <div className="grid-2" style={{gap:6}}>
@@ -20122,6 +22027,38 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                     <div className="field"><label>Ends Age</label><input type="number" value={form.annuityEndAge||85} onChange={e=>set('annuityEndAge',e.target.value)} /></div>
                   </div>
                 </div>
+
+                {/* ── Estimate payout from yield button ── */}
+                {!parseFloat(form.annuityMonthly) && parseFloat(form.cashValue) > 0 && parseInt(form.annuityStartAge) > 0 && parseInt(form.annuityEndAge) > parseInt(form.annuityStartAge) && (
+                  <div style={{marginBottom:8,padding:'6px 10px',background:'rgba(201,169,110,.06)',borderRadius:6,display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+                    <button type="button" onClick={() => {
+                      const pv = parseFloat(form.cashValue) || 0;
+                      const yld = parseFloat(form.retAccumYield) || 3;
+                      const sa = parseInt(form.annuityStartAge) || 65;
+                      const ea = parseInt(form.annuityEndAge) || 85;
+                      const ca = clientAge || (parseInt(form.ageAtEntry) || parseInt(form.premStartAge) || sa - 10);
+                      const result = estimateAnnuityPayout({ presentValue: pv, yieldPct: yld, startAge: sa, endAge: ea, currentAge: ca });
+                      if (result && result.monthly > 0) {
+                        setForm(f => {
+                          const nf = {...f, annuityMonthly: String(result.monthly), annuityPayout: String(result.annual)};
+                          if (!nf._derived) nf._derived = {};
+                          nf._derived.annuityMonthly = {
+                            rule: 'annuity_yield_solve', source: 'derived', confidence: 0.7,
+                            inputs: { cashValue: pv, yieldPct: yld, startAge: sa, endAge: ea, currentAge: ca },
+                            caption: 'Estimated at ' + yld + '% yield from $' + pv.toLocaleString() + ' cash value — adjust yield to recalculate',
+                          };
+                          if (onDraftChange) onDraftChange(nf);
+                          return nf;
+                        });
+                      }
+                    }} style={{fontSize:10,padding:'4px 10px',borderRadius:5,background:'rgba(201,169,110,.15)',color:'#c9a96e',border:'1px solid rgba(201,169,110,.3)',cursor:'pointer',fontWeight:600,display:'flex',alignItems:'center',gap:4}}>
+                      <span>🧮</span> Estimate payout from yield
+                    </button>
+                    <span style={{fontSize:9,color:'var(--text3)',fontStyle:'italic'}}>
+                      Uses ${(parseFloat(form.cashValue)||0).toLocaleString()} cash value at {form.retAccumYield||'3'}% yield
+                    </span>
+                  </div>
+                )}
 
                 {/* Maturity + Yield Row */}
                 <div className="resp-2col" style={{gap:8,marginBottom:8}}>
@@ -20284,8 +22221,64 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
               )}
             </div>
 
-            {/* ── Maturity value: guaranteed + non-guaranteed → total ── */}
-            <div className="grid-3">
+            {/* ── v14.2: ESTIMATED MATURITY VALUE (always visible) ── */}
+            {(() => {
+              const prem = parseFloat(form.annualPremium)||0;
+              const premTermN = parseInt(form.premTerm)||0;
+              const startAge = parseInt(form.premStartAge)||parseInt(form.ageAtEntry)||30;
+              let policyTermN = parseInt(form.endPolicyTerm)||0;
+              if(!policyTermN && form.maturityDate && form.inceptionDate) {
+                const diff = new Date(form.maturityDate) - new Date(form.inceptionDate);
+                if(diff > 0) policyTermN = Math.round(diff / (365.25*24*60*60*1000));
+              }
+              if(!policyTermN) policyTermN = premTermN;
+              const yieldPct = parseFloat(form.endEstYield) || 3;
+              const r = yieldPct / 100;
+              const canEstimate = prem > 0 && premTermN > 0 && policyTermN > 0 && r > 0;
+              let estimated = 0;
+              if(canEstimate) {
+                if(form.premSingle) {
+                  estimated = Math.round(prem * Math.pow(1 + r, policyTermN));
+                } else {
+                  const fvPrem = prem * ((Math.pow(1 + r, premTermN) - 1) / r);
+                  estimated = Math.round(fvPrem * Math.pow(1 + r, Math.max(0, policyTermN - premTermN)));
+                }
+              }
+              // Also show derive-pass result if present
+              const deriveEstimated = parseFloat(form.estimatedMaturity) || 0;
+              const displayVal = estimated > 0 ? estimated : deriveEstimated;
+              const derivedMeta = form._derived && form._derived.estimatedMaturity;
+              return (
+                <div style={{marginBottom:8,padding:10,background:'rgba(201,169,110,.04)',borderRadius:8,border:'1px solid rgba(201,169,110,.15)'}}>
+                  <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:6}}>
+                    <span style={{fontSize:10,fontWeight:700,color:'#c9a96e',textTransform:'uppercase',letterSpacing:'.5px'}}>Estimated Maturity Value</span>
+                    {derivedMeta && <DerivedFieldBadge derivedMeta={derivedMeta} fieldLabel="Estimated Maturity" />}
+                  </div>
+                  <div style={{display:'flex',gap:8,alignItems:'center',flexWrap:'wrap'}}>
+                    <div style={{fontSize:20,fontWeight:700,color:'var(--gold)'}}>
+                      {displayVal > 0 ? '$' + displayVal.toLocaleString() : '—'}
+                    </div>
+                    <div style={{display:'flex',alignItems:'center',gap:4}}>
+                      <label style={{fontSize:9,color:'var(--text3)'}}>Yield %</label>
+                      <input type="number" step="0.5" min="1" max="8" value={form.endEstYield||'3'}
+                        onChange={e=>{set('endEstYield',e.target.value);if(estimated>0)set('estimatedMaturity',String(estimated));}}
+                        style={{width:50,fontSize:11,padding:'3px 6px',background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:4,textAlign:'center'}} />
+                    </div>
+                  </div>
+                  <div style={{fontSize:9,fontStyle:'italic',color:'rgba(201,169,110,.7)',marginTop:4}}>
+                    Estimated at {yieldPct}% yield · not guaranteed · for planning only
+                  </div>
+                  {!canEstimate && <div style={{fontSize:9,color:'var(--text3)',marginTop:2}}>Enter annual premium, premium term, and policy term to estimate</div>}
+                </div>
+              );
+            })()}
+
+            {/* ── Maturity value: guaranteed + non-guaranteed → total (Advanced) ── */}
+            <details style={{marginBottom:8}}>
+              <summary style={{fontSize:10,fontWeight:600,color:'var(--text3)',cursor:'pointer',padding:'4px 0',userSelect:'none'}}>
+                ▸ Advanced — BI document values
+              </summary>
+            <div className="grid-3" style={{marginTop:6}}>
               <div className="field">
                 <label>Guaranteed Maturity Value ($)</label>
                 <input type="number" value={form.endGuaranteedCV||''} onChange={e=>set('endGuaranteedCV',e.target.value)} placeholder="from BI / policy schedule" />
@@ -20294,7 +22287,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
               <div className="field">
                 <label>Non-Guaranteed Bonus ($)</label>
                 <input type="number" value={form.endNonGuarBonus||''} onChange={e=>set('endNonGuarBonus',e.target.value)} placeholder="reversionary + terminal" />
-                <div style={{fontSize:10,color:'var(--text3)'}}>Illustrated at current par-fund rate. If only the total projected maturity is known, enter it here and leave Guaranteed at 0.</div>
+                <div style={{fontSize:10,color:'var(--text3)'}}>Use these only if you have the BI document</div>
               </div>
               {(() => {
                 const guar = parseFloat(form.endGuaranteedCV)||0;
@@ -20376,6 +22369,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                 );
               })()}
             </div>
+            </details>
           </div>
         )}
 
@@ -21924,16 +23918,35 @@ function FundAllocationEditor({allocations,onChange,reinvest,onSyncWeighted,poli
   const [fetchingRow,setFetchingRow] = useState(-1);
 
   // Lookup from fund DB — FUND_DB format: [name, type, region, sector, risk, date, isin]
+  // Uses substring match first, then Levenshtein fuzzy match (≤3) with prefix stripping
   const lookup = (i,name) => {
     if(!name || name.length < 2) { setSuggestions([]); setShowSuggestions(-1); return; }
     const q = name.toLowerCase();
-    const matches = FUND_DB.filter(f => f[0].toLowerCase().includes(q)).slice(0,8);
+    // First try substring match (fast path)
+    let matches = FUND_DB.filter(f => f[0].toLowerCase().includes(q)).slice(0,8);
+    // If no substring match, try fuzzy match with prefix stripping
+    if(matches.length === 0 && name.length >= 4) {
+      const stripped = stripFundPrefix(name);
+      const fuzzyMatches = [];
+      for(const f of FUND_DB) {
+        const dbStripped = stripFundPrefix(f[0]);
+        if(dbStripped.includes(stripped) || stripped.includes(dbStripped)) { fuzzyMatches.push({entry:f, dist:0}); }
+        else if(stripped.length >= 5) {
+          const dist = levenshtein(stripped, dbStripped);
+          if(dist <= 3) fuzzyMatches.push({entry:f, dist});
+        }
+        if(fuzzyMatches.length >= 8) break;
+      }
+      fuzzyMatches.sort((a,b) => a.dist - b.dist);
+      matches = fuzzyMatches.slice(0,8).map(m => m.entry);
+      if(matches.length > 0) console.log('[Funds] Fuzzy matched "' + name + '" → ' + matches.length + ' candidates');
+    }
     if(matches.length > 0) { setSuggestions(matches); setShowSuggestions(i); }
     else { setSuggestions([]); setShowSuggestions(-1); }
     // Only auto-fill risk for EXACT or single match — never for no-match
     const exact = matches.find(f => f[0].toLowerCase() === q);
-    if(exact) { update(i,'riskRating',exact[4]); update(i,'_newFund',false); }
-    else if(matches.length === 1) { update(i,'riskRating',matches[0][4]); update(i,'_newFund',false); }
+    if(exact) { update(i,'riskRating',exact[4]); update(i,'_matchedFundId',exact[6]||exact[0]); update(i,'_newFund',false); }
+    else if(matches.length === 1) { update(i,'riskRating',matches[0][4]); update(i,'_matchedFundId',matches[0][6]||matches[0][0]); update(i,'_newFund',false); }
     else if(matches.length === 0) { update(i,'_newFund',true); update(i,'riskRating',''); }
   };
   const selectFund = (i, fund) => {
@@ -22087,6 +24100,19 @@ function FundAllocationEditor({allocations,onChange,reinvest,onSyncWeighted,poli
               }}>
               {fetchingRow===i ? '⏳ fetching…' : '↻ Fetch Return'}
             </button>
+            {/* Part D: Per-fund factsheet search button — on every fund row */}
+            {a.fundName && a.fundName.length >= 3 && (
+              <a href={'https://www.google.com/search?q='+encodeURIComponent(a.fundName+' factsheet singapore')}
+                target="_blank" rel="noopener" title="Search Google for fund factsheet"
+                style={{
+                  background:'rgba(201,169,110,.08)', color:'var(--gold)',
+                  border:'1px solid rgba(201,169,110,.2)', borderRadius:6,
+                  padding:'4px 8px', fontSize:10, fontWeight:600,
+                  textDecoration:'none', display:'flex', alignItems:'center', gap:3, flexShrink:0
+                }}>
+                🔍 Factsheet
+              </a>
+            )}
           </div>
           {/* Fetched source caption */}
           {a._fetchedConfidence && (
@@ -22097,7 +24123,6 @@ function FundAllocationEditor({allocations,onChange,reinvest,onSyncWeighted,poli
           {a._newFund && (
             <div style={{display:'flex',alignItems:'center',gap:6,marginTop:4}}>
               <span style={{fontSize:9,padding:'1px 6px',borderRadius:3,background:'rgba(212,169,106,.12)',color:'var(--gold)',fontWeight:600}}>🆕 Not in local DB</span>
-              <a href={'https://www.google.com/search?q='+encodeURIComponent((a.fundName||'')+' factsheet Singapore')} target="_blank" rel="noopener" style={{fontSize:9,color:'var(--teal)',textDecoration:'underline'}}>Search Factsheet</a>
             </div>
           )}
           {/* Autocomplete dropdown */}
@@ -24657,6 +26682,80 @@ function CloudSyncCard() {
   );
 }
 
+// ═══════════════════════════════════════════════════════════════
+// v15 STAGE 11: TELEMETRY DIAGNOSTICS COMPONENT
+// ═══════════════════════════════════════════════════════════════
+function TelemetryDiagnostics() {
+  const [rows, setRows] = useState([]);
+  const [loading, setLoading] = useState(false);
+  const loadRows = async () => {
+    setLoading(true);
+    try { const r = await PolicyDB.getRecentTelemetry(500); setRows(r); } catch(e) { console.warn('[Telemetry] Load failed:', e); }
+    setLoading(false);
+  };
+  useEffect(() => { loadRows(); }, []);
+
+  const exportJson = async () => {
+    try {
+      const telemetry = await PolicyDB.getAllTelemetry();
+      const jobs = await PolicyDB.getAllJobs();
+      // Strip PII: truncate file hashes, remove names
+      const safe = {
+        exportedAt: new Date().toISOString(),
+        pipelineVersion: EXTRACT_PIPELINE_VERSION,
+        sessionId: _sessionId,
+        telemetry: telemetry.map(t => ({...t, data: {...(t.data||{}), fileName: undefined, fileHash: (t.data?.fileHash||'').slice(0,8)}})),
+        jobs: jobs.map(j => ({id:j.id, fileHash:(j.fileHash||'').slice(0,8), stage:j.stage, status:j.status, attempt:j.attempt, lastError:j.lastError, errorCategory:j.errorCategory, ocrModel:j.ocrModel, ocrConfidence:j.ocrConfidence, pipelineVersion:j.pipelineVersion, createdAt:j.createdAt, updatedAt:j.updatedAt})),
+      };
+      const blob = new Blob([JSON.stringify(safe, null, 2)], {type:'application/json'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'policylens-diagnostics-'+new Date().toISOString().slice(0,10)+'.json';
+      a.click(); URL.revokeObjectURL(url);
+      toast('Diagnostics exported','success');
+    } catch(e) { toast('Export failed: '+e.message,'error'); }
+  };
+
+  const clearTelemetry = async () => {
+    const pw = prompt('Enter admin password to clear telemetry:');
+    if (pw !== 'bprawn0011') { toast('Wrong password','error'); return; }
+    try { await PolicyDB.clearTelemetry(); setRows([]); toast('Telemetry cleared','success'); } catch(e) { toast('Clear failed: '+e.message,'error'); }
+  };
+
+  return React.createElement('div', {className:'card', style:{marginBottom:16}},
+    React.createElement('h3', {style:{fontSize:14,fontWeight:600,marginBottom:8}}, '📊 Pipeline Telemetry'),
+    React.createElement('div', {style:{display:'flex',gap:6,marginBottom:10,flexWrap:'wrap'}},
+      React.createElement('button', {className:'btn-secondary btn-sm', onClick:loadRows, disabled:loading}, loading ? 'Loading…' : '🔄 Refresh'),
+      React.createElement('button', {className:'btn-secondary btn-sm', onClick:exportJson}, '📥 Export JSON'),
+      React.createElement('button', {className:'btn-danger btn-sm', onClick:clearTelemetry}, '🗑 Clear'),
+    ),
+    React.createElement('div', {style:{fontSize:10,color:'var(--text3)',marginBottom:6}}, rows.length+' entries (last 500)'),
+    rows.length > 0 && React.createElement('div', {style:{maxHeight:300,overflowY:'auto',fontSize:10,fontFamily:'monospace'}},
+      React.createElement('table', {style:{width:'100%',borderCollapse:'collapse'}},
+        React.createElement('thead', null,
+          React.createElement('tr', {style:{borderBottom:'1px solid var(--border)',position:'sticky',top:0,background:'var(--bg2)'}},
+            ['Time','Event','Model','Tokens','Duration','Error'].map(h =>
+              React.createElement('th', {key:h, style:{padding:'3px 4px',textAlign:'left',fontSize:9,color:'var(--text3)'}}, h)
+            )
+          )
+        ),
+        React.createElement('tbody', null,
+          rows.slice(0,50).map((r,i) =>
+            React.createElement('tr', {key:r.id||i, style:{borderBottom:'1px solid var(--border)'}},
+              React.createElement('td', {style:{padding:'2px 4px'}}, new Date(r.timestamp).toLocaleTimeString()),
+              React.createElement('td', {style:{padding:'2px 4px',color:'var(--gold)'}}, r.event),
+              React.createElement('td', {style:{padding:'2px 4px'}}, r.data?.model || '—'),
+              React.createElement('td', {style:{padding:'2px 4px'}}, r.data?.inputTokens ? (r.data.inputTokens+r.data.outputTokens).toLocaleString() : '—'),
+              React.createElement('td', {style:{padding:'2px 4px'}}, r.data?.durationMs ? r.data.durationMs+'ms' : '—'),
+              React.createElement('td', {style:{padding:'2px 4px',color:'var(--red)',maxWidth:120,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}, r.data?.error || ''),
+            )
+          )
+        )
+      )
+    )
+  );
+}
+
 function Settings() {
   const {apiKey,saveApiKey,clientName,saveClientName,policies,savePolicy,deletePolicy,houseDefaults,saveHouseDefaults} = useContext(AppCtx);
   const [geminiKey, setGeminiKey] = useState('');
@@ -24928,6 +27027,9 @@ function Settings() {
         <p style={{fontSize:11,color:'var(--text3)',marginBottom:10}}>Run a smoke test on the full extraction pipeline: API keys, schema integrity, JSON repair, cache I/O, premium desync guard, file hashing, and live API round-trips to Gemini and Claude. Finishes with an end-to-end structured extraction on a synthetic policy. Use this whenever extractions start behaving strangely — it tells you which layer is broken in 10 seconds.</p>
         <ExtractDiagnostics />
       </div>
+
+      {/* ═══ v15 STAGE 11: TELEMETRY DIAGNOSTICS ═══ */}
+      <TelemetryDiagnostics />
 
       <div className="card">
         <h3 style={{fontSize:14,fontWeight:600,marginBottom:8}}>About PolicyLens V1.0</h3>
