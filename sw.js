@@ -22,7 +22,7 @@
 //     the Tier 1 in-page extraction with batch-level resume.
 // ═══════════════════════════════════════════════════════════════
 
-const CACHE_NAME = 'policylens-v1.0.5-bgfetch-check';
+const CACHE_NAME = 'policylens-v2.0.0';
 const ASSETS = [
   './',
   './index.html',

@@ -51,7 +51,7 @@ console.error=function(){var m=arguments[0]||'';if(typeof m==='string'&&m.includ
 // steps, zero data loss (partial extractions already survive via
 // the sessionStorage resume banner).
 // ═══════════════════════════════════════════════════════════════
-const EXPECTED_SW_VERSION = 'policylens-v1.0.6-retry';
+const EXPECTED_SW_VERSION = 'policylens-v2.0.0';
 
 function __plShowUpdateToast(msg) {
   try {
@@ -371,7 +371,7 @@ label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;lett
       <button class="abtn abtn-s" onclick="authShow('signup')">Create Account</button>
       <div class="auth-link" onclick="authShow('reset')">Forgot password?</div>
       <div style="text-align:center;margin-top:24px;font-size:11px;opacity:0.6">
-        <span>PolicyLens v2.0.0</span>
+        <span>PolicyLens v2.0.1</span>
         <span style="margin:0 8px">&middot;</span>
         <button onclick="document.getElementById('auth-changelog').style.display=document.getElementById('auth-changelog').style.display==='none'?'block':'none'" style="background:none;border:none;color:#c9a96e;cursor:pointer;font-size:11px;padding:0">Changelog</button>
       </div>
@@ -710,11 +710,24 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.0.0';
+const APP_VERSION = 'v2.0.1';
 const APP_VERSION_DATE = '2026-04-10';
 const APP_VERSION_NAME = 'Reasoning & Field-Tool Release';
 
 const CHANGELOG = [
+  {
+    version: 'v2.0.1',
+    date: '2026-04-10',
+    name: 'Service Worker Fix',
+    sections: [
+      {
+        heading: 'Deployment',
+        items: [
+          'Service worker auto-update: new versions now deploy without requiring users to clear cache',
+        ]
+      },
+    ]
+  },
   {
     version: 'v2.0.0',
     date: '2026-04-10',
