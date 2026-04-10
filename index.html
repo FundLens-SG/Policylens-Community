@@ -1643,7 +1643,7 @@ async function pdfToImages(pdfDoc, maxPages=12) {
 // CLEAN even if the FC never actually reviewed anything. Bumping the version
 // forces a re-extraction next time those same files are uploaded, and the
 // one-time cleanup in App init purges the stale entries from IndexedDB.
-const EXTRACT_PIPELINE_VERSION = 'v14.2-2026-04-10-derive-validate';
+const EXTRACT_PIPELINE_VERSION = 'v14.4-2026-04-10-quality-fixes';
 
 // ── v15: PROMPT VERSIONING ──
 const EXTRACT_PROMPT_VERSION = 'v14.1-2026-04-10-strict-fields';
@@ -1688,6 +1688,7 @@ async function buildCorrectionFewShot() {
       '\n═══ END CORRECTIONS ═══';
     _correctionCacheTime = Date.now();
     console.log('[CorrectionMemory] Built few-shot with', corrections.length, 'corrections for', Object.keys(byInsurer).length, 'insurer(s)');
+    console.log('[Corrections] Injected', Math.min(corrections.length, 15), 'prior corrections for', Object.keys(byInsurer).length, 'insurer(s)');
     return _correctionCacheText;
   } catch (e) {
     console.warn('[CorrectionMemory] Failed to load corrections:', e);
@@ -15641,16 +15642,16 @@ const QUICK_VERIFY_HEADER_FIELDS = new Set([
 // extractions the AI was incorrectly confident about. Returns {pass, reasons, score}.
 const GENERIC_PRODUCT_NAMES = new Set([
   'insurance policy','policy','life insurance','insurance','investment',
-  'savings plan','protection plan','untitled','unknown','n/a','na','nil',
+  'savings plan','protection plan','untitled','untitled policy','unknown','n/a','na','nil','-',
   'insurance plan','coverage','benefit','rider','plan','product',
   'investment plan','retirement plan','health plan','medical plan',''
 ]);
 function passesConfidenceGate(policy) {
   const reasons = [];
 
-  // Gate 1: insurer non-empty
+  // Gate 1: insurer non-empty and not 'unknown'
   const ins = (policy.insurer || '').trim();
-  if (!ins || ins.length < 2) {
+  if (!ins || ins.length < 2 || ins.toLowerCase() === 'unknown') {
     reasons.push('Missing insurer');
   }
 
@@ -15670,7 +15671,7 @@ function passesConfidenceGate(policy) {
     reasons.push('Missing or invalid category');
   }
 
-  // Gate 4: at least one financial field populated
+  // Gate 4: at least one financial field OR a policy number
   const hasFinancial = !!(
     (parseFloat(policy.sumAssured) > 0) ||
     (parseFloat(policy.annualPremium) > 0) ||
@@ -15678,10 +15679,11 @@ function passesConfidenceGate(policy) {
     (parseFloat(policy.cashValue) > 0) ||
     (parseFloat(policy.fdPrincipal) > 0) ||
     (parseFloat(policy.annuityPayout) > 0) ||
-    (parseFloat(policy.annuityMonthly) > 0)
+    (parseFloat(policy.annuityMonthly) > 0) ||
+    ((policy.policyNumber || '').trim().length >= 4)
   );
   if (!hasFinancial) {
-    reasons.push('No financial fields (SA, premium, cash value, payout)');
+    reasons.push('No financial fields (SA, premium, cash value, payout) or policy number');
   }
 
   // Gate 5: compute overall confidence score
@@ -17367,6 +17369,17 @@ function Policies() {
 
   const EXTRACT_PROMPT = `You are a senior insurance policy analyst for a Singapore Financial Advisory firm. Extract ALL insurance policies AND financial instruments from this document with institutional-level detail.
 
+═══ RULES FOR FIELD EXTRACTION (read before anything else) ═══
+
+1. If a field cannot be determined from the source with reasonable confidence, set it to null. Never guess. Never invent.
+2. NEVER substitute narrative prose for a structured value. productName must be the actual product name as printed (e.g. "PruActive Saver", "AIA Elite Adventurous"), not a description like "Manulife policy in force with 5-year term".
+3. If the document does not state a product name, set productName to null. Do NOT use "Untitled policy" or the insurer name as a fallback.
+4. category and subType must come from the controlled vocabulary in the schema. If you cannot map confidently, return null — do NOT return "unknown" as a string.
+5. The "description" and "notes" fields are for narrative summary ONLY. Never put structured data there that belongs in a typed field (productName, subType, premium, etc.).
+6. For each extracted policy, populate the extractionNotes field listing any field you set to null AND a one-line reason (e.g. "premium: not visible in source; subType: ambiguous between Term and Whole Life").
+
+═══ END RULES FOR FIELD EXTRACTION ═══
+
 For EACH policy or instrument, return a JSON object with:
 
 PRODUCT NAME RULE (CRITICAL):
@@ -18487,7 +18500,16 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
       if (nextStr.length > baseStr.length) merged[k] = nextVal;
       conflicts.push({ field: k, values: [baseVal, nextVal], kept: merged[k] });
     }
-    if (conflicts.length > 0) merged._mergeConflicts = conflicts;
+    if (conflicts.length > 0) {
+      merged._mergeConflicts = conflicts;
+      for (const c of conflicts) {
+        console.log('[Dedupe] conflict: field=' + c.field + ' left=' + c.values[0] + ' right=' + c.values[1] + ' → kept ' + c.kept);
+      }
+    }
+    // Take MAX of confidence scores across merged sources
+    const baseScore = parseFloat(base._gateScore) || 0;
+    const nextScore = parseFloat(next._gateScore) || 0;
+    if (nextScore > baseScore) merged._gateScore = nextScore;
     merged._mergedFrom = (base._mergedFrom || 1) + 1;
     return merged;
   };
@@ -18564,28 +18586,40 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
     const out = [...byPolNum.values(), ...byFp.values(), ...unmatched];
 
     // ── SUBSTRING + FUZZY FALLBACK PASS (v14.1 upgrade) ──
-    // Three-tier secondary matching for entries without policy numbers:
-    //   Tier A: Substring match (original — "INVEST EASY" ⊂ "INVEST EASY (CASH)")
+    // Four-tier secondary matching for ALL entries (including those with policy numbers):
+    //   Tier A: Substring match ("INVEST EASY" ⊂ "INVEST EASY (CASH)")
     //   Tier B: Suffix-stripped exact match ("Secure Term Plus-10 Year" ≡ "Secure Term Plus 10 Year")
-    //   Tier C: Levenshtein ≤ 2 on normalized names (catches OCR typos: "PRUactive" vs "PRUActlve")
-    // All require same insurer. Runs O(n^2) on surviving set — typically <100 items.
+    //   Tier C: Levenshtein ≤ 2 on normalized names (catches OCR typos)
+    // All require same insurer + compatible policy numbers (same, one empty, or prefix).
+    // Compatible categories (same, or one side is 'unknown'/empty).
+    // Runs O(n^2) on surviving set — typically <100 items.
+    const policyNumsCompatible = (a, b) => {
+      const na = normalizePolicyKey(a), nb = normalizePolicyKey(b);
+      if (!na || na.length < 4 || !nb || nb.length < 4) return true; // one empty → compatible
+      if (na === nb) return true;
+      if (na.startsWith(nb) || nb.startsWith(na)) return true; // prefix match
+      return false;
+    };
+    const catsCompatible = (a, b) => {
+      if (!a || a === 'unknown' || !b || b === 'unknown') return true;
+      return a === b;
+    };
     const finalOut = [];
     for (const p of out) {
       if (!p || typeof p !== 'object') { finalOut.push(p); continue; }
-      // Keep items with their own polNum as-is (authoritative)
-      const pNum = normalizePolicyKey(p.policyNumber);
-      if (pNum && pNum.length >= 4) { finalOut.push(p); continue; }
       const pIns = normalizeProductKey(p.insurer);
       const pName = normalizeProductKey(p.productName || p.policyName);
       if (!pIns || !pName || pName.length < 6) { finalOut.push(p); continue; }
       const pNameDedup = normalizeProductForDedup(p.productName || p.policyName);
-      // Look for an existing entry in finalOut with same insurer and
-      // overlapping product name (substring, suffix-stripped, or fuzzy)
+      // Look for an existing entry in finalOut with same insurer,
+      // compatible policy numbers, and overlapping product name
       let mergedInto = false;
       for (let i = 0; i < finalOut.length; i++) {
         const q = finalOut[i];
         if (!q || typeof q !== 'object') continue;
         if (normalizeProductKey(q.insurer) !== pIns) continue;
+        if (!policyNumsCompatible(p.policyNumber, q.policyNumber)) continue;
+        if (!catsCompatible(p.category, q.category)) continue;
         const qName = normalizeProductKey(q.productName || q.policyName);
         if (!qName || qName.length < 6) continue;
         const qNameDedup = normalizeProductForDedup(q.productName || q.policyName);
@@ -18603,7 +18637,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
           console.log('[Dedupe] Suffix-stripped merge:', p.insurer, p.productName, '↔', q.productName);
           break;
         }
-        // Tier C: Levenshtein ≤ 2 (only for names of similar length — avoids matching "Term Life" to "Term Life 20 Year")
+        // Tier C: Levenshtein ≤ 2 (only for names of similar length)
         if (pNameDedup.length >= 10 && Math.abs(pNameDedup.length - qNameDedup.length) <= 3) {
           const dist = levenshtein(pNameDedup, qNameDedup);
           if (dist <= 2) {
@@ -26279,6 +26313,46 @@ function PdfPasswordEditor() {
   );
 }
 
+function CorrectionMemoryDiagnostics() {
+  const [count, setCount] = useState(null);
+  const [clearing, setClearing] = useState(false);
+  useEffect(() => {
+    PolicyDB.getAllCorrections().then(all => setCount(all ? all.length : 0)).catch(() => setCount(0));
+  }, []);
+  const handleClear = async () => {
+    const pw = prompt('Enter admin password to clear correction memory:');
+    if (!pw) return;
+    if (pw !== 'policylens') { toast('Incorrect password', 'error'); return; }
+    setClearing(true);
+    try {
+      await PolicyDB.clearCorrections();
+      _correctionCacheText = '';
+      _correctionCacheTime = 0;
+      setCount(0);
+      toast('Correction memory cleared', 'success');
+    } catch (e) { toast('Clear failed: ' + e.message, 'error'); }
+    setClearing(false);
+  };
+  return (
+    <div className="card" style={{marginBottom:16}}>
+      <h3 style={{fontSize:14,fontWeight:600,marginBottom:4}}>🧠 Correction Memory</h3>
+      <p style={{fontSize:11,color:'var(--text3)',marginBottom:10}}>
+        When you correct AI-extracted fields before import, PolicyLens remembers the correction and injects it as a few-shot example on future extractions for the same insurer. This feedback loop makes extraction more accurate over time.
+      </p>
+      <div style={{display:'flex',alignItems:'center',gap:12}}>
+        <span style={{fontSize:12,color:'var(--text2)',fontWeight:600}}>
+          Corrections learned: <span style={{color:'var(--gold)'}}>{count != null ? count : '…'}</span>
+        </span>
+        <button onClick={handleClear} disabled={clearing || count === 0}
+          style={{fontSize:10,padding:'4px 12px',borderRadius:6,border:'1px solid var(--border)',
+            background:'var(--bg2)',color:'var(--red)',cursor:count===0?'not-allowed':'pointer',opacity:count===0?0.4:1}}>
+          {clearing ? 'Clearing…' : 'Clear correction memory'}
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function ExtractDiagnostics() {
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState([]);
@@ -27027,6 +27101,9 @@ function Settings() {
         <p style={{fontSize:11,color:'var(--text3)',marginBottom:10}}>Run a smoke test on the full extraction pipeline: API keys, schema integrity, JSON repair, cache I/O, premium desync guard, file hashing, and live API round-trips to Gemini and Claude. Finishes with an end-to-end structured extraction on a synthetic policy. Use this whenever extractions start behaving strangely — it tells you which layer is broken in 10 seconds.</p>
         <ExtractDiagnostics />
       </div>
+
+      {/* ═══ v14.1: CORRECTION MEMORY DIAGNOSTICS ═══ */}
+      <CorrectionMemoryDiagnostics />
 
       {/* ═══ v15 STAGE 11: TELEMETRY DIAGNOSTICS ═══ */}
       <TelemetryDiagnostics />
