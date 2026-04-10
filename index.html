@@ -9035,7 +9035,7 @@ async function claudeExtract(anthropicKey, systemPrompt, rawText, maxTokens) {
       method:'POST',
       headers:{'Content-Type':'application/json','x-api-key':anthropicKey,'anthropic-version':'2023-06-01','anthropic-dangerous-direct-browser-access':'true'},
       body:JSON.stringify({model:'claude-sonnet-4-20250514',max_tokens:maxTokens||8000,
-        system:systemPrompt+'\n\nRespond with ONLY valid JSON. Start with { end with }.',
+        system:systemPrompt+'\n\nRespond with ONLY a valid JSON array of policy objects. Start with [ and end with ]. No markdown, no backticks.',
         messages:[{role:'user',content:rawText}]
       })
     });
@@ -10413,9 +10413,12 @@ async function claudeStructuredExtract(anthropicKey, systemPrompt, contentBlocks
   // System prompt — augment to demand JSON-only output since Claude
   // doesn't enforce response schemas at the API level.
   const augmentedSystem = systemPrompt + '\n\n' +
-    'CRITICAL OUTPUT FORMAT: Respond with ONLY a valid JSON array. Start with [ end with ]. ' +
-    'No markdown, no backticks, no commentary, no preamble. The first character of your response ' +
-    'MUST be [ and the last character MUST be ]. If extracting a single policy, wrap it in a one-element array.';
+    'CRITICAL OUTPUT FORMAT REMINDER: Respond with ONLY a valid JSON array of policy objects. ' +
+    'Start with [ and end with ]. No markdown, no backticks, no preamble. ' +
+    'Each element is one distinct standalone policy with its own policy number and premium. ' +
+    'DO NOT create array elements for riders/benefits (Terminal Illness, TPD, Waiver of Premium, ADB) — ' +
+    'those go in the riders[] array of their parent policy. ' +
+    'If extracting a single policy, return a one-element array like [{ ... }].';
 
   // ── PROMPT CACHING (cost optimization #2) ──
   // The system prompt is ~16KB and IDENTICAL across every extraction
@@ -10767,7 +10770,14 @@ async function routeExtraction(gk, ck, systemPrompt, contentBlocks, maxTokens, r
             throw new Error('PDF extraction failed: claudeExtract failed (' + claudeExtractErr.message + ') and geminiStructuredExtract also failed (' + geminiStructErr.message + ')');
           }
         }
-        throw claudeExtractErr;
+        // No responseSchema — fall back to plain Gemini extract on original PDF blocks
+        try {
+          const result = await geminiExtract(gk, systemPrompt, contentBlocks, maxTokens);
+          return result;
+        } catch (geminiExtractErr) {
+          console.warn('[Router] PDF geminiExtract fallback failed:', geminiExtractErr.message);
+          throw new Error('PDF extraction failed: claudeExtract failed (' + claudeExtractErr.message + ') and geminiExtract also failed (' + geminiExtractErr.message + ')');
+        }
       }
     }
 
@@ -15496,7 +15506,9 @@ function Policies() {
 For EACH policy or instrument, return a JSON object with:
 
 PRODUCT NAME RULE (CRITICAL):
-productName must be the SPECIFIC marketed product name as written in the document — "Elite Investment Plan", "Pro Achiever", "Achiever Accumulator", "Platinum Wealth Elite", "LifeReady Plus", "PRUShield Premier", "GREAT TotalCare". NEVER return a generic sub-type or category description as the productName. The following are NOT valid productNames and must never be returned: "Investment Linked Policy", "Investment-Linked Policy", "Life Insurance Policy", "Whole Life Plan", "Term Life Plan", "Insurance Plan", "ILP", "Annuity Plan". Those are subTypes, not product names. If you genuinely cannot find a specific marketed product name in the document, set productName to an empty string "" — do NOT substitute a generic category label. The sub-type goes in the separate "subType" field, not in productName.
+productName must be the SPECIFIC marketed product name as written in the document — "Elite Investment Plan", "Pro Achiever", "Achiever Accumulator", "Platinum Wealth Elite", "LifeReady Plus", "PRUShield Premier", "GREAT TotalCare". NEVER return a generic sub-type or category description as the productName. The following are NOT valid productNames and must never be returned: "Investment Linked Policy", "Investment-Linked Policy", "Life Insurance Policy", "Whole Life Plan", "Term Life Plan", "Insurance Plan", "ILP", "Annuity Plan". Those are subTypes, not product names. If you genuinely cannot find a specific marketed product name in the document, use your Singapore insurance product knowledge to infer the most likely product name from the insurer + subType + visible features — do NOT return empty string unless you truly have zero signal. For example: Manulife + Retirement Income (Par WL) → "RetireReady Plus"; Manulife + Retirement + Limited Pay 5 → "RetireReady Plus – Limited Pay 5"; Great Eastern + Whole Life + CI → "GREAT Flexi Life Cover". Always prefer a specific known product name over an empty string. If you have no signal at all, set productName to "" — but this should be rare. The sub-type goes in the separate "subType" field, not in productName.
+
+PRODUCT NAME POLLUTION — NEVER include the following in productName or policyName: document metadata such as "as of [date]", "currency in SGD", "SGFinDex", "SGFinDex Report", reference/report codes, document dates, page numbers, or any text that looks like a footer, header, or timestamp. These are document artifacts, not policy names. If the only text visible on a page is metadata like "as of 30 Mar 2026, currency in SGD,..." — this is a document header, extract zero policies from it unless other policy fields are visible on that same page.
 
 CORE: insurer, productName, policyName, policyNumber, category (protection/savings/health/investment/retirement/maternity/cash_investments/other_assets), subType (Term Life/Whole Life/Universal Life (UL)/Indexed UL (IUL)/Variable UL (VUL)/Critical Illness/Personal Accident/Disability Income/Long-term Care/Endowment/Lifetime Endowment/Education Plan/Short-term Endowment/Integrated Shield Plan/Hospital Income/CareShield Life Supplement/ElderShield 300/ElderShield 400/ILP (Protection)/ILP (Investment)/Unit Trust/Retirement/Annuity/Maternity Coverage/Fixed Deposit/T-bill/Singapore Savings Bond/Corporate Bond/Money Market/Property/Stocks\/Equities/Gold\/Precious Metals/Fixed Coupon Note (FCN)/Equity Linked Note (ELN)/Options\/Futures/Cryptocurrency/Other), currency (default SGD), sumAssured (number), premiumAmount (number — the premium AS PAID, at whatever frequency it is billed. Do NOT convert or normalize. If document shows "$1,000 Monthly", return premiumAmount=1000. If document shows "$12,000 Annually", return premiumAmount=12000. If document shows "$50,000 Single Premium", return premiumAmount=50000. The frequency is captured in the separate premFrequency field below — NEVER multiply or divide the amount to match a different period), premFrequency (annual/monthly/single/unknown — MUST match the exact period of the premiumAmount value above. Singlife/SGFinDex portfolio reports have a "How Often You Pay" column — copy that verbatim: Monthly→monthly, Annually→annual, "Single Premium"→single. If unclear, use unknown), premiumStructure (Single Premium/Regular Premium/Limited Pay/Flexible Premium), paymentMethod (Cash/MediSave/SRS/MediSave+Cash/CPF OA/CPF SA)
 IMPORTANT: If document mentions CPFIS-OA, CPF-IS or CPF Investment Scheme, set paymentMethod to "CPF OA" or "CPF SA" accordingly. Standalone fund holdings (e.g. "Allianz Global High Payout", "First Sentier Bridge") without an insurance wrapper are category:investment, subType:"Unit Trust". If it mentions CPFIS, still category:investment subType:"Unit Trust".
@@ -15580,6 +15592,17 @@ RIDERS: riders (JSON array). CRITICAL — capture-first approach:
 2. ALWAYS set riderName to the EXACT benefit name as written (e.g. "Double Indemnity on Accidental Death", "Accidental Dismemberment and Burns", "TCM/Chiropractic Reimbursement", "Early CompleteCare Rider III")
 3. THEN classify type from: death, tpd, ci, eci, di, accidental, acc_medical, acc_tcm, acc_dismember, premium_waiver, other
 4. If the benefit name doesn't clearly match a type, use "other" — NEVER force-snap to "death" or "accidental" when unsure
+
+CRITICAL — BENEFITS/RIDERS ARE NEVER STANDALONE POLICIES:
+The following are ALWAYS riders[] entries on the parent base policy — NEVER create a separate top-level policy object for them:
+- Terminal Illness (TI / TIB / "Terminal Illness Benefit")
+- Total and Permanent Disability (TPD / TPDB / "Total and Permanent Disability Benefit")  
+- Accidental Death Benefit (ADB)
+- Waiver of Premium (WOP / "Premium Waiver")
+- Payor Benefit / Payor Waiver
+- Dread Disease / Critical Illness rider (when bundled with a base life policy)
+- Any benefit that says "Benefit" or "Rider" in its name without its own independent policy number
+A valid standalone policy MUST have: (1) its own unique policy number, and (2) its own separate premium payment, and (3) covers a completely different risk class. If a page shows only benefits/riders with no standalone policy number, these belong in the riders[] of the nearest matching base policy — do NOT create orphan policies for them.
 5. NEVER create duplicate types for the same benefit. "Accidental Death $100k" + "Double Indemnity on Acc Death $100k" = TWO separate riders (type:accidental + type:other), NOT two "death" entries
 Each rider: {type, riderName (ALWAYS filled — exact name from document), sa (number), premium (0 if part of plan), expiryAge, bundled (true if part of plan, false if separate add-on), multiClaim, totalClaimPct}
 Type mapping guide: "death/terminal illness" → death, "total permanent disablement/disability" → tpd, "critical illness" → ci, "early CI" → eci, "disability income" → di, "accidental death" → accidental, "medical reimbursement/expenses" → acc_medical, "TCM/chiropractic" → acc_tcm, "dismemberment/burns" → acc_dismember, "premium waiver" → premium_waiver, anything else → other
@@ -15723,6 +15746,16 @@ OTHER PLANS:
 - "Income" / "Payout" plans → check if monthly income (Annuity) or lump sum (Endowment)
 - "VitalCare" / "VitalHealth" without "Max" prefix → could be standalone, check context
 
+MANULIFE PRODUCT RECOGNITION (use these exact names when features match):
+- Manulife + participating whole life + retirement income + guaranteed payout → "RetireReady Plus" (subType: Retirement Income (Par WL), category: retirement)
+- Manulife + "Limited Pay 5" + retirement → "RetireReady Plus – Limited Pay 5"
+- Manulife + "Limited Pay 10" + retirement → "RetireReady Plus – Limited Pay 10"
+- Manulife + endowment + "Smart Saver" → "Smart Saver 15 (I) – Limited Pay 5-Years" or match visible name
+- Manulife + whole life + CI → "ManuProtect Whole Life" or "LifeReady Plus"
+- Manulife + term + protection → "ManuProtect Term"
+- Manulife + ILP → "InvestReady" series (match premium term from visible text)
+- If you see "Par WL" with Manulife in the context of retirement/income payouts → this is always RetireReady Plus or a variant
+
 CRITICAL — GUARANTEED-COUPON WHOLE LIFE PLANS ARE RETIREMENT/INCOME, NOT ILP:
 When you see a plan that has ALL of the following characteristics:
 - Limited premium payment term (typically 5, 10, 15, 20 years)
@@ -15854,7 +15887,7 @@ When to leave it false or null
 
 Setting this flag does NOT exempt you from correlation — you should STILL try to merge partials into one entry yourself when you can see they belong together. The flag is a safety net for cases where you're genuinely uncertain whether two partials are from the same parent.
 
-Return ONLY valid JSON. Start with { end with }. No markdown.`;
+Return ONLY a valid JSON array of policy objects. Start with [ and end with ]. Each element is one policy object. If extracting a single policy, return a one-element array. No markdown, no backticks, no preamble.`;
 
   // ── Stage camera photos ──
   const stagePhotos = async (files) => {
