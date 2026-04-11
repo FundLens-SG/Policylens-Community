@@ -22,7 +22,7 @@
 //     the Tier 1 in-page extraction with batch-level resume.
 // ═══════════════════════════════════════════════════════════════
 
-const CACHE_NAME = 'policylens-v2.0.0';
+const CACHE_NAME = 'policylens-v2.1.0b';
 const ASSETS = [
   './',
   './index.html',
@@ -852,4 +852,4 @@ self.addEventListener('notificationclick', (e) => {
   })());
 });
 
-console.log('[SW] PolicyLens v2.0.0 loaded');
+console.log('[SW] PolicyLens ' + CACHE_NAME + ' loaded');

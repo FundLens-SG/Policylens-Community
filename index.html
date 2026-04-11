@@ -51,7 +51,38 @@ console.error=function(){var m=arguments[0]||'';if(typeof m==='string'&&m.includ
 // steps, zero data loss (partial extractions already survive via
 // the sessionStorage resume banner).
 // ═══════════════════════════════════════════════════════════════
-const EXPECTED_SW_VERSION = 'policylens-v2.0.0';
+const EXPECTED_SW_VERSION = 'policylens-v2.1.0b';
+
+// ═══════════════════════════════════════════════════════════════
+// v2.1.0b: TEMPORARY COOP CONSOLE-WARN FILTER
+// ───────────────────────────────────────────────────────────────
+// GitHub Pages serves Cross-Origin-Opener-Policy: same-origin, which
+// trips a console warning every time the GIS library polls
+// popup.window.closed during the OAuth consent flow. The warning is
+// cosmetic — popup polling still works, and the v2.1.0a error_callback
+// wiring catches any actual hangs — but it spams the console 4x per
+// connect attempt and confuses anyone reviewing the production logs.
+//
+// This filter wraps console.warn to swallow EXACTLY the COOP message
+// string. All other warnings pass through unchanged. We do not touch
+// console.error, console.log, or any other channel.
+//
+// v2.1.0c: REMOVE THIS FILTER when redirect-mode OAuth ships. Once
+// the GIS popup mode is gone, COOP warnings can no longer fire and
+// this whole block becomes dead code. Grep for "v2.1.0c: REMOVE THIS
+// FILTER" to find it from the next batch.
+// ═══════════════════════════════════════════════════════════════
+(function() {
+  const COOP_PATTERN = 'Cross-Origin-Opener-Policy policy would block the window.closed call';
+  const _origWarn = console.warn;
+  console.warn = function() {
+    if (arguments.length > 0 && typeof arguments[0] === 'string' && arguments[0].indexOf(COOP_PATTERN) >= 0) {
+      // Swallow — this is the GIS popup polling noise on GitHub Pages.
+      return;
+    }
+    return _origWarn.apply(console, arguments);
+  };
+})();
 
 function __plShowUpdateToast(msg) {
   try {
@@ -69,6 +100,38 @@ function __plHideUpdateToast() {
   try {
     const el = document.getElementById('__pl_update_toast');
     if (el) el.remove();
+  } catch(_) {}
+}
+
+// v2.1.0b: Non-blocking version-mismatch banner. Shown when the SW
+// reports a version that disagrees with EXPECTED_SW_VERSION AND the
+// auto-reload path is blocked (mid-extraction, or already reloaded
+// once this session). Gives the user manual Reload control.
+function __plShowVersionMismatchBanner(activeVersion, expectedVersion) {
+  try {
+    if (document.getElementById('__pl_version_banner')) return; // already shown
+    const el = document.createElement('div');
+    el.id = '__pl_version_banner';
+    el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:rgba(212,169,106,0.96);color:#0b0f1a;padding:10px 16px;font-family:system-ui,sans-serif;font-size:13px;font-weight:600;box-shadow:0 2px 8px rgba(0,0,0,0.3);z-index:999998;display:flex;align-items:center;justify-content:center;gap:12px;flex-wrap:wrap;';
+    const msg = document.createElement('span');
+    msg.textContent = '✨ PolicyLens updated to ' + (expectedVersion || 'a new version') + ' — reload to apply (you have ' + (activeVersion || 'an older') + ')';
+    el.appendChild(msg);
+    const btn = document.createElement('button');
+    btn.textContent = 'Reload';
+    btn.style.cssText = 'background:#0b0f1a;color:#c9a96e;border:none;padding:6px 16px;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer';
+    btn.onclick = () => {
+      try { sessionStorage.removeItem('__pl_sw_reloaded_this_session'); } catch(_) {}
+      window.location.reload();
+    };
+    el.appendChild(btn);
+    const dismiss = document.createElement('button');
+    dismiss.textContent = '✕';
+    dismiss.title = 'Dismiss until next page load';
+    dismiss.style.cssText = 'background:transparent;color:#0b0f1a;border:none;padding:4px 8px;font-size:14px;cursor:pointer;opacity:0.7';
+    dismiss.onclick = () => { try { el.remove(); } catch(_) {} };
+    el.appendChild(dismiss);
+    document.body?.appendChild(el) || document.documentElement.appendChild(el);
+    console.log('[SW Update] Version mismatch banner shown:', activeVersion, '→', expectedVersion);
   } catch(_) {}
 }
 
@@ -174,8 +237,17 @@ if('serviceWorker' in navigator && location.hostname.includes('github.io')){
                     setTimeout(() => window.location.reload(), 600);
                   } else {
                     try { sessionStorage.setItem('__pl_sw_reload_pending', '1'); } catch(_) {}
+                    // v2.1.0b: extraction is running, can't auto-reload — show
+                    // the user-controlled banner instead so they can choose
+                    // when to apply the update.
+                    __plShowVersionMismatchBanner(result.version, EXPECTED_SW_VERSION);
                   }
                 }
+              } else {
+                // v2.1.0b: We already auto-reloaded once this session and the
+                // SW is STILL on the wrong version. Auto-reload exhausted —
+                // surface the manual banner so the user can intervene.
+                __plShowVersionMismatchBanner(result.version, EXPECTED_SW_VERSION);
               }
             } else if (result && result.version === EXPECTED_SW_VERSION) {
               console.log('[SW Update] Version matches:', result.version);
@@ -378,7 +450,7 @@ label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;lett
       <button class="abtn abtn-s" onclick="authShow('signup')">Create Account</button>
       <div class="auth-link" onclick="authShow('reset')">Forgot password?</div>
       <div style="text-align:center;margin-top:24px;font-size:11px;opacity:0.6">
-        <span>PolicyLens v2.1.0a</span>
+        <span>PolicyLens v2.1.0b</span>
         <span style="margin:0 8px">&middot;</span>
         <button onclick="document.getElementById('auth-changelog').style.display=document.getElementById('auth-changelog').style.display==='none'?'block':'none'" style="background:none;border:none;color:#c9a96e;cursor:pointer;font-size:11px;padding:0">Changelog</button>
       </div>
@@ -717,11 +789,39 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.1.0a';
-const APP_VERSION_DATE = '2026-04-11';
-const APP_VERSION_NAME = 'Phase A Hotfixes';
+const APP_VERSION = 'v2.1.0b';
+const APP_VERSION_DATE = '2026-04-12';
+const APP_VERSION_NAME = 'Pre-Phase B Cleanup';
 
 const CHANGELOG = [
+  {
+    version: 'v2.1.0b',
+    date: '2026-04-12',
+    name: 'Pre-Phase B Cleanup',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Suppress noisy Cross-Origin-Opener-Policy console warnings from the GIS popup polling on GitHub Pages. The warnings were cosmetic — the v2.1.0a error_callback wiring already handles any actual popup failures — but they spammed the console 4× per OAuth attempt. Filter is targeted (exact-substring on the COOP message) and TEMPORARY: it will be removed in v2.1.0c when the OAuth flow migrates from popup mode to redirect mode. Grep for "v2.1.0c: REMOVE THIS FILTER" to find the line.',
+          'Service worker version-mismatch banner: when the SW reports a CACHE_NAME that disagrees with EXPECTED_SW_VERSION (e.g. a deploy bumped APP_VERSION but the user\'s tab is still controlled by the previous SW), a non-blocking banner now appears at the top of the page with a Reload button. Bumped CACHE_NAME and EXPECTED_SW_VERSION to policylens-v2.1.0b in lockstep so the SW load message in console is no longer the stale "v2.0.0" string.',
+        ]
+      },
+      {
+        heading: 'UI',
+        items: [
+          'Drive status chip removed from header row 1. The Phase A chip duplicated information already shown in Settings → Google Drive card. Header was getting cramped and the chip added no value when the connection state was already visible in Settings. Component definition retained in code (may be reused in Phase B) but no longer mounted.',
+          'Orientation lock button (the small floating screen-rotation toggle, bottom-right) now hides itself entirely on devices where the Screen Orientation API is unavailable — typically all desktop browsers. Mobile / tablet users still see it. Previously the button rendered identically to the User Management button on desktop and was confusing. The graceful "lock unavailable" log message also no longer fires on desktop because the button isn\'t there to click.',
+        ]
+      },
+      {
+        heading: 'Deploy hygiene',
+        items: [
+          'CACHE_NAME (sw.js) and EXPECTED_SW_VERSION (index.html) are now bumped together when shipping. This batch establishes the convention going forward — every release that ships sw.js changes or index.html static-asset changes should bump both, and the version-mismatch banner from this release is the safety net for the rare case when one is forgotten.',
+          'v2.1.0c (next batch, before Phase B): full migration from GIS popup OAuth to redirect-mode OAuth. This eliminates the COOP issue at the source rather than filtering its symptoms, and is more mobile-friendly. Requires a one-time Google Cloud Console change (add Authorized redirect URI for the deployed Pages URL).',
+        ]
+      },
+    ]
+  },
   {
     version: 'v2.1.0a',
     date: '2026-04-11',
@@ -11422,17 +11522,30 @@ function PresentMode() {
 //   without API: still tracks the preference for visual feedback and CSS
 //   When in 'auto' mode, the OS decides — no override.
 const OrientationLock = memo(function OrientationLock() {
+  // v2.1.0b: Hide the button entirely on devices where screen.orientation.lock
+  // is not a function (typically all desktop browsers). Previously the button
+  // rendered but the lock call silently failed, leaving a useless icon next
+  // to the User Management button that looked confusingly identical. The
+  // check is done via lazy useState initializer so it runs ONCE at mount —
+  // hook count stays constant per render, the early return at the bottom
+  // is a structurally safe pattern.
+  const [supported] = useState(() => {
+    try {
+      const so = (typeof screen !== 'undefined') && screen.orientation;
+      return !!(so && typeof so.lock === 'function');
+    } catch (_) { return false; }
+  });
   const [mode, setMode] = useState(() => {
     try { return localStorage.getItem('policylens-orientation-lock') || 'auto'; }
     catch(e) { return 'auto'; }
   });
-  const [supported, setSupported] = useState(true);
 
-  // Apply the lock when mode changes
+  // Apply the lock when mode changes (only fires when supported is true,
+  // but the effect itself is unconditional to keep hook count constant)
   useEffect(() => {
+    if (!supported) return;
     try { localStorage.setItem('policylens-orientation-lock', mode); } catch(e) {}
-    const so = (typeof screen !== 'undefined') && screen.orientation;
-    if(!so) { setSupported(false); return; }
+    const so = screen.orientation;
     const apply = async () => {
       try {
         if(mode === 'auto') {
@@ -11449,7 +11562,11 @@ const OrientationLock = memo(function OrientationLock() {
       }
     };
     apply();
-  }, [mode]);
+  }, [mode, supported]);
+
+  // v2.1.0b: After all hooks have run, hide entirely on desktop / unsupported
+  // browsers. Single deterministic exit, hook count is constant above this line.
+  if (!supported) return null;
 
   const cycle = () => {
     setMode(m => m === 'auto' ? 'portrait' : m === 'portrait' ? 'landscape' : 'auto');
@@ -11462,7 +11579,7 @@ const OrientationLock = memo(function OrientationLock() {
   return (
     <button
       onClick={cycle}
-      title={`Orientation: ${labels[mode]} (tap to change)${supported?'':' — lock API unavailable on this browser'}`}
+      title={`Orientation: ${labels[mode]} (tap to change)`}
       aria-label={`Orientation lock: ${labels[mode]}`}
       style={{
         position:'fixed',
@@ -11608,8 +11725,11 @@ function Header() {
           </button>
           {/* v15 STAGE 10: SESSION COST METER */}
           <CostMeterChip />
-          {/* v2.1.0 Phase A: Drive status — hidden when Local-only mode is ON (default) */}
-          <DriveStatusChip />
+          {/* v2.1.0b: DriveStatusChip removed from header — connection status
+              now lives only in Settings → Google Drive card to reduce header
+              clutter and avoid duplicating information. The component
+              definition is retained in code (search for `function
+              DriveStatusChip`) and may be remounted in a future phase. */}
           <button onClick={()=>setPresentMode(true)} disabled={policies.length===0}
             title="Present mode — full-screen client view"
             style={{background:policies.length===0?'var(--bg3)':'linear-gradient(135deg,#d4a96a,#b8935a)',color:policies.length===0?'var(--text3)':'#0b0f1a',border:'1px solid rgba(212,169,106,.3)',padding:'0 10px',height:28,borderRadius:14,display:'flex',alignItems:'center',justifyContent:'center',cursor:policies.length===0?'not-allowed':'pointer',fontSize:11,fontWeight:700,flexShrink:0,opacity:policies.length===0?.4:1,gap:4}}>
