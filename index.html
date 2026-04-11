@@ -378,7 +378,7 @@ label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;lett
       <button class="abtn abtn-s" onclick="authShow('signup')">Create Account</button>
       <div class="auth-link" onclick="authShow('reset')">Forgot password?</div>
       <div style="text-align:center;margin-top:24px;font-size:11px;opacity:0.6">
-        <span>PolicyLens v2.1.0</span>
+        <span>PolicyLens v2.1.0a</span>
         <span style="margin:0 8px">&middot;</span>
         <button onclick="document.getElementById('auth-changelog').style.display=document.getElementById('auth-changelog').style.display==='none'?'block':'none'" style="background:none;border:none;color:#c9a96e;cursor:pointer;font-size:11px;padding:0">Changelog</button>
       </div>
@@ -717,11 +717,26 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.1.0';
+const APP_VERSION = 'v2.1.0a';
 const APP_VERSION_DATE = '2026-04-11';
-const APP_VERSION_NAME = 'Google Drive — Phase A (Auth + Primitives)';
+const APP_VERSION_NAME = 'Phase A Hotfixes';
 
 const CHANGELOG = [
+  {
+    version: 'v2.1.0a',
+    date: '2026-04-11',
+    name: 'Phase A Hotfixes',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Fix React error #310 on first load (DriveStatusChip): the chip used a `return null` early-exit when Local-only mode was on. Even though all hooks were called above the return, production-minified React was throwing #310 on first load specifically on Dashboard. Replaced with always-render-the-span + display:none. Hook count is now provably constant.',
+          'Fix Connect button stuck on "Connecting…" after OAuth errors: the GIS token client was missing its error_callback wire-up. When the popup failed before producing a token response (popup closed by user, popup blocked, network failure, or 403 access_denied where Google shows its own "Access blocked" UI), GIS called neither callback nor any error path — the Promise hung forever, the try/catch/finally never ran, busy state never reset.',
+          'Fix friendly mapped error messages never appearing in the UI: same root cause as the stuck button — when the Promise hung, the catch block in handleConnect never fired, so setStatusMsg never wrote the error to the display element. error_callback now rejects the Promise via mapDriveError, the catch fires, the friendly message renders. Also: handleToggleLocalOnly now clears any stale statusMsg when the dev toggle flips.',
+        ]
+      },
+    ]
+  },
   {
     version: 'v2.1.0',
     date: '2026-04-11',
@@ -8294,6 +8309,26 @@ function _ensureDriveTokenClient() {
 // or fall through to a generic toast.
 function mapDriveError(err) {
   if (!err) return { kind: 'unknown', message: 'Drive request failed.' };
+  // v2.1.0a (Bug 2+3): GIS error_callback shape — popup-level failures
+  // before any token response. Shape is { type, message? } where type is
+  // one of 'popup_failed_to_open' / 'popup_closed' / 'unknown'.
+  // Handled BEFORE the generic err.error / err.status branches because
+  // the GIS shape is different from a Drive API HTTP response.
+  if (err.type) {
+    if (err.type === 'popup_closed') {
+      return { kind: 'cancelled', message: 'Sign-in cancelled.' };
+    }
+    if (err.type === 'popup_failed_to_open') {
+      return { kind: 'popup-blocked', message: 'Sign-in popup was blocked. Allow popups for this site and try again.' };
+    }
+    // type === 'unknown' — could be access_denied surfaced via popup UI,
+    // or a transient failure. Inspect message for the access_denied hint.
+    const tMsg = (err.message || '').toLowerCase();
+    if (tMsg.includes('access_denied') || tMsg.includes('access denied') || tMsg.includes('not authorized') || tMsg.includes('blocked')) {
+      return { kind: 'access-denied', message: DRIVE_ACCESS_DENIED_MSG };
+    }
+    return { kind: 'unknown', message: 'Drive sign-in failed: ' + (err.message || err.type) };
+  }
   // Status code from fetch response or thrown shape
   const status = err.status || err.code || (err.response && err.response.status);
   const errMsg = (err.message || '').toLowerCase();
@@ -8359,10 +8394,17 @@ const driveClient = {
     const tokenClient = _ensureDriveTokenClient();
     if (!tokenClient) throw new Error('Failed to initialize Google OAuth token client');
     return new Promise((resolve, reject) => {
+      // v2.1.0a (Bug 2+3): Track whether the Promise has settled so neither
+      // callback nor error_callback can resolve/reject twice. GIS sometimes
+      // fires both for the same request — particularly when an access-denied
+      // popup is closed by the user mid-flow.
+      let settled = false;
+      const safeResolve = (v) => { if (settled) return; settled = true; resolve(v); };
+      const safeReject = (e) => { if (settled) return; settled = true; reject(e); };
       tokenClient.callback = async (resp) => {
         if (resp.error) {
           const mapped = mapDriveError({ error: resp.error, error_description: resp.error_description });
-          reject(Object.assign(new Error(mapped.message), { kind: mapped.kind }));
+          safeReject(Object.assign(new Error(mapped.message), { kind: mapped.kind }));
           return;
         }
         _driveAccessToken = resp.access_token;
@@ -8373,16 +8415,28 @@ const driveClient = {
           await driveClient.ensureFolder();
           setDriveStatus('connected');
           console.log('[Drive] ✓ Connected as', me?.user?.emailAddress || '(unknown)');
-          resolve({ ok: true, email: me?.user?.emailAddress || null });
+          safeResolve({ ok: true, email: me?.user?.emailAddress || null });
         } catch (e) {
           const mapped = mapDriveError(e);
-          reject(Object.assign(new Error(mapped.message), { kind: mapped.kind }));
+          safeReject(Object.assign(new Error(mapped.message), { kind: mapped.kind }));
         }
+      };
+      // v2.1.0a (Bug 2+3): error_callback handles popup-level failures that
+      // happen BEFORE GIS produces any token response — popup closed by user,
+      // popup blocked by browser, network failure, or 403 access_denied where
+      // Google shows its own "Access blocked" UI inside the popup. Without
+      // this wire-up, GIS calls neither callback nor anything else, the
+      // Promise hangs forever, handleConnect's try/catch/finally never runs,
+      // and the Connect button stays stuck on "Connecting…".
+      tokenClient.error_callback = (err) => {
+        const mapped = mapDriveError(err || {});
+        console.warn('[Drive] error_callback:', err?.type || '(unknown)', '→', mapped.kind, mapped.message);
+        safeReject(Object.assign(new Error(mapped.message), { kind: mapped.kind }));
       };
       try {
         tokenClient.requestAccessToken({ prompt: 'consent' });
       } catch (e) {
-        reject(e);
+        safeReject(e);
       }
     });
   },
@@ -8397,12 +8451,17 @@ const driveClient = {
     const tokenClient = _ensureDriveTokenClient();
     if (!tokenClient) return false;
     return new Promise((resolve) => {
+      // v2.1.0a (Bug 2+3): same settled-once guard as signInInteractive,
+      // since silent re-auth has the same hang risk if GIS fires neither
+      // callback nor error_callback (rare but documented).
+      let settled = false;
+      const safeResolve = (v) => { if (settled) return; settled = true; resolve(v); };
       tokenClient.callback = (resp) => {
         if (resp.error) {
           // Silent failure is expected — fall back to interactive
           console.log('[Drive] Silent re-auth failed:', resp.error, '— Reconnect required');
           setDriveStatus('reconnect-needed');
-          resolve(false);
+          safeResolve(false);
           return;
         }
         _driveAccessToken = resp.access_token;
@@ -8415,12 +8474,20 @@ const driveClient = {
           setDriveStatus('connected');
           console.log('[Drive] ✓ Silent re-auth ok');
         }
-        resolve(true);
+        safeResolve(true);
+      };
+      // v2.1.0a (Bug 2+3): error_callback for popup-level / silent failures.
+      // Resolves false (not throws) because silent re-auth is meant to fail
+      // gracefully and fall back to interactive on the user's next click.
+      tokenClient.error_callback = (err) => {
+        console.log('[Drive] Silent re-auth error_callback:', err?.type || '(unknown)');
+        setDriveStatus('reconnect-needed');
+        safeResolve(false);
       };
       try {
         tokenClient.requestAccessToken({ prompt: 'none' });
       } catch (_) {
-        resolve(false);
+        safeResolve(false);
       }
     });
   },
@@ -11449,9 +11516,16 @@ function CostMeterChip() {
 }
 
 // v2.1.0 Phase A: Drive status chip in Header row 1.
-// Hidden entirely when Local-only mode is ON (the default).
+// Hidden via display:none when Local-only mode is ON (the default).
 // Display only — no live sync states (synced/syncing/offline) yet.
 // Click jumps to Settings tab where the user can connect/disconnect.
+//
+// v2.1.0a (Bug 1): Removed the early `return null` that previously
+// guarded the local-only path. Even though all hooks were called
+// above the return, production-minified React was throwing error
+// #310 on first load. Now always returns the span — visibility is
+// controlled via display:none — so the component has a single
+// deterministic return shape and a provably constant hook count.
 function DriveStatusChip() {
   const { setTab } = useContext(AppCtx);
   const [, force] = useState(0);
@@ -11460,8 +11534,7 @@ function DriveStatusChip() {
     const unsub = driveClient.onStatusChange(() => force(n => n + 1));
     return unsub;
   }, []);
-  // Hide entirely when Local-only mode is on
-  if (driveClient.isLocalOnly()) return null;
+  const hidden = driveClient.isLocalOnly();
   const status = driveClient.getStatus();
   const map = {
     'disconnected':     { icon: '○', label: 'Drive', color: 'var(--text3)', bg: 'var(--bg3)',           border: 'var(--border)',          title: 'Drive: not connected — click to set up in Settings' },
@@ -11471,8 +11544,8 @@ function DriveStatusChip() {
   const m = map[status] || map['disconnected'];
   return React.createElement('span', {
     title: m.title,
-    onClick: () => setTab('settings'),
-    style: {fontSize:10,fontWeight:600,color:m.color,padding:'2px 8px',background:m.bg,borderRadius:10,border:'1px solid '+m.border,whiteSpace:'nowrap',flexShrink:0,cursor:'pointer'}
+    onClick: hidden ? undefined : () => setTab('settings'),
+    style: {display: hidden ? 'none' : 'inline-flex', alignItems:'center', fontSize:10, fontWeight:600, color:m.color, padding:'2px 8px', background:m.bg, borderRadius:10, border:'1px solid '+m.border, whiteSpace:'nowrap', flexShrink:0, cursor: hidden ? 'default' : 'pointer'}
   }, m.icon + ' ' + m.label);
 }
 
@@ -29245,6 +29318,10 @@ function DriveConnectionCard() {
 
   const handleToggleLocalOnly = (on) => {
     driveClient.setLocalOnly(on);
+    // v2.1.0a (Bug 3): clear any stale error/info message when the dev
+    // toggle flips, so old failure text doesn't linger after the user
+    // dismisses the feature.
+    setStatusMsg(null);
     force(n => n + 1);
   };
 
