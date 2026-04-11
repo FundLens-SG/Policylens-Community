@@ -15,6 +15,7 @@ console.error=function(){var m=arguments[0]||'';if(typeof m==='string'&&m.includ
 <link rel="manifest" href="data:application/json,%7B%22name%22%3A%22PolicyLens%22%2C%22short_name%22%3A%22PolicyLens%22%2C%22start_url%22%3A%22.%22%2C%22display%22%3A%22standalone%22%2C%22orientation%22%3A%22any%22%2C%22background_color%22%3A%22%230b0f1a%22%2C%22theme_color%22%3A%22%23d4a96a%22%7D">
 <meta name="theme-color" content="#0b0f1a">
 <meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="PolicyLens">
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
@@ -51,38 +52,7 @@ console.error=function(){var m=arguments[0]||'';if(typeof m==='string'&&m.includ
 // steps, zero data loss (partial extractions already survive via
 // the sessionStorage resume banner).
 // ═══════════════════════════════════════════════════════════════
-const EXPECTED_SW_VERSION = 'policylens-v2.1.0b';
-
-// ═══════════════════════════════════════════════════════════════
-// v2.1.0b: TEMPORARY COOP CONSOLE-WARN FILTER
-// ───────────────────────────────────────────────────────────────
-// GitHub Pages serves Cross-Origin-Opener-Policy: same-origin, which
-// trips a console warning every time the GIS library polls
-// popup.window.closed during the OAuth consent flow. The warning is
-// cosmetic — popup polling still works, and the v2.1.0a error_callback
-// wiring catches any actual hangs — but it spams the console 4x per
-// connect attempt and confuses anyone reviewing the production logs.
-//
-// This filter wraps console.warn to swallow EXACTLY the COOP message
-// string. All other warnings pass through unchanged. We do not touch
-// console.error, console.log, or any other channel.
-//
-// v2.1.0c: REMOVE THIS FILTER when redirect-mode OAuth ships. Once
-// the GIS popup mode is gone, COOP warnings can no longer fire and
-// this whole block becomes dead code. Grep for "v2.1.0c: REMOVE THIS
-// FILTER" to find it from the next batch.
-// ═══════════════════════════════════════════════════════════════
-(function() {
-  const COOP_PATTERN = 'Cross-Origin-Opener-Policy policy would block the window.closed call';
-  const _origWarn = console.warn;
-  console.warn = function() {
-    if (arguments.length > 0 && typeof arguments[0] === 'string' && arguments[0].indexOf(COOP_PATTERN) >= 0) {
-      // Swallow — this is the GIS popup polling noise on GitHub Pages.
-      return;
-    }
-    return _origWarn.apply(console, arguments);
-  };
-})();
+const EXPECTED_SW_VERSION = 'policylens-v2.1.0c';
 
 function __plShowUpdateToast(msg) {
   try {
@@ -450,7 +420,7 @@ label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;lett
       <button class="abtn abtn-s" onclick="authShow('signup')">Create Account</button>
       <div class="auth-link" onclick="authShow('reset')">Forgot password?</div>
       <div style="text-align:center;margin-top:24px;font-size:11px;opacity:0.6">
-        <span>PolicyLens v2.1.0b</span>
+        <span>PolicyLens v2.1.0c</span>
         <span style="margin:0 8px">&middot;</span>
         <button onclick="document.getElementById('auth-changelog').style.display=document.getElementById('auth-changelog').style.display==='none'?'block':'none'" style="background:none;border:none;color:#c9a96e;cursor:pointer;font-size:11px;padding:0">Changelog</button>
       </div>
@@ -789,11 +759,49 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.1.0b';
+const APP_VERSION = 'v2.1.0c';
 const APP_VERSION_DATE = '2026-04-12';
-const APP_VERSION_NAME = 'Pre-Phase B Cleanup';
+const APP_VERSION_NAME = 'Redirect-mode OAuth';
 
 const CHANGELOG = [
+  {
+    version: 'v2.1.0c',
+    date: '2026-04-12',
+    name: 'Redirect-mode OAuth',
+    sections: [
+      {
+        heading: 'OAuth',
+        items: [
+          'Switched the Connect Google Drive flow from popup-mode (GIS initTokenClient) to manual implicit-grant redirect mode. The whole tab now navigates to accounts.google.com for the consent screen, then Google redirects back to https://fundlens-sg.github.io/Policylens-Community/#access_token=... and a fragment parser at app mount consumes the token. This eliminates the GIS popup polling that was causing 4 Cross-Origin-Opener-Policy console errors per Connect attempt — popup mode is gone, COOP violations are gone permanently.',
+          'OAuth state nonce (16 random bytes) is generated before each redirect and validated on return for CSRF protection. Mismatches surface a "Sign-in response invalid (security check failed)" toast.',
+          'In-flight connect intent is persisted to sessionStorage with a 5-minute expiry. Aborted flows (user closes the Google tab without completing consent) are detected on the next app mount via the orphan-intent branch and silently cleaned up — no false error display, no retry loops.',
+          'URL fragment is cleared via history.replaceState immediately on consume so the access token cannot leak via referrer headers, screenshots, or accidental re-processing on reload.',
+        ]
+      },
+      {
+        heading: 'UI',
+        items: [
+          'Removed duplicate "Connected as <email>" plain text label below the green status pill in the Google Drive Settings card. The pill itself already shows the email — the second label was redundant.',
+          'Added <meta name="mobile-web-app-capable" content="yes"> alongside the existing apple-mobile-web-app-capable tag to silence Chrome\'s deprecation warning about the Apple-prefixed name. The Apple-prefixed tag is retained because some iOS Safari versions still require it.',
+        ]
+      },
+      {
+        heading: 'Deploy hygiene',
+        items: [
+          'Removed the v2.1.0b console.warn filter for COOP messages. The filter never actually worked (the warnings were emitted by the browser security subsystem, not console.warn) and is moot now that popup mode is gone. Grep tag "v2.1.0c: REMOVE THIS FILTER" no longer appears in the codebase.',
+          'Removed the popup-mode error_callback wiring from signInInteractive (unreachable in redirect mode — the page navigates away before any callback can fire). error_callback wiring on signInSilent is RETAINED because silent re-auth still uses an iframe and is still vulnerable to GIS hangs.',
+        ]
+      },
+      {
+        heading: 'Known limitations & future migration',
+        items: [
+          'This release uses the OAuth 2.0 implicit grant (response_type=token), which Google has officially "discouraged for new applications" since 2024 in favour of the authorization code flow with PKCE. Existing OAuth clients (including this one) are grandfathered and the implicit grant continues to function. There is no announced sunset date.',
+          'Migration path if Google ever sunsets implicit grant: switch _buildOAuthURL to response_type=code, generate a PKCE code_verifier + code_challenge per request, persist the verifier across the redirect, exchange the returned code at https://oauth2.googleapis.com/token via PKCE (no client_secret required for SPAs). Adds approximately 100 lines. No other code path changes — the fragment parser becomes a query parser, the token storage and ensureFolder calls stay identical.',
+          'Implicit grant does not return refresh tokens. Access tokens are valid for ~1 hour. After expiry the user has to click Connect again. signInSilent (iframe-based silent re-auth, still on GIS) handles refresh during the same session. Phase B will gate save operations on token validity and trigger silent re-auth when needed.',
+        ]
+      },
+    ]
+  },
   {
     version: 'v2.1.0b',
     date: '2026-04-12',
@@ -8332,6 +8340,15 @@ const DRIVE_CLIENT_ID = '502722318908-lsdr6qhoavkok0kd3ipa94mip1uqu3kp.apps.goog
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const DRIVE_FOLDER_NAME = 'PolicyLens';
 const DRIVE_REFRESH_WARN_MS = 6 * 24 * 60 * 60 * 1000; // 6 days — banner threshold
+// v2.1.0c: Hardcoded redirect URI for the manual implicit-grant flow.
+// Must match EXACTLY the value registered in Google Cloud Console under
+// the OAuth 2.0 client's "Authorized redirect URIs" — Google performs an
+// exact string comparison. Trailing slash is significant. Do NOT add URL
+// normalization here; the value must remain literally string-equal to the
+// console registration.
+const DRIVE_REDIRECT_URI = 'https://fundlens-sg.github.io/Policylens-Community/';
+const DRIVE_INTENT_KEY = 'policylens_drive_pending_intent';
+const DRIVE_INTENT_TTL_MS = 5 * 60 * 1000; // 5 minutes — stale intent guard
 // Generic admin contact string used in the 403 access_denied path.
 // Intentionally generic — no personal contact info per v2.1.0 decision.
 const DRIVE_ACCESS_DENIED_MSG = "Your Gmail isn't on the access list yet. Contact your PolicyLens administrator to be added.";
@@ -8391,7 +8408,149 @@ async function _waitForGIS(timeoutMs = 5000) {
   return false;
 }
 
+// ═══════════════════════════════════════════════════════════════
+// v2.1.0c: MANUAL IMPLICIT-GRANT REDIRECT FLOW
+// ───────────────────────────────────────────────────────────────
+// signInInteractive bypasses GIS entirely and constructs an OAuth 2.0
+// implicit-grant authorization URL by hand. The full tab navigates to
+// accounts.google.com, the user consents, Google redirects back to
+// DRIVE_REDIRECT_URI with #access_token=... in the URL fragment, and
+// the fragment parser at App() mount time consumes the token.
+//
+// Why bypass GIS?
+//   GIS's initTokenClient is popup-only — no ux_mode parameter. Popups
+//   trigger Cross-Origin-Opener-Policy violations on GitHub Pages
+//   because GH Pages serves COOP: same-origin and the GIS popup-polling
+//   internals access window.closed across origins. v2.1.0a's
+//   error_callback wiring caught the resulting hangs but the COOP
+//   warnings still spammed the console 4× per Connect attempt.
+//
+//   GIS's initCodeClient supports ux_mode: 'redirect' but returns an
+//   authorization code, not a token, and the code exchange call to
+//   https://oauth2.googleapis.com/token requires a client_secret OR
+//   PKCE. Embedding a client_secret in a static SPA is a security
+//   anti-pattern; PKCE adds ~100 lines of crypto + storage handling.
+//   Manual implicit grant skips both problems.
+//
+// Future migration path (if Google ever sunsets implicit grant):
+//   Switch _buildOAuthURL to response_type=code, generate a PKCE
+//   code_verifier + code_challenge per request, persist the verifier
+//   across the redirect, exchange the returned code at oauth2.googleapis.com/token
+//   via PKCE (no client_secret required for SPAs). Adds ~100 lines.
+//   No other code path changes — the fragment parser becomes a query
+//   parser, the token storage and ensureFolder calls stay identical.
+//   See https://datatracker.ietf.org/doc/html/rfc7636 for PKCE spec.
+// ═══════════════════════════════════════════════════════════════
+
+function _buildOAuthURL(state) {
+  const params = new URLSearchParams({
+    client_id: DRIVE_CLIENT_ID,
+    redirect_uri: DRIVE_REDIRECT_URI,
+    response_type: 'token',
+    scope: DRIVE_SCOPE,
+    state: state,
+    include_granted_scopes: 'true',
+    prompt: 'consent',
+  });
+  return 'https://accounts.google.com/o/oauth2/v2/auth?' + params.toString();
+}
+
+// Generate a 16-byte hex nonce for OAuth state CSRF protection.
+function _generateOAuthState() {
+  const buf = new Uint8Array(16);
+  crypto.getRandomValues(buf);
+  return Array.from(buf).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// ──────────────────────────────────────────────
+// _consumeOAuthRedirect — runs once per app mount.
+// Returns one of:
+//   null                       — no OAuth fragment, no orphan intent (or orphan was silently cleaned)
+//   { kind: 'success', ... }   — token in URL, state matched, ready to consume
+//   { kind: 'error', ... }     — Google returned #error=... in fragment
+//   { kind: 'expired', ... }   — fragment present but stored intent is older than DRIVE_INTENT_TTL_MS
+//   { kind: 'state-mismatch' } — fragment present but state nonce doesn't match
+//   { kind: 'unknown' }        — fragment is malformed (no access_token, no error)
+//
+// Side effects:
+//   - Always cleans the URL fragment via history.replaceState before returning
+//     (so the access token never leaks via referrer headers, screenshots, or
+//     accidental re-processing on reload).
+//   - Always clears sessionStorage[DRIVE_INTENT_KEY] when returning a non-null
+//     result (the intent is single-use).
+//   - When called with NO fragment but a stale/orphan intent in sessionStorage,
+//     silently clears the intent and returns null. This handles the abort case
+//     (user closes Google tab without consenting) without showing any toast.
+// ──────────────────────────────────────────────
+function _consumeOAuthRedirect() {
+  const hash = window.location.hash || '';
+  const hasOAuthFragment = hash.startsWith('#access_token=') || hash.startsWith('#error=');
+  // Read intent regardless — needed for both consume-success and orphan-cleanup paths
+  let intent = null;
+  try {
+    const raw = sessionStorage.getItem(DRIVE_INTENT_KEY);
+    if (raw) intent = JSON.parse(raw);
+  } catch (_) {}
+
+  if (!hasOAuthFragment) {
+    // No OAuth fragment in URL. Sub-cases:
+    //   - No intent → fresh page load, do nothing
+    //   - Intent present → aborted flow OR stale orphan; clean up silently
+    if (intent) {
+      try { sessionStorage.removeItem(DRIVE_INTENT_KEY); } catch (_) {}
+      console.log('[Drive] Aborted/stale OAuth intent detected — cleaned up silently');
+    }
+    return null;
+  }
+
+  // We have an OAuth fragment. Always clean the URL first so subsequent code
+  // can't accidentally re-process and so the token can't leak via referrer.
+  try { history.replaceState({}, '', window.location.pathname + window.location.search); } catch (_) {}
+  // Always clear the intent — single-use, we're consuming or rejecting it now.
+  try { sessionStorage.removeItem(DRIVE_INTENT_KEY); } catch (_) {}
+
+  // Intent missing or expired
+  if (!intent || (intent.expiresAt && Date.now() > intent.expiresAt)) {
+    return { kind: 'expired' };
+  }
+
+  const params = new URLSearchParams(hash.slice(1));
+  const returnedState = params.get('state');
+  // CSRF state validation
+  if (returnedState !== intent.state) {
+    return { kind: 'state-mismatch', returnTab: intent.returnTab };
+  }
+
+  // Error path
+  const err = params.get('error');
+  if (err) {
+    return {
+      kind: 'error',
+      error: err,
+      errorDescription: params.get('error_description') || '',
+      returnTab: intent.returnTab,
+    };
+  }
+
+  // Success path
+  const accessToken = params.get('access_token');
+  if (accessToken) {
+    return {
+      kind: 'success',
+      accessToken,
+      tokenType: params.get('token_type'),
+      expiresIn: parseInt(params.get('expires_in') || '3599'),
+      scope: params.get('scope'),
+      returnTab: intent.returnTab,
+    };
+  }
+  return { kind: 'unknown' };
+}
+
 // ── Initialize the OAuth token client (idempotent) ──
+// v2.1.0c: This is now used ONLY by signInSilent (iframe-based silent
+// re-auth via prompt:'none'). signInInteractive bypasses GIS entirely
+// and uses the manual implicit-grant redirect flow above.
 function _ensureDriveTokenClient() {
   if (_driveTokenClient) return _driveTokenClient;
   if (!window.google?.accounts?.oauth2) return null;
@@ -8481,64 +8640,45 @@ async function _driveFetch(url, opts) {
 // driveClient — public API
 // ──────────────────────────────────────────────
 const driveClient = {
-  // ── signInInteractive: opens consent screen ──
-  // Stamps oauthGrantedAt on success, calls ensureFolder, sets status.
-  // Returns { ok: true, email } on success or throws on failure.
-  async signInInteractive() {
-    const ready = await _waitForGIS();
-    if (!ready) {
-      const err = new Error('Google sign-in library failed to load. Check your network connection and try again.');
-      err.kind = 'gis-load-failed';
-      throw err;
+  // ── signInInteractive: redirect-mode OAuth (v2.1.0c) ──
+  // Generates a CSRF state nonce, persists the in-flight intent to
+  // sessionStorage with a 5-minute expiry, then navigates the entire
+  // tab to Google's authorization endpoint. The page unmounts. After
+  // consent, Google redirects back to DRIVE_REDIRECT_URI with
+  // #access_token=... in the URL fragment, and _consumeOAuthRedirect
+  // (called from App() mount) consumes it.
+  //
+  // The previous popup-mode signInInteractive (v2.1.0a/b) used GIS
+  // initTokenClient and required intricate callback/error_callback
+  // wiring + safeResolve/safeReject settled-once guards. None of that
+  // is needed in redirect mode because there's no JavaScript context
+  // running between the redirect-out and the redirect-back. The page
+  // is gone. The function returns a never-resolving Promise so any
+  // accidental await stays parked until the tab navigates away.
+  async signInInteractive(opts) {
+    const returnTab = (opts && opts.returnTab) || 'settings';
+    const state = _generateOAuthState();
+    const intent = {
+      state,
+      returnTab,
+      timestamp: Date.now(),
+      expiresAt: Date.now() + DRIVE_INTENT_TTL_MS,
+    };
+    try {
+      sessionStorage.setItem(DRIVE_INTENT_KEY, JSON.stringify(intent));
+    } catch (e) {
+      // sessionStorage write failed (Safari private mode, quota, etc.) —
+      // we still attempt the redirect but warn the user that recovery may fail.
+      console.warn('[Drive] Could not persist OAuth intent — recovery on return may fail:', e);
     }
-    const tokenClient = _ensureDriveTokenClient();
-    if (!tokenClient) throw new Error('Failed to initialize Google OAuth token client');
-    return new Promise((resolve, reject) => {
-      // v2.1.0a (Bug 2+3): Track whether the Promise has settled so neither
-      // callback nor error_callback can resolve/reject twice. GIS sometimes
-      // fires both for the same request — particularly when an access-denied
-      // popup is closed by the user mid-flow.
-      let settled = false;
-      const safeResolve = (v) => { if (settled) return; settled = true; resolve(v); };
-      const safeReject = (e) => { if (settled) return; settled = true; reject(e); };
-      tokenClient.callback = async (resp) => {
-        if (resp.error) {
-          const mapped = mapDriveError({ error: resp.error, error_description: resp.error_description });
-          safeReject(Object.assign(new Error(mapped.message), { kind: mapped.kind }));
-          return;
-        }
-        _driveAccessToken = resp.access_token;
-        driveLSSet(DRIVE_LS.oauthGrantedAt, String(Date.now()));
-        try {
-          const me = await driveClient.pingDriveAPI();
-          if (me?.user?.emailAddress) driveLSSet(DRIVE_LS.userEmail, me.user.emailAddress);
-          await driveClient.ensureFolder();
-          setDriveStatus('connected');
-          console.log('[Drive] ✓ Connected as', me?.user?.emailAddress || '(unknown)');
-          safeResolve({ ok: true, email: me?.user?.emailAddress || null });
-        } catch (e) {
-          const mapped = mapDriveError(e);
-          safeReject(Object.assign(new Error(mapped.message), { kind: mapped.kind }));
-        }
-      };
-      // v2.1.0a (Bug 2+3): error_callback handles popup-level failures that
-      // happen BEFORE GIS produces any token response — popup closed by user,
-      // popup blocked by browser, network failure, or 403 access_denied where
-      // Google shows its own "Access blocked" UI inside the popup. Without
-      // this wire-up, GIS calls neither callback nor anything else, the
-      // Promise hangs forever, handleConnect's try/catch/finally never runs,
-      // and the Connect button stays stuck on "Connecting…".
-      tokenClient.error_callback = (err) => {
-        const mapped = mapDriveError(err || {});
-        console.warn('[Drive] error_callback:', err?.type || '(unknown)', '→', mapped.kind, mapped.message);
-        safeReject(Object.assign(new Error(mapped.message), { kind: mapped.kind }));
-      };
-      try {
-        tokenClient.requestAccessToken({ prompt: 'consent' });
-      } catch (e) {
-        safeReject(e);
-      }
-    });
+    console.log('[Drive] Redirecting to Google for consent (state:', state.slice(0,8) + '…)');
+    // Navigate the entire tab. The page unmounts here.
+    window.location.href = _buildOAuthURL(state);
+    // Return a never-resolving Promise. The await in handleConnect will
+    // never return because the page is about to be replaced. The new
+    // mount after redirect-back starts fresh with busy=false (useState
+    // default), so no cleanup is needed.
+    return new Promise(() => {});
   },
 
   // ── signInSilent: tries prompt:'none' re-auth on app load ──
@@ -9470,6 +9610,53 @@ function App() {
   const [clientProfile, setClientProfile] = useState({name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[]});
   const [loading, setLoading] = useState(true);
   const [repoSource, setRepoSource] = useState('loading'); // 'supabase' | 'local' | 'loading'
+
+  // ── v2.1.0c: OAUTH REDIRECT-RETURN HANDLER ──
+  // Runs once on mount. If the URL contains an OAuth fragment from a
+  // redirect return, consume it: validate state nonce, store the access
+  // token in driveClient's in-memory slot, ping Drive for the user's
+  // email, ensure the PolicyLens folder exists, set status to connected,
+  // navigate back to the tab the user was on when they clicked Connect,
+  // and toast success or the friendly error message.
+  //
+  // Aborted-flow case (user clicked Connect, closed Google tab without
+  // consenting, then came back): _consumeOAuthRedirect detects the
+  // orphan sessionStorage intent on its own and silently cleans it up
+  // — this branch returns null and we do nothing.
+  useEffect(() => {
+    const result = _consumeOAuthRedirect();
+    if (!result) return;
+    if (result.kind === 'success') {
+      _driveAccessToken = result.accessToken;
+      driveLSSet(DRIVE_LS.oauthGrantedAt, String(Date.now()));
+      driveClient.pingDriveAPI()
+        .then(me => {
+          if (me?.user?.emailAddress) driveLSSet(DRIVE_LS.userEmail, me.user.emailAddress);
+          return driveClient.ensureFolder();
+        })
+        .then(() => {
+          setDriveStatus('connected');
+          if (result.returnTab) setTab(result.returnTab);
+          try { toast('✓ Connected to Google Drive', 'success', 3000); } catch (_) {}
+        })
+        .catch(e => {
+          const mapped = mapDriveError(e);
+          setDriveStatus('disconnected');
+          if (result.returnTab) setTab(result.returnTab);
+          try { toast(mapped.message, 'error', 5000); } catch (_) {}
+        });
+    } else if (result.kind === 'error') {
+      const mapped = mapDriveError({ error: result.error, error_description: result.errorDescription });
+      if (result.returnTab) setTab(result.returnTab);
+      try { toast(mapped.message, 'error', 5000); } catch (_) {}
+    } else if (result.kind === 'state-mismatch') {
+      if (result.returnTab) setTab(result.returnTab);
+      try { toast('Sign-in response invalid (security check failed). Please try again.', 'error', 5000); } catch (_) {}
+    } else if (result.kind === 'expired') {
+      try { toast("Sign-in didn't complete. Click Connect to try again.", 'warning', 4000); } catch (_) {}
+    }
+    // 'unknown' kind: silently ignore — malformed fragment, nothing to do
+  }, []);
   // ── PRESENT MODE ──
   // When true, the whole app swaps to a presentation-grade UI: big numbers,
   // stripped navigation, no editing surfaces. Designed for use during live
@@ -29409,18 +29596,29 @@ function DriveConnectionCard() {
   const grantedRel = grantedAt ? fmtRelativeTime(new Date(grantedAt).toISOString()) : null;
 
   const handleConnect = async () => {
+    // v2.1.0c: signInInteractive now navigates the entire tab away to
+    // accounts.google.com via window.location.href and returns a never-
+    // resolving Promise. The await below never returns. The success path
+    // is handled by App()'s _consumeOAuthRedirect useEffect on the next
+    // page mount after Google redirects back. The error path (consent
+    // denied, network failure during the redirect itself, etc.) is also
+    // handled there via the URL fragment.
+    //
+    // The duplicate "Connected as <email>" label that the pill at the
+    // top of this card already shows has been removed — there's no
+    // handleConnect success branch to set it from anymore.
     setBusy(true);
-    setStatusMsg({ kind: 'info', text: 'Opening Google sign-in…' });
+    setStatusMsg({ kind: 'info', text: 'Redirecting to Google sign-in…' });
     try {
-      const res = await driveClient.signInInteractive();
-      setStatusMsg({ kind: 'success', text: 'Connected as ' + (res.email || cachedEmail || 'your Google account') });
-      setPingedEmail(res.email || null);
-      setTimeout(() => setStatusMsg(null), 4000);
+      await driveClient.signInInteractive({ returnTab: 'settings' });
+      // Unreachable in v2.1.0c — the line above navigates the tab away.
     } catch (err) {
+      // Only reached if signInInteractive throws synchronously before the
+      // window.location.href assignment (e.g. crypto.getRandomValues fails,
+      // sessionStorage write fails AND the redirect itself fails). Rare.
       const mapped = err.kind ? { kind: err.kind, message: err.message } : mapDriveError(err);
       setStatusMsg({ kind: 'error', text: mapped.message });
-      console.warn('[Drive] Connect failed:', mapped);
-    } finally {
+      console.warn('[Drive] Connect failed before redirect:', mapped);
       setBusy(false);
     }
   };

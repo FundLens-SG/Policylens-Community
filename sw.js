@@ -22,7 +22,7 @@
 //     the Tier 1 in-page extraction with batch-level resume.
 // ═══════════════════════════════════════════════════════════════
 
-const CACHE_NAME = 'policylens-v2.1.0b';
+const CACHE_NAME = 'policylens-v2.1.0c';
 const ASSETS = [
   './',
   './index.html',
