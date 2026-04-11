@@ -371,7 +371,7 @@ label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;lett
       <button class="abtn abtn-s" onclick="authShow('signup')">Create Account</button>
       <div class="auth-link" onclick="authShow('reset')">Forgot password?</div>
       <div style="text-align:center;margin-top:24px;font-size:11px;opacity:0.6">
-        <span>PolicyLens v2.0.1</span>
+        <span>PolicyLens v2.0.9</span>
         <span style="margin:0 8px">&middot;</span>
         <button onclick="document.getElementById('auth-changelog').style.display=document.getElementById('auth-changelog').style.display==='none'?'block':'none'" style="background:none;border:none;color:#c9a96e;cursor:pointer;font-size:11px;padding:0">Changelog</button>
       </div>
@@ -710,11 +710,153 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.0.1';
-const APP_VERSION_DATE = '2026-04-10';
-const APP_VERSION_NAME = 'Reasoning & Field-Tool Release';
+const APP_VERSION = 'v2.0.9';
+const APP_VERSION_DATE = '2026-04-11';
+const APP_VERSION_NAME = 'EXTRACT_PROMPT Scope Fix';
 
 const CHANGELOG = [
+  {
+    version: 'v2.0.9',
+    date: '2026-04-11',
+    name: 'EXTRACT_PROMPT Scope Fix',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Fix EXTRACT_PROMPT reference error in extract stage (exposed by v2.0.8 xlsx routing fix) — the v15 job queue\'s performOCR and case \'extracting\' handlers were referencing EXTRACT_PROMPT as if it were a module-level constant, but it was declared inside the Policies component. Scanned PDFs and xlsx files that reached these code paths threw ReferenceError instead of extracting',
+          'EXTRACT_PROMPT now lives at module scope. xlsx, scanned PDFs, and any file falling through to the Gemini→Claude tier loop in performOCR now reach the AI successfully',
+        ]
+      },
+    ]
+  },
+  {
+    version: 'v2.0.8',
+    date: '2026-04-11',
+    name: 'xlsx Fast-Path Fix',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Stop routing xlsx through text-layer fast path — Excel and CSV files were being treated as if they were pre-extracted JSON and parsed with JSON.parse instead of being sent to the AI pipeline, resulting in every spreadsheet silently returning zero policies',
+          'xlsx / xls / csv now always go through Gemini/Claude for extraction, same as images and PDFs without a text layer',
+          'Settings → Scan Cache editor now shows the active store name and entry count even when empty, so you can confirm it\'s wired correctly',
+        ]
+      },
+    ]
+  },
+  {
+    version: 'v2.0.7',
+    date: '2026-04-11',
+    name: 'Cache Poisoning Fix',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Fix xlsx (and any) extraction cache poisoning from empty results — an extraction that returned zero policies was silently cached, causing every subsequent upload of the same file to hit the bad cache and skip real extraction',
+          'Write-side guard: empty result arrays no longer get persisted into the extract cache',
+          'Read-side guard: any existing empty-array cache entries are now rejected on lookup so they re-run extraction instead of serving stale emptiness',
+          'One-time cleanup on app load purges pre-existing poisoned cache entries',
+          'Settings → Scan Cache editor now correctly reads and writes the active v15 extract_cache store (previously pointed at the stale v1 extractCache store and the Clear All button did nothing useful)',
+        ]
+      },
+    ]
+  },
+  {
+    version: 'v2.0.6',
+    date: '2026-04-11',
+    name: 'Drop CPF Sliders',
+    sections: [
+      {
+        heading: 'UI',
+        items: [
+          'Removed CPF OA and CPF SA rate sliders from the Assumptions card — they are statutory rates, not planning inputs',
+          'Assumptions card now shows 5 sliders in 3 rows: Inflation / Endowment yield, ILP Yield / Retirement age, Life expectancy',
+        ]
+      },
+      {
+        heading: 'Cleanup',
+        items: [
+          'CPF projection, retirement readiness, and cashflow chart continue to use the statutory 2.5% OA / 4% SA rates hardcoded in the CPF calc constants — unchanged',
+          'Old client data with cpfOaRate / cpfSaRate keys in globalAssumptions is preserved for backward compat but no longer read or displayed',
+        ]
+      },
+    ]
+  },
+  {
+    version: 'v2.0.5',
+    date: '2026-04-11',
+    name: 'Assumptions Card Polish',
+    sections: [
+      {
+        heading: 'UI',
+        items: [
+          'Assumptions card reorganised into a cleaner 2-column grid so related sliders sit together',
+          'CPF OA rate and CPF SA rate now share a single row as a locked pair — both are fixed and shouldn\'t have been split',
+          'ILP yield slider renamed to "ILP Yield (if no funds detail)" to clarify that it only applies when a policy has no fund allocation; helper text added below the slider',
+        ]
+      },
+    ]
+  },
+  {
+    version: 'v2.0.3',
+    date: '2026-04-11',
+    name: 'Single-Source-of-Truth',
+    sections: [
+      {
+        heading: 'UI',
+        items: [
+          'Knowns / Assumptions tab removed — global assumption sliders now live on the My Client tab in a dedicated Assumptions card',
+          'Per-policy derived values panel relocated to a collapsible section at the bottom of the Dashboard',
+          'My Client → Income & Retirement card no longer shows duplicate retirement age and inflation rate text inputs',
+        ]
+      },
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Retirement age and inflation rate now have a single source: the Assumptions sliders. Dashboard, retirement readiness meter, LIA gap analysis, cashflow chart, and PDF report all read from the same place',
+          'Old top-level retirementAge / inflationRate fields auto-migrate into globalAssumptions on first load — existing client data preserved',
+        ]
+      },
+    ]
+  },
+  {
+    version: 'v2.0.2',
+    date: '2026-04-11',
+    name: 'Client Tracking & Polish',
+    sections: [
+      {
+        heading: 'Client List',
+        items: [
+          'Client tier dropdown (A / B / C / Unassigned) on My Client tab — foundation for the v2.1.0 client list view',
+          '"Mark Reviewed" button on My Client header tracks last review date with relative time display',
+          'Tier badge and "Reviewed X ago" indicator surface client status at a glance',
+        ]
+      },
+      {
+        heading: 'Knowns / Assumptions',
+        items: [
+          'Removed duplicate "Client facts" column — My Client tab is now the single source of truth for client data',
+          'Knowns / Assumptions tab focused purely on global planning assumptions and per-policy derived values',
+          'Global assumptions persist on the client profile and survive cross-device sync',
+        ]
+      },
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Supabase realtime toast spam: cross-device update toast now rate-limited to once per 3 seconds',
+          'Insurer logos no longer flicker offline — broken Clearbit image fallback removed in favour of always-on color badges',
+          'Verified dynamic death benefit (higher of SA or CV) flows through to LIA gap analysis on Portfolio Analysis tab',
+        ]
+      },
+      {
+        heading: 'UI',
+        items: [
+          'My Client header redesigned with tier badge and last reviewed timestamp',
+          'Settings and login footer show v2.0.2 with one-click changelog access',
+        ]
+      },
+    ]
+  },
   {
     version: 'v2.0.1',
     date: '2026-04-10',
@@ -1733,6 +1875,28 @@ const EXTRACT_PIPELINE_VERSION = 'v14.4-2026-04-10-final-accuracy-r3';
 // ── v15: PROMPT VERSIONING ──
 const EXTRACT_PROMPT_VERSION = 'v14.1-2026-04-10-strict-fields';
 const OCR_PROMPT_VERSION = 'v15-2026-04-10';
+
+// ── v2.0.9: MODULE-SCOPE EXTRACT_PROMPT ──
+// The EXTRACT_PROMPT template literal (~443 lines of insurance extraction
+// rules) is assigned inside the Policies() React component. Before v2.0.9
+// it was declared there with `const`, making it invisible to the top-level
+// v15 job queue functions (`performOCR`, `tickQueue` case 'extracting')
+// which live outside Policies' closure. Any file that fell through to
+// the Gemini/Claude tier loop — xlsx, scanned PDFs, short-text-layer PDFs —
+// hit `ReferenceError: EXTRACT_PROMPT is not defined` and extraction failed.
+//
+// Fix: declare as a top-level `let` placeholder here, and drop the `const`
+// from the declaration inside Policies so the assignment writes to this
+// module-scope binding. startTicker is only ever called from Policies'
+// UI handlers (startExtraction / retry handler), so by the time the
+// ticker fires performOCR, Policies has rendered and the assignment has
+// populated this variable.
+//
+// The template literal has zero `${...}` interpolations (verified with
+// awk+grep), so there is no closure dependency and hoisting the binding
+// is safe. Inside Policies, the existing reads (lines 20131/20140/21364)
+// still see this same variable via lexical scope lookup.
+let EXTRACT_PROMPT = '';
 
 // ── v14.1: CORRECTION MEMORY — FEW-SHOT BUILDER ──
 // Loads recent corrections from IDB and formats them as few-shot examples
@@ -3246,7 +3410,12 @@ async function ingestFile(file) {
   try {
     // Check for a single-file extract cache hit (hash-based)
     const extractHit = await PolicyDB.getExtractCache(EXTRACT_PIPELINE_VERSION + ':' + fileHash);
-    if (extractHit && extractHit.value && extractHit.pipelineVersion === EXTRACT_PIPELINE_VERSION) {
+    // v2.0.7: defensive guard — reject empty-array cache entries (poisoned
+    // from the pre-v2.0.7 write path). Empty arrays are truthy in JS so the
+    // old `extractHit.value` check let them through and silently skipped
+    // extraction. Any such entries are re-extracted on next upload and the
+    // one-time cleanup in App init purges them from IndexedDB.
+    if (extractHit && Array.isArray(extractHit.value) && extractHit.value.length > 0 && extractHit.pipelineVersion === EXTRACT_PIPELINE_VERSION) {
       cachedStage = 'done';
       cachedResult = extractHit.value;
       console.log('[Cache] Extract cache HIT for', file.name, '→ skip all stages');
@@ -4352,8 +4521,20 @@ async function performOCR(job, file) {
   if (!gk && !ck) throw new Error('No API keys configured — add a Gemini or Anthropic key in Settings');
 
   const contentBlocks = await processFile(file);
-  // PDFs with meaningful text layer skip API OCR entirely
-  const hasTextLayer = contentBlocks.some(b => b.type === 'text' && (b.text||'').length > 200);
+  // v2.0.8: restrict the text-layer fast path to PDFs only. The original
+  // 7612adb "Pre-v14.4 baseline" commit introduced this guard to skip the
+  // Gemini OCR call on text-native PDFs — but the type check was missing,
+  // so xlsx/xls/csv files (which processFile returns as [{type:'text',
+  // text:'[Spreadsheet: ...] <CSV>'}] via SheetJS) also matched. Downstream
+  // then fed the raw CSV text into JSON.parse → repairJSON → [] and cached
+  // zero policies, silently bypassing the entire dual-AI pipeline.
+  //
+  // Fix: require the source file to actually be a PDF before taking the
+  // fast path. Everything else (xlsx/xls/csv/images) flows through the
+  // Gemini → Claude tiers below, which is the documented architecture.
+  const fileName = (file.name || '').toLowerCase();
+  const isPDF = file.type === 'application/pdf' || fileName.endsWith('.pdf');
+  const hasTextLayer = isPDF && contentBlocks.some(b => b.type === 'text' && (b.text||'').length > 200);
   if (hasTextLayer) {
     const text = contentBlocks.filter(b => b.type === 'text').map(b => b.text).join('\n');
     console.log('[OCR] Text-layer fast path for', job.fileName, '(', text.length, 'chars)');
@@ -4471,7 +4652,10 @@ async function tickQueue() {
     const active = all.filter(j => !JOB_TERMINAL.has(j.stage));
     if (active.length === 0) {
       // All done — flush results and stop
-      const doneJobs = all.filter(j => j.stage === 'done' && j.result);
+      // v2.0.7: require a non-empty result array before caching. Empty arrays
+      // were being treated as truthy and written to extract_cache, so the next
+      // upload of the same file hit the cache and skipped real extraction.
+      const doneJobs = all.filter(j => j.stage === 'done' && Array.isArray(j.result) && j.result.length > 0);
       if (doneJobs.length > 0) {
         console.log('[Queue] All jobs terminal. Done:', doneJobs.length);
         // Cache results for future re-uploads
@@ -4953,11 +5137,14 @@ function normalizeInsurerName(raw) {
 }
 
 // Insurer badge component
+// v2.0.2: Lean badge — color/initial only, fully offline. No clearbit.com fetch.
+// The previous <img> tag pulled brand logos from clearbit.com which (a) requires
+// network, (b) flickers on slow connections, (c) blocks if clearbit is down.
+// Color + brand-coded background covers all 56 insurers with zero network deps.
 const InsurerBadge = ({name, size='sm'}) => {
   const ins = getInsurer(name);
-  const sz = size==='lg'?{h:24,f:13,p:'3px 10px',img:18}:{h:18,f:11,p:'2px 8px',img:14};
+  const sz = size==='lg'?{f:13,p:'3px 10px'}:{f:11,p:'2px 8px'};
   return React.createElement('span',{style:{display:'inline-flex',alignItems:'center',gap:4,background:ins.bg,color:ins.color,fontSize:sz.f,fontWeight:600,padding:sz.p,borderRadius:6,border:`1px solid ${ins.color}22`,whiteSpace:'nowrap'}},
-    ins.logo && React.createElement('img',{src:ins.logo,style:{width:sz.img,height:sz.img,borderRadius:3,objectFit:'contain'},onError:e=>{e.target.style.display='none'}}),
     name||'Unknown'
   );
 };
@@ -7918,6 +8105,59 @@ const fmt = (n, ccy='SGD') => {
 const fmtPct = n => n==null?'-':(n*1).toFixed(2)+'%';
 const catColor = cat => CATEGORIES[cat]?.color || 'var(--text3)';
 
+// v2.0.2: Relative time formatter for "Reviewed X ago" displays
+const fmtRelativeTime = (iso) => {
+  if (!iso) return 'Never';
+  const then = new Date(iso).getTime();
+  if (isNaN(then)) return 'Never';
+  const diff = Date.now() - then;
+  if (diff < 0) return 'Just now';
+  const sec = Math.floor(diff / 1000);
+  if (sec < 60) return 'Just now';
+  const min = Math.floor(sec / 60);
+  if (min < 60) return min + ' min ago';
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return hr + ' hour' + (hr === 1 ? '' : 's') + ' ago';
+  const day = Math.floor(hr / 24);
+  if (day < 30) return day + ' day' + (day === 1 ? '' : 's') + ' ago';
+  const mo = Math.floor(day / 30);
+  if (mo < 12) return mo + ' month' + (mo === 1 ? '' : 's') + ' ago';
+  const yr = Math.floor(day / 365);
+  return yr + ' year' + (yr === 1 ? '' : 's') + ' ago';
+};
+
+// v2.0.3: Resolve retirement age and inflation rate from the single
+// source of truth — clientProfile.globalAssumptions. Falls back to the
+// old top-level keys for backward compat with pre-v2.0.3 client data,
+// then to houseDefaults / hardcoded fallback. Use these EVERYWHERE
+// instead of reading p.retirementAge or p.inflationRate directly.
+const getRetirementAge = (cp, fallback) => {
+  if (!cp) return fallback || 65;
+  const ga = cp.globalAssumptions || {};
+  const v = parseInt(ga.retirementAge);
+  if (v > 0) return v;
+  const legacy = parseInt(cp.retirementAge);
+  if (legacy > 0) return legacy;
+  return fallback || 65;
+};
+const getInflationPct = (cp, fallback) => {
+  if (!cp) return fallback != null ? fallback : 2.8;
+  const ga = cp.globalAssumptions || {};
+  const v = parseFloat(ga.inflationPct);
+  if (!isNaN(v) && v >= 0) return v;
+  const legacy = parseFloat(cp.inflationRate);
+  if (!isNaN(legacy) && legacy >= 0) return legacy;
+  return fallback != null ? fallback : 2.8;
+};
+
+// v2.0.2: Tier color palette — A=gold, B=navy, C=gray, Unassigned=muted
+const TIER_STYLES = {
+  A: { bg: 'rgba(212,169,106,.18)', color: '#c9a96e', border: 'rgba(212,169,106,.4)', label: 'Tier A' },
+  B: { bg: 'rgba(91,143,217,.15)', color: '#5b8fd9', border: 'rgba(91,143,217,.35)', label: 'Tier B' },
+  C: { bg: 'rgba(148,163,184,.15)', color: '#94a3b8', border: 'rgba(148,163,184,.35)', label: 'Tier C' },
+  Unassigned: { bg: 'rgba(148,163,184,.06)', color: '#64748b', border: 'rgba(148,163,184,.18)', label: 'Unassigned' },
+};
+
 // ═══════════════════════════════════════════════════════════════
 // MODULE: APP_CONTEXT
 // ═══════════════════════════════════════════════════════════════
@@ -8855,6 +9095,8 @@ function App() {
   // handler short-circuits and the user only sees toasts when
   // a TRUE cross-device update happens.
   const lastSelfPushRef = useRef(0);
+  // v2.0.2: Rate-limit ref for cross-device toast — max 1 per 3 seconds
+  const lastRealtimeToastRef = useRef(0);
   // Ref to the LATEST runCloudSync function. Updated on every
   // render so event handlers (which capture the closure once via
   // useEffect with []) can always call the freshest version with
@@ -9108,10 +9350,16 @@ function App() {
       // Fire only if SOMETHING actually changed AND we're confident
       // this isn't a self-echo (no recent self-push). Otherwise stay
       // silent.
+      // v2.0.2: Additional rate-limit — max 1 toast per 3 seconds even
+      // if multiple cross-device events stack up rapidly.
       const totalChanges = profileChanges + policyChanges + settingsChanges;
       const recentSelfPush = (Date.now() - lastSelfPushRef.current) < 5000;
-      if (totalChanges > 0 && !recentSelfPush) {
+      const recentToast = (Date.now() - (lastRealtimeToastRef.current || 0)) < 3000;
+      if (totalChanges > 0 && !recentSelfPush && !recentToast) {
+        lastRealtimeToastRef.current = Date.now();
         try { toast('☁️ Updates from another device', 'info', 2500); } catch(e){}
+      } else if (totalChanges > 0 && recentToast) {
+        console.log('[Realtime] Toast suppressed (rate-limited, last toast', Date.now() - lastRealtimeToastRef.current, 'ms ago)');
       }
 
       console.log('[Sync] Auto-merge done:', profileChanges, 'profile changes,', policyChanges, 'policy changes,', settingsChanges, 'settings changes');
@@ -9271,6 +9519,49 @@ function App() {
       } catch(err) {
         // Never surface cleanup errors — stale entries will be retried next load
         console.warn('[ExtractCache] Cleanup skipped:', err?.message || err);
+      }
+    })();
+  }, []);
+
+  // ── v2.0.7: ONE-TIME POISON CLEANUP for extract_cache ──
+  // Purges cache entries whose .value is an empty array (or missing/non-array),
+  // which is the footprint left by the pre-v2.0.7 write-side bug: an extraction
+  // that returned zero policies was silently written to cache and served back
+  // on every subsequent upload. The write-side and read-side guards above
+  // prevent new poisoned entries going forward, but existing entries need a
+  // one-shot sweep. Gated by a localStorage flag so it never runs twice.
+  // Fire-and-forget — if it fails, read-side guard still rejects bad entries.
+  useEffect(() => {
+    const FLAG = 'extractCachePoisonCleanup_v2.0.7_done';
+    let alreadyDone = false;
+    try { alreadyDone = localStorage.getItem(FLAG) === '1'; } catch(_) {}
+    if (alreadyDone) return;
+    (async () => {
+      try {
+        const all = await dbGetAll('extract_cache').catch(() => []);
+        if (!Array.isArray(all) || all.length === 0) {
+          try { localStorage.setItem(FLAG, '1'); } catch(_) {}
+          return;
+        }
+        const poisoned = all.filter(e => !e || !Array.isArray(e.value) || e.value.length === 0);
+        if (poisoned.length === 0) {
+          console.log('[Cleanup] extract_cache healthy —', all.length, 'entries, 0 poisoned');
+          try { localStorage.setItem(FLAG, '1'); } catch(_) {}
+          return;
+        }
+        const db = await openDB();
+        const tx = db.transaction('extract_cache', 'readwrite');
+        const store = tx.objectStore('extract_cache');
+        for (const entry of poisoned) {
+          try { store.delete(entry.key); } catch(_) {}
+        }
+        tx.oncomplete = () => {
+          console.log('[Cleanup] Removed', poisoned.length, 'poisoned cache entries');
+          try { localStorage.setItem(FLAG, '1'); } catch(_) {}
+        };
+        tx.onerror = e => console.warn('[Cleanup] Poison purge transaction error:', e);
+      } catch (err) {
+        console.warn('[Cleanup] Skipped:', err?.message || err);
       }
     })();
   }, []);
@@ -9568,7 +9859,6 @@ function App() {
       <div style={{flex:1,overflow:'auto',padding:'12px clamp(10px, 3vw, 20px) 40px'}}>
         {tab==='profile' && <ErrorBoundary key="profile"><ProfileTab /></ErrorBoundary>}
         {tab==='dashboard' && <ErrorBoundary key="dashboard"><Dashboard /></ErrorBoundary>}
-        {tab==='knowns' && <ErrorBoundary key="knowns"><KnownsAssumptions /></ErrorBoundary>}
         <div style={{display:tab==='policies'?'block':'none'}}><Policies /></div>
         {tab==='repository' && <ErrorBoundary key="repo"><Repository /></ErrorBoundary>}
         {tab==='funds' && <FundLookup />}
@@ -9841,7 +10131,7 @@ function PresentMode() {
   // paying in future years, and by Retirement Income Composition for the
   // headline at retirement age. Falls back to sensible defaults.
   const clientAge = getProfileAge(clientProfile) ?? 35;
-  const retAge = parseInt(clientProfile?.retirementAge) || 65;
+  const retAge = getRetirementAge(clientProfile, 65); // v2.0.3: globalAssumptions source
 
   // ── CLIENT-LEVEL CACHES FOR TIER 2 CARDS ──
   // These come from Dashboard via window.__cvTimelineCache (set by Dashboard
@@ -10817,7 +11107,6 @@ function Header() {
   const tabs = [
     {id:'profile',label:'My Profile',icon:'👤'},
     {id:'dashboard',label:'Dashboard',icon:'📊'},
-    {id:'knowns',label:'Knowns / Assumptions',icon:'⚖️'},
     {id:'policies',label:'Policies',icon:'📋'},
     {id:'repository',label:'Repository',icon:'🗄️'},
     {id:'funds',label:'Funds',icon:'📉'},
@@ -13625,12 +13914,99 @@ function DropZone({onFiles, label, active}) {
 // MODULE: PROFILE — My Client tab + Financial Profile
 // ═══════════════════════════════════════════════════════════════
 
+// v2.0.3: Assumptions card — global planning sliders moved from the
+// deleted Knowns / Assumptions tab. Single source of truth for
+// retirement age, inflation rate, yields, life expectancy.
+// Stored on clientProfile.globalAssumptions; saves debounced via the
+// parent ProfileTab's debouncedSave (no separate IDB write here).
+function AssumptionsCard({ p, set, houseDefaults }) {
+  const ga = (p && p.globalAssumptions) || {};
+  const getVal = (key) => {
+    if (ga[key] != null) return ga[key];
+    return DEFAULT_ASSUMPTIONS[key];
+  };
+  const updateGA = (key, val) => {
+    const v = parseFloat(val);
+    const nextGA = { ...ga, [key]: isNaN(v) ? val : v };
+    set('globalAssumptions', nextGA);
+  };
+  // v2.0.5: Single slider tile. Locked pair gets a subtle muted tint.
+  const renderSlider = (s) => (
+    <div key={s.key} style={s.pairedLock ? {
+      background:'rgba(148,163,184,.05)',
+      border:'1px dashed rgba(148,163,184,.18)',
+      borderRadius:6,
+      padding:'8px 10px',
+    } : {}}>
+      <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:3}}>
+        <span style={{fontSize:11,color:'var(--text3)'}}>{s.label}</span>
+        <span style={{fontSize:12,fontWeight:700,color:s.locked ? 'var(--text3)' : '#c9a96e'}}>
+          {s.locked ? '🔒 ' : ''}{getVal(s.key)}{s.unit}
+        </span>
+      </div>
+      {!s.locked && (
+        <input type="range" min={s.min} max={s.max} step={s.step}
+          value={getVal(s.key)}
+          onChange={e => updateGA(s.key, e.target.value)}
+          style={{width:'100%',accentColor:'#c9a96e',height:4}} />
+      )}
+      {s.helper && (
+        <div style={{fontSize:9,color:'var(--text3)',marginTop:4,lineHeight:1.4,fontStyle:'italic'}}>{s.helper}</div>
+      )}
+    </div>
+  );
+  return (
+    <div className="card" style={{marginBottom:16,borderLeft:'2px solid rgba(201,169,110,.3)'}}>
+      <h3 style={{fontSize:14,fontWeight:600,marginBottom:4}}>🧮 Assumptions</h3>
+      <div style={{fontSize:11,color:'var(--text3)',marginBottom:12}}>Single source of truth for global planning assumptions. Powers the gap analysis, retirement readiness meter, cashflow chart, and PDF report.</div>
+      {/* v2.0.5: Fixed 2-column grid on desktop (via .resp-2col — exactly
+          1fr 1fr), collapses to single column on mobile ≤640px.
+          Slider order in ASSUMPTION_SLIDERS drives the visual row layout:
+          Row 1: Inflation | Endowment
+          Row 2: ILP Yield | Retirement age
+          Row 3: CPF OA    | CPF SA   (paired lock, row-aligned)
+          Row 4: Life expectancy | (empty cell) */}
+      <div className="resp-2col" style={{gap:14,alignItems:'start'}}>
+        {ASSUMPTION_SLIDERS.map(renderSlider)}
+      </div>
+      <div style={{fontSize:9,color:'var(--text3)',marginTop:10,fontStyle:'italic'}}>Saved automatically to this client's profile.</div>
+    </div>
+  );
+}
+
 function ProfileTab() {
   const {clientProfile,saveProfile,apiKey,houseDefaults} = useContext(AppCtx);
   const [p, setP] = useState(clientProfile);
   const [scanning, setScanning] = useState(false);
   const camRef = useRef(null);
   const uploadRef = useRef(null);
+
+  // v2.0.3: One-shot migration of legacy top-level retirementAge / inflationRate
+  // into clientProfile.globalAssumptions. Runs once on mount per session.
+  // Old fields are LEFT IN PLACE for backward compat (if user opens v2.0.2 or
+  // earlier, those fields still work). New code reads via getRetirementAge /
+  // getInflationPct helpers which prefer globalAssumptions but fall back to
+  // the legacy keys.
+  const _migratedRef = useRef(false);
+  useEffect(() => {
+    if (_migratedRef.current) return;
+    _migratedRef.current = true;
+    const ga = (clientProfile && clientProfile.globalAssumptions) || {};
+    const next = { ...ga };
+    let changed = false;
+    if (ga.retirementAge == null && parseInt(clientProfile?.retirementAge) > 0) {
+      next.retirementAge = parseInt(clientProfile.retirementAge);
+      changed = true;
+    }
+    if (ga.inflationPct == null && parseFloat(clientProfile?.inflationRate) >= 0) {
+      next.inflationPct = parseFloat(clientProfile.inflationRate);
+      changed = true;
+    }
+    if (changed) {
+      console.log('[v2.0.3 migration] Copied legacy retirementAge/inflationRate into globalAssumptions');
+      setP(prev => ({ ...prev, globalAssumptions: next }));
+    }
+  }, [clientProfile]);
 
   // Auto-save on change — debounced to avoid cascade on every keystroke
   // Input fields update instantly (local state), but IndexedDB write + gap recalc waits 500ms
@@ -13718,8 +14094,29 @@ function ProfileTab() {
     <div className="fade-in">
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:12,flexWrap:'wrap',gap:8}}>
         <div>
-          <h2 style={{fontSize:18,fontWeight:600}}>My Profile</h2>
-          <p style={{fontSize:12,color:'var(--text3)'}}>Client details used across all policies — fill once, use everywhere</p>
+          <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+            <h2 style={{fontSize:18,fontWeight:600,margin:0}}>My Profile</h2>
+            {/* v2.0.2: Tier badge */}
+            {(() => {
+              const tier = p.tier || 'Unassigned';
+              const ts = TIER_STYLES[tier] || TIER_STYLES.Unassigned;
+              return (
+                <span style={{fontSize:10,fontWeight:700,padding:'3px 9px',borderRadius:10,background:ts.bg,color:ts.color,border:'1px solid '+ts.border,whiteSpace:'nowrap'}}>
+                  {ts.label}
+                </span>
+              );
+            })()}
+            {/* v2.0.2: Last reviewed display */}
+            <span style={{fontSize:10,color:'var(--text3)'}}>
+              Reviewed {fmtRelativeTime(p.lastReviewedAt)}
+            </span>
+            {/* v2.0.2: Mark Reviewed button */}
+            <button onClick={() => { const now = new Date().toISOString(); set('lastReviewedAt', now); try { toast('✓ Marked as reviewed','success',2000); } catch(_){} }}
+              style={{fontSize:10,fontWeight:600,padding:'4px 10px',borderRadius:6,background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',cursor:'pointer'}}>
+              ✓ Mark Reviewed
+            </button>
+          </div>
+          <p style={{fontSize:12,color:'var(--text3)',marginTop:4}}>Client details used across all policies — fill once, use everywhere</p>
         </div>
         <div style={{display:'flex',gap:6,alignItems:'center'}}>
           <input ref={camRef} type="file" accept="image/*" capture="environment" multiple style={{display:'none'}} onChange={e=>{scanProfile(e.target.files);e.target.value='';}} />
@@ -13880,10 +14277,19 @@ function ProfileTab() {
         <div className="resp-2col" style={{gap:16}}>
           <div style={{background:'var(--bg3)',borderRadius:8,padding:12,border:'1px solid var(--border)'}}>
             <div style={{fontSize:10,fontWeight:700,color:'var(--gold)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8}}>Income & Retirement</div>
+            {/* v2.0.2: Client tier */}
+            <div className="field"><label>Client Tier</label>
+              <select value={p.tier||'Unassigned'} onChange={e=>set('tier',e.target.value)}>
+                <option value="Unassigned">Unassigned</option>
+                <option value="A">Tier A — VIP / strategic</option>
+                <option value="B">Tier B — active / regular</option>
+                <option value="C">Tier C — light-touch / dormant</option>
+              </select>
+              <div style={{fontSize:10,color:'var(--text3)'}}>Used for prioritisation in the v2.1 client list view</div>
+            </div>
             <div className="field"><label>Gross Annual Income ($)</label><input type="number" value={p.annualIncome||''} onChange={e=>set('annualIncome',e.target.value)} placeholder="e.g. 120000" /><div style={{fontSize:10,color:'var(--text3)'}}>{p.annualIncome ? '$'+(Math.round(p.annualIncome/12)).toLocaleString()+'/mth' : ''}</div></div>
-            <div className="field"><label>Target Retirement Age</label><input type="number" value={p.retirementAge||houseDefaults.retirementAge} onChange={e=>set('retirementAge',e.target.value)} /></div>
             <div className="field"><label>Desired Monthly Income in Retirement</label><input type="number" value={p.desiredRetIncome||''} onChange={e=>set('desiredRetIncome',e.target.value)} placeholder="e.g. 5000" /><div style={{fontSize:10,color:'var(--text3)'}}>Target lifestyle expense in today's dollars</div></div>
-            <div className="field"><label>Inflation Rate (% p.a.)</label><input type="number" step="0.1" value={p.inflationRate||String(houseDefaults.inflationRate)} onChange={e=>set('inflationRate',e.target.value)} /><div style={{fontSize:10,color:'var(--text3)'}}>Default {houseDefaults.inflationRate}% (house view) — used for retirement target inflation adjustment</div></div>
+            <div style={{fontSize:9,color:'var(--text3)',fontStyle:'italic',marginTop:6}}>Retirement age and inflation rate are now set in the <strong>Assumptions</strong> card below.</div>
           </div>
           <div style={{background:'var(--bg3)',borderRadius:8,padding:12,border:'1px solid var(--border)'}}>
             <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8}}>Monthly Outgoings</div>
@@ -14146,6 +14552,9 @@ function ProfileTab() {
           </div>
         </div>
       </div>
+
+      {/* v2.0.3: Assumptions card — global planning sliders, single source of truth */}
+      <AssumptionsCard p={p} set={set} houseDefaults={houseDefaults} />
 
       {/* Dependants */}
       <div className="card">
@@ -14695,7 +15104,7 @@ function ReviewSession({onClose}) {
   const [step, setStep] = useState(0);
   const p = clientProfile || {};
   const age = getProfileAge(p) ?? 35;
-  const retAge = parseInt(p.retirementAge)||65;
+  const retAge = getRetirementAge(p, 65); // v2.0.3
   const income = parseFloat(p.annualIncome)||0;
   const active = policies.filter(pol=>pol.status!=='matured'&&pol.status!=='surrendered'&&pol.status!=='lapsed');
 
@@ -14923,7 +15332,7 @@ function Dashboard() {
   const {policies,setTab,apiKey,clientProfile,saveProfile,houseDefaults} = useContext(AppCtx);
   const p = clientProfile || {};
   const age = getProfileAge(p) ?? 35;
-  const retAge = parseInt(p.retirementAge)||houseDefaults.retirementAge;
+  const retAge = getRetirementAge(p, houseDefaults.retirementAge); // v2.0.3
   const annualIncome = parseFloat(p.annualIncome)||0;
   const monthlyIncome = annualIncome/12;
   const monthlyExpenses = parseFloat(p.monthlyExpenses)||0;
@@ -15312,7 +15721,7 @@ function Dashboard() {
     // Fallbacks read from firm-level house defaults (Settings → House Defaults)
     // so a new or partially-filled profile starts from the firm's baseline
     // assumptions rather than hardcoded values.
-    const inflationRate = (parseFloat(p.inflationRate) || houseDefaults.inflationRate) / 100;
+    const inflationRate = getInflationPct(p, houseDefaults.inflationRate) / 100; // v2.0.3
     const yearsToRet = Math.max(0, retAge - (age||35));
     const desiredMonthly = Math.round(baseDesired * Math.pow(1 + inflationRate, yearsToRet));
     const cpfScheme = p.cpfScheme || houseDefaults.cpfScheme;
@@ -16242,6 +16651,55 @@ function Dashboard() {
           })}
         </div>
       </div>
+
+      {/* v2.0.3: Per-policy derived values (diagnostic) — moved here from the deleted Knowns / Assumptions tab */}
+      <DerivedValuesPanel policies={policies} />
+    </div>
+  );
+}
+
+// v2.0.3: Collapsible diagnostic panel showing every per-policy value that
+// the v14.2 derive layer computed (annual premium from total paid, death
+// benefit from SA, estimated maturity, etc). Lives at the bottom of the
+// Dashboard. Click to expand.
+function DerivedValuesPanel({ policies }) {
+  const [open, setOpen] = useState(false);
+  const active = policies.filter(p => p.status !== 'matured' && p.status !== 'surrendered' && p.status !== 'lapsed');
+  const derivedSnapshot = useMemo(() => {
+    const snap = [];
+    for (const pol of active) {
+      if (!pol._derived || Object.keys(pol._derived).length === 0) continue;
+      const fields = [];
+      for (const [field, meta] of Object.entries(pol._derived)) {
+        const val = pol[field];
+        if (val == null) continue;
+        fields.push({ field, value: val, meta });
+      }
+      if (fields.length > 0) {
+        snap.push({ id: pol.id, name: pol.productName || pol.insurer || '(unnamed)', insurer: pol.insurer, fields });
+      }
+    }
+    return snap;
+  }, [active]);
+  if (derivedSnapshot.length === 0) return null;
+  const totalDerived = derivedSnapshot.reduce((s, d) => s + d.fields.length, 0);
+  return (
+    <div style={{marginTop:24}}>
+      <div onClick={() => setOpen(!open)}
+        style={{cursor:'pointer',padding:'10px 14px',background:'rgba(201,169,110,.05)',border:'1px solid rgba(201,169,110,.18)',borderLeft:'3px solid rgba(201,169,110,.5)',borderRadius:8,display:'flex',justifyContent:'space-between',alignItems:'center'}}>
+        <div>
+          <span style={{fontSize:12,fontWeight:700,color:'#c9a96e'}}>🧮 Per-policy derived values</span>
+          <span style={{fontSize:10,color:'var(--text3)',marginLeft:8}}>{totalDerived} value{totalDerived === 1 ? '' : 's'} across {derivedSnapshot.length} polic{derivedSnapshot.length === 1 ? 'y' : 'ies'} — diagnostic</span>
+        </div>
+        <span style={{fontSize:11,color:'var(--text3)'}}>{open ? '▾' : '▸'}</span>
+      </div>
+      {open && (
+        <div className="card" style={{borderLeft:'2px solid rgba(201,169,110,.3)',marginTop:6}}>
+          {derivedSnapshot.map(d => (
+            <DerivedPolicyRow key={d.id} data={d} overrides={{}} setOverrides={() => {}} setDirty={() => {}} />
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -16283,59 +16741,67 @@ const DEFAULT_ASSUMPTIONS = {
   inflationPct: 2.5,
   endowmentYieldPct: 3,
   ilpYieldPct: 5,
-  cpfOaRate: 2.5,
-  cpfSaRate: 4,
   retirementAge: 65,
   lifeExpectancy: 85,
 };
 
+// v2.0.6: CPF OA / CPF SA sliders removed (statutory rates, not planning inputs).
+// Order here drives the 2-column visual grid in AssumptionsCard.
+// Row 1: Inflation rate          | Endowment yield
+// Row 2: ILP Yield (if no funds) | Retirement age
+// Row 3: Life expectancy         | (empty cell)
 const ASSUMPTION_SLIDERS = [
   { key: 'inflationPct', label: 'Inflation rate', unit: '%', min: 0, max: 6, step: 0.1, locked: false },
   { key: 'endowmentYieldPct', label: 'Endowment yield', unit: '%', min: 1, max: 8, step: 0.1, locked: false },
-  { key: 'ilpYieldPct', label: 'ILP yield', unit: '%', min: 2, max: 10, step: 0.1, locked: false },
-  { key: 'cpfOaRate', label: 'CPF OA rate', unit: '%', min: 2.5, max: 2.5, step: 0, locked: true },
-  { key: 'cpfSaRate', label: 'CPF SA rate', unit: '%', min: 4, max: 4, step: 0, locked: true },
+  { key: 'ilpYieldPct', label: 'ILP Yield (if no funds detail)', unit: '%', min: 2, max: 10, step: 0.1, locked: false, helper: 'Used as fallback when an ILP policy has no fund allocation. Policies with funds use weighted fund yields instead.' },
   { key: 'retirementAge', label: 'Retirement age', unit: 'yrs', min: 55, max: 70, step: 1, locked: false },
   { key: 'lifeExpectancy', label: 'Life expectancy', unit: 'yrs', min: 75, max: 95, step: 1, locked: false },
 ];
 
 function KnownsAssumptions() {
-  const { policies, clientProfile, houseDefaults } = useContext(AppCtx);
-  const [assumptions, setAssumptions] = useState({ ...DEFAULT_ASSUMPTIONS });
-  const [overrides, setOverrides] = useState({}); // field key → locked value
+  const { policies, clientProfile, saveProfile, houseDefaults } = useContext(AppCtx);
+  // v2.0.2: Global assumptions now live on clientProfile.globalAssumptions
+  // (Option 3 — store inside the existing user_client_profile.data JSONB).
+  // No separate IndexedDB store, no Supabase migration. The existing
+  // per-field versioning + Realtime sync covers it for free.
+  const [assumptions, setAssumptions] = useState(() => {
+    const saved = (clientProfile && clientProfile.globalAssumptions) || {};
+    const merged = { ...DEFAULT_ASSUMPTIONS };
+    for (const k of Object.keys(DEFAULT_ASSUMPTIONS)) {
+      if (saved[k] != null) merged[k] = saved[k];
+    }
+    return merged;
+  });
+  const [overrides, setOverrides] = useState(() => (clientProfile && clientProfile.globalAssumptions && clientProfile.globalAssumptions.customOverrides) || {});
   const [shareMode, setShareMode] = useState(false);
-  const [dirty, setDirty] = useState(false);
 
-  // Load saved assumptions
+  // Re-sync local state when clientProfile changes (cross-device sync)
   useEffect(() => {
-    (async () => {
-      try {
-        const saved = await PolicyDB.getAssumptions('default');
-        if (saved) {
-          const merged = { ...DEFAULT_ASSUMPTIONS };
-          for (const k of Object.keys(DEFAULT_ASSUMPTIONS)) {
-            if (saved[k] != null) merged[k] = saved[k];
-          }
-          setAssumptions(merged);
-          if (saved.customOverrides) setOverrides(saved.customOverrides);
-          console.log('[Assume] Loaded saved assumptions');
-        }
-      } catch (e) { console.warn('[Assume] Load failed:', e); }
-    })();
-  }, []);
+    const saved = (clientProfile && clientProfile.globalAssumptions) || {};
+    if (Object.keys(saved).length === 0) return;
+    setAssumptions(prev => {
+      const merged = { ...prev };
+      for (const k of Object.keys(DEFAULT_ASSUMPTIONS)) {
+        if (saved[k] != null) merged[k] = saved[k];
+      }
+      return merged;
+    });
+    if (saved.customOverrides) setOverrides(saved.customOverrides);
+  }, [clientProfile && clientProfile.globalAssumptions]);
 
+  // v2.0.2: Debounced 500ms save to clientProfile.globalAssumptions
+  const _saveTimer = useRef(null);
   const updateAssumption = (key, val) => {
-    setAssumptions(prev => ({ ...prev, [key]: parseFloat(val) || 0 }));
-    setDirty(true);
-  };
-
-  const saveAssumptions = async () => {
-    try {
-      await PolicyDB.saveAssumptions({ ...assumptions, customOverrides: overrides, clientId: 'default' });
-      setDirty(false);
-      console.log('[Assume] Saved assumptions');
-      try { toast('Assumptions saved', 'success', 2000); } catch(_) {}
-    } catch (e) { console.warn('[Assume] Save failed:', e); }
+    setAssumptions(prev => {
+      const next = { ...prev, [key]: parseFloat(val) || 0 };
+      // Debounced save into clientProfile
+      if (_saveTimer.current) clearTimeout(_saveTimer.current);
+      _saveTimer.current = setTimeout(() => {
+        const updated = { ...(clientProfile || {}), globalAssumptions: { ...next, customOverrides: overrides } };
+        try { saveProfile(updated); console.log('[Assume] Saved to clientProfile.globalAssumptions'); } catch (e) { console.warn('[Assume] Save failed:', e); }
+      }, 500);
+      return next;
+    });
   };
 
   // Active (non-matured) policies
@@ -16360,65 +16826,34 @@ function KnownsAssumptions() {
     return snap;
   }, [active]);
 
-  // ── CLIENT FACTS (left column) ──
+  // v2.0.2: Client facts column removed — My Client tab is the single source of truth.
+  // Only client name retained for the share-mode header.
   const cp = clientProfile || {};
-  const clientFacts = [
-    { label: 'Name', value: cp.name },
-    { label: 'Date of birth', value: cp.dob },
-    { label: 'Gender', value: cp.gender },
-    { label: 'Smoker status', value: cp.smoker },
-    { label: 'Nationality', value: cp.nationality },
-    { label: 'Occupation', value: cp.occupation },
-    { label: 'Monthly income', value: cp.monthlyIncome ? '$' + parseFloat(cp.monthlyIncome).toLocaleString() : null },
-    { label: 'Dependants', value: Array.isArray(cp.dependants) && cp.dependants.length > 0 ? cp.dependants.length + ' dependant' + (cp.dependants.length > 1 ? 's' : '') : null },
-  ].filter(f => f.value);
-
-  // Coverage totals (facts from policies)
-  let totalDeathSA = 0, totalCI = 0, totalPremium = 0;
-  active.forEach(p => {
-    const sa = parseFloat(p.deathBenefit) || parseFloat(p.sumAssured) || 0;
-    const cat = (p.category || '').toLowerCase();
-    if (cat === 'protection' || cat === 'savings' || cat === 'retirement') totalDeathSA += sa;
-    if ((p.subType || '').toLowerCase().includes('critical')) totalCI += parseFloat(p.sumAssured) || 0;
-    totalPremium += parseFloat(p.annualPremium) || 0;
-  });
   const fmt = (n) => '$' + Math.round(n).toLocaleString();
 
   // ── SHARE MODE (client-facing) ──
+  // v2.0.2: Share mode now shows only assumptions + derived values.
+  // Client facts live on the My Client tab — present them there if needed.
   if (shareMode) {
     return (
       <div style={{position:'fixed',inset:0,zIndex:9999,background:'#0b0f1a',color:'#e8e8e8',overflow:'auto',padding:20}}>
-        <div style={{maxWidth:900,margin:'0 auto'}}>
+        <div style={{maxWidth:720,margin:'0 auto'}}>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:20}}>
             <div>
-              <h2 style={{fontSize:22,fontWeight:700,color:'#c9a96e',margin:0}}>Here's what we know — and what we're assuming.</h2>
+              <h2 style={{fontSize:22,fontWeight:700,color:'#c9a96e',margin:0}}>Our planning assumptions</h2>
               {cp.name && <div style={{fontSize:13,color:'var(--text3)',marginTop:4}}>Portfolio review for {cp.name}</div>}
             </div>
             <button onClick={() => setShareMode(false)} style={{background:'var(--bg3)',color:'var(--text2)',border:'1px solid var(--border)',padding:'8px 16px',borderRadius:8,cursor:'pointer',fontSize:12}}>✕ Exit</button>
           </div>
-          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(320px,1fr))',gap:20}}>
-            {/* Left: Facts */}
-            <div style={{background:'var(--bg2)',borderRadius:12,padding:16,border:'1px solid var(--border)'}}>
-              <h3 style={{fontSize:16,fontWeight:700,color:'var(--green2)',marginBottom:12}}>✓ What we know</h3>
-              {clientFacts.map(f => <div key={f.label} style={{display:'flex',justifyContent:'space-between',padding:'6px 0',borderBottom:'1px solid var(--border)',fontSize:14}}><span style={{color:'var(--text3)'}}>{f.label}</span><span style={{fontWeight:600}}>{f.value}</span></div>)}
-              <div style={{marginTop:12,padding:'8px 0',borderTop:'1px solid var(--border2)'}}>
-                <div style={{display:'flex',justifyContent:'space-between',fontSize:14,marginBottom:4}}><span style={{color:'var(--text3)'}}>Death cover</span><span style={{fontWeight:600}}>{fmt(totalDeathSA)}</span></div>
-                <div style={{display:'flex',justifyContent:'space-between',fontSize:14,marginBottom:4}}><span style={{color:'var(--text3)'}}>CI cover</span><span style={{fontWeight:600}}>{fmt(totalCI)}</span></div>
-                <div style={{display:'flex',justifyContent:'space-between',fontSize:14}}><span style={{color:'var(--text3)'}}>Annual premiums</span><span style={{fontWeight:600}}>{fmt(totalPremium)}</span></div>
+          <div style={{background:'var(--bg2)',borderRadius:12,padding:20,border:'1px solid rgba(201,169,110,.2)'}}>
+            <h3 style={{fontSize:16,fontWeight:700,color:'#c9a96e',marginBottom:12}}>🧮 Global assumptions</h3>
+            {ASSUMPTION_SLIDERS.map(s => (
+              <div key={s.key} style={{display:'flex',justifyContent:'space-between',padding:'8px 0',borderBottom:'1px solid var(--border)',fontSize:15}}>
+                <span style={{color:'var(--text3)'}}>{s.label}</span>
+                <span style={{fontWeight:600}}>{assumptions[s.key]}{s.unit}</span>
               </div>
-              <div style={{fontSize:11,color:'var(--text3)',marginTop:8}}>{active.length} active polic{active.length === 1 ? 'y' : 'ies'}</div>
-            </div>
-            {/* Right: Assumptions */}
-            <div style={{background:'var(--bg2)',borderRadius:12,padding:16,border:'1px solid rgba(201,169,110,.2)'}}>
-              <h3 style={{fontSize:16,fontWeight:700,color:'#c9a96e',marginBottom:12}}>🧮 What we're assuming</h3>
-              {ASSUMPTION_SLIDERS.map(s => (
-                <div key={s.key} style={{display:'flex',justifyContent:'space-between',padding:'6px 0',borderBottom:'1px solid var(--border)',fontSize:14}}>
-                  <span style={{color:'var(--text3)'}}>{s.label}</span>
-                  <span style={{fontWeight:600}}>{assumptions[s.key]}{s.unit}</span>
-                </div>
-              ))}
-              {derivedSnapshot.length > 0 && <div style={{marginTop:12,fontSize:12,color:'var(--text3)'}}>{derivedSnapshot.reduce((s,d) => s + d.fields.length, 0)} values derived from these assumptions</div>}
-            </div>
+            ))}
+            {derivedSnapshot.length > 0 && <div style={{marginTop:14,fontSize:13,color:'var(--text3)'}}>{derivedSnapshot.reduce((s,d) => s + d.fields.length, 0)} values derived from these assumptions across {derivedSnapshot.length} polic{derivedSnapshot.length === 1 ? 'y' : 'ies'}</div>}
           </div>
         </div>
       </div>
@@ -16426,84 +16861,49 @@ function KnownsAssumptions() {
   }
 
   // ── NORMAL EDITOR MODE ──
+  // v2.0.2: Single-column layout. Global assumptions + per-policy derived values.
+  // Client facts live on the My Client tab — single source of truth.
   return (
     <div>
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'flex-start',marginBottom:16,gap:10,flexWrap:'wrap'}}>
         <div>
-          <h2 style={{fontSize:18,fontWeight:700,margin:0}}>Here's what we know — and what we're assuming.</h2>
-          <p style={{fontSize:11,color:'var(--text3)',marginTop:2}}>Adjust any assumption to see the impact across the portfolio.</p>
+          <h2 style={{fontSize:18,fontWeight:700,margin:0}}>Knowns &amp; Assumptions</h2>
+          <p style={{fontSize:11,color:'var(--text3)',marginTop:2}}>Adjust any assumption to see the impact across the portfolio. Client facts live on the <strong>My Client</strong> tab.</p>
         </div>
         <div style={{display:'flex',gap:6,alignItems:'center'}}>
-          {dirty && <button onClick={saveAssumptions} style={{background:'var(--gold)',color:'var(--bg)',border:'none',padding:'6px 14px',borderRadius:6,fontSize:11,fontWeight:700,cursor:'pointer'}}>Save assumptions</button>}
           <button onClick={() => setShareMode(true)} style={{background:'var(--bg2)',color:'var(--gold)',border:'1px solid rgba(201,169,110,.25)',padding:'6px 14px',borderRadius:6,fontSize:11,fontWeight:600,cursor:'pointer'}}>📤 Show client</button>
         </div>
       </div>
 
       <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(320px,1fr))',gap:16}}>
-        {/* ═══ LEFT COLUMN: FACTS ═══ */}
-        <div>
-          <div className="card" style={{marginBottom:12}}>
-            <h3 style={{fontSize:13,fontWeight:700,color:'var(--green2)',marginBottom:8}}>✓ Client facts</h3>
-            {clientFacts.length === 0 ? (
-              <div style={{fontSize:11,color:'var(--text3)'}}>No client profile data yet. Fill in My Profile to see facts here.</div>
-            ) : clientFacts.map(f => (
-              <div key={f.label} style={{display:'flex',justifyContent:'space-between',padding:'4px 0',borderBottom:'1px solid var(--border)',fontSize:11}}>
-                <span style={{color:'var(--text3)'}}>{f.label}</span>
-                <span style={{fontWeight:600,color:'var(--text2)'}}>{f.value}</span>
+        <div className="card" style={{borderLeft:'2px solid rgba(201,169,110,.3)'}}>
+          <h3 style={{fontSize:13,fontWeight:700,color:'#c9a96e',marginBottom:8}}>🧮 Global assumptions</h3>
+          {ASSUMPTION_SLIDERS.map(s => (
+            <div key={s.key} style={{marginBottom:8}}>
+              <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:2}}>
+                <span style={{fontSize:11,color:'var(--text3)'}}>{s.label}</span>
+                <span style={{fontSize:12,fontWeight:700,color:s.locked ? 'var(--text3)' : '#c9a96e'}}>
+                  {s.locked ? '🔒 ' : ''}{assumptions[s.key]}{s.unit}
+                </span>
               </div>
-            ))}
-          </div>
-
-          <div className="card" style={{marginBottom:12}}>
-            <h3 style={{fontSize:13,fontWeight:700,color:'var(--green2)',marginBottom:8}}>✓ Coverage totals</h3>
-            <div style={{display:'flex',justifyContent:'space-between',padding:'4px 0',borderBottom:'1px solid var(--border)',fontSize:11}}><span style={{color:'var(--text3)'}}>Death / TI cover</span><span style={{fontWeight:600,color:'var(--text2)'}}>{fmt(totalDeathSA)}</span></div>
-            <div style={{display:'flex',justifyContent:'space-between',padding:'4px 0',borderBottom:'1px solid var(--border)',fontSize:11}}><span style={{color:'var(--text3)'}}>CI cover</span><span style={{fontWeight:600,color:'var(--text2)'}}>{fmt(totalCI)}</span></div>
-            <div style={{display:'flex',justifyContent:'space-between',padding:'4px 0',borderBottom:'1px solid var(--border)',fontSize:11}}><span style={{color:'var(--text3)'}}>Annual premiums</span><span style={{fontWeight:600,color:'var(--text2)'}}>{fmt(totalPremium)}</span></div>
-            <div style={{fontSize:10,color:'var(--text3)',marginTop:6}}>{active.length} active polic{active.length === 1 ? 'y' : 'ies'}</div>
-          </div>
-
-          {/* Per-policy facts (collapsible) */}
-          <div className="card">
-            <h3 style={{fontSize:13,fontWeight:700,color:'var(--green2)',marginBottom:8}}>✓ Per-policy extracted facts</h3>
-            {active.length === 0 ? (
-              <div style={{fontSize:11,color:'var(--text3)'}}>No active policies. Add policies to see extracted facts.</div>
-            ) : active.map(pol => (
-              <PolicyFactRow key={pol.id} policy={pol} />
-            ))}
-          </div>
+              {!s.locked && (
+                <input type="range" min={s.min} max={s.max} step={s.step}
+                  value={assumptions[s.key]}
+                  onChange={e => updateAssumption(s.key, e.target.value)}
+                  style={{width:'100%',accentColor:'#c9a96e',height:4}} />
+              )}
+            </div>
+          ))}
+          <div style={{fontSize:9,color:'var(--text3)',marginTop:8,fontStyle:'italic'}}>Saved automatically to this client's profile.</div>
         </div>
 
-        {/* ═══ RIGHT COLUMN: ASSUMPTIONS ═══ */}
-        <div>
-          <div className="card" style={{marginBottom:12,borderLeft:'2px solid rgba(201,169,110,.3)'}}>
-            <h3 style={{fontSize:13,fontWeight:700,color:'#c9a96e',marginBottom:8}}>🧮 Global assumptions</h3>
-            {ASSUMPTION_SLIDERS.map(s => (
-              <div key={s.key} style={{marginBottom:8}}>
-                <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:2}}>
-                  <span style={{fontSize:11,color:'var(--text3)'}}>{s.label}</span>
-                  <span style={{fontSize:12,fontWeight:700,color:s.locked ? 'var(--text3)' : '#c9a96e'}}>
-                    {s.locked ? '🔒 ' : ''}{assumptions[s.key]}{s.unit}
-                  </span>
-                </div>
-                {!s.locked && (
-                  <input type="range" min={s.min} max={s.max} step={s.step}
-                    value={assumptions[s.key]}
-                    onChange={e => updateAssumption(s.key, e.target.value)}
-                    style={{width:'100%',accentColor:'#c9a96e',height:4}} />
-                )}
-              </div>
-            ))}
-          </div>
-
-          {/* Per-policy derived values */}
-          <div className="card" style={{borderLeft:'2px solid rgba(201,169,110,.3)'}}>
-            <h3 style={{fontSize:13,fontWeight:700,color:'#c9a96e',marginBottom:8}}>🧮 Per-policy derived values</h3>
-            {derivedSnapshot.length === 0 ? (
-              <div style={{fontSize:11,color:'var(--text3)'}}>No derived values yet. Run AI extraction to populate.</div>
-            ) : derivedSnapshot.map(d => (
-              <DerivedPolicyRow key={d.id} data={d} overrides={overrides} setOverrides={setOverrides} setDirty={setDirty} />
-            ))}
-          </div>
+        <div className="card" style={{borderLeft:'2px solid rgba(201,169,110,.3)'}}>
+          <h3 style={{fontSize:13,fontWeight:700,color:'#c9a96e',marginBottom:8}}>🧮 Per-policy derived values</h3>
+          {derivedSnapshot.length === 0 ? (
+            <div style={{fontSize:11,color:'var(--text3)'}}>No derived values yet. Run AI extraction to populate.</div>
+          ) : derivedSnapshot.map(d => (
+            <DerivedPolicyRow key={d.id} data={d} overrides={overrides} setOverrides={setOverrides} setDirty={() => {}} />
+          ))}
         </div>
       </div>
     </div>
@@ -18893,7 +19293,11 @@ function Policies() {
   const isImage = file => getMime(file).startsWith('image/');
   const isText = file => ['text/plain','text/html','text/csv'].includes(getMime(file));
 
-  const EXTRACT_PROMPT = `You are a senior insurance policy analyst for a Singapore Financial Advisory firm. Extract ALL insurance policies AND financial instruments from this document with institutional-level detail.
+  // v2.0.9: Assigns the module-level `let EXTRACT_PROMPT` (declared near the
+  // top of the file) — NOT a local const. This makes the prompt visible to
+  // the top-level v15 queue handlers (performOCR, tickQueue) which live
+  // outside this component's closure. See module-level comment for details.
+  EXTRACT_PROMPT = `You are a senior insurance policy analyst for a Singapore Financial Advisory firm. Extract ALL insurance policies AND financial instruments from this document with institutional-level detail.
 
 ═══ RULES FOR FIELD EXTRACTION (read before anything else) ═══
 
@@ -25370,7 +25774,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
             {(() => {
               const prem = parseFloat(form.annualPremium)||0;
               const startAge = parseInt(form.premStartAge)||parseInt(form.ageAtEntry)||0;
-              const retAge = parseInt(_cp?.retirementAge)||65;
+              const retAge = getRetirementAge(_cp, 65); // v2.0.3
               // ── PREMIUM TERM (2026-04-09 fix) ──
               // When the user ticks the "Whole Life" checkbox, form.premTerm
               // is empty and parseInt returns NaN (falling through to 0).
@@ -26375,7 +26779,7 @@ function ReportTab() {
   const [generatingVisual, setGeneratingVisual] = useState(false);
   const p = clientProfile || {};
   const age = getProfileAge(p) ?? 35;
-  const retAge = parseInt(p.retirementAge)||65;
+  const retAge = getRetirementAge(p, 65); // v2.0.3
   const annualIncome = parseFloat(p.annualIncome)||0;
 
   // ═══════════════════════════════════════════════════════════════
@@ -28281,15 +28685,27 @@ function ExtractDiagnostics() {
 }
 
 function ExtractCacheEditor() {
+  // v2.0.7: Now reads/writes the active v15 `extract_cache` store instead of
+  // the stale `extractCache` store. The old store still exists in IndexedDB
+  // for backward compat but hasn't been written to by the queue pipeline
+  // since v15. Clear All now actually frees the entries that the per-file
+  // cache check looks up.
+  // v2.0.8: Also surfaces the store name and empty-entry count as a
+  // diagnostic header so the team can visually confirm the editor is
+  // correctly wired even when the cache is genuinely empty.
   const [entries, setEntries] = useState([]);
+  const [emptyCount, setEmptyCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const refresh = async () => {
     try {
-      const all = await dbGetAll('extractCache').catch(()=>[]);
+      const all = await dbGetAll('extract_cache').catch(()=>[]);
       // Sort newest first
       all.sort((a,b) => (b.timestamp||0) - (a.timestamp||0));
       setEntries(all);
-    } catch(e) { setEntries([]); }
+      // v2.0.8: count entries that would currently be rejected by the
+      // read-side guard added in v2.0.7 (empty arrays / missing value).
+      setEmptyCount(all.filter(e => !Array.isArray(e?.value) || e.value.length === 0).length);
+    } catch(e) { setEntries([]); setEmptyCount(0); }
     setLoading(false);
   };
   useEffect(() => { refresh(); }, []);
@@ -28297,8 +28713,8 @@ function ExtractCacheEditor() {
     if(!confirm('Clear all '+entries.length+' cached scans? You will have to re-run extraction (and re-spend tokens) on any rescans.')) return;
     try {
       const db = await openDB();
-      const tx = db.transaction('extractCache', 'readwrite');
-      tx.objectStore('extractCache').clear();
+      const tx = db.transaction('extract_cache', 'readwrite');
+      tx.objectStore('extract_cache').clear();
       await new Promise((res,rej) => { tx.oncomplete = res; tx.onerror = () => rej(tx.error); });
       toast('Scan cache cleared','success');
       refresh();
@@ -28307,6 +28723,15 @@ function ExtractCacheEditor() {
   const totalPolicies = entries.reduce((s,e) => s + (e.policyCount||0), 0);
   return (
     <div>
+      {/* v2.0.8: Diagnostic header — always visible. Confirms which store
+          the editor is wired to and surfaces empty-entry count even when
+          the cache is empty. */}
+      <div style={{fontSize:10,color:'var(--text3)',marginBottom:8,padding:'4px 8px',background:'var(--bg3)',borderRadius:4,fontFamily:'monospace'}}>
+        Store: <span style={{color:'var(--gold)'}}>extract_cache</span> (v15)
+        {' · '}
+        {loading ? 'loading…' : <><span style={{color:'var(--text2)'}}>{entries.length}</span> entr{entries.length === 1 ? 'y' : 'ies'}</>}
+        {!loading && emptyCount > 0 && <> · <span style={{color:'var(--orange)'}}>{emptyCount} empty</span> (would be rejected by read-side guard)</>}
+      </div>
       {loading ? (
         <div style={{fontSize:11,color:'var(--text3)'}}>Loading cache…</div>
       ) : entries.length === 0 ? (
