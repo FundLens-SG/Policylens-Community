@@ -211,6 +211,13 @@ if(!navigator.locks){navigator.locks={request:function(name,opts,cb){if(typeof o
 </script>
 <script crossorigin="anonymous" src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <script crossorigin="anonymous" src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<!-- v2.1.0 Phase A: Google Identity Services library for Drive OAuth.
+     Loaded async — does NOT block page render. Token client is initialized
+     lazily on first Connect click (in driveClient.signInInteractive),
+     so users in Local-only mode (the default) never touch this library.
+     The 5s polling timeout in signInInteractive guards against race
+     conditions if the user clicks Connect before the script finishes loading. -->
+<script async src="https://accounts.google.com/gsi/client"></script>
 <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ccircle cx='50' cy='50' r='38' fill='none' stroke='%23d4a96a' stroke-width='3'/%3E%3Ccircle cx='50' cy='50' r='2.5' fill='%23d4a96a'/%3E%3Cline x1='50' y1='32' x2='50' y2='42' stroke='%23d4a96a' stroke-width='2' stroke-linecap='round'/%3E%3Cline x1='50' y1='58' x2='50' y2='68' stroke='%23d4a96a' stroke-width='2' stroke-linecap='round'/%3E%3Cline x1='32' y1='50' x2='42' y2='50' stroke='%23d4a96a' stroke-width='2' stroke-linecap='round'/%3E%3Cline x1='58' y1='50' x2='68' y2='50' stroke='%23d4a96a' stroke-width='2' stroke-linecap='round'/%3E%3C/svg%3E">
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
 <style>
@@ -371,7 +378,7 @@ label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;lett
       <button class="abtn abtn-s" onclick="authShow('signup')">Create Account</button>
       <div class="auth-link" onclick="authShow('reset')">Forgot password?</div>
       <div style="text-align:center;margin-top:24px;font-size:11px;opacity:0.6">
-        <span>PolicyLens v2.0.9</span>
+        <span>PolicyLens v2.1.0</span>
         <span style="margin:0 8px">&middot;</span>
         <button onclick="document.getElementById('auth-changelog').style.display=document.getElementById('auth-changelog').style.display==='none'?'block':'none'" style="background:none;border:none;color:#c9a96e;cursor:pointer;font-size:11px;padding:0">Changelog</button>
       </div>
@@ -710,11 +717,39 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.0.9';
+const APP_VERSION = 'v2.1.0';
 const APP_VERSION_DATE = '2026-04-11';
-const APP_VERSION_NAME = 'EXTRACT_PROMPT Scope Fix';
+const APP_VERSION_NAME = 'Google Drive — Phase A (Auth + Primitives)';
 
 const CHANGELOG = [
+  {
+    version: 'v2.1.0',
+    date: '2026-04-11',
+    name: 'Google Drive — Phase A (Auth + Primitives)',
+    sections: [
+      {
+        heading: 'New features',
+        items: [
+          'Phase A of the Google Drive integration: client data will move from Supabase to JSON files in the FC\'s own Google Drive under a PolicyLens/ folder. This release ships the auth + primitives DORMANT — Local-only mode is ON by default and Drive code does not run unless an FC explicitly turns it off in Settings',
+          'New Settings card "🗂 Google Drive" with Connect / Disconnect / Reconnect buttons, status badge, folder link, last sync timestamp, the Local-only dev toggle, and help text explaining the unverified-app warning screen and 7-day refresh token cycle',
+          'Header row 1 has a small Drive status chip that appears only when Local-only mode is OFF — shows ○ disconnected / ● connected / ⚠ reconnect needed',
+          'driveClient module exposes signInInteractive / signInSilent / signOut / ensureFolder / listFiles / getFile / getFileMetadata / pingDriveAPI / mapDriveError. All Drive API calls scoped to https://www.googleapis.com/auth/drive.file (the app can only see files it created)',
+          'Day-6 reconnect check fires on app mount: if the OAuth grant timestamp in localStorage is older than 6 days the Drive status flips to "reconnect needed" and the chip turns gold',
+          'Google Identity Services library lazy-loaded via async script tag. Initialization deferred until first Connect click — users in Local-only mode (the default) never load the Google library',
+          'NOT YET ACTIVE in this release: save flow, migration, multi-client, conflict resolution, offline queue, Supabase realtime disable. Phase A is auth + read-only primitives only',
+        ]
+      },
+      {
+        heading: 'Roadmap',
+        items: [
+          'v2.1.0-beta (Phase B): Drive sync engine + offline mutation queue + conflict modal + dual-write to BOTH Drive and Supabase from day one of Phase B (Supabase remains the rollback safety net throughout the Phase B test window)',
+          'v2.1.0-rc (Phase C): One-shot migration runner moves existing IDB / Supabase clients into Drive JSON files, Supabase realtime listeners disabled when Drive mode is on, Local-only default flips from ON to OFF after 1 week of stable Phase B operation across trusted FCs',
+          'v2.1.1: Supabase write dropped after 1 additional week of stable Drive operation across all FCs. Supabase becomes product-repository only',
+          'v2.2: Multi-client switcher (deferred from v2.0.2 — singleton client_singleton.json shipping in v2.1.x)',
+        ]
+      },
+    ]
+  },
   {
     version: 'v2.0.9',
     date: '2026-04-11',
@@ -8165,6 +8200,339 @@ const TIER_STYLES = {
 const AppCtx = createContext();
 
 // ═══════════════════════════════════════════════════════════════
+// MODULE: GOOGLE DRIVE — Phase A (v2.1.0)
+// ───────────────────────────────────────────────────────────────
+// Auth + read-only primitives. Ships DORMANT — Local-only mode is
+// ON by default. Drive code only runs when an FC explicitly turns
+// the dev toggle off in Settings.
+//
+// Save flow, migration, multi-client, conflict resolution, offline
+// queue, and Supabase realtime disable are NOT in this phase.
+// They land in Phase B (v2.1.0-beta) and Phase C (v2.1.0-rc).
+//
+// Scope: drive.file — the app can only see files it created.
+// ═══════════════════════════════════════════════════════════════
+
+const DRIVE_CLIENT_ID = '502722318908-lsdr6qhoavkok0kd3ipa94mip1uqu3kp.apps.googleusercontent.com';
+const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
+const DRIVE_FOLDER_NAME = 'PolicyLens';
+const DRIVE_REFRESH_WARN_MS = 6 * 24 * 60 * 60 * 1000; // 6 days — banner threshold
+// Generic admin contact string used in the 403 access_denied path.
+// Intentionally generic — no personal contact info per v2.1.0 decision.
+const DRIVE_ACCESS_DENIED_MSG = "Your Gmail isn't on the access list yet. Contact your PolicyLens administrator to be added.";
+
+// ── localStorage keys (all prefixed policylens_drive_) ──
+const DRIVE_LS = {
+  folderId: 'policylens_drive_folder_id',
+  oauthGrantedAt: 'policylens_drive_oauth_granted_at',
+  localOnlyMode: 'policylens_drive_local_only_mode',
+  userEmail: 'policylens_drive_user_email',
+};
+const driveLSGet = (k) => { try { return localStorage.getItem(k); } catch (_) { return null; } };
+const driveLSSet = (k, v) => { try { localStorage.setItem(k, v); } catch (_) {} };
+const driveLSDel = (k) => { try { localStorage.removeItem(k); } catch (_) {} };
+
+// Default Local-only mode to ON for v2.1.0. v2.1.0-rc (Phase C) flips
+// the default to OFF after a week of stable Phase B operation. Until
+// then, every fresh browser starts with Drive disabled.
+function isDriveLocalOnly() {
+  const v = driveLSGet(DRIVE_LS.localOnlyMode);
+  if (v === '0') return false;
+  if (v === '1') return true;
+  return true; // default ON
+}
+function setDriveLocalOnly(on) {
+  driveLSSet(DRIVE_LS.localOnlyMode, on ? '1' : '0');
+}
+
+// ── In-memory state (NOT persisted) ──
+// Access tokens are intentionally never written to localStorage. On
+// app load, signInSilent attempts a prompt:'none' re-auth using the
+// stored oauth_granted_at timestamp as a hint that consent has been
+// given previously. Tokens live for ~1 hour and we let GIS handle
+// the refresh transparently.
+let _driveAccessToken = null;
+let _driveTokenClient = null;
+let _driveStatus = 'disconnected'; // 'disconnected' | 'connected' | 'reconnect-needed'
+const _driveStatusListeners = new Set();
+function onDriveStatusChange(fn) { _driveStatusListeners.add(fn); return () => _driveStatusListeners.delete(fn); }
+function setDriveStatus(s) {
+  if (_driveStatus === s) return;
+  _driveStatus = s;
+  _driveStatusListeners.forEach(fn => { try { fn(s); } catch (_) {} });
+}
+function getDriveStatus() { return _driveStatus; }
+
+// ── Wait for the GIS library to load (5s timeout) ──
+// Lazy-loaded via async <script> tag in <head>. If user clicks Connect
+// before the script finishes, poll for window.google.accounts.oauth2
+// for up to 5 seconds before giving up with a clear error.
+async function _waitForGIS(timeoutMs = 5000) {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (window.google?.accounts?.oauth2) return true;
+    await new Promise(r => setTimeout(r, 100));
+  }
+  return false;
+}
+
+// ── Initialize the OAuth token client (idempotent) ──
+function _ensureDriveTokenClient() {
+  if (_driveTokenClient) return _driveTokenClient;
+  if (!window.google?.accounts?.oauth2) return null;
+  _driveTokenClient = window.google.accounts.oauth2.initTokenClient({
+    client_id: DRIVE_CLIENT_ID,
+    scope: DRIVE_SCOPE,
+    callback: () => {}, // overridden per-request below
+  });
+  return _driveTokenClient;
+}
+
+// ── mapDriveError: classify a Drive API failure for the UI ──
+// Returns { kind, message }. UI consumes `kind` to decide whether
+// to flip status to reconnect-needed, show the access-list message,
+// or fall through to a generic toast.
+function mapDriveError(err) {
+  if (!err) return { kind: 'unknown', message: 'Drive request failed.' };
+  // Status code from fetch response or thrown shape
+  const status = err.status || err.code || (err.response && err.response.status);
+  const errMsg = (err.message || '').toLowerCase();
+  const errType = (err.error || '').toLowerCase();
+  const detail = (err.detail || err.error_description || '').toLowerCase();
+  if (status === 401 || errType === 'invalid_token' || errMsg.includes('invalid credential')) {
+    return { kind: 'reconnect-needed', message: 'Drive session expired. Click Reconnect to restore access.' };
+  }
+  if (status === 403 || errType === 'access_denied' || errType === 'accessnotconfigured' || errMsg.includes('access_denied') || detail.includes('access_denied')) {
+    return { kind: 'access-denied', message: DRIVE_ACCESS_DENIED_MSG };
+  }
+  if (status === 429 || errMsg.includes('rate')) {
+    return { kind: 'rate-limited', message: 'Drive rate-limited. Retry shortly.' };
+  }
+  if (errMsg.includes('failed to fetch') || errMsg.includes('networkerror') || errMsg.includes('network request failed')) {
+    return { kind: 'offline', message: 'No network connection — Drive unreachable.' };
+  }
+  return { kind: 'unknown', message: 'Drive error: ' + (err.message || String(err)) };
+}
+
+// ── Wrap fetch to a Drive endpoint with auth + error mapping ──
+async function _driveFetch(url, opts) {
+  if (!_driveAccessToken) {
+    const e = new Error('Not signed in to Google Drive');
+    e.status = 401;
+    throw e;
+  }
+  const headers = Object.assign({}, opts?.headers || {}, {
+    'Authorization': 'Bearer ' + _driveAccessToken,
+  });
+  const resp = await fetch(url, Object.assign({}, opts, { headers }));
+  if (!resp.ok) {
+    let body = null;
+    try { body = await resp.json(); } catch (_) {}
+    const err = new Error('Drive ' + resp.status + ': ' + (body?.error?.message || resp.statusText));
+    err.status = resp.status;
+    err.error = body?.error?.status || body?.error?.errors?.[0]?.reason;
+    err.detail = body?.error?.message;
+    if (resp.status === 401) {
+      // Token died — drop it so next call forces reconnect
+      _driveAccessToken = null;
+      setDriveStatus('reconnect-needed');
+    }
+    throw err;
+  }
+  return resp;
+}
+
+// ──────────────────────────────────────────────
+// driveClient — public API
+// ──────────────────────────────────────────────
+const driveClient = {
+  // ── signInInteractive: opens consent screen ──
+  // Stamps oauthGrantedAt on success, calls ensureFolder, sets status.
+  // Returns { ok: true, email } on success or throws on failure.
+  async signInInteractive() {
+    const ready = await _waitForGIS();
+    if (!ready) {
+      const err = new Error('Google sign-in library failed to load. Check your network connection and try again.');
+      err.kind = 'gis-load-failed';
+      throw err;
+    }
+    const tokenClient = _ensureDriveTokenClient();
+    if (!tokenClient) throw new Error('Failed to initialize Google OAuth token client');
+    return new Promise((resolve, reject) => {
+      tokenClient.callback = async (resp) => {
+        if (resp.error) {
+          const mapped = mapDriveError({ error: resp.error, error_description: resp.error_description });
+          reject(Object.assign(new Error(mapped.message), { kind: mapped.kind }));
+          return;
+        }
+        _driveAccessToken = resp.access_token;
+        driveLSSet(DRIVE_LS.oauthGrantedAt, String(Date.now()));
+        try {
+          const me = await driveClient.pingDriveAPI();
+          if (me?.user?.emailAddress) driveLSSet(DRIVE_LS.userEmail, me.user.emailAddress);
+          await driveClient.ensureFolder();
+          setDriveStatus('connected');
+          console.log('[Drive] ✓ Connected as', me?.user?.emailAddress || '(unknown)');
+          resolve({ ok: true, email: me?.user?.emailAddress || null });
+        } catch (e) {
+          const mapped = mapDriveError(e);
+          reject(Object.assign(new Error(mapped.message), { kind: mapped.kind }));
+        }
+      };
+      try {
+        tokenClient.requestAccessToken({ prompt: 'consent' });
+      } catch (e) {
+        reject(e);
+      }
+    });
+  },
+
+  // ── signInSilent: tries prompt:'none' re-auth on app load ──
+  // Returns true if a token was obtained, false otherwise (silent fail).
+  async signInSilent() {
+    const granted = driveLSGet(DRIVE_LS.oauthGrantedAt);
+    if (!granted) return false;
+    const ready = await _waitForGIS();
+    if (!ready) return false;
+    const tokenClient = _ensureDriveTokenClient();
+    if (!tokenClient) return false;
+    return new Promise((resolve) => {
+      tokenClient.callback = (resp) => {
+        if (resp.error) {
+          // Silent failure is expected — fall back to interactive
+          console.log('[Drive] Silent re-auth failed:', resp.error, '— Reconnect required');
+          setDriveStatus('reconnect-needed');
+          resolve(false);
+          return;
+        }
+        _driveAccessToken = resp.access_token;
+        // Day-6 check on the persisted timestamp
+        const ageMs = Date.now() - parseInt(granted);
+        if (ageMs > DRIVE_REFRESH_WARN_MS) {
+          setDriveStatus('reconnect-needed');
+          console.log('[Drive] Silent re-auth ok but grant is', Math.round(ageMs / 86400000), 'days old — Reconnect recommended');
+        } else {
+          setDriveStatus('connected');
+          console.log('[Drive] ✓ Silent re-auth ok');
+        }
+        resolve(true);
+      };
+      try {
+        tokenClient.requestAccessToken({ prompt: 'none' });
+      } catch (_) {
+        resolve(false);
+      }
+    });
+  },
+
+  // ── signOut: revoke token + clear all Drive localStorage ──
+  async signOut() {
+    if (_driveAccessToken && window.google?.accounts?.oauth2?.revoke) {
+      try { window.google.accounts.oauth2.revoke(_driveAccessToken, () => {}); } catch (_) {}
+    }
+    _driveAccessToken = null;
+    driveLSDel(DRIVE_LS.oauthGrantedAt);
+    driveLSDel(DRIVE_LS.userEmail);
+    // Note: folderId is NOT cleared — if the FC reconnects with the same
+    // Google account, the folder is still theirs and we want to find it
+    // by ID rather than create a duplicate. ensureFolder() validates and
+    // recovers if the stored ID is stale.
+    setDriveStatus('disconnected');
+    console.log('[Drive] Signed out');
+  },
+
+  // ── getStatus: derived from in-memory token + day-6 timestamp check ──
+  getStatus() { return _driveStatus; },
+
+  // ── ensureFolder: find or create the PolicyLens/ folder in My Drive root ──
+  // Stores the resulting folderId in localStorage. Idempotent.
+  async ensureFolder() {
+    // 1. Try the cached ID first
+    const cached = driveLSGet(DRIVE_LS.folderId);
+    if (cached) {
+      try {
+        const meta = await driveClient.getFileMetadata(cached);
+        if (meta && meta.mimeType === 'application/vnd.google-apps.folder' && !meta.trashed) {
+          return cached;
+        }
+      } catch (_) { /* fall through to search */ }
+    }
+    // 2. Search by name in My Drive root
+    const q = encodeURIComponent("name='" + DRIVE_FOLDER_NAME + "' and mimeType='application/vnd.google-apps.folder' and 'root' in parents and trashed=false");
+    const searchResp = await _driveFetch('https://www.googleapis.com/drive/v3/files?q=' + q + '&fields=files(id,name)');
+    const searchData = await searchResp.json();
+    if (searchData.files && searchData.files.length > 0) {
+      const id = searchData.files[0].id;
+      driveLSSet(DRIVE_LS.folderId, id);
+      console.log('[Drive] Found existing folder:', id);
+      return id;
+    }
+    // 3. Create it
+    const createResp = await _driveFetch('https://www.googleapis.com/drive/v3/files?fields=id', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: DRIVE_FOLDER_NAME,
+        mimeType: 'application/vnd.google-apps.folder',
+        parents: ['root'],
+      }),
+    });
+    const createData = await createResp.json();
+    driveLSSet(DRIVE_LS.folderId, createData.id);
+    console.log('[Drive] ✓ Created PolicyLens folder:', createData.id);
+    return createData.id;
+  },
+
+  // ── listFiles: list metadata of files in the PolicyLens folder ──
+  // Read-only primitive — Phase A does not call this from any UI flow,
+  // but Phase B will use it to enumerate client_*.json files on startup.
+  async listFiles() {
+    const folderId = driveLSGet(DRIVE_LS.folderId);
+    if (!folderId) throw new Error('PolicyLens folder not initialized');
+    const q = encodeURIComponent("'" + folderId + "' in parents and trashed=false");
+    const resp = await _driveFetch('https://www.googleapis.com/drive/v3/files?q=' + q + '&fields=files(id,name,headRevisionId,modifiedTime,size,appProperties)');
+    const data = await resp.json();
+    return data.files || [];
+  },
+
+  // ── getFile: fetch a file's content + metadata ──
+  // Phase A only uses this for the pingDriveAPI health check; Phase B
+  // will use it to fetch client_singleton.json on startup.
+  async getFile(fileId) {
+    const metaResp = await _driveFetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(fileId) + '?fields=id,name,headRevisionId,modifiedTime,appProperties');
+    const meta = await metaResp.json();
+    const contentResp = await _driveFetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(fileId) + '?alt=media');
+    const content = await contentResp.text();
+    return { meta, content };
+  },
+
+  // ── getFileMetadata: metadata only (used for headRevisionId checks in Phase B) ──
+  async getFileMetadata(fileId) {
+    const resp = await _driveFetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(fileId) + '?fields=id,name,headRevisionId,modifiedTime,mimeType,trashed,appProperties');
+    return await resp.json();
+  },
+
+  // ── pingDriveAPI: small no-op call to verify token still works ──
+  // Returns the GET /about response which includes user.emailAddress.
+  // Used by Settings card render to refresh the connected email display
+  // and to trigger 401-on-stale-token detection without doing anything heavy.
+  async pingDriveAPI() {
+    const resp = await _driveFetch('https://www.googleapis.com/drive/v3/about?fields=user(emailAddress,displayName)');
+    return await resp.json();
+  },
+
+  // ── helpers exposed for the UI ──
+  getCachedEmail() { return driveLSGet(DRIVE_LS.userEmail); },
+  getCachedFolderId() { return driveLSGet(DRIVE_LS.folderId); },
+  isLocalOnly: isDriveLocalOnly,
+  setLocalOnly: setDriveLocalOnly,
+  onStatusChange: onDriveStatusChange,
+};
+
+// Expose for console diagnostics in dev — never call from production code
+if (typeof window !== 'undefined') window.driveClient = driveClient;
+
+// ═══════════════════════════════════════════════════════════════
 // MODULE: SUPABASE_REPO — Cloud repository sync
 // ═══════════════════════════════════════════════════════════════
 
@@ -11080,6 +11448,34 @@ function CostMeterChip() {
   }, cost.files+' files · $'+cost.costUsd.toFixed(2)+' · '+elapsedStr);
 }
 
+// v2.1.0 Phase A: Drive status chip in Header row 1.
+// Hidden entirely when Local-only mode is ON (the default).
+// Display only — no live sync states (synced/syncing/offline) yet.
+// Click jumps to Settings tab where the user can connect/disconnect.
+function DriveStatusChip() {
+  const { setTab } = useContext(AppCtx);
+  const [, force] = useState(0);
+  // Subscribe to status changes from the driveClient
+  useEffect(() => {
+    const unsub = driveClient.onStatusChange(() => force(n => n + 1));
+    return unsub;
+  }, []);
+  // Hide entirely when Local-only mode is on
+  if (driveClient.isLocalOnly()) return null;
+  const status = driveClient.getStatus();
+  const map = {
+    'disconnected':     { icon: '○', label: 'Drive', color: 'var(--text3)', bg: 'var(--bg3)',           border: 'var(--border)',          title: 'Drive: not connected — click to set up in Settings' },
+    'connected':        { icon: '●', label: 'Drive', color: 'var(--teal)',  bg: 'rgba(91,168,160,.1)',  border: 'rgba(91,168,160,.3)',    title: 'Drive: connected (Phase A is dormant — sync wires in v2.1.0-beta)' },
+    'reconnect-needed': { icon: '⚠', label: 'Drive', color: 'var(--gold)',  bg: 'rgba(212,169,106,.12)', border: 'rgba(212,169,106,.35)', title: 'Drive: session expired — click to reconnect in Settings' },
+  };
+  const m = map[status] || map['disconnected'];
+  return React.createElement('span', {
+    title: m.title,
+    onClick: () => setTab('settings'),
+    style: {fontSize:10,fontWeight:600,color:m.color,padding:'2px 8px',background:m.bg,borderRadius:10,border:'1px solid '+m.border,whiteSpace:'nowrap',flexShrink:0,cursor:'pointer'}
+  }, m.icon + ' ' + m.label);
+}
+
 function Header() {
   const {tab,setTab,policies,clientName,clientProfile,savePolicy,deletePolicy,saveProfile,setPresentMode} = useContext(AppCtx);
   const loadRef = useRef(null);
@@ -11139,6 +11535,8 @@ function Header() {
           </button>
           {/* v15 STAGE 10: SESSION COST METER */}
           <CostMeterChip />
+          {/* v2.1.0 Phase A: Drive status — hidden when Local-only mode is ON (default) */}
+          <DriveStatusChip />
           <button onClick={()=>setPresentMode(true)} disabled={policies.length===0}
             title="Present mode — full-screen client view"
             style={{background:policies.length===0?'var(--bg3)':'linear-gradient(135deg,#d4a96a,#b8935a)',color:policies.length===0?'var(--text3)':'#0b0f1a',border:'1px solid rgba(212,169,106,.3)',padding:'0 10px',height:28,borderRadius:14,display:'flex',alignItems:'center',justifyContent:'center',cursor:policies.length===0?'not-allowed':'pointer',fontSize:11,fontWeight:700,flexShrink:0,opacity:policies.length===0?.4:1,gap:4}}>
@@ -28771,6 +29169,174 @@ function ExtractCacheEditor() {
 //     bypasses the once-per-session ref guard and re-pulls from
 //     Supabase, applying per-field merge.
 //   • Last sync timestamp (read from a ref + state hook)
+
+// v2.1.0 Phase A — Google Drive connection card.
+// Lives in Settings between the API key cards and CloudSyncCard.
+// All Drive code is dormant by default (Local-only mode ON). The
+// FC must explicitly toggle Local-only OFF and click Connect to
+// trigger any actual Drive API call.
+function DriveConnectionCard() {
+  const [, force] = useState(0);
+  const [busy, setBusy] = useState(false);
+  const [statusMsg, setStatusMsg] = useState(null);
+  const [pingedEmail, setPingedEmail] = useState(null);
+
+  // Subscribe to driveClient status changes
+  useEffect(() => {
+    const unsub = driveClient.onStatusChange(() => force(n => n + 1));
+    return unsub;
+  }, []);
+
+  // Re-validate the cached email by pinging Drive on every render of the card.
+  // Phase A decision: localStorage cache for instant display + pingDriveAPI
+  // re-validation, cleared on disconnect.
+  useEffect(() => {
+    if (driveClient.isLocalOnly()) return;
+    if (driveClient.getStatus() !== 'connected') return;
+    let cancelled = false;
+    driveClient.pingDriveAPI()
+      .then(me => { if (!cancelled) setPingedEmail(me?.user?.emailAddress || null); })
+      .catch(err => {
+        if (cancelled) return;
+        const mapped = mapDriveError(err);
+        if (mapped.kind === 'reconnect-needed') {
+          // status was already flipped inside _driveFetch
+          setStatusMsg({ kind: 'warn', text: mapped.message });
+        }
+      });
+    return () => { cancelled = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [driveClient.getStatus(), driveClient.isLocalOnly()]);
+
+  const localOnly = driveClient.isLocalOnly();
+  const status = driveClient.getStatus();
+  const cachedEmail = driveClient.getCachedEmail();
+  const folderId = driveClient.getCachedFolderId();
+  const grantedAt = parseInt(driveLSGet(DRIVE_LS.oauthGrantedAt) || '0');
+  const grantedRel = grantedAt ? fmtRelativeTime(new Date(grantedAt).toISOString()) : null;
+
+  const handleConnect = async () => {
+    setBusy(true);
+    setStatusMsg({ kind: 'info', text: 'Opening Google sign-in…' });
+    try {
+      const res = await driveClient.signInInteractive();
+      setStatusMsg({ kind: 'success', text: 'Connected as ' + (res.email || cachedEmail || 'your Google account') });
+      setPingedEmail(res.email || null);
+      setTimeout(() => setStatusMsg(null), 4000);
+    } catch (err) {
+      const mapped = err.kind ? { kind: err.kind, message: err.message } : mapDriveError(err);
+      setStatusMsg({ kind: 'error', text: mapped.message });
+      console.warn('[Drive] Connect failed:', mapped);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleDisconnect = async () => {
+    if (!confirm('Disconnect Google Drive?\n\nLocal data is unaffected. You can reconnect at any time.')) return;
+    setBusy(true);
+    try {
+      await driveClient.signOut();
+      setPingedEmail(null);
+      setStatusMsg({ kind: 'info', text: 'Disconnected from Drive.' });
+      setTimeout(() => setStatusMsg(null), 4000);
+    } finally { setBusy(false); }
+  };
+
+  const handleToggleLocalOnly = (on) => {
+    driveClient.setLocalOnly(on);
+    force(n => n + 1);
+  };
+
+  // Status badge styling
+  const badgeFor = (() => {
+    if (localOnly) return { bg: 'rgba(148,163,184,.08)', color: 'var(--text3)', border: 'rgba(148,163,184,.2)', text: 'Local-only mode (Drive disabled)' };
+    if (status === 'connected') return { bg: 'rgba(91,168,160,.1)', color: 'var(--teal)', border: 'rgba(91,168,160,.3)', text: '● Connected' + (pingedEmail || cachedEmail ? ' as ' + (pingedEmail || cachedEmail) : '') };
+    if (status === 'reconnect-needed') return { bg: 'rgba(212,169,106,.12)', color: 'var(--gold)', border: 'rgba(212,169,106,.35)', text: '⚠ Reconnect needed' };
+    return { bg: 'var(--bg3)', color: 'var(--text3)', border: 'var(--border)', text: '○ Not connected' };
+  })();
+
+  const msgColor = !statusMsg ? null
+    : statusMsg.kind === 'success' ? 'var(--teal)'
+    : statusMsg.kind === 'error' ? 'var(--red)'
+    : statusMsg.kind === 'warn' ? 'var(--gold)'
+    : 'var(--text2)';
+
+  return (
+    <div className="card" style={{marginBottom:16}}>
+      <h3 style={{fontSize:14,fontWeight:600,marginBottom:4}}>🗂 Google Drive</h3>
+      <p style={{fontSize:11,color:'var(--text3)',marginBottom:10}}>
+        Phase A — auth + primitives. Save flow, migration, and conflict resolution land in v2.1.0-beta. This release ships dormant by default — flip Local-only mode OFF below to enable.
+      </p>
+
+      {/* Help text — first-time connect warning */}
+      <div style={{fontSize:10,color:'var(--text3)',background:'var(--bg3)',padding:'8px 10px',borderRadius:6,marginBottom:10,lineHeight:1.5,border:'1px solid var(--border)'}}>
+        <div style={{fontWeight:600,color:'var(--text2)',marginBottom:4}}>First time connecting?</div>
+        PolicyLens is pending Google verification. You'll see a "Google hasn't verified this app" warning screen — click <strong>Advanced → Go to PolicyLens (unsafe)</strong> to continue. This is normal and will go away once verification completes.
+        <div style={{marginTop:6,fontWeight:600,color:'var(--text2)'}}>Refresh tokens</div>
+        Refresh tokens expire every 7 days while the app is in test mode. You'll see a Reconnect prompt periodically — usually one click.
+      </div>
+
+      {/* Status + folder + last sync */}
+      <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10,flexWrap:'wrap'}}>
+        <div style={{fontSize:11,padding:'4px 10px',borderRadius:6,background:badgeFor.bg,color:badgeFor.color,border:'1px solid '+badgeFor.border}}>
+          {badgeFor.text}
+        </div>
+        {!localOnly && folderId && (
+          <a href={'https://drive.google.com/drive/folders/' + folderId} target="_blank" rel="noopener noreferrer"
+            style={{fontSize:11,color:'var(--gold)',textDecoration:'none'}}>
+            Open PolicyLens folder in Drive →
+          </a>
+        )}
+        {!localOnly && status === 'connected' && grantedRel && (
+          <span style={{fontSize:10,color:'var(--text3)'}}>Last sign-in {grantedRel}</span>
+        )}
+      </div>
+
+      {/* Status message (transient) */}
+      {statusMsg && (
+        <div style={{fontSize:11,color:msgColor,marginBottom:10}}>{statusMsg.text}</div>
+      )}
+
+      {/* Buttons */}
+      <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:12}}>
+        {!localOnly && status === 'disconnected' && (
+          <button className="btn-primary btn-sm" onClick={handleConnect} disabled={busy}>
+            {busy ? 'Connecting…' : 'Connect Google Drive'}
+          </button>
+        )}
+        {!localOnly && status === 'reconnect-needed' && (
+          <button className="btn-primary btn-sm" onClick={handleConnect} disabled={busy}
+            style={{background:'var(--gold)',color:'var(--bg)'}}>
+            {busy ? 'Reconnecting…' : 'Reconnect'}
+          </button>
+        )}
+        {!localOnly && status === 'connected' && (
+          <button className="btn-secondary btn-sm" onClick={handleDisconnect} disabled={busy}>
+            Disconnect
+          </button>
+        )}
+        {localOnly && (
+          <span style={{fontSize:11,color:'var(--text3)',fontStyle:'italic'}}>Drive integration is disabled in Local-only mode.</span>
+        )}
+      </div>
+
+      {/* Local-only dev toggle */}
+      <div style={{padding:'8px 10px',background:'var(--bg3)',borderRadius:6,border:'1px solid var(--border)'}}>
+        <label style={{display:'flex',alignItems:'center',gap:8,cursor:'pointer',fontSize:11}}>
+          <input type="checkbox" checked={localOnly} onChange={e => handleToggleLocalOnly(e.target.checked)} />
+          <span>
+            <strong style={{color:'var(--text2)'}}>Local-only mode (skip Drive entirely)</strong>
+            <div style={{fontSize:10,color:'var(--text3)',marginTop:2}}>
+              Default for v2.1.0. When ON, Drive code is fully bypassed and the app behaves identically to v2.0.x. Flip OFF to enable Drive auth and (in v2.1.0-beta) sync.
+            </div>
+          </span>
+        </label>
+      </div>
+    </div>
+  );
+}
+
 function CloudSyncCard() {
   const { runCloudSync, policies } = useContext(AppCtx);
   const [syncing, setSyncing] = useState(false);
@@ -29081,6 +29647,9 @@ function Settings() {
           <div className="field"><label>Company</label><input value={advisorCompany} onChange={e=>setAdvisorCompany(e.target.value)} onBlur={e=>{dbPut('settings',{key:'advisorCompany',value:e.target.value});if(window.saveKeyToSupabase)saveKeyToSupabase('advisorCompany',e.target.value)}} placeholder="e.g. ABC Advisory" /></div>
         </div>
       </div>
+
+      {/* ═══ v2.1.0 PHASE A: GOOGLE DRIVE ═══ */}
+      <DriveConnectionCard />
 
       {/* ═══ CLOUD SYNC ═══ */}
       <CloudSyncCard />
