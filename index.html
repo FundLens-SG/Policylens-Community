@@ -63,7 +63,7 @@ if ('serviceWorker' in navigator) {
 // Polyfill navigator.locks for older Android WebViews that don't support it
 if(!navigator.locks){navigator.locks={request:function(name,opts,cb){if(typeof opts==='function'){cb=opts;opts={}}return Promise.resolve(cb({name:name}))}};}
 </script>
-<script crossorigin="anonymous" src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script crossorigin="anonymous" src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.49.1/dist/umd/supabase.min.js"></script>
 <script crossorigin="anonymous" src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <!-- v2.1.0 Phase A: Google Identity Services library for Drive OAuth.
      Loaded async — does NOT block page render. Token client is initialized
@@ -232,7 +232,7 @@ label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;lett
       <button class="abtn abtn-s" onclick="authShow('signup')">Create Account</button>
       <div class="auth-link" onclick="authShow('reset')">Forgot password?</div>
       <div style="text-align:center;margin-top:24px;font-size:11px;opacity:0.6">
-        <span>PolicyLens v2.1.0c</span>
+        <span id="auth-version-label">PolicyLens</span>
         <span style="margin:0 8px">&middot;</span>
         <button onclick="document.getElementById('auth-changelog').style.display=document.getElementById('auth-changelog').style.display==='none'?'block':'none'" style="background:none;border:none;color:#c9a96e;cursor:pointer;font-size:11px;padding:0">Changelog</button>
       </div>
@@ -559,6 +559,7 @@ async function adminAct(id,approve,email,name){
 // ── Init ──
 document.addEventListener('DOMContentLoaded',function(){
   if(SB_KEY==='DISABLED'){console.warn('PolicyLens: Supabase auth disabled');authGrant();return;}
+  try { console.log('[Auth] Session in storage:', !!localStorage.getItem('policylens-auth')); } catch(_) {}
   authCheck();
   var s=sb();if(s)s.auth.onAuthStateChange(function(ev){
     if(ev==='SIGNED_OUT'){document.getElementById('auth-gate').style.display='flex';document.getElementById('logout-pill').style.display='none';document.getElementById('admin-fab').style.display='none';}
@@ -571,11 +572,32 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.1.0e';
+const APP_VERSION = 'v2.1.0f';
 const APP_VERSION_DATE = '2026-04-12';
-const APP_VERSION_NAME = 'Remove service worker';
+const APP_VERSION_NAME = 'OAuth session fix';
 
 const CHANGELOG = [
+  {
+    version: 'v2.1.0f',
+    date: '2026-04-12',
+    name: 'OAuth session fix',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Pinned Supabase CDN to v2.49.1 — was loading unpinned @2, which auto-upgraded to v2.103.0 and introduced a session-deserialization bug where existing sessions lost their user field on full-page reload, triggering spurious SIGNED_OUT events. Manifested as: user signed into PolicyLens normally, clicked Connect Drive, returned from Google OAuth, landed on PolicyLens login screen. Root cause: Supabase\'s userStorage refactor in late 2025 changed the stored session format. Fix: pin to the last pre-refactor version.',
+          'Login footer now reflects current APP_VERSION dynamically instead of hardcoded string (fixes stale v2.1.0c showing even when v2.1.0e was running).',
+          'Added diagnostic console.log showing auth session presence on mount.',
+        ]
+      },
+      {
+        heading: 'Follow-up: unpinned CDN in exported report',
+        items: [
+          'The exported HTML portfolio report (shareable standalone page) loads Chart.js from https://cdn.jsdelivr.net/npm/chart.js with no version pin. Low risk (report is a one-shot render, not a persistent app), but should be pinned to Chart.js 4.4.1 in a future batch for consistency.',
+        ]
+      },
+    ]
+  },
   {
     version: 'v2.1.0e',
     date: '2026-04-12',
@@ -9545,6 +9567,12 @@ function App() {
   // FC makes their choice and the cloudSyncInitialized flag flips.
   // Shape: { localProfile, cloudProfile, localPolicies, cloudPolicies }
   const [reconcileData, setReconcileData] = useState(null);
+
+  // v2.1.0f: Patch pre-React login footer with dynamic APP_VERSION
+  useEffect(() => {
+    const el = document.getElementById('auth-version-label');
+    if (el) el.textContent = 'PolicyLens ' + APP_VERSION;
+  }, []);
 
   useEffect(() => {
     (async () => {
