@@ -608,11 +608,35 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.1.0m1';
+const APP_VERSION = 'v2.2.0-alpha';
 const APP_VERSION_DATE = '2026-04-12';
-const APP_VERSION_NAME = 'Firm Defaults refactor';
+const APP_VERSION_NAME = 'Drive sync foundations';
 
 const CHANGELOG = [
+  {
+    version: 'v2.2.0-alpha',
+    date: '2026-04-12',
+    name: 'Drive sync foundations',
+    sections: [
+      {
+        heading: 'New',
+        items: [
+          'Drive file schema v1 defined (per-client JSON files in "PolicyLens" Drive folder)',
+          'Drive API primitives: create/read/update/list client files with headRevisionId tracking',
+          'IndexedDB drive_state store tracks per-client file ID, revision, sync state',
+          'One-time migration prompt offers to sync existing local data to Drive',
+          'Dual-write: saves now write to both IndexedDB and Drive when connected (Supabase sync unchanged)'
+        ]
+      },
+      {
+        heading: 'Internal',
+        items: [
+          'Conflict detection via headRevisionId (resolution UI deferred to v2.2.0-beta)',
+          'Save/Load buttons and status indicator deferred to v2.2.0-beta'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.1.0m1',
     date: '2026-04-12',
@@ -7973,7 +7997,7 @@ function isLikelyFundName(name) {
 // MODULE: INDEXEDDB — Database layer + batch operations
 // ═══════════════════════════════════════════════════════════════
 
-const DB_NAME='PolicyLensV4';const DB_VER=6;
+const DB_NAME='PolicyLensV4';const DB_VER=7;
 const openDB=()=>new Promise((res,rej)=>{
   const r=indexedDB.open(DB_NAME,DB_VER);
   r.onupgradeneeded=e=>{
@@ -8016,6 +8040,10 @@ const openDB=()=>new Promise((res,rej)=>{
     if(!db.objectStoreNames.contains('learned_fewshots')){
       const lf=db.createObjectStore('learned_fewshots',{keyPath:'id'});
       lf.createIndex('byInsurer','insurer',{unique:false});
+    }
+    // ── v2.2.0-alpha: Drive sync state per client ──
+    if(!db.objectStoreNames.contains('drive_state')){
+      db.createObjectStore('drive_state',{keyPath:'clientId'});
     }
   };
   r.onblocked=()=>{console.warn('[IDB] Blocked by another tab — close other PolicyLens tabs');try{toast('Close other PolicyLens tabs to complete the update','warning',8000)}catch(_){}};
@@ -8171,6 +8199,10 @@ const PolicyDB = {
   },
   getAllLearnedFewShots: () => dbGetAll('learned_fewshots'),
   clearLearnedFewShots: () => PolicyDB.clearStore('learned_fewshots'),
+  // ── v2.2.0-alpha: Drive sync state ──
+  getDriveState: (clientId) => dbGet('drive_state', clientId).catch(() => null),
+  saveDriveState: (state) => dbPut('drive_state', { ...state, clientId: state.clientId }),
+  getAllDriveStates: () => dbGetAll('drive_state'),
 };
 
 // ── v14.4 FIX 5: ACTIVE LEARNING — Pattern extraction from corrections ──
@@ -8417,6 +8449,53 @@ function setDriveStatus(s) {
   _driveStatusListeners.forEach(fn => { try { fn(s); } catch (_) {} });
 }
 function getDriveStatus() { return _driveStatus; }
+
+// ── Drive file schema v1 ──
+const DRIVE_SCHEMA_VERSION = 1;
+
+// Build the JSON payload for a Drive client file.
+// Accepts the live React state values. Strips _fieldVersions (internal to
+// Supabase sync) so Drive files contain only user-facing data.
+function buildDriveClientPayload(clientId, clientProfile, policies, globalAssumptions) {
+  const stripVersions = (obj) => {
+    if (!obj) return obj;
+    const { _fieldVersions, ...rest } = obj;
+    return rest;
+  };
+  return {
+    schemaVersion: DRIVE_SCHEMA_VERSION,
+    clientId,
+    clientProfile: stripVersions(clientProfile) || {},
+    policies: (policies || []).map(stripVersions),
+    globalAssumptions: globalAssumptions || {},
+    tier: null,           // placeholder — client tier not yet in data model
+    lastReviewedAt: null, // placeholder — client-level review date not yet in data model
+    updatedAt: new Date().toISOString(),
+  };
+}
+
+// ── Drive conflict error (thrown by updateClientFile on headRevisionId mismatch) ──
+class DriveConflictError extends Error {
+  constructor(fileId, localHead, remoteHead) {
+    super('[Drive] Conflict on file ' + fileId + ': local head ' + localHead + ' vs remote ' + remoteHead);
+    this.name = 'DriveConflictError';
+    this.fileId = fileId;
+    this.localHead = localHead;
+    this.remoteHead = remoteHead;
+  }
+}
+
+// ── Drive sync debounce (module-scoped, not a React hook) ──
+let _driveSyncTimer = null;
+function _driveSyncDebounced(fn, ms) {
+  clearTimeout(_driveSyncTimer);
+  _driveSyncTimer = setTimeout(fn, ms || 1000);
+}
+
+// ── Drive migration prompt session flag ──
+// Set to true when user clicks "Not now" — prevents re-showing until next session.
+// Module-scoped (not persisted) so it resets on page reload as specified.
+let _driveMigrationDismissed = false;
 
 // ── Wait for the GIS library to load (5s timeout) ──
 // Lazy-loaded via async <script> tag in <head>. If user clicks Connect
@@ -8832,6 +8911,73 @@ const driveClient = {
     const resp = await _driveFetch('https://www.googleapis.com/drive/v3/files?q=' + q + '&fields=files(id,name,headRevisionId,modifiedTime,size,appProperties)');
     const data = await resp.json();
     return data.files || [];
+  },
+
+  // ── createClientFile: multipart POST to create a new per-client JSON file ──
+  // Sets appProperties.clientId and appProperties.schemaVersion so files are
+  // discoverable by listFiles() and identifiable without parsing content.
+  // Returns {fileId, headRevisionId}.
+  async createClientFile(folderId, clientData) {
+    const metadata = {
+      name: 'PolicyLens \u2014 ' + (clientData.clientProfile?.name || 'Untitled') + '.json',
+      parents: [folderId],
+      mimeType: 'application/json',
+      appProperties: {
+        clientId: clientData.clientId,
+        schemaVersion: String(DRIVE_SCHEMA_VERSION),
+      },
+    };
+    const body = JSON.stringify(clientData, null, 2);
+    const boundary = '----PolicyLensBoundary' + Date.now();
+    const multipart =
+      '--' + boundary + '\r\n' +
+      'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
+      JSON.stringify(metadata) + '\r\n' +
+      '--' + boundary + '\r\n' +
+      'Content-Type: application/json\r\n\r\n' +
+      body + '\r\n' +
+      '--' + boundary + '--';
+    const resp = await _driveFetch('https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&fields=id,headRevisionId', {
+      method: 'POST',
+      headers: { 'Content-Type': 'multipart/related; boundary=' + boundary },
+      body: multipart,
+    });
+    const result = await resp.json();
+    console.log('[Drive] \u2713 Created client file:', result.id, 'for', clientData.clientId);
+    return { fileId: result.id, headRevisionId: result.headRevisionId };
+  },
+
+  // ── updateClientFile: PATCH content with pre-write conflict detection ──
+  // Fetches current headRevisionId BEFORE writing. If it doesn't match
+  // expectedHeadRevisionId, throws DriveConflictError (caller decides
+  // resolution — Batch 1 console.warns, Batch 2 shows modal).
+  // On success, returns new headRevisionId.
+  async updateClientFile(fileId, clientData, expectedHeadRevisionId) {
+    // 1. Pre-write conflict check
+    const meta = await driveClient.getFileMetadata(fileId);
+    if (meta.headRevisionId !== expectedHeadRevisionId) {
+      throw new DriveConflictError(fileId, expectedHeadRevisionId, meta.headRevisionId);
+    }
+    // 2. Update file name in case client was renamed
+    const newName = 'PolicyLens \u2014 ' + (clientData.clientProfile?.name || 'Untitled') + '.json';
+    const body = JSON.stringify(clientData, null, 2);
+    const boundary = '----PolicyLensBoundary' + Date.now();
+    const multipart =
+      '--' + boundary + '\r\n' +
+      'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
+      JSON.stringify({ name: newName, appProperties: { schemaVersion: String(DRIVE_SCHEMA_VERSION) } }) + '\r\n' +
+      '--' + boundary + '\r\n' +
+      'Content-Type: application/json\r\n\r\n' +
+      body + '\r\n' +
+      '--' + boundary + '--';
+    const resp = await _driveFetch('https://www.googleapis.com/upload/drive/v3/files/' + encodeURIComponent(fileId) + '?uploadType=multipart&fields=id,headRevisionId', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'multipart/related; boundary=' + boundary },
+      body: multipart,
+    });
+    const result = await resp.json();
+    console.log('[Drive] \u2713 Updated client file:', fileId);
+    return result.headRevisionId;
   },
 
   // ── getFile: fetch a file's content + metadata ──
@@ -9514,6 +9660,41 @@ function OnboardingModal() {
 //   • Merge both — combine policies by id, per-field merge for
 //     conflicts on the same id (uses bumpFieldVersions/mergePerField)
 //
+// ── v2.2.0-alpha: Drive Migration Prompt ──
+// One-time modal offering to sync existing local data to Google Drive.
+// Shown when user has IDB data + no drive_state + Drive connected.
+function DriveMigrationModal({ onSync, onDismiss }) {
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    const esc = (e) => { if (e.key === 'Escape' && !busy) onDismiss(); };
+    window.addEventListener('keydown', esc);
+    return () => window.removeEventListener('keydown', esc);
+  }, [onDismiss, busy]);
+  return (
+    <div onClick={e => { if (e.target === e.currentTarget && !busy) onDismiss(); }}
+      style={{position:'fixed',inset:0,zIndex:10000,background:'rgba(0,0,0,.7)',display:'flex',alignItems:'center',justifyContent:'center',padding:16}}>
+      <div style={{background:'#1a2332',borderRadius:16,border:'1px solid rgba(201,169,110,.2)',maxWidth:440,width:'100%',padding:'28px 24px',boxShadow:'0 20px 60px rgba(0,0,0,.5)'}}>
+        <h2 style={{fontSize:18,fontWeight:700,color:'#e8e8e8',margin:'0 0 12px'}}>Enable Google Drive Sync?</h2>
+        <p style={{fontSize:14,color:'#aaa',lineHeight:1.6,margin:'0 0 20px'}}>
+          PolicyLens can now sync your client data to your Google Drive.
+          We'll create a file in a new "PolicyLens" folder in your Drive.
+          Your existing data will be uploaded once. Changes will auto-sync going forward.
+        </p>
+        <div style={{display:'flex',gap:10,justifyContent:'flex-end'}}>
+          <button onClick={onDismiss} disabled={busy}
+            style={{padding:'8px 16px',borderRadius:8,border:'1px solid rgba(255,255,255,.12)',background:'transparent',color:'#999',cursor:'pointer',fontSize:13}}>
+            Not now
+          </button>
+          <button onClick={async () => { setBusy(true); try { await onSync(); } finally { setBusy(false); } }} disabled={busy}
+            style={{padding:'8px 20px',borderRadius:8,border:'none',background:'linear-gradient(135deg,#c9a96e,#b8944f)',color:'#0d1117',cursor:'pointer',fontSize:13,fontWeight:600,opacity:busy?.6:1}}>
+            {busy ? 'Syncing\u2026' : 'Sync to Drive'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // Locked-in: cannot dismiss without choosing. The cloudSyncInitialized
 // flag is set after the FC commits, so this modal never reappears
 // for the same device.
@@ -9798,6 +9979,9 @@ function App() {
   // Shape: { localProfile, cloudProfile, localPolicies, cloudPolicies }
   const [reconcileData, setReconcileData] = useState(null);
 
+  // ── v2.2.0-alpha: Drive migration prompt state ──
+  const [showDriveMigration, setShowDriveMigration] = useState(false);
+
   // v2.1.0f: Patch pre-React login footer with dynamic APP_VERSION
   useEffect(() => {
     const el = document.getElementById('auth-version-label');
@@ -9893,6 +10077,29 @@ function App() {
       setLoading(false);
     })();
   }, []);
+
+  // ── v2.2.0-alpha: Drive migration prompt condition check ──
+  // Fires after initial IDB load completes AND whenever Drive status changes.
+  // Shows the one-time migration prompt when:
+  //   1. User has data in IDB (policies.length > 0 OR clientProfile has a name)
+  //   2. No drive_state row exists for any client (never synced before)
+  //   3. Drive is connected
+  //   4. User hasn't dismissed the prompt this session
+  useEffect(() => {
+    if (loading) return;
+    const checkMigration = async () => {
+      if (_driveMigrationDismissed) return;
+      if (getDriveStatus() !== 'connected') return;
+      const hasData = policies.length > 0 || (clientProfile?.name && clientProfile.name.trim() !== '');
+      if (!hasData) return;
+      const states = await PolicyDB.getAllDriveStates().catch(() => []);
+      if (states && states.length > 0) return;
+      setShowDriveMigration(true);
+    };
+    checkMigration();
+    const unsub = onDriveStatusChange(() => checkMigration());
+    return unsub;
+  }, [loading, policies.length, clientProfile?.name]);
 
   // Reload API keys when Supabase sync completes (fixes race condition on login)
   // Also fires the cloud sync because auth might be the LAST step before sync
@@ -10460,6 +10667,35 @@ function App() {
 
   // Repo reload triggered manually via refreshRepo or on initial load
 
+  // ── v2.2.0-alpha: Drive dual-write ──
+  // Called (debounced 1s) after every saveProfile / savePolicy IDB write.
+  // No-ops silently when current client has no drive_state row.
+  const _driveSyncCurrentClient = async () => {
+    if (getDriveStatus() !== 'connected') return;
+    let states;
+    try { states = await PolicyDB.getAllDriveStates(); } catch (_) { return; }
+    if (!states || states.length === 0) return;
+    const ds = states[0]; // Batch 1: single client only
+    try {
+      const assumptions = await PolicyDB.getAssumptions('default').catch(() => null);
+      const payload = buildDriveClientPayload(ds.clientId, clientProfile, policies, assumptions?.value || assumptions || null);
+      const newHead = await driveClient.updateClientFile(ds.fileId, payload, ds.headRevisionId);
+      await PolicyDB.saveDriveState({
+        ...ds,
+        headRevisionId: newHead,
+        lastSyncedAt: new Date().toISOString(),
+        pendingWrite: false,
+      });
+    } catch (err) {
+      if (err instanceof DriveConflictError) {
+        console.warn('[Drive] Conflict on client ' + ds.clientId + ', deferred to Batch 2');
+      } else {
+        console.warn('[Drive] Sync failed (non-blocking):', err.message || err);
+      }
+      // Drive failure must NOT throw into the existing save path
+    }
+  };
+
   const savePolicy = async (incomingP) => {
     // Dedup pass — if an existing policy shares (policyNumber|insurer),
     // merge into it rather than creating a duplicate row.
@@ -10486,6 +10722,8 @@ function App() {
     // Stamp self-push so Realtime echoes get ignored.
     lastSelfPushRef.current = Date.now();
     sbPolicyPush(enriched, newVersions).catch(() => {});
+    // v2.2.0-alpha: Dual-write to Drive (debounced, fire-and-forget)
+    _driveSyncDebounced(() => _driveSyncCurrentClient(), 1000);
   };
   const deletePolicy = async (id) => {
     await dbDel('policies', id);
@@ -10540,6 +10778,8 @@ function App() {
     // Push to cloud (fire-and-forget). Cloud helper strips _fieldVersions.
     lastSelfPushRef.current = Date.now();
     sbProfilePush(enriched, newVersions).catch(() => {});
+    // v2.2.0-alpha: Dual-write to Drive (debounced, fire-and-forget)
+    _driveSyncDebounced(() => _driveSyncCurrentClient(), 1000);
     // ── GLOBAL SYNC: Recalculate ageAtEntry for all policies ──
     // Triggers whenever the profile has ANY age source (real DOB
     // OR current age + asOf timestamp). Uses getProfileEffectiveDob
@@ -10745,6 +10985,34 @@ function App() {
             try { toast('Sync failed: '+(err.message||err),'error',6000); } catch(e){}
           }
           setReconcileData(null);
+        }}
+      />}
+      {showDriveMigration && <DriveMigrationModal
+        onSync={async () => {
+          try {
+            const clientId = crypto.randomUUID();
+            const assumptions = await PolicyDB.getAssumptions('default').catch(() => null);
+            const payload = buildDriveClientPayload(clientId, clientProfile, policies, assumptions?.value || assumptions || null);
+            const folderId = await driveClient.ensureFolder();
+            const { fileId, headRevisionId } = await driveClient.createClientFile(folderId, payload);
+            await PolicyDB.saveDriveState({
+              clientId,
+              fileId,
+              headRevisionId,
+              lastSyncedAt: new Date().toISOString(),
+              pendingWrite: false,
+            });
+            setShowDriveMigration(false);
+            try { toast('\u2713 Client data synced to Drive', 'success', 4000); } catch(_){}
+            console.log('[Drive] Migration complete — clientId:', clientId, 'fileId:', fileId);
+          } catch (err) {
+            console.error('[Drive] Migration failed:', err);
+            try { toast('Drive sync failed: ' + (err.message || err), 'error', 6000); } catch(_){}
+          }
+        }}
+        onDismiss={() => {
+          _driveMigrationDismissed = true;
+          setShowDriveMigration(false);
         }}
       />}
       <Header />
