@@ -608,11 +608,43 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.2.0-alpha.1';
+const APP_VERSION = 'v2.2.0-beta';
 const APP_VERSION_DATE = '2026-04-13';
-const APP_VERSION_NAME = 'Drive sync hotfixes';
+const APP_VERSION_NAME = 'Drive sync UI + conflict resolution';
 
 const CHANGELOG = [
+  {
+    version: 'v2.2.0-beta',
+    date: '2026-04-13',
+    name: 'Drive sync UI + conflict resolution',
+    sections: [
+      {
+        heading: 'New',
+        items: [
+          'Header Save/Load buttons now dynamically sync to Drive when connected, fall back to local JSON export/import when not',
+          '"Saved Xs ago" indicator in header (desktop) and animated save-button states (mobile) show Drive sync status at a glance',
+          'Drive sync conflicts now prompt a two-button "Keep mine / Keep theirs" resolution modal (previously logged to console only)',
+          'Page focus triggers a background Drive refresh (max once every 15s) — edits from your other devices show up without a reload',
+          'Disconnected-from-Drive status bar at top of app with one-click Reconnect, only shown when Drive was previously connected',
+          'Settings → Local Backup card provides Download as JSON / Load from JSON file — always available regardless of Drive connection state. Temporary belt-and-suspenders during Drive sync trust-building period.'
+        ]
+      },
+      {
+        heading: 'Changed',
+        items: [
+          'Drive file schema bumped to v2: top-level globalAssumptions field removed (was redundant with clientProfile.globalAssumptions). v1 files upgrade silently on next write — no action needed.',
+          'Orientation-lock button now hidden based on viewport width (<768px) instead of screen.orientation.lock API availability — more predictable mobile/desktop gating'
+        ]
+      },
+      {
+        heading: 'Internal',
+        items: [
+          'Removed dead client_assumptions IDB object store and orphaned PolicyDB.getAssumptions / saveAssumptions helpers (DB_VER bumped to 8)',
+          'doLocalSave / doLocalLoad extracted to module scope for reuse by Header and Settings Local Backup card'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.2.0-alpha.1',
     date: '2026-04-13',
@@ -8011,7 +8043,7 @@ function isLikelyFundName(name) {
 // MODULE: INDEXEDDB — Database layer + batch operations
 // ═══════════════════════════════════════════════════════════════
 
-const DB_NAME='PolicyLensV4';const DB_VER=7;
+const DB_NAME='PolicyLensV4';const DB_VER=8;
 const openDB=()=>new Promise((res,rej)=>{
   const r=indexedDB.open(DB_NAME,DB_VER);
   r.onupgradeneeded=e=>{
@@ -8041,9 +8073,9 @@ const openDB=()=>new Promise((res,rej)=>{
       cs.createIndex('byInsurer','insurer',{unique:false});
       cs.createIndex('byTimestamp','timestamp',{unique:false});
     }
-    // ── v14.3: Client assumptions store ──
-    if(!db.objectStoreNames.contains('client_assumptions')){
-      db.createObjectStore('client_assumptions',{keyPath:'clientId'});
+    // ── v2.2.0-beta: Remove dead client_assumptions store ──
+    if(db.objectStoreNames.contains('client_assumptions')){
+      db.deleteObjectStore('client_assumptions');
     }
     // ── v14.3: Snap-and-go captures store ──
     if(!db.objectStoreNames.contains('snap_captures')){
@@ -8183,9 +8215,6 @@ const PolicyDB = {
     });
   },
   clearCorrections: () => PolicyDB.clearStore('extraction_corrections'),
-  // ── v14.3: Client assumptions ──
-  getAssumptions: (clientId) => dbGet('client_assumptions', clientId || 'default').catch(() => null),
-  saveAssumptions: (a) => dbPut('client_assumptions', { ...a, clientId: a.clientId || 'default', updatedAt: Date.now() }),
   // ── v14.3: Snap captures ──
   putCapture: (entry) => dbPut('snap_captures', { ...entry, id: entry.id || ('sc_'+Date.now()+'_'+Math.random().toString(36).slice(2,6)), timestamp: entry.timestamp || Date.now() }),
   getCapturesBySession: async (sessionId) => {
@@ -8428,6 +8457,7 @@ const DRIVE_LS = {
   oauthGrantedAt: 'policylens_drive_oauth_granted_at',
   localOnlyMode: 'policylens_drive_local_only_mode',
   userEmail: 'policylens_drive_user_email',
+  hasEverConnected: 'policylens_drive_has_ever_connected',
 };
 const driveLSGet = (k) => { try { return localStorage.getItem(k); } catch (_) { return null; } };
 const driveLSSet = (k, v) => { try { localStorage.setItem(k, v); } catch (_) {} };
@@ -8464,13 +8494,18 @@ function setDriveStatus(s) {
 }
 function getDriveStatus() { return _driveStatus; }
 
-// ── Drive file schema v1 ──
-const DRIVE_SCHEMA_VERSION = 1;
+// ── Drive file schema v2 (v2.2.0-beta) ──
+// v2 removes the redundant top-level globalAssumptions field.
+// Real data lives in clientProfile.globalAssumptions.
+// Read-path tolerates v1 files: ignore top-level globalAssumptions,
+// source truth from clientProfile.globalAssumptions. On next write,
+// file silently upgrades to v2.
+const DRIVE_SCHEMA_VERSION = 2;
 
 // Build the JSON payload for a Drive client file.
 // Accepts the live React state values. Strips _fieldVersions (internal to
 // Supabase sync) so Drive files contain only user-facing data.
-function buildDriveClientPayload(clientId, clientProfile, policies, globalAssumptions) {
+function buildDriveClientPayload(clientId, clientProfile, policies) {
   const stripVersions = (obj) => {
     if (!obj) return obj;
     const { _fieldVersions, ...rest } = obj;
@@ -8481,11 +8516,21 @@ function buildDriveClientPayload(clientId, clientProfile, policies, globalAssump
     clientId,
     clientProfile: stripVersions(clientProfile) || {},
     policies: (policies || []).map(stripVersions),
-    globalAssumptions: globalAssumptions || {},
     tier: null,           // placeholder — client tier not yet in data model
     lastReviewedAt: null, // placeholder — client-level review date not yet in data model
     updatedAt: new Date().toISOString(),
   };
+}
+
+// Parse a Drive file (v1 or v2). Always returns { clientProfile, policies }
+// with globalAssumptions sourced from clientProfile.globalAssumptions.
+function parseDriveClientFile(data) {
+  const cp = data.clientProfile || {};
+  const policies = data.policies || [];
+  if ((data.schemaVersion || 1) < 2) {
+    console.info('[Drive] Upgraded file from schema v1 → v2');
+  }
+  return { clientProfile: cp, policies };
 }
 
 // ── Drive conflict error (thrown by updateClientFile on headRevisionId mismatch) ──
@@ -8503,7 +8548,92 @@ class DriveConflictError extends Error {
 let _driveSyncTimer = null;
 function _driveSyncDebounced(fn, ms) {
   clearTimeout(_driveSyncTimer);
-  _driveSyncTimer = setTimeout(fn, ms || 1000);
+  _driveSyncTimer = setTimeout(() => { _driveSyncTimer = null; fn(); }, ms || 1000);
+}
+
+// ── Drive sync in-flight flag (module-scoped) ──
+// Toggled around every Drive read/write. UI subscribes via
+// 'policylens-sync-status-change' events.
+let _driveSyncInFlight = false;
+let _driveSyncJustSaved = false;
+let _driveLastFocusRefreshAt = 0;
+function _notifySyncStatus() {
+  window.dispatchEvent(new Event('policylens-sync-status-change'));
+}
+
+// ── Shared Drive write core (used by debounced dual-write + manual "Sync now") ──
+// ds: drive_state row, clientProfile/policies: current React state.
+// opts.showToast: true for user-initiated sync, false for background dual-write.
+// Returns true on success, false on failure. Caller must set/clear _driveSyncInFlight.
+async function _performDriveSync(ds, clientProfile, policies, opts) {
+  try {
+    const payload = buildDriveClientPayload(ds.clientId, clientProfile, policies);
+    const newHead = await driveClient.updateClientFile(ds.fileId, payload, ds.headRevisionId);
+    await PolicyDB.saveDriveState({ ...ds, headRevisionId: newHead, lastSyncedAt: new Date().toISOString(), pendingWrite: false });
+    _driveSyncJustSaved = true;
+    _notifySyncStatus();
+    setTimeout(() => { _driveSyncJustSaved = false; _notifySyncStatus(); }, 1500);
+    if (opts?.showToast) { try { toast('Synced to Drive', 'success', 2000); } catch(_){} }
+    return true;
+  } catch (err) {
+    if (err instanceof DriveConflictError) {
+      window.dispatchEvent(new CustomEvent('policylens-drive-conflict', {
+        detail: { clientId: ds.clientId, fileId: ds.fileId, localHead: ds.headRevisionId }
+      }));
+    } else {
+      if (opts?.showToast) { try { toast('Sync failed: ' + (err.message || err), 'error', 4000); } catch(_){} }
+      else { console.warn('[Drive] Sync failed (non-blocking):', err.message || err); }
+    }
+    return false;
+  }
+}
+
+// ── Shared viewport breakpoint (items 1 + 4) ──
+let _viewportIsMobile = typeof window !== 'undefined' && window.innerWidth < 768;
+(function _initViewportListener() {
+  if (typeof window === 'undefined') return;
+  let timer = null;
+  window.addEventListener('resize', () => {
+    clearTimeout(timer);
+    timer = setTimeout(() => {
+      const was = _viewportIsMobile;
+      _viewportIsMobile = window.innerWidth < 768;
+      if (was !== _viewportIsMobile) window.dispatchEvent(new Event('policylens-viewport-change'));
+    }, 150);
+  });
+})();
+function useViewportIsMobile() {
+  const [m, setM] = useState(_viewportIsMobile);
+  useEffect(() => {
+    const h = () => setM(_viewportIsMobile);
+    window.addEventListener('policylens-viewport-change', h);
+    return () => window.removeEventListener('policylens-viewport-change', h);
+  }, []);
+  return m;
+}
+
+// ── Extracted doLocalSave / doLocalLoad (module scope) ──
+// Used by Header buttons (when Drive disconnected) and Settings Local Backup card.
+function doLocalSave(clientProfile, clientName, policies) {
+  const data = {version:'PolicyLens_V1',exportedAt:new Date().toISOString(),clientName:clientProfile?.name||clientName||'',clientProfile,policies};
+  const blob = new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.href=url; a.download='PolicyLens_'+(clientProfile?.name||clientName||'Portfolio').replace(/\s+/g,'_')+'_'+new Date().toISOString().slice(0,10)+'.json'; a.click(); URL.revokeObjectURL(url);
+}
+async function doLocalLoad(file, policies, savePolicy, deletePolicy, saveProfile, clientProfile) {
+  if(!file)return;
+  try{
+    const text=await file.text(); const data=JSON.parse(text);
+    const arr=data.policies||(Array.isArray(data)?data:[]);
+    if(!arr.length){toast('No policies found in file','warning');return;}
+    const mode=confirm('Found '+arr.length+' policies'+(data.clientName?' for '+data.clientName:'')+'.\n\nOK = Replace current portfolio\nCancel = Add to existing');
+    if(mode){for(const pol of policies) await deletePolicy(pol.id);}
+    let count=0;
+    for(const pol of arr){await savePolicy({...pol,id:mode?pol.id:('p_'+Date.now()+'_'+Math.random().toString(36).slice(2,5))});count++;}
+    if(data.clientProfile && mode) saveProfile(data.clientProfile);
+    else if(data.clientName && mode) saveProfile({...clientProfile,name:data.clientName});
+    toast('Loaded '+count+' policies'+(mode?' (replaced)':' (added)'),'success');
+  }catch(e){toast(e.message,'error');}
 }
 
 // ── Drive migration prompt session flag ──
@@ -9929,6 +10059,7 @@ function App() {
       }
       _driveAccessToken = result.accessToken;
       driveLSSet(DRIVE_LS.oauthGrantedAt, String(Date.now()));
+      driveLSSet(DRIVE_LS.hasEverConnected, '1');
       // v2.1.0k: Persist token to localStorage for cross-refresh survival
       try {
         const uid = sbGetUserId() || (await (async () => { try { const s = await window._SB?.auth?.getSession(); return s?.data?.session?.user?.id; } catch(_) { return null; } })());
@@ -9995,6 +10126,83 @@ function App() {
 
   // ── v2.2.0-alpha: Drive migration prompt state ──
   const [showDriveMigration, setShowDriveMigration] = useState(false);
+
+  // ── v2.2.0-beta: Drive state for current client (for Header/sync UI) ──
+  const [driveState, setDriveState] = useState(null);
+  const [conflictData, setConflictData] = useState(null);
+  // Load drive_state on mount and after sync operations
+  useEffect(() => {
+    const loadDS = async () => {
+      try {
+        const states = await PolicyDB.getAllDriveStates();
+        setDriveState(states && states.length > 0 ? states[0] : null);
+      } catch(_) { setDriveState(null); }
+    };
+    loadDS();
+    // Refresh drive_state whenever sync status changes (after writes update it)
+    const h = () => loadDS();
+    window.addEventListener('policylens-sync-status-change', h);
+    return () => window.removeEventListener('policylens-sync-status-change', h);
+  }, []);
+  // Listen for conflict events
+  useEffect(() => {
+    const h = (e) => setConflictData(e.detail);
+    window.addEventListener('policylens-drive-conflict', h);
+    return () => window.removeEventListener('policylens-drive-conflict', h);
+  }, []);
+  // ── v2.2.0-beta: Focus-based Drive refresh ──
+  // Refs for latest state — avoids stale closures and re-registering
+  // the focus listener on every policy edit.
+  const policiesRef = useRef(policies);
+  const clientProfileRef = useRef(clientProfile);
+  useEffect(() => { policiesRef.current = policies; clientProfileRef.current = clientProfile; }, [policies, clientProfile]);
+  useEffect(() => {
+    const onFocus = async () => {
+      if (getDriveStatus() !== 'connected') return;
+      if (isDriveLocalOnly()) return;
+      let ds;
+      try { const states = await PolicyDB.getAllDriveStates(); ds = states?.[0]; } catch(_) { return; }
+      if (!ds) return;
+      if (Date.now() - _driveLastFocusRefreshAt < 15000) return;
+      _driveLastFocusRefreshAt = Date.now();
+      try {
+        const meta = await driveClient.getFileMetadata(ds.fileId);
+        if (meta.headRevisionId === ds.headRevisionId) return; // no-op
+        if (_driveSyncTimer === null && !_driveSyncInFlight) {
+          // Silent pull — no pending local edits
+          _driveSyncInFlight = true;
+          _notifySyncStatus();
+          try {
+            const { meta: fullMeta, content } = await driveClient.getFile(ds.fileId);
+            const fileData = JSON.parse(content);
+            const { clientProfile: driveProfile, policies: drivePolicies } = parseDriveClientFile(fileData);
+            const ts = Date.now();
+            const profileVersions = {};
+            for (const key of Object.keys(driveProfile)) { if (!key.startsWith('_')) profileVersions[key] = ts; }
+            for (const pol of policiesRef.current) await deletePolicy(pol.id);
+            for (const pol of drivePolicies) {
+              const polVersions = {};
+              for (const key of Object.keys(pol)) { if (!key.startsWith('_')) polVersions[key] = ts; }
+              await savePolicy({ ...pol, _fieldVersions: polVersions });
+            }
+            await saveProfile({ ...driveProfile, _fieldVersions: profileVersions });
+            await PolicyDB.saveDriveState({ ...ds, headRevisionId: fullMeta.headRevisionId, lastSyncedAt: new Date().toISOString(), pendingWrite: false });
+            console.log('[Drive] Focus-refresh: pulled updated data from Drive');
+          } finally {
+            _driveSyncInFlight = false;
+            _notifySyncStatus();
+          }
+        } else {
+          // Local has pending edits — show conflict modal
+          setConflictData({ clientId: ds.clientId, fileId: ds.fileId, localHead: ds.headRevisionId });
+        }
+      } catch (err) {
+        console.warn('[Drive] Focus-refresh failed (non-blocking):', err.message || err);
+      }
+    };
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, []);
 
   // v2.1.0f: Patch pre-React login footer with dynamic APP_VERSION
   useEffect(() => {
@@ -10152,6 +10360,7 @@ function App() {
         console.log('[Drive] Resuming queued OAuth after sign-in');
         _driveAccessToken = pending.accessToken;
         driveLSSet(DRIVE_LS.oauthGrantedAt, String(Date.now()));
+        driveLSSet(DRIVE_LS.hasEverConnected, '1');
         driveClient.pingDriveAPI()
           .then(me => {
             if (me?.user?.emailAddress) driveLSSet(DRIVE_LS.userEmail, me.user.emailAddress);
@@ -10685,6 +10894,7 @@ function App() {
   // ── v2.2.0-alpha: Drive dual-write ──
   // Called (debounced 1s) after every saveProfile / savePolicy IDB write.
   // No-ops silently when current client has no drive_state row.
+  // v2.2.0-beta: delegates to _performDriveSync shared helper.
   const _driveSyncCurrentClient = async () => {
     if (isDriveLocalOnly()) return;
     if (getDriveStatus() !== 'connected') return;
@@ -10692,23 +10902,13 @@ function App() {
     try { states = await PolicyDB.getAllDriveStates(); } catch (_) { return; }
     if (!states || states.length === 0) return;
     const ds = states[0]; // Batch 1: single client only
+    _driveSyncInFlight = true;
+    _notifySyncStatus();
     try {
-      const assumptions = clientProfile?.globalAssumptions || null;
-      const payload = buildDriveClientPayload(ds.clientId, clientProfile, policies, assumptions);
-      const newHead = await driveClient.updateClientFile(ds.fileId, payload, ds.headRevisionId);
-      await PolicyDB.saveDriveState({
-        ...ds,
-        headRevisionId: newHead,
-        lastSyncedAt: new Date().toISOString(),
-        pendingWrite: false,
-      });
-    } catch (err) {
-      if (err instanceof DriveConflictError) {
-        console.warn('[Drive] Conflict on client ' + ds.clientId + ', deferred to Batch 2');
-      } else {
-        console.warn('[Drive] Sync failed (non-blocking):', err.message || err);
-      }
-      // Drive failure must NOT throw into the existing save path
+      await _performDriveSync(ds, clientProfile, policies, { showToast: false });
+    } finally {
+      _driveSyncInFlight = false;
+      _notifySyncStatus();
     }
   };
 
@@ -10856,7 +11056,7 @@ function App() {
     sbAppSettingsPush(bundle, newVersions).catch(()=>{});
   };
 
-  const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,deletePolicy,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,tab,setTab,presentMode,setPresentMode,showChangelog,setShowChangelog,houseDefaults,saveHouseDefaults,runCloudSync:()=>runCloudSyncRef.current?.({force:true})};
+  const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,deletePolicy,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,tab,setTab,presentMode,setPresentMode,showChangelog,setShowChangelog,houseDefaults,saveHouseDefaults,runCloudSync:()=>runCloudSyncRef.current?.({force:true}),driveState};
 
   if(loading) return <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh'}}>
     <div style={{textAlign:'center'}}><LogoMark size={36} /><div style={{color:'var(--text2)',fontSize:14,marginTop:8}}>Loading PolicyLens…</div></div>
@@ -11005,10 +11205,11 @@ function App() {
       />}
       {showDriveMigration && <DriveMigrationModal
         onSync={async () => {
+          _driveSyncInFlight = true;
+          _notifySyncStatus();
           try {
             const clientId = crypto.randomUUID();
-            const assumptions = clientProfile?.globalAssumptions || null;
-            const payload = buildDriveClientPayload(clientId, clientProfile, policies, assumptions);
+            const payload = buildDriveClientPayload(clientId, clientProfile, policies);
             const folderId = await driveClient.ensureFolder();
             const { fileId, headRevisionId } = await driveClient.createClientFile(folderId, payload);
             await PolicyDB.saveDriveState({
@@ -11024,6 +11225,9 @@ function App() {
           } catch (err) {
             console.error('[Drive] Migration failed:', err);
             try { toast('Drive sync failed: ' + (err.message || err), 'error', 6000); } catch(_){}
+          } finally {
+            _driveSyncInFlight = false;
+            _notifySyncStatus();
           }
         }}
         onDismiss={() => {
@@ -11031,6 +11235,17 @@ function App() {
           setShowDriveMigration(false);
         }}
       />}
+      <DriveConflictModal
+        conflictData={conflictData}
+        onResolve={() => setConflictData(null)}
+        clientProfile={clientProfile}
+        clientName={clientName}
+        policies={policies}
+        savePolicy={savePolicy}
+        deletePolicy={deletePolicy}
+        saveProfile={saveProfile}
+      />
+      <DriveReconnectBar />
       <Header />
       <div style={{flex:1,overflow:'auto',padding:'12px clamp(10px, 3vw, 20px) 40px'}}>
         {tab==='profile' && <ErrorBoundary key="profile"><ProfileTab /></ErrorBoundary>}
@@ -12163,51 +12378,38 @@ function PresentMode() {
 //   without API: still tracks the preference for visual feedback and CSS
 //   When in 'auto' mode, the OS decides — no override.
 const OrientationLock = memo(function OrientationLock() {
-  // v2.1.0b: Hide the button entirely on devices where screen.orientation.lock
-  // is not a function (typically all desktop browsers). Previously the button
-  // rendered but the lock call silently failed, leaving a useless icon next
-  // to the User Management button that looked confusingly identical. The
-  // check is done via lazy useState initializer so it runs ONCE at mount —
-  // hook count stays constant per render, the early return at the bottom
-  // is a structurally safe pattern.
-  const [supported] = useState(() => {
-    try {
-      const so = (typeof screen !== 'undefined') && screen.orientation;
-      return !!(so && typeof so.lock === 'function');
-    } catch (_) { return false; }
-  });
+  // v2.2.0-beta: Gate on viewport width (<768px) instead of screen.orientation.lock
+  // API check. More predictable mobile/desktop split, shares the viewport listener
+  // with the sync status indicator.
+  const isMobile = useViewportIsMobile();
   const [mode, setMode] = useState(() => {
     try { return localStorage.getItem('policylens-orientation-lock') || 'auto'; }
     catch(e) { return 'auto'; }
   });
 
-  // Apply the lock when mode changes (only fires when supported is true,
+  // Apply the lock when mode changes (only fires on mobile,
   // but the effect itself is unconditional to keep hook count constant)
   useEffect(() => {
-    if (!supported) return;
+    if (!isMobile) return;
     try { localStorage.setItem('policylens-orientation-lock', mode); } catch(e) {}
-    const so = screen.orientation;
+    const so = (typeof screen !== 'undefined') && screen.orientation;
+    if (!so) return;
     const apply = async () => {
       try {
         if(mode === 'auto') {
           if(so.unlock) so.unlock();
         } else if(so.lock) {
-          // Lock API requires fullscreen on most browsers — try and swallow errors.
           await so.lock(mode === 'portrait' ? 'portrait-primary' : 'landscape-primary');
         }
       } catch(e) {
-        // Lock failed (typically: NotSupportedError or "fullscreen required").
-        // We still keep the user's preference saved so the button reflects it,
-        // and CSS / layout responds via media queries.
         console.log('[Orientation] lock unavailable:', e?.message || e);
       }
     };
     apply();
-  }, [mode, supported]);
+  }, [mode, isMobile]);
 
-  // v2.1.0b: After all hooks have run, hide entirely on desktop / unsupported
-  // browsers. Single deterministic exit, hook count is constant above this line.
-  if (!supported) return null;
+  // v2.2.0-beta: Hide on desktop viewports (>= 768px).
+  if (!isMobile) return null;
 
   const cycle = () => {
     setMode(m => m === 'auto' ? 'portrait' : m === 'portrait' ? 'landscape' : 'auto');
@@ -12273,6 +12475,186 @@ function CostMeterChip() {
   }, cost.files+' files · $'+cost.costUsd.toFixed(2)+' · '+elapsedStr);
 }
 
+// ── v2.2.0-beta: Sync status pill (desktop) ──
+// Shows "Saving..." / "Saved Xs ago" next to the Save button on desktop.
+// On mobile, the Save button itself becomes the indicator (see Header).
+function SyncStatusPill({ driveState }) {
+  const isMobile = useViewportIsMobile();
+  const [, force] = useState(0);
+  useEffect(() => {
+    const h = () => force(n => n + 1);
+    window.addEventListener('policylens-sync-status-change', h);
+    const iv = setInterval(h, 10000);
+    return () => { window.removeEventListener('policylens-sync-status-change', h); clearInterval(iv); };
+  }, []);
+  if (isMobile) return null;
+  if (!driveState || getDriveStatus() !== 'connected' || isDriveLocalOnly()) return null;
+  const isSaving = _driveSyncInFlight || _driveSyncTimer !== null;
+  if (isSaving) {
+    return React.createElement('span', {
+      style: {fontSize:10,color:'var(--gold)',padding:'2px 8px',background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)',whiteSpace:'nowrap',flexShrink:0,animation:'pulse 1.5s ease-in-out infinite'}
+    }, 'Saving\u2026');
+  }
+  const ts = driveState.lastSyncedAt;
+  if (!ts) return null;
+  const diff = Date.now() - new Date(ts).getTime();
+  const sec = Math.floor(diff / 1000);
+  let label;
+  if (sec < 10) label = 'Saved just now';
+  else if (sec < 60) label = 'Saved ' + sec + 's ago';
+  else if (sec < 3600) label = 'Saved ' + Math.floor(sec/60) + 'm ago';
+  else if (sec < 86400) label = 'Saved ' + Math.floor(sec/3600) + 'h ago';
+  else { const d = new Date(ts); label = 'Saved at ' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0'); }
+  return React.createElement('span', {
+    style: {fontSize:10,color:'var(--text3)',padding:'2px 8px',background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)',whiteSpace:'nowrap',flexShrink:0}
+  }, label);
+}
+
+// ── v2.2.0-beta: Drive reconnect status bar ──
+function DriveReconnectBar() {
+  const { tab } = useContext(AppCtx);
+  const [, force] = useState(0);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    const unsub = driveClient.onStatusChange(() => force(n => n + 1));
+    return unsub;
+  }, []);
+  if (getDriveStatus() === 'connected') return null;
+  if (isDriveLocalOnly()) return null;
+  if (driveLSGet(DRIVE_LS.hasEverConnected) !== '1') return null;
+  return (
+    <div style={{background:'rgba(212,169,106,.08)',borderBottom:'1px solid rgba(212,169,106,.2)',padding:'8px 16px',display:'flex',alignItems:'center',justifyContent:'space-between',gap:8,flexShrink:0,fontSize:12,color:'var(--text2)'}}>
+      <span>Google Drive disconnected — your changes are saving locally only.</span>
+      <button onClick={async () => {
+        setBusy(true);
+        try { await driveClient.signInInteractive({ returnTab: tab }); } catch(e) { setBusy(false); }
+      }} disabled={busy}
+        style={{background:'var(--gold)',color:'#0b0f1a',border:'none',borderRadius:14,padding:'4px 14px',fontSize:11,fontWeight:600,cursor:busy?'not-allowed':'pointer',flexShrink:0,opacity:busy?.6:1}}>
+        {busy ? 'Reconnecting\u2026' : 'Reconnect'}
+      </button>
+    </div>
+  );
+}
+
+// ── v2.2.0-beta: Drive conflict resolution modal ──
+function DriveConflictModal({ conflictData, onResolve, clientProfile, clientName, policies, savePolicy, deletePolicy, saveProfile }) {
+  const [busy, setBusy] = useState(null); // 'mine' | 'theirs' | null
+  const [retryFailed, setRetryFailed] = useState(false);
+  const [errMsg, setErrMsg] = useState(null);
+  if (!conflictData) return null;
+
+  const handleKeepMine = async () => {
+    setBusy('mine');
+    setErrMsg(null);
+    _driveSyncInFlight = true;
+    _notifySyncStatus();
+    try {
+      // Fetch fresh headRevisionId, then PATCH with it
+      const meta = await driveClient.getFileMetadata(conflictData.fileId);
+      const states = await PolicyDB.getAllDriveStates();
+      const ds = states[0];
+      const payload = buildDriveClientPayload(ds.clientId, clientProfile, policies);
+      const newHead = await driveClient.updateClientFile(ds.fileId, payload, meta.headRevisionId);
+      await PolicyDB.saveDriveState({ ...ds, headRevisionId: newHead, lastSyncedAt: new Date().toISOString(), pendingWrite: false });
+      _driveSyncJustSaved = true;
+      _notifySyncStatus();
+      setTimeout(() => { _driveSyncJustSaved = false; _notifySyncStatus(); }, 1500);
+      onResolve();
+      try { toast('Synced to Drive (kept local version)', 'success', 3000); } catch(_){}
+    } catch (err) {
+      // Single retry failed — reveal escape hatch
+      setRetryFailed(true);
+      setErrMsg('Sync failed after retry — your local data is still safe in this tab. Save a local backup before closing.');
+      console.warn('[Drive] Keep-mine retry failed:', err.message || err);
+    } finally {
+      _driveSyncInFlight = false;
+      _notifySyncStatus();
+      setBusy(null);
+    }
+  };
+
+  const handleKeepTheirs = async () => {
+    setBusy('theirs');
+    setErrMsg(null);
+    _driveSyncInFlight = true;
+    _notifySyncStatus();
+    try {
+      const { meta, content } = await driveClient.getFile(conflictData.fileId);
+      const data = JSON.parse(content);
+      const { clientProfile: driveProfile, policies: drivePolicies } = parseDriveClientFile(data);
+      const ts = Date.now();
+      // Bump _fieldVersions on all incoming entities — stamp every field as "now"
+      // so Supabase realtime treats them as authoritative (not echoes of stale local state)
+      const profileVersions = {};
+      for (const key of Object.keys(driveProfile)) { if (!key.startsWith('_')) profileVersions[key] = ts; }
+      const enrichedProfile = { ...driveProfile, _fieldVersions: profileVersions };
+      // Replace all local policies
+      for (const pol of policies) await deletePolicy(pol.id);
+      for (const pol of drivePolicies) {
+        const polVersions = {};
+        for (const key of Object.keys(pol)) { if (!key.startsWith('_')) polVersions[key] = ts; }
+        await savePolicy({ ...pol, _fieldVersions: polVersions });
+      }
+      await saveProfile(enrichedProfile);
+      // Update drive_state
+      const states = await PolicyDB.getAllDriveStates();
+      const ds = states[0];
+      await PolicyDB.saveDriveState({ ...ds, headRevisionId: meta.headRevisionId, lastSyncedAt: new Date().toISOString(), pendingWrite: false });
+      onResolve();
+      try { toast('Pulled from Drive (kept remote version)', 'success', 3000); } catch(_){}
+    } catch (err) {
+      setErrMsg('Pull failed: ' + (err.message || err));
+      console.warn('[Drive] Keep-theirs failed:', err.message || err);
+    } finally {
+      _driveSyncInFlight = false;
+      _notifySyncStatus();
+      setBusy(null);
+    }
+  };
+
+  const handleLocalBackup = () => {
+    doLocalSave(clientProfile, clientName, policies);
+    onResolve();
+  };
+
+  return (
+    <div style={{position:'fixed',inset:0,zIndex:10001,background:'rgba(0,0,0,.7)',display:'flex',alignItems:'center',justifyContent:'center',padding:16}}>
+      <div style={{background:'#1a2332',borderRadius:16,border:'1px solid rgba(201,169,110,.2)',maxWidth:480,width:'100%',padding:'28px 24px',boxShadow:'0 20px 60px rgba(0,0,0,.5)'}}>
+        <h2 style={{fontSize:18,fontWeight:700,color:'#e8e8e8',margin:'0 0 12px'}}>Drive sync conflict</h2>
+        {!retryFailed && <p style={{fontSize:13,color:'#aaa',lineHeight:1.6,margin:'0 0 20px'}}>
+          This client was edited on another device since your last sync. Choose which version to keep:
+          <br/><br/>
+          <strong style={{color:'var(--text2)'}}>Keep mine</strong> — your local changes overwrite the Drive version.<br/>
+          <strong style={{color:'var(--text2)'}}>Keep theirs</strong> — Drive version replaces your local data.<br/><br/>
+          Both options discard any unsaved edits in open forms.
+        </p>}
+        {retryFailed && <p style={{fontSize:13,color:'#aaa',lineHeight:1.6,margin:'0 0 20px'}}>
+          This client was edited on another device since your last sync. The sync retry failed — your local data is still safe in this tab.<br/><br/>
+          <strong style={{color:'var(--text2)'}}>Retry "Keep mine"</strong> — try overwriting Drive again.<br/>
+          <strong style={{color:'var(--text2)'}}>Keep theirs</strong> — Drive version replaces your local data.<br/>
+          <strong style={{color:'var(--text2)'}}>Save local backup & close</strong> — download your data as JSON and close this dialog.<br/><br/>
+          Both sync options discard any unsaved edits in open forms.
+        </p>}
+        {errMsg && <div style={{fontSize:11,color:'var(--red)',marginBottom:12,padding:'8px 10px',background:'rgba(239,83,80,.08)',borderRadius:6,border:'1px solid rgba(239,83,80,.15)'}}>{errMsg}</div>}
+        <div style={{display:'flex',gap:10,justifyContent:'flex-end',flexWrap:'wrap'}}>
+          {retryFailed && <button onClick={handleLocalBackup} disabled={!!busy}
+            style={{background:'transparent',color:'var(--text3)',border:'1px solid var(--border)',borderRadius:8,padding:'8px 16px',fontSize:11,cursor:busy?'not-allowed':'pointer'}}>
+            Save local backup & close
+          </button>}
+          <button onClick={handleKeepTheirs} disabled={!!busy}
+            style={{background:'var(--bg3)',color:'var(--text2)',border:'1px solid var(--border2)',borderRadius:8,padding:'8px 16px',fontSize:13,fontWeight:500,cursor:busy?'not-allowed':'pointer',opacity:busy?0.5:1}}>
+            {busy==='theirs' ? 'Pulling\u2026' : 'Keep theirs'}
+          </button>
+          <button onClick={handleKeepMine} disabled={!!busy}
+            style={{background:'var(--gold)',color:'#0b0f1a',border:'none',borderRadius:8,padding:'8px 16px',fontSize:13,fontWeight:600,cursor:busy?'not-allowed':'pointer',opacity:busy?0.5:1}}>
+            {busy==='mine' ? 'Syncing\u2026' : retryFailed ? 'Retry "Keep mine"' : 'Keep mine'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // v2.1.0 Phase A: Drive status chip in Header row 1.
 // Hidden via display:none when Local-only mode is ON (the default).
 // Display only — no live sync states (synced/syncing/offline) yet.
@@ -12308,29 +12690,105 @@ function DriveStatusChip() {
 }
 
 function Header() {
-  const {tab,setTab,policies,clientName,clientProfile,savePolicy,deletePolicy,saveProfile,setPresentMode} = useContext(AppCtx);
+  const {tab,setTab,policies,clientName,clientProfile,savePolicy,deletePolicy,saveProfile,setPresentMode,driveState} = useContext(AppCtx);
   const loadRef = useRef(null);
-  const doSave = () => {
-    const data = {version:'PolicyLens_V1',exportedAt:new Date().toISOString(),clientName:clientProfile?.name||clientName||'',clientProfile,policies};
-    const blob = new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.href=url; a.download=`PolicyLens_${(clientProfile?.name||clientName||'Portfolio').replace(/\s+/g,'_')}_${new Date().toISOString().slice(0,10)}.json`; a.click(); URL.revokeObjectURL(url);
+  const isMobile = useViewportIsMobile();
+  const [syncStatus, setSyncStatus] = useState('idle'); // idle | saving | saved
+  // Subscribe to sync status changes for mobile save button states
+  useEffect(() => {
+    const h = () => {
+      if (_driveSyncJustSaved) setSyncStatus('saved');
+      else if (_driveSyncInFlight || _driveSyncTimer !== null) setSyncStatus('saving');
+      else setSyncStatus('idle');
+    };
+    window.addEventListener('policylens-sync-status-change', h);
+    return () => window.removeEventListener('policylens-sync-status-change', h);
+  }, []);
+
+  // Determine if Drive sync is active for this client
+  const isDriveSync = getDriveStatus() === 'connected' && !isDriveLocalOnly() && !!driveState;
+
+  // ── Save handler ──
+  const handleSave = async () => {
+    if (isDriveSync) {
+      // Cancel pending debounce and flush immediately
+      clearTimeout(_driveSyncTimer);
+      _driveSyncTimer = null;
+      _driveSyncInFlight = true;
+      _notifySyncStatus();
+      try {
+        await _performDriveSync(driveState, clientProfile, policies, { showToast: true });
+      } finally {
+        _driveSyncInFlight = false;
+        _notifySyncStatus();
+      }
+    } else {
+      doLocalSave(clientProfile, clientName, policies);
+    }
   };
-  const doLoad = async(file) => {
-    if(!file)return;
-    try{
-      const text=await file.text(); const data=JSON.parse(text);
-      const arr=data.policies||(Array.isArray(data)?data:[]);
-      if(!arr.length){toast('No policies found in file','warning');return;}
-      const mode=confirm(`Found ${arr.length} policies${data.clientName?' for '+data.clientName:''}.\n\nOK = Replace current portfolio\nCancel = Add to existing`);
-      if(mode){for(const pol of policies) await deletePolicy(pol.id);}
-      let count=0;
-      for(const pol of arr){await savePolicy({...pol,id:mode?pol.id:('p_'+Date.now()+'_'+Math.random().toString(36).slice(2,5))});count++;}
-      if(data.clientProfile && mode) saveProfile(data.clientProfile);
-      else if(data.clientName && mode) saveProfile({...clientProfile,name:data.clientName});
-      toast(`Loaded ${count} policies`+(mode?' (replaced)':' (added)'),'success');
-    }catch(e){toast(e.message,'error');}
+
+  // ── Load handler ──
+  const handleLoad = async (file) => {
+    if (isDriveSync && !file) {
+      // Pull from Drive
+      if (_driveSyncTimer !== null || _driveSyncInFlight) {
+        if (!confirm('You have pending local edits. Pulling from Drive will discard them. Continue?')) return;
+      }
+      _driveSyncInFlight = true;
+      _notifySyncStatus();
+      try {
+        const { meta, content } = await driveClient.getFile(driveState.fileId);
+        const data = JSON.parse(content);
+        const { clientProfile: driveProfile, policies: drivePolicies } = parseDriveClientFile(data);
+        const ts = Date.now();
+        const profileVersions = {};
+        for (const key of Object.keys(driveProfile)) { if (!key.startsWith('_')) profileVersions[key] = ts; }
+        for (const pol of policies) await deletePolicy(pol.id);
+        for (const pol of drivePolicies) {
+          const polVersions = {};
+          for (const key of Object.keys(pol)) { if (!key.startsWith('_')) polVersions[key] = ts; }
+          await savePolicy({ ...pol, _fieldVersions: polVersions });
+        }
+        await saveProfile({ ...driveProfile, _fieldVersions: profileVersions });
+        await PolicyDB.saveDriveState({ ...driveState, headRevisionId: meta.headRevisionId, lastSyncedAt: new Date().toISOString(), pendingWrite: false });
+        try { toast('Pulled from Drive', 'success', 3000); } catch(_){}
+      } catch (err) {
+        try { toast('Pull failed: ' + (err.message || err), 'error', 4000); } catch(_){}
+      } finally {
+        _driveSyncInFlight = false;
+        _notifySyncStatus();
+      }
+    } else if (file) {
+      await doLocalLoad(file, policies, savePolicy, deletePolicy, saveProfile, clientProfile);
+    }
   };
+
+  const handleLoadClick = () => {
+    if (isDriveSync) {
+      handleLoad(null); // Pull from Drive
+    } else {
+      loadRef.current?.click();
+    }
+  };
+
+  // ── Mobile save button visual state ──
+  const mobileSaving = isMobile && isDriveSync && syncStatus === 'saving';
+  const mobileJustSaved = isMobile && isDriveSync && syncStatus === 'saved';
+  const mobileSaveDisabled = (policies.length === 0) || (mobileSaving && _driveSyncInFlight);
+
+  const saveBtnStyle = mobileSaving
+    ? {background:'#fff',color:'var(--gold)',border:'1px solid rgba(212,169,106,.5)',width:28,height:28,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:_driveSyncInFlight?'not-allowed':'pointer',fontSize:13,flexShrink:0,opacity:0.6}
+    : mobileJustSaved
+    ? {background:'#fff',color:'var(--green)',border:'1px solid var(--green)',width:28,height:28,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:13,flexShrink:0,opacity:1,transition:'all .3s'}
+    : {background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',width:28,height:28,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:13,flexShrink:0,opacity:policies.length===0?.4:1};
+
+  const saveBtnContent = mobileSaving
+    ? React.createElement('span', {style:{width:8,height:8,borderRadius:'50%',background:'var(--gold)',animation:'pulse 1s ease-in-out infinite'}})
+    : mobileJustSaved ? '✓' : '💾';
+
+  const saveTitle = isDriveSync ? 'Sync to Drive now' : 'Save portfolio (JSON)';
+  const loadTitle = isDriveSync ? 'Pull from Drive' : 'Load portfolio (JSON)';
+
   const tabs = [
     {id:'profile',label:'My Profile',icon:'👤'},
     {id:'dashboard',label:'Dashboard',icon:'📊'},
@@ -12350,12 +12808,14 @@ function Header() {
           {clientName && <span style={{fontSize:10,color:'var(--text3)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',minWidth:0}}>— {clientName}</span>}
         </div>
         <div style={{display:'flex',alignItems:'center',gap:4,flexShrink:0}}>
-          <button title="Save portfolio" onClick={doSave} disabled={policies.length===0}
-            style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',width:28,height:28,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:13,flexShrink:0,opacity:policies.length===0?.4:1}}>
-            💾
+          {/* v2.2.0-beta: Desktop sync status pill — left of Save */}
+          <SyncStatusPill driveState={driveState} />
+          <button title={saveTitle} onClick={handleSave} disabled={mobileSaveDisabled}
+            style={saveBtnStyle}>
+            {saveBtnContent}
           </button>
-          <input ref={loadRef} type="file" accept=".json" style={{display:'none'}} onChange={e=>{if(e.target.files[0])doLoad(e.target.files[0]);e.target.value='';}} />
-          <button title="Load portfolio" onClick={()=>loadRef.current?.click()}
+          <input ref={loadRef} type="file" accept=".json" style={{display:'none'}} onChange={e=>{if(e.target.files[0])handleLoad(e.target.files[0]);e.target.value='';}} />
+          <button title={loadTitle} onClick={handleLoadClick}
             style={{background:'var(--bg3)',color:'var(--text2)',border:'1px solid var(--border2)',width:28,height:28,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:13,flexShrink:0}}>
             📂
           </button>
@@ -12366,11 +12826,6 @@ function Header() {
           </button>
           {/* v15 STAGE 10: SESSION COST METER */}
           <CostMeterChip />
-          {/* v2.1.0b: DriveStatusChip removed from header — connection status
-              now lives only in Settings → Google Drive card to reduce header
-              clutter and avoid duplicating information. The component
-              definition is retained in code (search for `function
-              DriveStatusChip`) and may be remounted in a future phase. */}
           <button onClick={()=>setPresentMode(true)} disabled={policies.length===0}
             title="Present mode — full-screen client view"
             style={{background:policies.length===0?'var(--bg3)':'linear-gradient(135deg,#d4a96a,#b8935a)',color:policies.length===0?'var(--text3)':'#0b0f1a',border:'1px solid rgba(212,169,106,.3)',padding:'0 10px',height:28,borderRadius:14,display:'flex',alignItems:'center',justifyContent:'center',cursor:policies.length===0?'not-allowed':'pointer',fontSize:11,fontWeight:700,flexShrink:0,opacity:policies.length===0?.4:1,gap:4}}>
@@ -12380,25 +12835,15 @@ function Header() {
             if(!confirm('⚠️ WIPE PORTFOLIO DATA?\n\nThis will permanently delete:\n• All policies\n• Client profile (name, NRIC, dependants)\n• Saved drafts\n• Scan cache\n\nYour API keys and sign-in will be preserved.\n\nThis cannot be undone.')) return;
             if(!confirm('Are you SURE?\n\nOK = Yes, wipe portfolio data\nCancel = Keep my data')) return;
             try {
-              // 1. Delete every policy via the context — updates React state in place
               for(const pol of policies) await deletePolicy(pol.id);
-              // 2. Clear client profile + name via the context
               await saveProfile({name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[]});
-              // 3. Clear scan cache (safe — just recomputed on next scan)
               try {
                 const db = await openDB();
                 const tx = db.transaction('extractCache','readwrite');
                 tx.objectStore('extractCache').clear();
                 await new Promise((res,rej)=>{ tx.oncomplete=res; tx.onerror=()=>rej(tx.error); });
               } catch(e){}
-              // 4. Clear any sessionStorage drafts
               try { sessionStorage.removeItem('policylens_pendingExtract'); } catch(e){}
-              // NOTE: We deliberately do NOT clear the `settings` IndexedDB store — that
-              // would remove API keys + advisor info, which is friction for no benefit.
-              // We also deliberately do NOT call window.location.reload() — on some
-              // mobile browsers (observed on Huawei stock) reload causes a SIGNED_OUT
-              // event in the Supabase auth listener. State setters above propagate
-              // all visual changes without needing a reload.
               toast('Portfolio wiped. API keys and sign-in preserved.','success');
             } catch(e){ console.warn('Wipe error:', e); toast('Wipe error: '+e.message,'error'); }
           }}
@@ -30183,6 +30628,33 @@ function DriveConnectionCard() {
   );
 }
 
+// ── v2.2.0-beta: Local JSON Backup card (Settings) ──
+// Belt-and-suspenders: always available regardless of Drive state.
+// Will be removed once Drive sync is fully trusted.
+function LocalBackupCard() {
+  const { policies, clientProfile, clientName, savePolicy, deletePolicy, saveProfile } = useContext(AppCtx);
+  const loadRef = useRef(null);
+  return (
+    <div className="card" style={{marginBottom:16}}>
+      <h3 style={{fontSize:14,fontWeight:600,marginBottom:4}}>📥 Local Backup</h3>
+      <p style={{fontSize:11,color:'var(--text3)',marginBottom:10,lineHeight:1.5}}>
+        Download a local backup of this client's data, or restore from a previously-downloaded file.
+        Useful for archiving or transferring data manually. Will be removed in a future version once Drive sync is fully trusted.
+      </p>
+      <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+        <button className="btn-secondary btn-sm" onClick={() => doLocalSave(clientProfile, clientName, policies)}>
+          Download as JSON
+        </button>
+        <input ref={loadRef} type="file" accept=".json" style={{display:'none'}}
+          onChange={e => { if(e.target.files[0]) doLocalLoad(e.target.files[0], policies, savePolicy, deletePolicy, saveProfile, clientProfile); e.target.value=''; }} />
+        <button className="btn-secondary btn-sm" onClick={() => loadRef.current?.click()}>
+          Load from JSON file
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function CloudSyncCard() {
   const { runCloudSync, policies } = useContext(AppCtx);
   const [syncing, setSyncing] = useState(false);
@@ -30496,6 +30968,9 @@ function Settings() {
 
       {/* ═══ v2.1.0 PHASE A: GOOGLE DRIVE ═══ */}
       <DriveConnectionCard />
+
+      {/* ═══ v2.2.0-beta: LOCAL BACKUP (belt-and-suspenders) ═══ */}
+      <LocalBackupCard />
 
       {/* ═══ CLOUD SYNC ═══ */}
       <CloudSyncCard />
