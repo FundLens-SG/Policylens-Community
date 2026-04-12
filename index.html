@@ -21,219 +21,31 @@ console.error=function(){var m=arguments[0]||'';if(typeof m==='string'&&m.includ
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <script>
 // ═══════════════════════════════════════════════════════════════
-// SERVICE WORKER AUTO-UPDATE (user-invisible)
+// v2.1.0e: LEGACY SERVICE WORKER CLEANUP (one-time)
 // ───────────────────────────────────────────────────────────────
-// Problem: Service Workers don't auto-propagate to existing users.
-// When we deploy a new sw.js, Chrome only re-checks for updates
-// every 24 hours AND even after detecting a new version, the old
-// SW keeps controlling the tab until all tabs close. For FCs who
-// never close their PolicyLens tab, this means a deployed fix may
-// NEVER reach them without manual action (clearing site data,
-// hard-refresh, etc.) — none of which is realistic for non-technical
-// users.
-//
-// Solution: aggressive auto-update with these layers:
-//   1. EXPECTED_SW_VERSION embedded in index.html — the version we
-//      expect the active SW to report. Bumped alongside CACHE_NAME
-//      in sw.js.
-//   2. On page load: force reg.update() to make Chrome re-fetch sw.js
-//   3. On updatefound + new SW installed + skipWaiting activates it:
-//      auto-reload the page ONCE to pick up the new version
-//   4. On load: query the active SW's version via CHECK_SUPPORT and
-//      compare to EXPECTED_SW_VERSION. If mismatched AND the update
-//      flow hasn't fired, force unregister + reload as last resort
-//   5. All reloads are guarded by a sessionStorage flag so we never
-//      loop, and by a "scanning in progress" flag so we never
-//      interrupt a mid-extraction
-//
-// End result: the FC opens PolicyLens and within ~2 seconds is
-// running the latest code. They may see one brief "Updating…" toast
-// and one auto-reload, then everything works normally. Zero manual
-// steps, zero data loss (partial extractions already survive via
-// the sessionStorage resume banner).
+// PolicyLens no longer uses a service worker. This routine runs
+// once per session to unregister any SW left over from v2.1.0b–d,
+// then reloads so the browser releases the old SW's cached assets.
+// Guarded by sessionStorage so it never loops.
 // ═══════════════════════════════════════════════════════════════
-const EXPECTED_SW_VERSION = 'policylens-v2.1.0d';
-
-function __plShowUpdateToast(msg) {
-  try {
-    let el = document.getElementById('__pl_update_toast');
-    if (!el) {
-      el = document.createElement('div');
-      el.id = '__pl_update_toast';
-      el.style.cssText = 'position:fixed;top:16px;left:50%;transform:translateX(-50%);background:rgba(26,35,50,0.96);color:#c9a96e;padding:10px 16px;border-radius:8px;font-family:system-ui,sans-serif;font-size:13px;font-weight:600;box-shadow:0 4px 20px rgba(0,0,0,0.4);z-index:999999;border:1px solid rgba(201,169,110,0.4);backdrop-filter:blur(6px);';
-      document.body?.appendChild(el) || document.documentElement.appendChild(el);
-    }
-    el.textContent = msg;
-  } catch(_) {}
-}
-function __plHideUpdateToast() {
-  try {
-    const el = document.getElementById('__pl_update_toast');
-    if (el) el.remove();
-  } catch(_) {}
-}
-
-// v2.1.0b: Non-blocking version-mismatch banner. Shown when the SW
-// reports a version that disagrees with EXPECTED_SW_VERSION AND the
-// auto-reload path is blocked (mid-extraction, or already reloaded
-// once this session). Gives the user manual Reload control.
-function __plShowVersionMismatchBanner(activeVersion, expectedVersion) {
-  try {
-    if (document.getElementById('__pl_version_banner')) return; // already shown
-    const el = document.createElement('div');
-    el.id = '__pl_version_banner';
-    el.style.cssText = 'position:fixed;top:0;left:0;right:0;background:rgba(212,169,106,0.96);color:#0b0f1a;padding:10px 16px;font-family:system-ui,sans-serif;font-size:13px;font-weight:600;box-shadow:0 2px 8px rgba(0,0,0,0.3);z-index:999998;display:flex;align-items:center;justify-content:center;gap:12px;flex-wrap:wrap;';
-    const msg = document.createElement('span');
-    msg.textContent = '✨ PolicyLens updated to ' + (expectedVersion || 'a new version') + ' — reload to apply (you have ' + (activeVersion || 'an older') + ')';
-    el.appendChild(msg);
-    const btn = document.createElement('button');
-    btn.textContent = 'Reload';
-    btn.style.cssText = 'background:#0b0f1a;color:#c9a96e;border:none;padding:6px 16px;border-radius:6px;font-size:12px;font-weight:700;cursor:pointer';
-    btn.onclick = () => {
-      try { sessionStorage.removeItem('__pl_sw_reloaded_this_session'); } catch(_) {}
-      window.location.reload();
-    };
-    el.appendChild(btn);
-    const dismiss = document.createElement('button');
-    dismiss.textContent = '✕';
-    dismiss.title = 'Dismiss until next page load';
-    dismiss.style.cssText = 'background:transparent;color:#0b0f1a;border:none;padding:4px 8px;font-size:14px;cursor:pointer;opacity:0.7';
-    dismiss.onclick = () => { try { el.remove(); } catch(_) {} };
-    el.appendChild(dismiss);
-    document.body?.appendChild(el) || document.documentElement.appendChild(el);
-    console.log('[SW Update] Version mismatch banner shown:', activeVersion, '→', expectedVersion);
-  } catch(_) {}
-}
-
-if('serviceWorker' in navigator && location.hostname.includes('github.io')){
-  // Global flag so other code (extraction loop) can signal "don't
-  // reload right now" by setting sessionStorage policylens_scanning_active
-  let __plReloadedForUpdate = false;
-  try {
-    __plReloadedForUpdate = sessionStorage.getItem('__pl_sw_reloaded_this_session') === '1';
-  } catch(_) {}
-
-  const tryAutoReload = (reason) => {
-    if (__plReloadedForUpdate) return false; // already reloaded once this session
-    // Guard: don't reload mid-extraction
-    let scanning = false;
-    try { scanning = sessionStorage.getItem('policylens_scanning_active') === '1'; } catch(_) {}
-    if (scanning) {
-      console.log('[SW Update] Deferring reload — extraction in progress');
-      // Set a flag so scan completion can trigger the reload
-      try { sessionStorage.setItem('__pl_sw_reload_pending', '1'); } catch(_) {}
-      return false;
-    }
-    __plReloadedForUpdate = true;
-    try { sessionStorage.setItem('__pl_sw_reloaded_this_session', '1'); } catch(_) {}
-    console.log('[SW Update] Auto-reloading:', reason);
-    __plShowUpdateToast('✨ Updating PolicyLens to latest version…');
-    setTimeout(() => window.location.reload(), 600);
-    return true;
-  };
-
+if ('serviceWorker' in navigator) {
   window.addEventListener('load', async () => {
+    if (sessionStorage.getItem('policylens_sw_cleaned') === '1') return;
     try {
-      const reg = await navigator.serviceWorker.register('sw.js');
-      console.log('[SW] Registered:', reg.scope);
-
-      // Force update check — Chrome's default 24h cycle is too slow
-      try { await reg.update(); } catch(_) {}
-
-      // When a new SW is installing (either from update() above or
-      // from a later background check), listen for its state changes.
-      // Once it's INSTALLED, if we already had a controller (meaning
-      // this is an update, not a first-install), we know the skipWaiting
-      // in sw.js will activate it. Then controllerchange fires and we
-      // auto-reload.
-      reg.addEventListener('updatefound', () => {
-        const newSW = reg.installing;
-        if (!newSW) return;
-        console.log('[SW] New version installing');
-        newSW.addEventListener('statechange', () => {
-          console.log('[SW] New version state:', newSW.state);
-          if (newSW.state === 'installed' && navigator.serviceWorker.controller) {
-            // New SW installed while old one is still controlling.
-            // sw.js calls skipWaiting() in install so it will become
-            // active immediately — we'll get controllerchange next.
-            try { if (typeof swExtractResetCache === 'function') swExtractResetCache(); } catch(_) {}
-          }
-        });
-      });
-
-      // When the controller actually changes, the new SW is live.
-      // Reload ONCE to ensure the page's code matches the new SW.
-      navigator.serviceWorker.addEventListener('controllerchange', () => {
-        console.log('[SW] Controller changed — new SW is active');
-        try { if (typeof swExtractResetCache === 'function') swExtractResetCache(); } catch(_) {}
-        tryAutoReload('controllerchange');
-      });
-
-      // ── VERSION DRIFT DETECTION ──
-      // Query the active SW's version and compare to EXPECTED_SW_VERSION.
-      // Handles the case where Chrome has CACHED an old sw.js and isn't
-      // re-fetching it on update(). If we detect drift AND the update
-      // lifecycle hasn't already fired, force a harder refresh.
-      if (reg.active) {
-        setTimeout(async () => {
-          try {
-            const result = await new Promise((resolve) => {
-              const channel = new MessageChannel();
-              const to = setTimeout(() => resolve(null), 3000);
-              channel.port1.onmessage = (e) => { clearTimeout(to); resolve(e.data); };
-              reg.active.postMessage({ type: 'CHECK_SUPPORT' }, [channel.port2]);
-            });
-            if (result && result.version && result.version !== EXPECTED_SW_VERSION) {
-              console.warn('[SW Update] Version drift detected:',
-                'active=' + result.version, 'expected=' + EXPECTED_SW_VERSION);
-              // Try one more update() — sometimes Chrome needs the hint
-              try { await reg.update(); } catch(_) {}
-              // Give updatefound a moment to fire
-              await new Promise(r => setTimeout(r, 1500));
-              // If we still haven't reloaded, force the nuclear option:
-              // unregister the old SW and reload. On next load a fresh
-              // SW will be registered from scratch.
-              if (!__plReloadedForUpdate) {
-                console.warn('[SW Update] Update() did not trigger reload — forcing unregister + reload');
-                __plShowUpdateToast('✨ Updating PolicyLens to latest version…');
-                try { await reg.unregister(); } catch(_) {}
-                // Guard: don't loop, don't interrupt extraction
-                if (!__plReloadedForUpdate) {
-                  let scanning = false;
-                  try { scanning = sessionStorage.getItem('policylens_scanning_active') === '1'; } catch(_) {}
-                  if (!scanning) {
-                    __plReloadedForUpdate = true;
-                    try { sessionStorage.setItem('__pl_sw_reloaded_this_session', '1'); } catch(_) {}
-                    setTimeout(() => window.location.reload(), 600);
-                  } else {
-                    try { sessionStorage.setItem('__pl_sw_reload_pending', '1'); } catch(_) {}
-                    // v2.1.0b: extraction is running, can't auto-reload — show
-                    // the user-controlled banner instead so they can choose
-                    // when to apply the update.
-                    __plShowVersionMismatchBanner(result.version, EXPECTED_SW_VERSION);
-                  }
-                }
-              } else {
-                // v2.1.0b: We already auto-reloaded once this session and the
-                // SW is STILL on the wrong version. Auto-reload exhausted —
-                // surface the manual banner so the user can intervene.
-                __plShowVersionMismatchBanner(result.version, EXPECTED_SW_VERSION);
-              }
-            } else if (result && result.version === EXPECTED_SW_VERSION) {
-              console.log('[SW Update] Version matches:', result.version);
-              // Clear the session flag so if the user stays on this
-              // page across a future deploy, they get the update
-              try { sessionStorage.removeItem('__pl_sw_reloaded_this_session'); } catch(_) {}
-            } else if (result === null) {
-              console.warn('[SW Update] CHECK_SUPPORT timed out — SW may be stopped');
-            }
-          } catch (e) {
-            console.warn('[SW Update] Version check failed:', e);
-          }
-        }, 1200); // delay so the initial update() has a chance to run first
+      const regs = await navigator.serviceWorker.getRegistrations();
+      if (regs.length === 0) {
+        sessionStorage.setItem('policylens_sw_cleaned', '1');
+        return; // nothing to clean
       }
+      for (const reg of regs) {
+        await reg.unregister();
+      }
+      console.log('[SW] Unregistered legacy service worker (v2.1.0e cleanup)');
+      sessionStorage.setItem('policylens_sw_cleaned', '1');
+      window.location.reload();
     } catch (e) {
-      console.warn('[SW] Registration failed:', e);
+      console.warn('[SW] Legacy cleanup failed:', e);
+      sessionStorage.setItem('policylens_sw_cleaned', '1'); // don't retry
     }
   });
 }
@@ -759,11 +571,32 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.1.0d';
+const APP_VERSION = 'v2.1.0e';
 const APP_VERSION_DATE = '2026-04-12';
-const APP_VERSION_NAME = 'OAuth + Dashboard hotfix';
+const APP_VERSION_NAME = 'Remove service worker';
 
 const CHANGELOG = [
+  {
+    version: 'v2.1.0e',
+    date: '2026-04-12',
+    name: 'Remove service worker',
+    sections: [
+      {
+        heading: 'Architecture',
+        items: [
+          'Removed service worker. PolicyLens is now a plain HTML app served directly by GitHub Pages. Eliminates the entire class of SW update-coordination bugs (stale cache, update loops, skipWaiting race conditions, version drift). Existing FCs on v2.1.0c or v2.1.0d cached SWs will have their SW auto-unregistered on next app load via a one-time cleanup routine.',
+        ]
+      },
+      {
+        heading: 'Known trade-offs',
+        items: [
+          'No PWA install prompt (was not used by any FC anyway).',
+          'No offline capability (app already required network for all features: Supabase, Drive, Gemini/Claude).',
+          'Slightly slower cold-load after first visit (no cache), negligible for 12-FC internal use.',
+        ]
+      },
+    ]
+  },
   {
     version: 'v2.1.0d',
     date: '2026-04-12',
@@ -12591,9 +12424,9 @@ async function claudeExtract(anthropicKey, systemPrompt, rawText, maxTokens) {
 // make extraction worse than the in-page path.
 // ═══════════════════════════════════════════════════════════════
 
-// Cached support state, populated on first call to swExtractIsAvailable.
-// null = unchecked, true/false = known capability.
-let _swSupportCache = null;
+// v2.1.0e: SW removed. Hard-false so all SW extraction gates skip
+// immediately and the in-page extraction path is always used.
+let _swSupportCache = false;
 
 function isIOS() {
   if (typeof navigator === 'undefined') return false;
@@ -13010,7 +12843,7 @@ async function swExtractDiagnostic() {
 // and the Settings diagnostic button to pick up a freshly activated SW
 // without reloading the page.
 function swExtractResetCache() {
-  _swSupportCache = null;
+  // v2.1.0e: no-op — SW removed, cache stays false permanently
 }
 
 // Send a request to the SW for background-fetch-powered extraction.
@@ -22133,32 +21966,8 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
     let completedBatches = 0;
 
     // ── BACKGROUND MODE DIAGNOSTIC ──
-    // Run the SW diagnostic up front so the progress card can tell the
-    // FC whether their extraction will survive tab-away. This runs
-    // BEFORE setScanning(true) so the initial progress card render has
-    // the result. Also requests notification permission unconditionally
-    // (not just when SW is available) so per-batch notifications work
-    // even on the in-page foreground path.
-    //
-    // Force an SW update check FIRST. Chrome normally only checks for
-    // a new sw.js every 24h, which means deployed fixes can take up
-    // to a day to reach users. Calling reg.update() forces an
-    // immediate re-fetch. Combined with self.skipWaiting() in sw.js
-    // install handler, a freshly-deployed sw.js takes over before
-    // this extraction starts.
-    try {
-      if ('serviceWorker' in navigator) {
-        const reg = await navigator.serviceWorker.getRegistration();
-        if (reg) {
-          await reg.update();
-          // Give the new SW a moment to install + take control
-          await new Promise(resolve => setTimeout(resolve, 300));
-        }
-      }
-    } catch(e) { console.warn('[Extract] SW update check failed:', e); }
-    swExtractResetCache(); // force a fresh check each extraction
-    // bgDiag was hoisted above (before visibility handler) so the
-    // handler can read it. Here we just assign the result.
+    // v2.1.0e: SW removed — bgDiag will report overall:false and
+    // extraction always uses the in-page foreground path.
     try { bgDiag = await swExtractDiagnostic(); }
     catch (e) { console.warn('[Extract] Diagnostic failed:', e); }
     console.log('[Extract] Background mode:', bgDiag?.overall ? 'ACTIVE' : 'foreground-only', '—', bgDiag?.reason || 'unknown');
