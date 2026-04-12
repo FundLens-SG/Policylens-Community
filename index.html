@@ -572,20 +572,20 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.1.0g-debug';
+const APP_VERSION = 'v2.1.0g';
 const APP_VERSION_DATE = '2026-04-12';
-const APP_VERSION_NAME = 'OAuth redirect diagnostic';
+const APP_VERSION_NAME = 'Drive OAuth fragment fix';
 
 const CHANGELOG = [
   {
-    version: 'v2.1.0g-debug',
+    version: 'v2.1.0g',
     date: '2026-04-12',
-    name: 'OAuth redirect diagnostic',
+    name: 'Drive OAuth fragment fix',
     sections: [
       {
-        heading: 'Debugging',
+        heading: 'Bug fixes',
         items: [
-          'Added verbose logging for OAuth redirect flow to diagnose "Aborted/stale OAuth intent" bug in v2.1.0f. This is a diagnostic build, not a fix. Will be replaced by v2.1.0g proper once root cause is confirmed.',
+          'Drive OAuth return was silently discarded when hash fragment started with "#state=" instead of "#access_token=". Google returns OAuth params in variable order; the startsWith() check assumed access_token was always first. Changed to hash.includes() for parameter-order-agnostic detection. Fixes: user completes Google consent, returns to PolicyLens, is still signed in (v2.1.0f fix held), but Drive was never connected because token was thrown away by false-positive staleness check.',
         ]
       },
     ]
@@ -8366,28 +8366,23 @@ function _generateOAuthState() {
 // ──────────────────────────────────────────────
 function _consumeOAuthRedirect() {
   const hash = window.location.hash || '';
-  console.log('[Drive DEBUG] Fragment parser running. URL hash:', hash.slice(0, 120) + (hash.length > 120 ? '…' : ''));
-  console.log('[Drive DEBUG] hash.startsWith("#access_token="):', hash.startsWith('#access_token='));
-  console.log('[Drive DEBUG] hash.startsWith("#error="):', hash.startsWith('#error='));
-  console.log('[Drive DEBUG] hash.includes("access_token="):', hash.includes('access_token='));
-  console.log('[Drive DEBUG] sessionStorage keys at parse time:', Object.keys(sessionStorage));
-  const hasOAuthFragment = hash.startsWith('#access_token=') || hash.startsWith('#error=');
-  console.log('[Drive DEBUG] hasOAuthFragment:', hasOAuthFragment);
+  // v2.1.0g: Use includes() instead of startsWith() — Google returns OAuth
+  // fragment params in variable order (#state=...&access_token=... OR
+  // #access_token=...&state=...). startsWith('#access_token=') failed when
+  // state came first, causing a silent false-negative that discarded the token.
+  const hasOAuthFragment = hash.includes('access_token=') || hash.includes('error=');
   // Read intent regardless — needed for both consume-success and orphan-cleanup paths
   let intent = null;
   try {
     const raw = sessionStorage.getItem(DRIVE_INTENT_KEY);
-    console.log('[Drive DEBUG] savedIntent raw:', raw?.slice(0, 100));
     if (raw) intent = JSON.parse(raw);
   } catch (_) {}
-  console.log('[Drive DEBUG] parsed intent:', intent ? JSON.stringify({state: intent.state?.slice(0,8)+'…', expiresAt: intent.expiresAt, age_ms: Date.now() - (intent.timestamp||0)}) : 'null');
 
   if (!hasOAuthFragment) {
     // No OAuth fragment in URL. Sub-cases:
     //   - No intent → fresh page load, do nothing
     //   - Intent present → aborted flow OR stale orphan; clean up silently
     if (intent) {
-      console.warn('[Drive DEBUG] *** BUG PATH: hasOAuthFragment=false but intent exists. Hash has access_token?', hash.includes('access_token='), '— hash starts with:', hash.slice(0,30));
       try { sessionStorage.removeItem(DRIVE_INTENT_KEY); } catch (_) {}
       console.log('[Drive] Aborted/stale OAuth intent detected — cleaned up silently');
     }
@@ -8562,8 +8557,6 @@ const driveClient = {
       // we still attempt the redirect but warn the user that recovery may fail.
       console.warn('[Drive] Could not persist OAuth intent — recovery on return may fail:', e);
     }
-    console.log('[Drive DEBUG] SAVING oauth intent:', JSON.stringify({state: state.slice(0,8)+'…', expiresAt: intent.expiresAt, returnTab, allSessionKeys: Object.keys(sessionStorage)}));
-    console.log('[Drive DEBUG] Verify read-back:', sessionStorage.getItem(DRIVE_INTENT_KEY)?.slice(0,80));
     console.log('[Drive] Redirecting to Google for consent (state:', state.slice(0,8) + '…)');
     // Navigate the entire tab. The page unmounts here.
     window.location.href = _buildOAuthURL(state);
@@ -9517,9 +9510,7 @@ function App() {
   // orphan sessionStorage intent on its own and silently cleans it up
   // — this branch returns null and we do nothing.
   useEffect(() => {
-    console.log('[Drive DEBUG] useEffect mount — calling _consumeOAuthRedirect. window._user:', window._user?.email || 'null');
     const result = _consumeOAuthRedirect();
-    console.log('[Drive DEBUG] _consumeOAuthRedirect returned:', result ? JSON.stringify({kind: result.kind}) : 'null');
     if (!result) return;
     if (result.kind === 'success') {
       // v2.1.0d: Guard against OAuth completing without a Supabase session.
