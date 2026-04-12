@@ -608,11 +608,26 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.1.0k';
+const APP_VERSION = 'v2.1.0l';
 const APP_VERSION_DATE = '2026-04-12';
-const APP_VERSION_NAME = 'Drive token persistence';
+const APP_VERSION_NAME = 'Extraction queue cleanup';
 
 const CHANGELOG = [
+  {
+    version: 'v2.1.0l',
+    date: '2026-04-12',
+    name: 'Extraction queue cleanup',
+    sections: [
+      {
+        heading: 'New',
+        items: [
+          'App-load sweep: extraction jobs stuck >24h in IndexedDB auto-marked as failed',
+          'Settings → Clear Extraction Queue (mark all non-terminal jobs as failed)',
+          'Settings → Delete completed & failed jobs (reclaim IndexedDB storage)',
+        ]
+      },
+    ]
+  },
   {
     version: 'v2.1.0k',
     date: '2026-04-12',
@@ -9757,6 +9772,16 @@ function App() {
     (async () => {
       // PERFORMANCE: Batch load — single DB open, parallel reads for policies + all settings
       const {policies: ps, settings: stg} = await dbBatchLoad(['apiKey','clientName','clientProfile','houseDefaults']);
+      // v2.1.0l: Sweep stuck extraction jobs (>24h in non-terminal state) on app load.
+      // Fire-and-forget — never blocks mount.
+      PolicyDB.getAllJobs().then(jobs => {
+        const cutoff = Date.now() - 24 * 60 * 60 * 1000;
+        const stuck = jobs.filter(j => j.status !== 'done' && j.status !== 'failed' && j.status !== 'cancelled' && (j.updatedAt || 0) < cutoff);
+        if (stuck.length === 0) return;
+        return Promise.all(stuck.map(j => PolicyDB.putJob({...j, status: 'failed', lastError: 'Auto-failed: stuck >24h on app load'})));
+      }).then(results => {
+        if (results && results.length) console.log('[sweep] Marked', results.length, 'stuck jobs as failed');
+      }).catch(e => console.warn('[sweep]', e));
       // ── ONE-SHOT CLEANUP: fix stale status='matured' on policies with FUTURE maturity dates ──
       // Previously the AI/importer could set status='matured' on policies that clearly hadn't
       // matured yet (e.g. AIA Gen3 with maturity 2088 flagged as matured). The display-layer
@@ -30302,6 +30327,34 @@ function Settings() {
         <h3 style={{fontSize:14,fontWeight:600,marginBottom:4}}>📦 Scan Cache</h3>
         <p style={{fontSize:11,color:'var(--text3)',marginBottom:10}}>PolicyLens caches extraction results by file content hash, so rescanning the same document is instant and free. Clear this if you changed the extraction prompt and want fresh results.</p>
         <ExtractCacheEditor />
+      </div>
+
+      {/* ═══ EXTRACTION QUEUE (v2.1.0l) ═══ */}
+      <div className="card" style={{marginBottom:16}}>
+        <h3 style={{fontSize:14,fontWeight:600,marginBottom:4}}>🔄 Extraction Queue</h3>
+        <p style={{fontSize:11,color:'var(--text3)',marginBottom:10}}>Manage extraction jobs stored in IndexedDB. Clear stalled jobs or reclaim storage from completed ones.</p>
+        <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+          <button className="btn-secondary btn-sm" style={{fontSize:11}} onClick={async () => {
+            if (!confirm('Mark all pending extraction jobs as failed? This cannot be undone.')) return;
+            try {
+              const jobs = await PolicyDB.getAllJobs();
+              const pending = jobs.filter(j => j.status !== 'done' && j.status !== 'failed' && j.status !== 'cancelled');
+              if (pending.length === 0) { toast('No pending jobs to clear', 'info', 2000); return; }
+              await Promise.all(pending.map(j => PolicyDB.putJob({...j, status: 'failed', lastError: 'Manually cleared from Settings'})));
+              toast('Cleared ' + pending.length + ' job' + (pending.length === 1 ? '' : 's'), 'success', 3000);
+            } catch(e) { toast('Error: ' + e.message, 'error', 3000); }
+          }}>Clear Extraction Queue</button>
+          <button className="btn-secondary btn-sm" style={{fontSize:11}} onClick={async () => {
+            if (!confirm('Delete all completed and failed extraction jobs? This reclaims IndexedDB storage and cannot be undone.')) return;
+            try {
+              const jobs = await PolicyDB.getAllJobs();
+              const terminal = jobs.filter(j => j.status === 'done' || j.status === 'failed' || j.status === 'cancelled');
+              if (terminal.length === 0) { toast('No completed/failed jobs to delete', 'info', 2000); return; }
+              await Promise.all(terminal.map(j => PolicyDB.deleteJob(j.id)));
+              toast('Deleted ' + terminal.length + ' job' + (terminal.length === 1 ? '' : 's'), 'success', 3000);
+            } catch(e) { toast('Error: ' + e.message, 'error', 3000); }
+          }}>Delete Completed &amp; Failed</button>
+        </div>
       </div>
 
       {/* ═══ EXTRACTION DIAGNOSTICS ═══ */}
