@@ -608,11 +608,25 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.2.0-alpha';
-const APP_VERSION_DATE = '2026-04-12';
-const APP_VERSION_NAME = 'Drive sync foundations';
+const APP_VERSION = 'v2.2.0-alpha.1';
+const APP_VERSION_DATE = '2026-04-13';
+const APP_VERSION_NAME = 'Drive sync hotfixes';
 
 const CHANGELOG = [
+  {
+    version: 'v2.2.0-alpha.1',
+    date: '2026-04-13',
+    name: 'Drive sync hotfixes',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'localOnlyMode now gates _driveSyncCurrentClient and the migration prompt directly, preventing a toggle-during-mount race from leaking writes to Drive',
+          'Drive file top-level globalAssumptions now reflects the actual per-client assumptions (was always empty due to a read from a dead IDB store; real data was still present under clientProfile.globalAssumptions so no client saw wrong values)'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.2.0-alpha',
     date: '2026-04-12',
@@ -10088,6 +10102,7 @@ function App() {
   useEffect(() => {
     if (loading) return;
     const checkMigration = async () => {
+      if (isDriveLocalOnly()) return;
       if (_driveMigrationDismissed) return;
       if (getDriveStatus() !== 'connected') return;
       const hasData = policies.length > 0 || (clientProfile?.name && clientProfile.name.trim() !== '');
@@ -10671,14 +10686,15 @@ function App() {
   // Called (debounced 1s) after every saveProfile / savePolicy IDB write.
   // No-ops silently when current client has no drive_state row.
   const _driveSyncCurrentClient = async () => {
+    if (isDriveLocalOnly()) return;
     if (getDriveStatus() !== 'connected') return;
     let states;
     try { states = await PolicyDB.getAllDriveStates(); } catch (_) { return; }
     if (!states || states.length === 0) return;
     const ds = states[0]; // Batch 1: single client only
     try {
-      const assumptions = await PolicyDB.getAssumptions('default').catch(() => null);
-      const payload = buildDriveClientPayload(ds.clientId, clientProfile, policies, assumptions?.value || assumptions || null);
+      const assumptions = clientProfile?.globalAssumptions || null;
+      const payload = buildDriveClientPayload(ds.clientId, clientProfile, policies, assumptions);
       const newHead = await driveClient.updateClientFile(ds.fileId, payload, ds.headRevisionId);
       await PolicyDB.saveDriveState({
         ...ds,
@@ -10991,8 +11007,8 @@ function App() {
         onSync={async () => {
           try {
             const clientId = crypto.randomUUID();
-            const assumptions = await PolicyDB.getAssumptions('default').catch(() => null);
-            const payload = buildDriveClientPayload(clientId, clientProfile, policies, assumptions?.value || assumptions || null);
+            const assumptions = clientProfile?.globalAssumptions || null;
+            const payload = buildDriveClientPayload(clientId, clientProfile, policies, assumptions);
             const folderId = await driveClient.ensureFolder();
             const { fileId, headRevisionId } = await driveClient.createClientFile(folderId, payload);
             await PolicyDB.saveDriveState({
