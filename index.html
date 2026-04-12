@@ -170,6 +170,8 @@ label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;lett
 
 /* ══════ AUTH LOADING (v2.1.0i) ══════ */
 #auth-loading{position:fixed;inset:0;z-index:10001;background:var(--bg);display:flex;align-items:center;justify-content:center}
+@keyframes plPulse{0%,100%{opacity:.6}50%{opacity:1}}
+#auth-loading-text.pulse{animation:plPulse 1.5s ease-in-out infinite}
 /* ══════ AUTH GATE ══════ */
 #auth-gate{position:fixed;inset:0;z-index:10000;background:var(--bg);display:none;align-items:center;justify-content:center;padding:20px}
 #auth-gate .auth-card{background:var(--bg2);border:1px solid var(--border2);border-radius:16px;max-width:400px;width:100%;padding:32px;box-shadow:0 24px 64px rgba(0,0,0,.4)}
@@ -223,7 +225,7 @@ label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;lett
       <path d="M30 50 L32 51.5 L34 50 L32 48.5Z" fill="#d4a96a" opacity="0.8"/>
       <path d="M66 50 L68 51.5 L70 50 L68 48.5Z" fill="#d4a96a" opacity="0.8"/>
     </svg>
-    <div style="color:#c8c8c8;font-size:14px;margin-top:8px;font-family:system-ui,sans-serif">Loading PolicyLens…</div>
+    <div id="auth-loading-text" style="color:#c8c8c8;font-size:14px;margin-top:8px;font-family:system-ui,sans-serif">Loading PolicyLens…</div>
   </div>
 </div>
 
@@ -606,11 +608,25 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.1.0j';
+const APP_VERSION = 'v2.1.0k';
 const APP_VERSION_DATE = '2026-04-12';
-const APP_VERSION_NAME = 'Drive silent re-auth';
+const APP_VERSION_NAME = 'Drive token persistence';
 
 const CHANGELOG = [
+  {
+    version: 'v2.1.0k',
+    date: '2026-04-12',
+    name: 'Drive token persistence',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Drive connection now persists across page refresh. Previously, silent re-auth via GIS iframe failed consistently due to Chrome\'s third-party cookie deprecation (platform change, not a code bug). Replaced iframe-based silent re-auth with localStorage token persistence (scoped to drive.file, bound to Supabase user ID, validated via pingDriveAPI on mount). Users who previously saw "Reconnect needed" after every refresh now remain connected for the token lifetime (1 hour), with silent re-acquisition on token expiry still deferring to the reconnect flow.',
+          'Dynamic loading text: "Connecting Google Drive..." shown during Drive token restoration, "Loading PolicyLens..." for all other mount scenarios.',
+        ]
+      },
+    ]
+  },
   {
     version: 'v2.1.0j',
     date: '2026-04-12',
@@ -8589,6 +8605,7 @@ async function _driveFetch(url, opts) {
     if (resp.status === 401) {
       // Token died — drop it so next call forces reconnect
       _driveAccessToken = null;
+      driveLSDel('policylens_drive_token');
       setDriveStatus('reconnect-needed');
     }
     throw err;
@@ -8642,6 +8659,9 @@ const driveClient = {
   },
 
   // ── signInSilent: tries prompt:'none' re-auth on app load ──
+  // v2.1.0k: UNUSED — retained for potential Phase B fallback. GIS iframe
+  // silent re-auth fails in 2025+ Chrome due to third-party cookie deprecation.
+  // Mount path now uses localStorage token persistence instead.
   // Returns true if a token was obtained, false otherwise (silent fail).
   async signInSilent() {
     const granted = driveLSGet(DRIVE_LS.oauthGrantedAt);
@@ -8698,6 +8718,7 @@ const driveClient = {
       try { window.google.accounts.oauth2.revoke(_driveAccessToken, () => {}); } catch (_) {}
     }
     _driveAccessToken = null;
+    driveLSDel('policylens_drive_token');
     driveLSDel(DRIVE_LS.oauthGrantedAt);
     driveLSDel(DRIVE_LS.userEmail);
     // Note: folderId is NOT cleared — if the FC reconnects with the same
@@ -9585,20 +9606,48 @@ function App() {
   // — this branch returns null and we do nothing.
   useEffect(() => {
     (async () => {
-    // v2.1.0j: Silent re-auth on mount for returning Drive users.
-    // If user previously connected Drive, attempt a fresh token via
-    // GIS prompt:'none' iframe. Skip if an OAuth fragment is present
-    // (the fragment parser handles that case) or if local-only mode is on.
+    // v2.1.0k: Restore Drive token from localStorage on mount.
+    // Skip if an OAuth fragment is present (the fragment parser handles that).
     const _hash = window.location.hash || '';
     const _hasOAuthReturn = _hash.includes('access_token=') || _hash.includes('error=');
     if (!_hasOAuthReturn && driveLSGet(DRIVE_LS.oauthGrantedAt) && driveLSGet(DRIVE_LS.localOnlyMode) !== '1') {
       try {
-        const ok = await Promise.race([
-          driveClient.signInSilent(),
-          new Promise(r => setTimeout(() => r(false), 5000)),
-        ]);
-        if (!ok) console.warn('[Drive] Silent re-auth failed — user will see reconnect banner');
-      } catch(_) {}
+        const raw = localStorage.getItem('policylens_drive_token');
+        if (raw) {
+          const stored = JSON.parse(raw);
+          // Await Supabase session so we can verify userId
+          let uid = sbGetUserId();
+          if (!uid && window._SB) {
+            try { const s = await window._SB.auth.getSession(); uid = s?.data?.session?.user?.id || null; } catch(_) {}
+          }
+          if (stored.token && stored.expiresAt > Date.now() && stored.userId && stored.userId === uid) {
+            // Update loading overlay text
+            try { const el = document.getElementById('auth-loading-text'); if (el) { el.textContent = 'Connecting Google Drive…'; el.classList.add('pulse'); } } catch(_) {}
+            _driveAccessToken = stored.token;
+            setDriveStatus('connected');
+            console.log('[Drive] ✓ Token restored from storage (expires', new Date(stored.expiresAt).toLocaleTimeString() + ')');
+            // Background-validate — if token is actually dead, flip to reconnect
+            driveClient.pingDriveAPI().catch(() => {
+              console.warn('[Drive] Stored token failed validation — clearing');
+              _driveAccessToken = null;
+              driveLSDel('policylens_drive_token');
+              setDriveStatus('reconnect-needed');
+            });
+          } else {
+            // Token expired, userId mismatch, or malformed — clear it
+            driveLSDel('policylens_drive_token');
+            if (stored.userId && uid && stored.userId !== uid) {
+              console.log('[Drive] Stored token userId mismatch — cleared (stored:', stored.userId?.slice(0,8), 'current:', uid?.slice(0,8) + ')');
+            } else {
+              setDriveStatus('reconnect-needed');
+              console.log('[Drive] Stored token expired or invalid — reconnect needed');
+            }
+          }
+        } else if (driveLSGet(DRIVE_LS.oauthGrantedAt)) {
+          // No stored token but has prior grant — needs reconnect
+          setDriveStatus('reconnect-needed');
+        }
+      } catch(e) { console.warn('[Drive] Token restore failed:', e); }
     }
     const result = _consumeOAuthRedirect();
     if (!result) return;
@@ -9634,6 +9683,17 @@ function App() {
       }
       _driveAccessToken = result.accessToken;
       driveLSSet(DRIVE_LS.oauthGrantedAt, String(Date.now()));
+      // v2.1.0k: Persist token to localStorage for cross-refresh survival
+      try {
+        const uid = sbGetUserId() || (await (async () => { try { const s = await window._SB?.auth?.getSession(); return s?.data?.session?.user?.id; } catch(_) { return null; } })());
+        if (uid) {
+          localStorage.setItem('policylens_drive_token', JSON.stringify({
+            token: result.accessToken,
+            expiresAt: Date.now() + (result.expiresIn || 3599) * 1000,
+            userId: uid,
+          }));
+        }
+      } catch(_) {}
       driveClient.pingDriveAPI()
         .then(me => {
           if (me?.user?.emailAddress) driveLSSet(DRIVE_LS.userEmail, me.user.emailAddress);
