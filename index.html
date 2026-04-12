@@ -52,7 +52,7 @@ console.error=function(){var m=arguments[0]||'';if(typeof m==='string'&&m.includ
 // steps, zero data loss (partial extractions already survive via
 // the sessionStorage resume banner).
 // ═══════════════════════════════════════════════════════════════
-const EXPECTED_SW_VERSION = 'policylens-v2.1.0c';
+const EXPECTED_SW_VERSION = 'policylens-v2.1.0d';
 
 function __plShowUpdateToast(msg) {
   try {
@@ -759,11 +759,25 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.1.0c';
+const APP_VERSION = 'v2.1.0d';
 const APP_VERSION_DATE = '2026-04-12';
-const APP_VERSION_NAME = 'Redirect-mode OAuth';
+const APP_VERSION_NAME = 'OAuth + Dashboard hotfix';
 
 const CHANGELOG = [
+  {
+    version: 'v2.1.0d',
+    date: '2026-04-12',
+    name: 'OAuth + Dashboard hotfix',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'React error #310 regression on Dashboard after OAuth redirect return (conditional hook pattern in Dashboard — early-return-before-useState at the welcome screen guard, same class as v2.1.0a\'s DriveStatusChip bug). Moved useState(showReview) and derived declarations above the early return so hook count is constant across renders.',
+          'OAuth-without-Supabase-session now queues the token in tab-local memory (window.__pendingDriveOAuth) and auto-completes the Drive connection when user signs in, with 5-minute UX TTL and Google-side token expiry double-check. No persisted orphan state (token never written to localStorage/sessionStorage/IndexedDB until user is authenticated), no cross-tab coordination.',
+        ]
+      },
+    ]
+  },
   {
     version: 'v2.1.0c',
     date: '2026-04-12',
@@ -9627,6 +9641,24 @@ function App() {
     const result = _consumeOAuthRedirect();
     if (!result) return;
     if (result.kind === 'success') {
+      // v2.1.0d: Guard against OAuth completing without a Supabase session.
+      // If no user is signed in, queue the token in tab-local memory and
+      // defer processing until 'policylens-keys-synced' fires on sign-in.
+      // The token is NEVER written to localStorage/sessionStorage/IDB
+      // until the user is authenticated — in-memory only, dies with the tab.
+      if (!sbGetUserId()) {
+        const expiresAt = Date.now() + (result.expiresIn || 3599) * 1000;
+        window.__pendingDriveOAuth = {
+          accessToken: result.accessToken,
+          expiresAt,
+          returnTab: result.returnTab,
+          queuedAt: Date.now(),
+        };
+        console.log('[Drive] OAuth succeeded but no Supabase user — token queued in memory (expires', new Date(expiresAt).toLocaleTimeString() + ')');
+        try { toast('Sign in to PolicyLens to finish connecting Google Drive', 'info', 5000); } catch (_) {}
+        if (result.returnTab) setTab(result.returnTab);
+        return; // ← skip all Drive state writes until user signs in
+      }
       _driveAccessToken = result.accessToken;
       driveLSSet(DRIVE_LS.oauthGrantedAt, String(Date.now()));
       driveClient.pingDriveAPI()
@@ -9775,6 +9807,43 @@ function App() {
       // state and silently bails (or syncs nothing useful).
       if (runCloudSyncRef.current) {
         runCloudSyncRef.current().catch(err => console.warn('[Sync] runCloudSync failed:', err));
+      }
+      // v2.1.0d: Resume pending Drive OAuth if token was queued before sign-in.
+      // window.__pendingDriveOAuth is in-memory only — never persisted.
+      const pending = window.__pendingDriveOAuth;
+      if (pending) {
+        delete window.__pendingDriveOAuth;
+        // Guard: event might fire on auth failure — re-check we actually have a user
+        if (!sbGetUserId()) {
+          console.log('[Drive] keys-synced fired but still no user — discarding pending OAuth');
+          return;
+        }
+        const STALENESS_TTL_MS = 5 * 60 * 1000; // 5 minutes
+        const TOKEN_SAFETY_MARGIN_MS = 60 * 1000; // 60 seconds
+        const isStale = Date.now() - pending.queuedAt > STALENESS_TTL_MS;
+        const isExpired = pending.expiresAt <= Date.now() + TOKEN_SAFETY_MARGIN_MS;
+        if (isStale || isExpired) {
+          console.log('[Drive] Pending OAuth discarded —', isStale ? 'stale (>5min)' : 'Google token expired/expiring');
+          return;
+        }
+        console.log('[Drive] Resuming queued OAuth after sign-in');
+        _driveAccessToken = pending.accessToken;
+        driveLSSet(DRIVE_LS.oauthGrantedAt, String(Date.now()));
+        driveClient.pingDriveAPI()
+          .then(me => {
+            if (me?.user?.emailAddress) driveLSSet(DRIVE_LS.userEmail, me.user.emailAddress);
+            return driveClient.ensureFolder();
+          })
+          .then(() => {
+            setDriveStatus('connected');
+            try { toast('✓ Connected to Google Drive', 'success', 3000); } catch (_) {}
+          })
+          .catch(e => {
+            _driveAccessToken = null;
+            setDriveStatus('disconnected');
+            const mapped = mapDriveError(e);
+            try { toast(mapped.message || 'Google Drive connection failed — please try again', 'error', 5000); } catch (_) {}
+          });
       }
     };
     window.addEventListener('policylens-keys-synced', handler);
@@ -16671,6 +16740,13 @@ function Dashboard() {
     window.dispatchEvent(new Event('policylens-pending-scan'));
   };
 
+  // v2.1.0d: Hoisted above the policies.length===0 early return to keep
+  // React hook count constant across renders. The welcome screen doesn't
+  // use showReview, premRatio, or retRow — they're inert on that path.
+  const premRatio = annualIncome > 0 ? Math.round(totalPremium.annual/annualIncome*100) : 0;
+  const retRow = cvTimeline.find(r => r.age === retAge);
+  const [showReview, setShowReview] = useState(false);
+
   if(policies.length === 0) return (
     <div className="fade-in" style={{textAlign:'center',padding:'40px 16px'}}>
       <input ref={welcomeCamRef} type="file" accept="image/*" capture="environment" style={{display:'none'}} onChange={e=>{handleWelcomeCamera(e.target.files);e.target.value='';}} />
@@ -16738,10 +16814,6 @@ function Dashboard() {
 
     </div>
   );
-
-  const premRatio = annualIncome > 0 ? Math.round(totalPremium.annual/annualIncome*100) : 0;
-  const retRow = cvTimeline.find(r => r.age === retAge);
-  const [showReview, setShowReview] = useState(false);
 
   return (
     <div className="fade-in">
