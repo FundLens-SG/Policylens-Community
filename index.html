@@ -168,8 +168,10 @@ label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;lett
   .resp-2col,.resp-5col,.resp-side{grid-template-columns:1fr!important}
 }
 
+/* ══════ AUTH LOADING (v2.1.0i) ══════ */
+#auth-loading{position:fixed;inset:0;z-index:10001;background:var(--bg);display:flex;align-items:center;justify-content:center}
 /* ══════ AUTH GATE ══════ */
-#auth-gate{position:fixed;inset:0;z-index:10000;background:var(--bg);display:flex;align-items:center;justify-content:center;padding:20px}
+#auth-gate{position:fixed;inset:0;z-index:10000;background:var(--bg);display:none;align-items:center;justify-content:center;padding:20px}
 #auth-gate .auth-card{background:var(--bg2);border:1px solid var(--border2);border-radius:16px;max-width:400px;width:100%;padding:32px;box-shadow:0 24px 64px rgba(0,0,0,.4)}
 #auth-gate h2{font-size:22px;font-weight:700;margin-bottom:4px;color:var(--gold)}
 #auth-gate .auth-sub{font-size:13px;color:var(--text3);margin-bottom:20px}
@@ -205,6 +207,25 @@ label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;lett
 </style>
 </head>
 <body>
+
+<!-- ══════ AUTH LOADING (v2.1.0i) ══════ -->
+<div id="auth-loading">
+  <div style="text-align:center">
+    <svg width="36" height="36" viewBox="0 0 100 100" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <circle cx="50" cy="50" r="38" fill="none" stroke="#d4a96a" stroke-width="2.5"/>
+      <circle cx="50" cy="50" r="2" fill="#d4a96a"/>
+      <line x1="50" y1="32" x2="50" y2="42" stroke="#d4a96a" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="50" y1="58" x2="50" y2="68" stroke="#d4a96a" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="32" y1="50" x2="42" y2="50" stroke="#d4a96a" stroke-width="1.5" stroke-linecap="round"/>
+      <line x1="58" y1="50" x2="68" y2="50" stroke="#d4a96a" stroke-width="1.5" stroke-linecap="round"/>
+      <path d="M50 30 L51.5 32 L50 34 L48.5 32Z" fill="#d4a96a" opacity="0.8"/>
+      <path d="M50 66 L51.5 68 L50 70 L48.5 68Z" fill="#d4a96a" opacity="0.8"/>
+      <path d="M30 50 L32 51.5 L34 50 L32 48.5Z" fill="#d4a96a" opacity="0.8"/>
+      <path d="M66 50 L68 51.5 L70 50 L68 48.5Z" fill="#d4a96a" opacity="0.8"/>
+    </svg>
+    <div style="color:#c8c8c8;font-size:14px;margin-top:8px;font-family:system-ui,sans-serif">Loading PolicyLens…</div>
+  </div>
+</div>
 
 <!-- ══════ AUTH GATE ══════ -->
 <div id="auth-gate">
@@ -377,7 +398,7 @@ async function authCheck(){
   var s=sb();
   if(!s){authGrant();return;}
   var sess=await s.auth.getSession();
-  if(!sess.data||!sess.data.session){document.getElementById('auth-gate').style.display='flex';return;}
+  if(!sess.data||!sess.data.session){document.getElementById('auth-loading').style.display='none';document.getElementById('auth-gate').style.display='flex';return;}
   _user=sess.data.session.user;
   console.log('[Auth] User:', _user.email, 'UID:', _user.id);
 
@@ -422,15 +443,18 @@ async function authCheck(){
       return;
     }
   }
-  authShow('pending');return;
+  document.getElementById('auth-loading').style.display='none';document.getElementById('auth-gate').style.display='flex';authShow('pending');return;
   } catch(err) {
     console.error('[Auth] Error:', err);
+    document.getElementById('auth-loading').style.display='none';
     if(_user && ADMIN_EMAILS.indexOf(_user.email)>=0){_isAdmin=true;authGrant();return;}
+    document.getElementById('auth-gate').style.display='flex';
     authMsg('Auth error: '+err.message);
   }
 }
 
 function authGrant(){
+  document.getElementById('auth-loading').style.display='none';
   document.getElementById('auth-gate').style.display='none';
   document.getElementById('logout-pill').style.display='block';
   if(_isAdmin)document.getElementById('admin-fab').style.display='flex';
@@ -560,6 +584,16 @@ async function adminAct(id,approve,email,name){
 document.addEventListener('DOMContentLoaded',function(){
   if(SB_KEY==='DISABLED'){console.warn('PolicyLens: Supabase auth disabled');authGrant();return;}
   try { console.log('[Auth] Session in storage:', !!localStorage.getItem('policylens-auth')); } catch(_) {}
+  // v2.1.0i: Safety timeout — if authCheck hangs (network issue, Supabase down),
+  // don't show the loading overlay forever. Fall back to showing the login screen.
+  setTimeout(function(){
+    var el=document.getElementById('auth-loading');
+    if(el && el.style.display!=='none'){
+      console.warn('[Auth] Hydration timeout after 3s — falling back to login screen');
+      el.style.display='none';
+      document.getElementById('auth-gate').style.display='flex';
+    }
+  }, 3000);
   authCheck();
   var s=sb();if(s)s.auth.onAuthStateChange(function(ev){
     if(ev==='SIGNED_OUT'){document.getElementById('auth-gate').style.display='flex';document.getElementById('logout-pill').style.display='none';document.getElementById('admin-fab').style.display='none';}
@@ -572,11 +606,24 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.1.0h';
+const APP_VERSION = 'v2.1.0i';
 const APP_VERSION_DATE = '2026-04-12';
-const APP_VERSION_NAME = 'OAuth return UX fix';
+const APP_VERSION_NAME = 'Auth loading screen';
 
 const CHANGELOG = [
+  {
+    version: 'v2.1.0i',
+    date: '2026-04-12',
+    name: 'Auth loading screen',
+    sections: [
+      {
+        heading: 'UX',
+        items: [
+          'Eliminated auth-gate flash on all page loads. App now shows a loading spinner during Supabase session hydration instead of briefly rendering the login screen. Fixes the ~200-400ms login-screen flicker visible on every mount, particularly noticeable after Google Drive OAuth return.',
+        ]
+      },
+    ]
+  },
   {
     version: 'v2.1.0h',
     date: '2026-04-12',
