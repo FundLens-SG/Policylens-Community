@@ -589,11 +589,11 @@ document.addEventListener('DOMContentLoaded',function(){
   setTimeout(function(){
     var el=document.getElementById('auth-loading');
     if(el && el.style.display!=='none'){
-      console.warn('[Auth] Hydration timeout after 3s — falling back to login screen');
+      console.warn('[Auth] Hydration timeout after 8s — falling back to login screen');
       el.style.display='none';
       document.getElementById('auth-gate').style.display='flex';
     }
-  }, 3000);
+  }, 8000);
   authCheck();
   var s=sb();if(s)s.auth.onAuthStateChange(function(ev){
     if(ev==='SIGNED_OUT'){document.getElementById('auth-gate').style.display='flex';document.getElementById('logout-pill').style.display='none';document.getElementById('admin-fab').style.display='none';}
@@ -606,11 +606,25 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.1.0i';
+const APP_VERSION = 'v2.1.0j';
 const APP_VERSION_DATE = '2026-04-12';
-const APP_VERSION_NAME = 'Auth loading screen';
+const APP_VERSION_NAME = 'Drive silent re-auth';
 
 const CHANGELOG = [
+  {
+    version: 'v2.1.0j',
+    date: '2026-04-12',
+    name: 'Drive silent re-auth',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Google Drive connection no longer disappears on page refresh. Silent re-auth now fires on app mount when user has previously connected Drive (uses existing signInSilent() Phase A function, wired to mount useEffect). Access token stays in-memory per Phase A security design — a fresh token is fetched silently via iframe on each app load.',
+          'Hydration safety timeout bumped from 3s to 8s. The 3s timeout was firing prematurely on slower devices during Supabase session hydration, briefly showing the login screen before auth resolved. 8s gives hydration enough time on slower connections.',
+        ]
+      },
+    ]
+  },
   {
     version: 'v2.1.0i',
     date: '2026-04-12',
@@ -9571,6 +9585,21 @@ function App() {
   // — this branch returns null and we do nothing.
   useEffect(() => {
     (async () => {
+    // v2.1.0j: Silent re-auth on mount for returning Drive users.
+    // If user previously connected Drive, attempt a fresh token via
+    // GIS prompt:'none' iframe. Skip if an OAuth fragment is present
+    // (the fragment parser handles that case) or if local-only mode is on.
+    const _hash = window.location.hash || '';
+    const _hasOAuthReturn = _hash.includes('access_token=') || _hash.includes('error=');
+    if (!_hasOAuthReturn && driveLSGet(DRIVE_LS.oauthGrantedAt) && driveLSGet(DRIVE_LS.localOnlyMode) !== '1') {
+      try {
+        const ok = await Promise.race([
+          driveClient.signInSilent(),
+          new Promise(r => setTimeout(() => r(false), 5000)),
+        ]);
+        if (!ok) console.warn('[Drive] Silent re-auth failed — user will see reconnect banner');
+      } catch(_) {}
+    }
     const result = _consumeOAuthRedirect();
     if (!result) return;
     if (result.kind === 'success') {
