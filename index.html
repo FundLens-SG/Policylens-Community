@@ -608,11 +608,33 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.1.0l';
+const APP_VERSION = 'v2.1.0m';
 const APP_VERSION_DATE = '2026-04-12';
-const APP_VERSION_NAME = 'Extraction queue cleanup';
+const APP_VERSION_NAME = 'Firm Defaults refactor';
 
 const CHANGELOG = [
+  {
+    version: 'v2.1.0m',
+    date: '2026-04-12',
+    name: 'Firm Defaults refactor',
+    sections: [
+      {
+        heading: 'Changed',
+        items: [
+          'Renamed "House Defaults" to "Firm Defaults for New Clients"',
+          'Firm Defaults panel slimmed to 5 projection fields (retirement age, life expectancy, inflation, endowment yield, ILP yield)',
+          'LIA gap analysis multipliers (Death 10\u00d7, TPD 10\u00d7, CI 5\u00d7, Early CI 2\u00d7, DI 75%) now hardcoded constants \u2014 removed from Settings UI and Dashboard sliders'
+        ]
+      },
+      {
+        heading: 'New',
+        items: [
+          'New client profiles seed assumptions from Firm Defaults on creation',
+          'Per-client Assumptions sliders show "Firm default \u00b7 matches" or override indicator with Reset link'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.1.0l',
     date: '2026-04-12',
@@ -3462,57 +3484,58 @@ function getProfileAgeSource(profile) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// HOUSE-VIEW DEFAULTS — Firm-level baseline values
+// LIA GAP-ANALYSIS MULTIPLIERS — hardcoded constants
 // ═══════════════════════════════════════════════════════════════
-// "House view" is insurance-industry terminology for the firm's default
-// planning assumptions. Every FC at the firm starts new clients from these
-// baselines — retirement age, inflation rate, gap-analysis multipliers, etc.
-// — so the firm speaks with one voice and the FC doesn't have to retype the
-// same values on every new client.
-//
-// DEFAULT_HOUSE_VALUES is the shipped baseline. The FC can override any of
-// these in Settings; overrides are stored in IndexedDB under the 'houseDefaults'
-// settings key, loaded into App state on mount, and exposed via AppCtx.
+// LIA-recommended coverage multipliers for the protection gap analysis.
+// These are industry-standard values (Death 10×, TPD 10×, CI 5×, Early CI 2×,
+// DI 75%) — not configurable per-firm or per-client. Used by Dashboard gap
+// calc, onboarding protection score, and PDF reports.
+const LIA_MULTIPLIERS = Object.freeze({
+  deathYrs: 10,
+  tpdYrs: 10,
+  ciYrs: 5,
+  eciYrs: 2,
+  diPct: 75,
+});
+
+// FIRM DEFAULTS — Firm-level baseline values
+// ═══════════════════════════════════════════════════════════════
+// Firm-level planning assumptions that seed new client profiles. The FC can
+// override these in Settings → "Firm Defaults for New Clients"; overrides are
+// stored in IndexedDB under the 'houseDefaults' settings key, loaded into App
+// state on mount, and exposed via AppCtx.
 //
 // Applied at (and only at):
-//   1. Blank profile creation — fills retirementAge, inflationRate, cpfScheme,
-//      cpfPlan, cpfStartAge
-//   2. Dashboard gap-analysis — initializes deathYrs, tpdYrs, ciYrs, eciYrs,
-//      diPct on component mount (user can still override in-session via sliders)
-//   3. Retirement projection — default retirement age and inflation rate
+//   1. New client creation — seeds globalAssumptions with the 5 projection
+//      fields (retirementAge, inflationRate, endowmentYieldPct, ilpYieldPct,
+//      lifeExpectancy)
+//   2. Retirement projection — default retirement age and inflation rate
 //
-// House defaults NEVER override existing client data. Changing a default
+// Firm defaults NEVER override existing client data. Changing a default
 // value in Settings does not retroactively affect any existing client's
 // profile — only new clients. This is deliberate: defaults are a starting
 // position, not a firm-wide mandate.
 const DEFAULT_HOUSE_VALUES = {
   retirementAge: 65,
   inflationRate: 2.8,
+  endowmentYieldPct: 3.0,
+  ilpYieldPct: 5.0,
+  lifeExpectancy: 85,
   cpfScheme: 'FRS',
   cpfPlan: 'standard',
   cpfStartAge: 65,
-  deathYrs: 10,       // death benefit multiplier (years of income)
-  tpdYrs: 10,         // TPD multiplier
-  ciYrs: 5,           // CI multiplier (years of expenses)
-  eciYrs: 2,          // Early CI multiplier
-  diPct: 75,          // Disability income % of monthly income
   premiumPctWarn: 15, // warn in Dashboard if total prem > this % of income
 };
 
-// Metadata for rendering the editor in Settings. Keyed by field name.
-// Keep the order stable — it drives the order rows appear in the UI.
+// Metadata for the Firm Defaults editor in Settings. Only the 5 projection
+// fields are shown — cpfScheme/cpfPlan/cpfStartAge/premiumPctWarn are kept
+// in DEFAULT_HOUSE_VALUES for code that reads them but hidden from the UI.
 const HOUSE_DEFAULT_FIELDS = [
   { key: 'retirementAge', label: 'Retirement Age', unit: 'yrs', type: 'number', min: 50, max: 80, step: 1, hint: 'Default retirement age for new clients' },
   { key: 'inflationRate', label: 'Inflation Rate', unit: '%/yr', type: 'number', min: 0, max: 10, step: 0.1, hint: 'Used to inflate retirement income targets year-on-year' },
-  { key: 'cpfScheme', label: 'CPF Scheme', type: 'select', options: ['BRS','FRS','ERS','none'], hint: 'Default CPF payout tier' },
-  { key: 'cpfPlan', label: 'CPF LIFE Plan', type: 'select', options: ['standard','escalating','basic'], hint: 'Default CPF LIFE plan (escalating adds 2%/yr)' },
-  { key: 'cpfStartAge', label: 'CPF Payout Start', unit: 'age', type: 'number', min: 65, max: 75, step: 1, hint: '65–70 (+7%/yr deferred)' },
-  { key: 'deathYrs', label: 'Death Cover Multiplier', unit: '× income', type: 'number', min: 1, max: 30, step: 1, hint: 'LIA guideline: 9–11× annual income' },
-  { key: 'tpdYrs', label: 'TPD Multiplier', unit: '× income', type: 'number', min: 1, max: 30, step: 1, hint: 'Typically same as death cover' },
-  { key: 'ciYrs', label: 'CI Multiplier', unit: '× expenses', type: 'number', min: 1, max: 20, step: 1, hint: 'Years of expenses to cover during CI recovery' },
-  { key: 'eciYrs', label: 'Early CI Multiplier', unit: '× expenses', type: 'number', min: 1, max: 10, step: 1, hint: 'Typically 2–3× expenses' },
-  { key: 'diPct', label: 'DI Coverage', unit: '% of income', type: 'number', min: 0, max: 100, step: 5, hint: 'MAS cap is 75% of monthly income' },
-  { key: 'premiumPctWarn', label: 'Premium Warning', unit: '% of income', type: 'number', min: 0, max: 50, step: 1, hint: 'Flag if total premium exceeds this % of annual income' },
+  { key: 'endowmentYieldPct', label: 'Endowment Yield', unit: '%/yr', type: 'number', min: 0, max: 10, step: 0.1, hint: 'Default projected yield for endowment policies' },
+  { key: 'ilpYieldPct', label: 'ILP Yield', unit: '%/yr', type: 'number', min: 0, max: 15, step: 0.1, hint: 'Default projected yield for ILP policies (when no fund detail)' },
+  { key: 'lifeExpectancy', label: 'Life Expectancy', unit: 'yrs', type: 'number', min: 75, max: 100, step: 1, hint: 'Planning horizon for retirement projections' },
 ];
 
 // SHA-256 hash of a File's bytes — used as content-addressable cache key.
@@ -9748,8 +9771,8 @@ function App() {
 
   // ── HOUSE-VIEW DEFAULTS ──
   // Firm-level baseline planning assumptions (retirement age, inflation rate,
-  // gap multipliers, etc). Loaded from IndexedDB on mount with DEFAULT_HOUSE_VALUES
-  // as fallback. The FC can edit these in Settings → House Defaults; changes
+  // yields, life expectancy). Loaded from IndexedDB on mount with DEFAULT_HOUSE_VALUES
+  // as fallback. The FC can edit these in Settings → Firm Defaults; changes
   // apply to new clients going forward, never retroactively.
   const [houseDefaults, setHouseDefaults] = useState(DEFAULT_HOUSE_VALUES);
 
@@ -10839,11 +10862,11 @@ function PresentMode() {
   const annualIncome = parseFloat(clientProfile?.annualIncome) || ((parseFloat(clientProfile?.monthlyIncome) || 0) * 12);
   const premiumPctOfIncome = annualIncome > 0 ? (annualPrem / annualIncome * 100) : 0;
 
-  // LIA-style required coverage (simplified)
-  const reqDeath = annualIncome > 0 ? annualIncome * 10 : 500000;
-  const reqTPD = annualIncome > 0 ? annualIncome * 10 : 500000;
-  const reqCI = annualIncome > 0 ? annualIncome * 5 : 250000;
-  const reqDI = annualIncome > 0 ? Math.round(annualIncome / 12 * 0.75) : 3000;
+  // LIA-style required coverage (simplified) — v2.1.0m: uses LIA_MULTIPLIERS
+  const reqDeath = annualIncome > 0 ? annualIncome * LIA_MULTIPLIERS.deathYrs : 500000;
+  const reqTPD = annualIncome > 0 ? annualIncome * LIA_MULTIPLIERS.tpdYrs : 500000;
+  const reqCI = annualIncome > 0 ? annualIncome * LIA_MULTIPLIERS.ciYrs : 250000;
+  const reqDI = annualIncome > 0 ? Math.round(annualIncome / 12 * LIA_MULTIPLIERS.diPct / 100) : 3000;
 
   // Protection score (simplified LIA framework)
   const coverPct = (have, need) => need === 0 ? 100 : Math.min(100, have / need * 100);
@@ -14842,8 +14865,20 @@ function AssumptionsCard({ p, set, houseDefaults }) {
     const nextGA = { ...ga, [key]: isNaN(v) ? val : v };
     set('globalAssumptions', nextGA);
   };
+  // v2.1.0m: Map assumption keys → houseDefaults keys for firm-default ghost text.
+  // inflationPct lives as inflationRate in houseDefaults; the rest share names.
+  const firmDefaultMap = { inflationPct:'inflationRate', endowmentYieldPct:'endowmentYieldPct', ilpYieldPct:'ilpYieldPct', retirementAge:'retirementAge', lifeExpectancy:'lifeExpectancy' };
+  const getFirmDefault = (key) => {
+    const hdKey = firmDefaultMap[key];
+    return hdKey != null ? (houseDefaults[hdKey] ?? DEFAULT_HOUSE_VALUES[hdKey]) : null;
+  };
   // v2.0.5: Single slider tile. Locked pair gets a subtle muted tint.
-  const renderSlider = (s) => (
+  const renderSlider = (s) => {
+    const val = getVal(s.key);
+    const firmDef = getFirmDefault(s.key);
+    const matches = firmDef != null && parseFloat(val) === parseFloat(firmDef);
+    const hasMapping = firmDef != null;
+    return (
     <div key={s.key} style={s.pairedLock ? {
       background:'rgba(148,163,184,.05)',
       border:'1px dashed rgba(148,163,184,.18)',
@@ -14853,20 +14888,28 @@ function AssumptionsCard({ p, set, houseDefaults }) {
       <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:3}}>
         <span style={{fontSize:11,color:'var(--text3)'}}>{s.label}</span>
         <span style={{fontSize:12,fontWeight:700,color:s.locked ? 'var(--text3)' : '#c9a96e'}}>
-          {s.locked ? '🔒 ' : ''}{getVal(s.key)}{s.unit}
+          {s.locked ? '🔒 ' : ''}{val}{s.unit}
         </span>
       </div>
       {!s.locked && (
         <input type="range" min={s.min} max={s.max} step={s.step}
-          value={getVal(s.key)}
+          value={val}
           onChange={e => updateGA(s.key, e.target.value)}
           style={{width:'100%',accentColor:'#c9a96e',height:4}} />
       )}
       {s.helper && (
         <div style={{fontSize:9,color:'var(--text3)',marginTop:4,lineHeight:1.4,fontStyle:'italic'}}>{s.helper}</div>
       )}
+      {hasMapping && !s.locked && (
+        <div style={{fontSize:9,marginTop:3,lineHeight:1.3,color:matches?'var(--text3)':'var(--gold)'}}>
+          {matches
+            ? 'Firm default \u00b7 matches'
+            : <span>Firm default {firmDef}{s.unit} \u00b7 <a href="#" onClick={e=>{e.preventDefault();updateGA(s.key,firmDef);}} style={{color:'var(--gold)',textDecoration:'underline',cursor:'pointer'}}>Reset</a></span>
+          }
+        </div>
+      )}
     </div>
-  );
+  );};
   return (
     <div className="card" style={{marginBottom:16,borderLeft:'2px solid rgba(201,169,110,.3)'}}>
       <h3 style={{fontSize:14,fontWeight:600,marginBottom:4}}>🧮 Assumptions</h3>
@@ -15038,9 +15081,9 @@ function ProfileTab() {
           <button style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',fontSize:11,padding:'5px 10px',borderRadius:8,cursor:'pointer',fontWeight:500}} onClick={()=>uploadRef.current?.click()} disabled={scanning}>{scanning?'…':'📄 Upload'}</button>
           <button className="btn-sm" style={{background:'rgba(239,83,80,.08)',color:'var(--red)',border:'1px solid rgba(239,83,80,.15)',fontSize:10,padding:'5px 10px',borderRadius:8,cursor:'pointer'}} onClick={()=>{
             if(!confirm('Delete all client profile data?\n\nClears name, NRIC, DOB, income, expenses, CPF settings, dependants.\n\nPolicies will NOT be deleted.')) return;
-            // Blank profile seeds from firm-level house defaults — so a fresh
-            // client starts with the firm's baseline planning assumptions, not
-            // hardcoded values. The FC can still override any field.
+            // Blank profile seeds from firm-level defaults — so a fresh client
+            // starts with the firm's baseline planning assumptions.
+            // v2.1.0m: globalAssumptions seeded from the 5 Firm Defaults fields.
             const blank = {
               name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[],
               annualIncome:'',
@@ -15051,7 +15094,14 @@ function ProfileTab() {
               cpfPlan: houseDefaults.cpfPlan,
               cpfStartAge: String(houseDefaults.cpfStartAge),
               cpfTopUp:'',cpfCurrentMonthly:'',
-              otherRetIncome:[]
+              otherRetIncome:[],
+              globalAssumptions: {
+                inflationPct: houseDefaults.inflationRate,
+                endowmentYieldPct: houseDefaults.endowmentYieldPct,
+                ilpYieldPct: houseDefaults.ilpYieldPct,
+                retirementAge: houseDefaults.retirementAge,
+                lifeExpectancy: houseDefaults.lifeExpectancy,
+              },
             };
             setP(blank); saveProfile(blank); toast('Profile cleared','success');
           }}>🗑 Clear Profile</button>
@@ -16029,8 +16079,8 @@ function ReviewSession({onClose}) {
     if(pol.subType==='Integrated Shield Plan') hasISP=true;
     if(pol.subType==='Disability Income') cDI+=parseFloat(pol.diMonthlyBenefit)||0;
   });
-  const rDeath=income>0?income*10:500000; const rCI=income>0?income*5:300000;
-  const rDI=income>0?Math.round(income/12*0.75):3000;
+  const rDeath=income>0?income*LIA_MULTIPLIERS.deathYrs:500000; const rCI=income>0?income*LIA_MULTIPLIERS.ciYrs:300000;
+  const rDI=income>0?Math.round(income/12*LIA_MULTIPLIERS.diPct/100):3000;
 
   // Premium analysis
   const totalAnnual = active.filter(pol=>!pol.premSingle&&pol.premFrequency!=='single'&&pol.category!=='cash_investments').reduce((s,pol)=>s+annualizedPremium(pol),0);
@@ -16257,15 +16307,9 @@ function Dashboard() {
   const [diOverride,setDiOverride] = useState('');
 
   // LIA parameters — initialize from firm-level house defaults on mount.
-  // Using lazy initialization so the default is read ONCE when Dashboard
-  // mounts; mid-session slider edits persist across re-renders. If the FC
-  // changes house defaults in Settings, they take effect next time Dashboard
-  // mounts (i.e. on next tab switch back) — not retroactively.
-  const [deathYrs,setDeathYrs] = useState(() => houseDefaults.deathYrs);
-  const [tpdYrs,setTpdYrs] = useState(() => houseDefaults.tpdYrs);
-  const [ciYrs,setCiYrs] = useState(() => houseDefaults.ciYrs);
-  const [eciYrs,setEciYrs] = useState(() => houseDefaults.eciYrs);
-  const [diPct,setDiPct] = useState(() => houseDefaults.diPct);
+  // v2.1.0m: LIA multipliers are now hardcoded constants (LIA_MULTIPLIERS),
+  // no longer configurable via house defaults or dashboard sliders.
+  const { deathYrs, tpdYrs, ciYrs, eciYrs, diPct } = LIA_MULTIPLIERS;
   const [ciMethod,setCiMethod] = useState('expenses'); // 'income' or 'expenses'
   const [ciIncExp,setCiIncExp] = useState(true);
   const [ciIncMort,setCiIncMort] = useState(true);
@@ -16630,7 +16674,7 @@ function Dashboard() {
   // ── RETIREMENT LITE COMPUTATION ──
   const retirementLite = useMemo(() => {
     const baseDesired = parseFloat(p.desiredRetIncome) || parseFloat(p.monthlyExpenses) || monthlyIncome * 0.7 || 5000;
-    // Fallbacks read from firm-level house defaults (Settings → House Defaults)
+    // Fallbacks read from firm-level defaults (Settings → Firm Defaults)
     // so a new or partially-filled profile starts from the firm's baseline
     // assumptions rather than hardcoded values.
     const inflationRate = getInflationPct(p, houseDefaults.inflationRate) / 100; // v2.0.3
@@ -17210,12 +17254,9 @@ function Dashboard() {
             <label style={{display:'flex',alignItems:'center',gap:3,cursor:'pointer'}}><input type="checkbox" checked={ciIncDep} onChange={e=>setCiIncDep(e.target.checked)} style={{accentColor:'var(--gold)'}} /> Dependant Support</label>
           </div>
         )}
-        <div className="resp-5col" style={{marginBottom:8}}>
-          <div className="field"><label>Death (yrs)</label><input type="number" value={deathYrs} onChange={e=>setDeathYrs(+e.target.value||10)} /><div style={{fontSize:9,color:'var(--text3)'}}>LIA: 9–10× {ciMethod==='income'?'income':'expenses'}</div></div>
-          <div className="field"><label>TPD (yrs)</label><input type="number" value={tpdYrs} onChange={e=>setTpdYrs(+e.target.value||10)} /><div style={{fontSize:9,color:'var(--text3)'}}>LIA: 9–10× {ciMethod==='income'?'income':'expenses'}</div></div>
-          <div className="field"><label>CI (yrs)</label><input type="number" value={ciYrs} onChange={e=>setCiYrs(+e.target.value||5)} /><div style={{fontSize:9,color:'var(--text3)'}}>LIA: 3.5–5× {ciMethod==='income'?'income':'expenses'}</div></div>
-          <div className="field"><label>ECI (yrs)</label><input type="number" value={eciYrs} onChange={e=>setEciYrs(+e.target.value||2)} /><div style={{fontSize:9,color:'var(--text3)'}}>LIA: ~2× {ciMethod==='income'?'income':'expenses'}</div></div>
-          <div className="field"><label>DI — Income %</label><input type="number" value={diPct} onChange={e=>setDiPct(+e.target.value||75)} /><div style={{fontSize:9,color:'var(--text3)'}}>LIA: 75% gross monthly</div></div>
+        {/* v2.1.0m: LIA multiplier sliders removed — now hardcoded constants (LIA_MULTIPLIERS) */}
+        <div style={{fontSize:10,color:'var(--text3)',marginBottom:8,padding:'6px 10px',background:'rgba(148,163,184,.05)',borderRadius:6}}>
+          Coverage multipliers: Death {LIA_MULTIPLIERS.deathYrs}× · TPD {LIA_MULTIPLIERS.tpdYrs}× · CI {LIA_MULTIPLIERS.ciYrs}× · ECI {LIA_MULTIPLIERS.eciYrs}× · DI {LIA_MULTIPLIERS.diPct}% <span style={{color:'var(--text3)',opacity:0.6}}>(LIA standard)</span>
         </div>
         <details>
           <summary style={{fontSize:10,color:'var(--gold)',cursor:'pointer',fontWeight:600}}>SA Override (retired clients / manual targets)</summary>
@@ -27841,11 +27882,11 @@ function ReportTab() {
       const pMedical = parseFloat(p.medicalBudget)||0;
       const pTotalMonthly = pMonthlyExp+pMortgage+pMedical;
       const pMonthlyForCI = pTotalMonthly>0?pTotalMonthly:(annualIncome>0?annualIncome/12:4000);
-      const rDeath = annualIncome>0?annualIncome*10:500000;
-      const rTPD = annualIncome>0?annualIncome*10:500000;
-      const rCI = pMonthlyForCI*12*5;
-      const rECI = pMonthlyForCI*12*2;
-      const rDI = annualIncome>0?Math.round(annualIncome/12*0.75):3000;
+      const rDeath = annualIncome>0?annualIncome*LIA_MULTIPLIERS.deathYrs:500000;
+      const rTPD = annualIncome>0?annualIncome*LIA_MULTIPLIERS.tpdYrs:500000;
+      const rCI = pMonthlyForCI*12*LIA_MULTIPLIERS.ciYrs;
+      const rECI = pMonthlyForCI*12*LIA_MULTIPLIERS.eciYrs;
+      const rDI = annualIncome>0?Math.round(annualIncome/12*LIA_MULTIPLIERS.diPct/100):3000;
       const gapData = [
         {label:'Death & Total Invalidity', have:cDeath, need:rDeath, weight:20, icon:'Life'},
         {label:'Total Permanent Disability', have:cTPD, need:rTPD, weight:20, icon:'TPD'},
@@ -28779,11 +28820,11 @@ function ReportTab() {
       const pMedical = parseFloat(p.medicalBudget)||0;
       const pTotalMonthly = pMonthlyExp + pMortgage + pMedical;
       const pMonthlyForCI = pTotalMonthly > 0 ? pTotalMonthly : (annualIncome > 0 ? annualIncome/12 : 4000);
-      const rDeath=annualIncome>0?annualIncome*10:500000;
-      const rTPD=annualIncome>0?annualIncome*10:500000;
-      const rCI=pMonthlyForCI*12*5;
-      const rECI=pMonthlyForCI*12*2;
-      const rDI=annualIncome>0?Math.round(annualIncome/12*0.75):3000;
+      const rDeath=annualIncome>0?annualIncome*LIA_MULTIPLIERS.deathYrs:500000;
+      const rTPD=annualIncome>0?annualIncome*LIA_MULTIPLIERS.tpdYrs:500000;
+      const rCI=pMonthlyForCI*12*LIA_MULTIPLIERS.ciYrs;
+      const rECI=pMonthlyForCI*12*LIA_MULTIPLIERS.eciYrs;
+      const rDI=annualIncome>0?Math.round(annualIncome/12*LIA_MULTIPLIERS.diPct/100):3000;
       const gapRows=[
         ['Death & Total Invalidity',cDeath,rDeath,20],['Total Permanent Disability',cTPD,rTPD,20],['Critical Illness',cCI,rCI,25],
         ['Early CI',cECI,rECI,10],['Disability/mth',cDI,rDI,10],
@@ -30183,23 +30224,22 @@ function Settings() {
         </div>
       )}
 
-      {/* ═══ HOUSE DEFAULTS ═══ */}
-      {/* Firm-level planning assumptions. Applied only to new clients (via
-          the "Clear Profile" reset and when blank fields fall back during
-          retirement/gap analysis). Changing a value here never alters any
+      {/* ═══ FIRM DEFAULTS ═══ */}
+      {/* Firm-level projection assumptions. Applied only to new clients when
+          seeding globalAssumptions. Changing a value here never alters any
           existing client's stored profile — it's a baseline, not a mandate. */}
       <div className="card" style={{marginBottom:16, borderColor:'rgba(212,169,106,0.2)'}}>
         <div style={{display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:4, gap:8, flexWrap:'wrap'}}>
           <div style={{flex:1, minWidth:200}}>
-            <h3 style={{fontSize:14, fontWeight:600, marginBottom:4}}>🏛️ House Defaults</h3>
+            <h3 style={{fontSize:14, fontWeight:600, marginBottom:4}}>🏛️ Firm Defaults for New Clients</h3>
             <p style={{fontSize:11, color:'var(--text3)', marginBottom:0}}>
-              Firm-level planning baselines. Applied to new clients and as fallbacks when profile fields are blank. Changing a value here never alters existing client profiles — only future ones.
+              Projection assumptions seeded into new client profiles. Changing a value here never alters existing clients — only future ones. Per-client overrides live on the Assumptions card.
             </p>
           </div>
           <button onClick={()=>{
-            if(confirm('Reset all House Defaults to their shipped baseline values?\n\nThis does not affect any existing client profiles.')) {
+            if(confirm('Reset all Firm Defaults to their shipped baseline values?\n\nThis does not affect any existing client profiles.')) {
               saveHouseDefaults(DEFAULT_HOUSE_VALUES);
-              toast('House defaults reset to baseline','success');
+              toast('Firm defaults reset to baseline','success');
             }
           }} style={{
             background:'var(--bg3)', color:'var(--text2)', border:'1px solid var(--border2)',
