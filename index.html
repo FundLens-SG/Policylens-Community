@@ -608,11 +608,24 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.1.0m';
+const APP_VERSION = 'v2.1.0m1';
 const APP_VERSION_DATE = '2026-04-12';
 const APP_VERSION_NAME = 'Firm Defaults refactor';
 
 const CHANGELOG = [
+  {
+    version: 'v2.1.0m1',
+    date: '2026-04-12',
+    name: 'Firm Defaults refactor (hotfix)',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Assumptions ghost text: literal "\\u00b7" replaced with middle dot character'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.1.0m',
     date: '2026-04-12',
@@ -623,14 +636,14 @@ const CHANGELOG = [
         items: [
           'Renamed "House Defaults" to "Firm Defaults for New Clients"',
           'Firm Defaults panel slimmed to 5 projection fields (retirement age, life expectancy, inflation, endowment yield, ILP yield)',
-          'LIA gap analysis multipliers (Death 10\u00d7, TPD 10\u00d7, CI 5\u00d7, Early CI 2\u00d7, DI 75%) now hardcoded constants \u2014 removed from Settings UI and Dashboard sliders'
+          'LIA gap analysis multipliers (Death 10×, TPD 10×, CI 5×, Early CI 2×, DI 75%) now hardcoded constants — removed from Settings UI and Dashboard sliders'
         ]
       },
       {
         heading: 'New',
         items: [
           'New client profiles seed assumptions from Firm Defaults on creation',
-          'Per-client Assumptions sliders show "Firm default \u00b7 matches" or override indicator with Reset link'
+          'Per-client Assumptions sliders show "Firm default · matches" or override indicator with Reset link'
         ]
       }
     ]
@@ -14903,8 +14916,8 @@ function AssumptionsCard({ p, set, houseDefaults }) {
       {hasMapping && !s.locked && (
         <div style={{fontSize:9,marginTop:3,lineHeight:1.3,color:matches?'var(--text3)':'var(--gold)'}}>
           {matches
-            ? 'Firm default \u00b7 matches'
-            : <span>Firm default {firmDef}{s.unit} \u00b7 <a href="#" onClick={e=>{e.preventDefault();updateGA(s.key,firmDef);}} style={{color:'var(--gold)',textDecoration:'underline',cursor:'pointer'}}>Reset</a></span>
+            ? 'Firm default · matches'
+            : <span>Firm default {firmDef}{s.unit} · <a href="#" onClick={e=>{e.preventDefault();updateGA(s.key,firmDef);}} style={{color:'var(--gold)',textDecoration:'underline',cursor:'pointer'}}>Reset</a></span>
           }
         </div>
       )}
