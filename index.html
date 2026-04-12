@@ -572,11 +572,24 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.1.0g';
+const APP_VERSION = 'v2.1.0h';
 const APP_VERSION_DATE = '2026-04-12';
-const APP_VERSION_NAME = 'Drive OAuth fragment fix';
+const APP_VERSION_NAME = 'OAuth return UX fix';
 
 const CHANGELOG = [
+  {
+    version: 'v2.1.0h',
+    date: '2026-04-12',
+    name: 'OAuth return UX fix',
+    sections: [
+      {
+        heading: 'UX',
+        items: [
+          'Eliminated login-screen flash on OAuth return. Fragment parser now waits for Supabase session hydration before deciding whether to defer.',
+        ]
+      },
+    ]
+  },
   {
     version: 'v2.1.0g',
     date: '2026-04-12',
@@ -9510,15 +9523,27 @@ function App() {
   // orphan sessionStorage intent on its own and silently cleans it up
   // — this branch returns null and we do nothing.
   useEffect(() => {
+    (async () => {
     const result = _consumeOAuthRedirect();
     if (!result) return;
     if (result.kind === 'success') {
+      // v2.1.0h: Wait for Supabase session hydration before deciding
+      // whether to defer. On OAuth return, this useEffect fires before
+      // authCheck sets window._user. getSession() awaits Supabase's
+      // initializePromise, so it's deterministic — no race, no timeout.
+      let hasSession = !!sbGetUserId();
+      if (!hasSession && window._SB) {
+        try {
+          const s = await window._SB.auth.getSession();
+          hasSession = !!(s?.data?.session);
+        } catch(_) {}
+      }
       // v2.1.0d: Guard against OAuth completing without a Supabase session.
       // If no user is signed in, queue the token in tab-local memory and
       // defer processing until 'policylens-keys-synced' fires on sign-in.
       // The token is NEVER written to localStorage/sessionStorage/IDB
       // until the user is authenticated — in-memory only, dies with the tab.
-      if (!sbGetUserId()) {
+      if (!hasSession) {
         const expiresAt = Date.now() + (result.expiresIn || 3599) * 1000;
         window.__pendingDriveOAuth = {
           accessToken: result.accessToken,
@@ -9560,6 +9585,7 @@ function App() {
       try { toast("Sign-in didn't complete. Click Connect to try again.", 'warning', 4000); } catch (_) {}
     }
     // 'unknown' kind: silently ignore — malformed fragment, nothing to do
+    })();
   }, []);
   // ── PRESENT MODE ──
   // When true, the whole app swaps to a presentation-grade UI: big numbers,
