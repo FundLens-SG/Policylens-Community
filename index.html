@@ -172,6 +172,18 @@ label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;lett
 #auth-loading{position:fixed;inset:0;z-index:10001;background:var(--bg);display:flex;align-items:center;justify-content:center}
 @keyframes plPulse{0%,100%{opacity:.6}50%{opacity:1}}
 #auth-loading-text.pulse{animation:plPulse 1.5s ease-in-out infinite}
+@keyframes rotateMsg{0%,9%{opacity:1}11.2%,100%{opacity:0}}
+#auth-loading-text{position:relative;min-height:20px}
+#auth-loading-text>span{position:absolute;left:0;right:0;opacity:0;animation:rotateMsg 13.5s infinite}
+#auth-loading-text>span:nth-child(1){opacity:1;animation-delay:0s}
+#auth-loading-text>span:nth-child(2){animation-delay:1.5s}
+#auth-loading-text>span:nth-child(3){animation-delay:3s}
+#auth-loading-text>span:nth-child(4){animation-delay:4.5s}
+#auth-loading-text>span:nth-child(5){animation-delay:6s}
+#auth-loading-text>span:nth-child(6){animation-delay:7.5s}
+#auth-loading-text>span:nth-child(7){animation-delay:9s}
+#auth-loading-text>span:nth-child(8){animation-delay:10.5s}
+#auth-loading-text>span:nth-child(9){animation-delay:12s}
 /* ══════ AUTH GATE ══════ */
 #auth-gate{position:fixed;inset:0;z-index:10000;background:var(--bg);display:none;align-items:center;justify-content:center;padding:20px}
 #auth-gate .auth-card{background:var(--bg2);border:1px solid var(--border2);border-radius:16px;max-width:400px;width:100%;padding:32px;box-shadow:0 24px 64px rgba(0,0,0,.4)}
@@ -225,7 +237,7 @@ label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;lett
       <path d="M30 50 L32 51.5 L34 50 L32 48.5Z" fill="#d4a96a" opacity="0.8"/>
       <path d="M66 50 L68 51.5 L70 50 L68 48.5Z" fill="#d4a96a" opacity="0.8"/>
     </svg>
-    <div id="auth-loading-text" style="color:#c8c8c8;font-size:14px;margin-top:8px;font-family:system-ui,sans-serif">Loading PolicyLens…</div>
+    <div id="auth-loading-text" style="color:#c8c8c8;font-size:14px;margin-top:8px;font-family:system-ui,sans-serif"><span>Loading PolicyLens…</span><span>Polishing the lenses…</span><span>Stretching before the work…</span><span>Warming up the engines…</span><span>Brewing your dashboard…</span><span>Tuning the instruments…</span><span>Sharpening the pencils…</span><span>Sweeping out the cobwebs…</span><span>Setting the table…</span></div>
   </div>
 </div>
 
@@ -608,11 +620,24 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.2.0-rc1.4';
+const APP_VERSION = 'v2.2.0-rc1.5';
 const APP_VERSION_DATE = '2026-04-14';
-const APP_VERSION_NAME = 'OAuth loader URL detection fix';
+const APP_VERSION_NAME = 'Pre-React loader polish';
 
 const CHANGELOG = [
+  {
+    version: 'v2.2.0-rc1.5',
+    date: '2026-04-14',
+    name: 'Pre-React loader polish',
+    sections: [
+      {
+        heading: 'Changed',
+        items: [
+          'Pre-React loading screen (shown during initial bundle parse) now rotates through playful messages every 1.5s instead of static "Loading PolicyLens\u2026". CSS-only implementation; falls back gracefully to static text if animations are blocked.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.2.0-rc1.4',
     date: '2026-04-14',
