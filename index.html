@@ -174,7 +174,7 @@ label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;lett
 #auth-loading-text.pulse{animation:plPulse 1.5s ease-in-out infinite}
 @keyframes rotateMsg{0%,9%{opacity:1}11.2%,100%{opacity:0}}
 #auth-loading-text{position:relative;min-height:20px}
-#auth-loading-text>span{position:absolute;left:0;right:0;opacity:0;animation:rotateMsg 13.5s infinite;white-space:nowrap;text-align:center}
+#auth-loading-text>span{position:absolute;left:50%;transform:translateX(-50%);opacity:0;animation:rotateMsg 13.5s infinite;white-space:nowrap}
 #auth-loading-text>span:nth-child(1){opacity:1;animation-delay:0s}
 #auth-loading-text>span:nth-child(2){animation-delay:1.5s}
 #auth-loading-text>span:nth-child(3){animation-delay:3s}
@@ -620,11 +620,24 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.2.0-rc1.6';
+const APP_VERSION = 'v2.2.0-rc1.7';
 const APP_VERSION_DATE = '2026-04-14';
-const APP_VERSION_NAME = 'Loader span layout fix';
+const APP_VERSION_NAME = 'Loader span centering fix';
 
 const CHANGELOG = [
+  {
+    version: 'v2.2.0-rc1.7',
+    date: '2026-04-14',
+    name: 'Loader span centering fix',
+    sections: [
+      {
+        heading: 'Fixed',
+        items: [
+          'Pre-React loader text now aligns under the logo (was offset to viewport center instead of logo center).'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.2.0-rc1.6',
     date: '2026-04-14',
