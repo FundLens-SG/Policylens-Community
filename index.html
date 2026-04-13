@@ -608,11 +608,24 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.2.0-rc1.3';
+const APP_VERSION = 'v2.2.0-rc1.4';
 const APP_VERSION_DATE = '2026-04-14';
-const APP_VERSION_NAME = 'OAuth loader polish';
+const APP_VERSION_NAME = 'OAuth loader URL detection fix';
 
 const CHANGELOG = [
+  {
+    version: 'v2.2.0-rc1.4',
+    date: '2026-04-14',
+    name: 'OAuth loader URL detection fix',
+    sections: [
+      {
+        heading: 'Fixed',
+        items: [
+          'OAuth-return loader (rotating insurance messages) now reliably appears during the redirect-back token exchange. Previous implementation re-checked window.location on every render, which read empty after the URL was cleaned mid-loading, causing fallback to the static "Loading PolicyLens\u2026" message instead.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.2.0-rc1.3',
     date: '2026-04-14',
@@ -10313,6 +10326,16 @@ function App() {
   const [clientProfile, setClientProfile] = useState({name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[]});
   const [loading, setLoading] = useState(true);
   const [repoSource, setRepoSource] = useState('loading'); // 'supabase' | 'local' | 'loading'
+  // v2.2.0-rc1.4: Capture OAuth-return URL state ONCE on mount.
+  // _consumeOAuthRedirect strips ?code= via history.replaceState during
+  // loading; without this, subsequent re-renders see empty URL.
+  const [_isOAuthReturn] = useState(() => {
+    try {
+      const h = window.location.hash || '';
+      const s = window.location.search || '';
+      return h.includes('access_token=') || h.includes('error=') || s.includes('code=');
+    } catch (_) { return false; }
+  });
 
   // ── v2.1.0c: OAUTH REDIRECT-RETURN HANDLER ──
   // Runs once on mount. If the URL contains an OAuth fragment from a
@@ -11519,11 +11542,7 @@ function App() {
   const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,deletePolicy,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,tab,setTab,presentMode,setPresentMode,showChangelog,setShowChangelog,houseDefaults,saveHouseDefaults,runCloudSync:()=>runCloudSyncRef.current?.({force:true}),driveState,activeClientId,switchClient,destroyClient};
 
   if(loading) {
-    const _h = window.location.hash || '';
-    const _s = window.location.search || '';
-    if (_h.includes('access_token=') || _h.includes('error=') || _s.includes('code=')) {
-      return <OAuthReturnLoader />;
-    }
+    if (_isOAuthReturn) return <OAuthReturnLoader />;
     return <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh'}}>
       <div style={{textAlign:'center'}}><LogoMark size={36} /><div style={{color:'var(--text2)',fontSize:14,marginTop:8}}>Loading PolicyLens…</div></div>
     </div>;
