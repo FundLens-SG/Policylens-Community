@@ -608,11 +608,57 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.2.0-beta';
+const APP_VERSION = 'v2.2.0-rc1';
 const APP_VERSION_DATE = '2026-04-13';
-const APP_VERSION_NAME = 'Drive sync UI + conflict resolution';
+const APP_VERSION_NAME = 'Multi-client foundation';
 
 const CHANGELOG = [
+  {
+    version: 'v2.2.0-rc1',
+    date: '2026-04-13',
+    name: 'Multi-client foundation',
+    sections: [
+      {
+        heading: 'New',
+        items: [
+          'Multi-client support: PolicyLens now manages unlimited clients in your Google Drive folder. Each client has their own folder under PolicyLens/{Tier}/{ClientName}/.',
+          'Clients tab — central switcher with filter chips (All / A / B / C / Unassigned), two-line client cards showing name, tier, total premium, policy count, last reviewed date.',
+          '"+ New Client" flow with fuzzy duplicate detection — typing a name that matches existing clients (Levenshtein distance + token-sort) shows up to 5 matches with age, occupation, and gross annual income before letting you create.',
+          'Active client persists across reloads (most-recently-edited client opens by default).',
+          'Funds tab merged into Repository as a Fund Repository subtab. Repository tab now has Policy Repository / Fund Repository subtabs.',
+          '"Destroy Client" button (replaces top-right Wipe) — two-step confirm, moves the entire client folder to Drive Trash (30-day recovery window).'
+        ]
+      },
+      {
+        heading: 'Changed',
+        items: [
+          'Profile tab: "Clear Profile" replaced with "Reset client data" — wipes policies + profile fields but keeps the client record. Use Destroy Client (header) to remove a client entirely.',
+          'Drive folder structure migrated automatically on first v2.2 load: existing client files move into PolicyLens/Unassigned/{ClientName}/. Re-tier via the dropdown in Profile or Clients tab to move them.',
+          'Autosave files now tagged with appProperties.kind = "autosave" (backfilled during migration). Distinguishes them from checkpoint files (v2.2.0).'
+        ]
+      },
+      {
+        heading: 'Internal',
+        items: [
+          'drive_state IDB schema extended: added folderId, tierFolderId, clientName, tier, lastReviewedAt fields. Migration script runs once on first v2.2 load.',
+          'driveClient.createClientFile now sets appProperties.kind = "autosave".',
+          'New driveClient primitives: ensureTierFolder, ensureClientFolder, moveFile, moveFolder, trashFolder, listFolderFiles.',
+          'Active client tracked via localStorage policylens_active_client_id; migration tracked via policylens_v22_migrated.',
+          'Policies tagged with clientId field; profiles stored under per-client IDB keys (clientProfile_{uuid}).'
+        ]
+      },
+      {
+        heading: 'Known gaps (v2.2.0 final)',
+        items: [
+          'Checkpoint creation and per-client checkpoint subview not yet built.',
+          'Tier filter chips render but do not filter (wiring lands in v2.2.0).',
+          '"Mark as reviewed" button and auto-derived "Needs Review" badge not yet built.',
+          'Client rename prompt (file + folder rename on name change) not yet built.',
+          'Policies loaded via full-table-scan filtered by clientId. Performant at current scale; a clientId index on the policies store is a future optimization (~30 lines, separate batch).'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.2.0-beta',
     date: '2026-04-13',
@@ -8437,6 +8483,9 @@ const AppCtx = createContext();
 const DRIVE_CLIENT_ID = '502722318908-lsdr6qhoavkok0kd3ipa94mip1uqu3kp.apps.googleusercontent.com';
 const DRIVE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 const DRIVE_FOLDER_NAME = 'PolicyLens';
+// v2.2.0-rc1: Tier/client folder caches (cleared on signOut)
+let _tierFolderCache = {};
+let _clientFolderCache = {};
 const DRIVE_REFRESH_WARN_MS = 6 * 24 * 60 * 60 * 1000; // 6 days — banner threshold
 // v2.1.0c: Hardcoded redirect URI for the manual implicit-grant flow.
 // Must match EXACTLY the value registered in Google Cloud Console under
@@ -8640,6 +8689,85 @@ async function doLocalLoad(file, policies, savePolicy, deletePolicy, saveProfile
 // Set to true when user clicks "Not now" — prevents re-showing until next session.
 // Module-scoped (not persisted) so it resets on page reload as specified.
 let _driveMigrationDismissed = false;
+
+// ── v2.2.0-rc1: Fuzzy match helpers for client duplicate detection ──
+function _levenshtein(a, b) {
+  const m = a.length, n = b.length;
+  const dp = Array.from({length: m+1}, (_,i) => i);
+  for (let j = 1; j <= n; j++) {
+    let prev = dp[0]; dp[0] = j;
+    for (let i = 1; i <= m; i++) {
+      const tmp = dp[i];
+      dp[i] = a[i-1] === b[j-1] ? prev : 1 + Math.min(prev, dp[i], dp[i-1]);
+      prev = tmp;
+    }
+  }
+  return dp[m];
+}
+function _tokenSort(s) { return s.toLowerCase().trim().split(/\s+/).sort().join(' '); }
+
+// ── v2.2.0-rc1: Migration from flat to nested folder structure ──
+async function _runV22Migration(states, setProgress) {
+  const rootFolderId = await driveClient.ensureFolder();
+  for (let i = 0; i < states.length; i++) {
+    const ds = states[i];
+    if (ds.folderId) continue; // already migrated (idempotent)
+    setProgress({ current: i + 1, total: states.length });
+    // 1. Determine client name
+    let name = ds.clientName;
+    if (!name) {
+      try {
+        const { content } = await driveClient.getFile(ds.fileId);
+        const data = JSON.parse(content);
+        name = data.clientProfile?.name || 'Untitled';
+      } catch (_) { name = 'Untitled'; }
+    }
+    console.log('[Migration]', i+1, '/', states.length, '— client:', name);
+    // 2. Ensure tier folder (Unassigned for all pre-v2.2 clients)
+    const tierFolderId = await driveClient.ensureTierFolder(null);
+    // 3. Ensure client folder
+    const clientFolderId = await driveClient.ensureClientFolder(tierFolderId, name);
+    // 4. Move autosave file into client folder
+    try {
+      await driveClient.moveFile(ds.fileId, clientFolderId, rootFolderId);
+      console.log('[Migration] Moved file', ds.fileId, '→', clientFolderId);
+    } catch (e) { console.warn('[Migration] moveFile failed (may be idempotent):', e.message); }
+    // 5. Backfill kind:'autosave' via lightweight metadata PATCH
+    try {
+      await _driveFetch('https://www.googleapis.com/drive/v3/files/' + ds.fileId, {
+        method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ appProperties: { kind: 'autosave' } }),
+      });
+    } catch (_) { console.warn('[Migration] kind backfill failed (non-blocking)'); }
+    // 6. Update drive_state row
+    await PolicyDB.saveDriveState({
+      ...ds, folderId: clientFolderId, tierFolderId, clientName: name,
+      tier: null, lastReviewedAt: ds.lastReviewedAt || null,
+    });
+  }
+  // Backfill policies with clientId
+  const allPolicies = await dbGetAll('policies');
+  const firstClientId = states[0].clientId;
+  for (const pol of allPolicies) {
+    if (!pol.clientId) { pol.clientId = firstClientId; await dbPut('policies', pol); }
+  }
+  console.log('[Migration] Tagged', allPolicies.filter(p=>!p.clientId).length || allPolicies.length, 'policies with clientId');
+  // Move profile to per-client key (delete old key immediately per refinement #1)
+  const profileRec = await dbGet('settings', 'clientProfile').catch(() => null);
+  if (profileRec?.value) {
+    await dbPut('settings', { key: 'clientProfile_' + firstClientId, value: profileRec.value });
+    await dbDel('settings', 'clientProfile');
+    console.log('[Migration] Moved clientProfile → clientProfile_' + firstClientId);
+  }
+  const nameRec = await dbGet('settings', 'clientName').catch(() => null);
+  if (nameRec?.value !== undefined) {
+    await dbPut('settings', { key: 'clientName_' + firstClientId, value: nameRec.value });
+    await dbDel('settings', 'clientName');
+    console.log('[Migration] Moved clientName → clientName_' + firstClientId);
+  }
+  driveLSSet('policylens_v22_migrated', '1');
+  console.log('[Migration] ✓ v2.2 migration complete');
+}
 
 // ── Wait for the GIS library to load (5s timeout) ──
 // Lazy-loaded via async <script> tag in <head>. If user clicks Connect
@@ -8999,6 +9127,8 @@ const driveClient = {
     // Google account, the folder is still theirs and we want to find it
     // by ID rather than create a duplicate. ensureFolder() validates and
     // recovers if the stored ID is stale.
+    _tierFolderCache = {};
+    _clientFolderCache = {};
     setDriveStatus('disconnected');
     console.log('[Drive] Signed out');
   },
@@ -9069,6 +9199,7 @@ const driveClient = {
       appProperties: {
         clientId: clientData.clientId,
         schemaVersion: String(DRIVE_SCHEMA_VERSION),
+        kind: 'autosave',
       },
     };
     const body = JSON.stringify(clientData, null, 2);
@@ -9109,7 +9240,7 @@ const driveClient = {
     const multipart =
       '--' + boundary + '\r\n' +
       'Content-Type: application/json; charset=UTF-8\r\n\r\n' +
-      JSON.stringify({ name: newName, appProperties: { schemaVersion: String(DRIVE_SCHEMA_VERSION) } }) + '\r\n' +
+      JSON.stringify({ name: newName, appProperties: { schemaVersion: String(DRIVE_SCHEMA_VERSION), kind: 'autosave' } }) + '\r\n' +
       '--' + boundary + '\r\n' +
       'Content-Type: application/json\r\n\r\n' +
       body + '\r\n' +
@@ -9122,6 +9253,73 @@ const driveClient = {
     const result = await resp.json();
     console.log('[Drive] \u2713 Updated client file:', fileId);
     return result.headRevisionId;
+  },
+
+  // ── v2.2.0-rc1: Tier + client folder primitives ──
+
+  async ensureTierFolder(tier) {
+    const tierName = tier || 'Unassigned';
+    if (_tierFolderCache[tierName]) return _tierFolderCache[tierName];
+    const rootId = await driveClient.ensureFolder();
+    const q = encodeURIComponent("name='" + tierName + "' and '" + rootId + "' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false");
+    const resp = await _driveFetch('https://www.googleapis.com/drive/v3/files?q=' + q + '&fields=files(id,name)');
+    const data = await resp.json();
+    if (data.files && data.files.length > 0) {
+      _tierFolderCache[tierName] = data.files[0].id;
+      return data.files[0].id;
+    }
+    const createResp = await _driveFetch('https://www.googleapis.com/drive/v3/files?fields=id', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: tierName, mimeType: 'application/vnd.google-apps.folder', parents: [rootId] }),
+    });
+    const created = await createResp.json();
+    _tierFolderCache[tierName] = created.id;
+    console.log('[Drive] ✓ Created tier folder:', tierName, created.id);
+    return created.id;
+  },
+
+  async ensureClientFolder(tierFolderId, clientName) {
+    const cacheKey = tierFolderId + '/' + clientName;
+    if (_clientFolderCache[cacheKey]) return _clientFolderCache[cacheKey];
+    const q = encodeURIComponent("name='" + clientName.replace(/'/g, "\\'") + "' and '" + tierFolderId + "' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false");
+    const resp = await _driveFetch('https://www.googleapis.com/drive/v3/files?q=' + q + '&fields=files(id,name)');
+    const data = await resp.json();
+    if (data.files && data.files.length > 0) {
+      _clientFolderCache[cacheKey] = data.files[0].id;
+      return data.files[0].id;
+    }
+    const createResp = await _driveFetch('https://www.googleapis.com/drive/v3/files?fields=id', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: clientName, mimeType: 'application/vnd.google-apps.folder', parents: [tierFolderId] }),
+    });
+    const created = await createResp.json();
+    _clientFolderCache[cacheKey] = created.id;
+    console.log('[Drive] ✓ Created client folder:', clientName, created.id);
+    return created.id;
+  },
+
+  async moveFile(fileId, newParentFolderId, oldParentFolderId) {
+    const resp = await _driveFetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(fileId) + '?addParents=' + newParentFolderId + '&removeParents=' + oldParentFolderId + '&fields=id,parents', { method: 'PATCH' });
+    return await resp.json();
+  },
+
+  async moveFolder(folderId, newParentFolderId, oldParentFolderId) {
+    return driveClient.moveFile(folderId, newParentFolderId, oldParentFolderId);
+  },
+
+  async trashFolder(folderId) {
+    await _driveFetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(folderId), {
+      method: 'PATCH', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ trashed: true }),
+    });
+    console.log('[Drive] ✓ Trashed folder:', folderId);
+  },
+
+  async listFolderFiles(folderId) {
+    const q = encodeURIComponent("'" + folderId + "' in parents and trashed=false");
+    const resp = await _driveFetch('https://www.googleapis.com/drive/v3/files?q=' + q + '&fields=files(id,name,headRevisionId,modifiedTime,size,appProperties)');
+    const data = await resp.json();
+    return data.files || [];
   },
 
   // ── getFile: fetch a file's content + metadata ──
@@ -10127,19 +10325,58 @@ function App() {
   // ── v2.2.0-alpha: Drive migration prompt state ──
   const [showDriveMigration, setShowDriveMigration] = useState(false);
 
-  // ── v2.2.0-beta: Drive state for current client (for Header/sync UI) ──
+  // ── v2.2.0-rc1: Active client + Drive state ──
+  const [activeClientId, setActiveClientId] = useState(null);
   const [driveState, setDriveState] = useState(null);
   const [conflictData, setConflictData] = useState(null);
-  // Load drive_state on mount and after sync operations
+  const [showV22Migration, setShowV22Migration] = useState(false);
+  const [v22MigrationProgress, setV22MigrationProgress] = useState(null);
+
+  // Refs for stable closure access in focus-refresh and sync
+  const policiesRef = useRef(policies);
+  const clientProfileRef = useRef(clientProfile);
+  const activeClientIdRef = useRef(activeClientId);
+  useEffect(() => { policiesRef.current = policies; clientProfileRef.current = clientProfile; }, [policies, clientProfile]);
+  useEffect(() => { activeClientIdRef.current = activeClientId; }, [activeClientId]);
+
+  // Load a specific client's data from IDB into React state
+  const _loadClientData = async (clientId) => {
+    const profileRec = await dbGet('settings', 'clientProfile_' + clientId).catch(() => null);
+    const profile = profileRec?.value || {name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[]};
+    setClientProfile(profile);
+    setClientName(profile.name || '');
+    const allPolicies = await dbGetAll('policies');
+    setPolicies(allPolicies.filter(p => p.clientId === clientId));
+    const states = await PolicyDB.getAllDriveStates();
+    setDriveState(states.find(s => s.clientId === clientId) || null);
+  };
+
+  // Switch active client — cancels pending sync, swaps all client-scoped state
+  const switchClient = async (clientId) => {
+    // LOAD-BEARING: cancel pending sync for previous client.
+    // Removing this causes cross-client sync contamination (pending
+    // timer fires against new active client's file with previous
+    // client's state). Do not remove.
+    clearTimeout(_driveSyncTimer);
+    _driveSyncTimer = null;
+    _notifySyncStatus();
+    setConflictData(null);
+    setActiveClientId(clientId);
+    activeClientIdRef.current = clientId;
+    try { localStorage.setItem('policylens_active_client_id', clientId); } catch(_) {}
+    await _loadClientData(clientId);
+  };
+
+  // Refresh driveState for active client on sync status changes
   useEffect(() => {
     const loadDS = async () => {
+      const cid = activeClientIdRef.current;
+      if (!cid) return;
       try {
         const states = await PolicyDB.getAllDriveStates();
-        setDriveState(states && states.length > 0 ? states[0] : null);
+        setDriveState(states.find(s => s.clientId === cid) || null);
       } catch(_) { setDriveState(null); }
     };
-    loadDS();
-    // Refresh drive_state whenever sync status changes (after writes update it)
     const h = () => loadDS();
     window.addEventListener('policylens-sync-status-change', h);
     return () => window.removeEventListener('policylens-sync-status-change', h);
@@ -10151,25 +10388,21 @@ function App() {
     return () => window.removeEventListener('policylens-drive-conflict', h);
   }, []);
   // ── v2.2.0-beta: Focus-based Drive refresh ──
-  // Refs for latest state — avoids stale closures and re-registering
-  // the focus listener on every policy edit.
-  const policiesRef = useRef(policies);
-  const clientProfileRef = useRef(clientProfile);
-  useEffect(() => { policiesRef.current = policies; clientProfileRef.current = clientProfile; }, [policies, clientProfile]);
   useEffect(() => {
     const onFocus = async () => {
       if (getDriveStatus() !== 'connected') return;
       if (isDriveLocalOnly()) return;
+      const cid = activeClientIdRef.current;
+      if (!cid) return;
       let ds;
-      try { const states = await PolicyDB.getAllDriveStates(); ds = states?.[0]; } catch(_) { return; }
+      try { const states = await PolicyDB.getAllDriveStates(); ds = states.find(s => s.clientId === cid); } catch(_) { return; }
       if (!ds) return;
       if (Date.now() - _driveLastFocusRefreshAt < 15000) return;
       _driveLastFocusRefreshAt = Date.now();
       try {
         const meta = await driveClient.getFileMetadata(ds.fileId);
-        if (meta.headRevisionId === ds.headRevisionId) return; // no-op
+        if (meta.headRevisionId === ds.headRevisionId) return;
         if (_driveSyncTimer === null && !_driveSyncInFlight) {
-          // Silent pull — no pending local edits
           _driveSyncInFlight = true;
           _notifySyncStatus();
           try {
@@ -10193,7 +10426,6 @@ function App() {
             _notifySyncStatus();
           }
         } else {
-          // Local has pending edits — show conflict modal
           setConflictData({ clientId: ds.clientId, fileId: ds.fileId, localHead: ds.headRevisionId });
         }
       } catch (err) {
@@ -10255,12 +10487,50 @@ function App() {
         })();
       }
       if(stg.apiKey) setApiKey(stg.apiKey.value||'');
-      if(stg.clientName) setClientName(stg.clientName.value||'');
-      if(stg.clientProfile?.value) setClientProfile(stg.clientProfile.value);
       // Merge stored house defaults with baseline — so new shipped fields
       // get picked up automatically without losing existing overrides.
       if(stg.houseDefaults?.value) {
         setHouseDefaults({...DEFAULT_HOUSE_VALUES, ...stg.houseDefaults.value});
+      }
+
+      // ── v2.2.0-rc1: Multi-client initialization ──
+      // 1. Run v2.2 migration if needed (adds nested folder structure)
+      const driveStates = await PolicyDB.getAllDriveStates().catch(() => []);
+      const needsMigration = driveLSGet('policylens_v22_migrated') !== '1'
+        && driveStates.length > 0
+        && driveStates.some(ds => !ds.folderId);
+      if (needsMigration && getDriveStatus() === 'connected' && !isDriveLocalOnly()) {
+        setShowV22Migration(true);
+        try {
+          await _runV22Migration(driveStates, setV22MigrationProgress);
+        } catch (err) {
+          console.error('[Migration] v2.2 migration failed:', err);
+          try { toast('Migration failed: ' + (err.message || err) + '. Will retry on next load.', 'error', 8000); } catch(_) {}
+        }
+        setShowV22Migration(false);
+      }
+
+      // 2. Determine active client
+      const refreshedStates = await PolicyDB.getAllDriveStates().catch(() => []);
+      if (refreshedStates.length > 0) {
+        let savedId; try { savedId = localStorage.getItem('policylens_active_client_id'); } catch(_) {}
+        const match = savedId && refreshedStates.find(s => s.clientId === savedId);
+        const active = match || refreshedStates.reduce((a, b) => (a.lastSyncedAt || '') > (b.lastSyncedAt || '') ? a : b);
+        setActiveClientId(active.clientId);
+        activeClientIdRef.current = active.clientId;
+        try { localStorage.setItem('policylens_active_client_id', active.clientId); } catch(_) {}
+        // Load active client's data from per-client IDB keys
+        const cpRec = await dbGet('settings', 'clientProfile_' + active.clientId).catch(() => null);
+        if (cpRec?.value) { setClientProfile(cpRec.value); setClientName(cpRec.value.name || ''); }
+        const allPoliciesFresh = await dbGetAll('policies');
+        const clientPolicies = allPoliciesFresh.filter(p => p.clientId === active.clientId);
+        setPolicies(clientPolicies);
+        setDriveState(refreshedStates.find(s => s.clientId === active.clientId) || null);
+      } else {
+        // No drive_state rows — legacy single-client or fresh install
+        // Load from unnamespaced keys (pre-migration or no Drive)
+        if(stg.clientName) setClientName(stg.clientName.value||'');
+        if(stg.clientProfile?.value) setClientProfile(stg.clientProfile.value);
       }
 
       // Load repository from Supabase (primary) with local fallback
@@ -10901,7 +11171,8 @@ function App() {
     let states;
     try { states = await PolicyDB.getAllDriveStates(); } catch (_) { return; }
     if (!states || states.length === 0) return;
-    const ds = states[0]; // Batch 1: single client only
+    const ds = states.find(s => s.clientId === activeClientId);
+    if (!ds) return;
     _driveSyncInFlight = true;
     _notifySyncStatus();
     try {
@@ -10930,7 +11201,11 @@ function App() {
     const oldData = policies.find(x => x.id === p.id);
     const oldVersions = oldData?._fieldVersions || {};
     const newVersions = bumpFieldVersions(p, oldData, oldVersions);
-    const enriched = {...p, _fieldVersions: newVersions};
+    if (!activeClientId && !p.clientId) {
+      console.warn('[savePolicy] No active client — policy not saved:', p.id);
+      return;
+    }
+    const enriched = {...p, _fieldVersions: newVersions, clientId: activeClientId || p.clientId};
     await dbPut('policies', enriched);
     setPolicies(prev => {const idx=prev.findIndex(x=>x.id===enriched.id);if(idx>=0){const n=[...prev];n[idx]=enriched;return n}return[...prev,enriched]});
     // Push to cloud (fire-and-forget — don't block save flow).
@@ -10989,8 +11264,21 @@ function App() {
     const enriched = {...p, _fieldVersions: newVersions};
     setClientProfile(enriched);
     setClientName(enriched.name||'');
-    await dbPut('settings',{key:'clientProfile',value:enriched});
-    await dbPut('settings',{key:'clientName',value:enriched.name||''});
+    // v2.2.0-rc1: Per-client profile keys
+    if (activeClientId) {
+      await dbPut('settings',{key:'clientProfile_'+activeClientId,value:enriched});
+      await dbPut('settings',{key:'clientName_'+activeClientId,value:enriched.name||''});
+      // Mirror name into drive_state for switcher display
+      try {
+        const ds = await PolicyDB.getDriveState(activeClientId);
+        if (ds && ds.clientName !== (enriched.name||'')) {
+          await PolicyDB.saveDriveState({...ds, clientName: enriched.name||''});
+        }
+      } catch(_){}
+    } else {
+      await dbPut('settings',{key:'clientProfile',value:enriched});
+      await dbPut('settings',{key:'clientName',value:enriched.name||''});
+    }
     // Push to cloud (fire-and-forget). Cloud helper strips _fieldVersions.
     lastSelfPushRef.current = Date.now();
     sbProfilePush(enriched, newVersions).catch(() => {});
@@ -11056,7 +11344,30 @@ function App() {
     sbAppSettingsPush(bundle, newVersions).catch(()=>{});
   };
 
-  const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,deletePolicy,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,tab,setTab,presentMode,setPresentMode,showChangelog,setShowChangelog,houseDefaults,saveHouseDefaults,runCloudSync:()=>runCloudSyncRef.current?.({force:true}),driveState};
+  // ── v2.2.0-rc1: Destroy client (called from Header) ──
+  const destroyClient = async () => {
+    const ds = driveState;
+    if (!ds) return;
+    if (ds.folderId) { try { await driveClient.trashFolder(ds.folderId); } catch(e) { console.warn('[Destroy] Trash failed:', e.message); } }
+    await dbDel('drive_state', activeClientId);
+    const allPols = await dbGetAll('policies');
+    for (const pol of allPols.filter(p => p.clientId === activeClientId)) await dbDel('policies', pol.id);
+    try { await dbDel('settings', 'clientProfile_' + activeClientId); } catch(_) {}
+    try { await dbDel('settings', 'clientName_' + activeClientId); } catch(_) {}
+    const remaining = await PolicyDB.getAllDriveStates();
+    if (remaining.length > 0) {
+      const next = remaining.reduce((a, b) => (a.lastSyncedAt || '') > (b.lastSyncedAt || '') ? a : b);
+      await switchClient(next.clientId);
+    } else {
+      setActiveClientId(null);
+      try { localStorage.removeItem('policylens_active_client_id'); } catch(_) {}
+      setPolicies([]); setClientProfile({name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[]}); setClientName(''); setDriveState(null);
+      setTab('clients');
+    }
+    try { toast('Client destroyed. Drive files moved to Trash (30-day recovery).', 'success'); } catch(_) {}
+  };
+
+  const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,deletePolicy,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,tab,setTab,presentMode,setPresentMode,showChangelog,setShowChangelog,houseDefaults,saveHouseDefaults,runCloudSync:()=>runCloudSyncRef.current?.({force:true}),driveState,activeClientId,switchClient,destroyClient};
 
   if(loading) return <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh'}}>
     <div style={{textAlign:'center'}}><LogoMark size={36} /><div style={{color:'var(--text2)',fontSize:14,marginTop:8}}>Loading PolicyLens…</div></div>
@@ -11209,16 +11520,30 @@ function App() {
           _notifySyncStatus();
           try {
             const clientId = crypto.randomUUID();
+            const clientName_ = clientProfile?.name || 'Untitled';
             const payload = buildDriveClientPayload(clientId, clientProfile, policies);
-            const folderId = await driveClient.ensureFolder();
-            const { fileId, headRevisionId } = await driveClient.createClientFile(folderId, payload);
+            // v2.2.0-rc1: Use nested folder structure
+            const rootFolderId = await driveClient.ensureFolder();
+            const tierFolderId = await driveClient.ensureTierFolder(null);
+            const clientFolderId = await driveClient.ensureClientFolder(tierFolderId, clientName_);
+            const { fileId, headRevisionId } = await driveClient.createClientFile(clientFolderId, payload);
             await PolicyDB.saveDriveState({
-              clientId,
-              fileId,
-              headRevisionId,
-              lastSyncedAt: new Date().toISOString(),
-              pendingWrite: false,
+              clientId, fileId, headRevisionId,
+              folderId: clientFolderId, tierFolderId,
+              clientName: clientName_, tier: null, lastReviewedAt: null,
+              lastSyncedAt: new Date().toISOString(), pendingWrite: false,
             });
+            // Tag existing policies + save profile under per-client key
+            const allPols = await dbGetAll('policies');
+            for (const pol of allPols) { if (!pol.clientId) { pol.clientId = clientId; await dbPut('policies', pol); } }
+            await dbPut('settings', { key: 'clientProfile_' + clientId, value: clientProfile });
+            await dbPut('settings', { key: 'clientName_' + clientId, value: clientName_ });
+            // Set as active client
+            setActiveClientId(clientId);
+            activeClientIdRef.current = clientId;
+            try { localStorage.setItem('policylens_active_client_id', clientId); } catch(_) {}
+            setDriveState({ clientId, fileId, headRevisionId, folderId: clientFolderId, tierFolderId, clientName: clientName_, tier: null, lastReviewedAt: null, lastSyncedAt: new Date().toISOString(), pendingWrite: false });
+            driveLSSet('policylens_v22_migrated', '1');
             setShowDriveMigration(false);
             try { toast('\u2713 Client data synced to Drive', 'success', 4000); } catch(_){}
             console.log('[Drive] Migration complete — clientId:', clientId, 'fileId:', fileId);
@@ -11245,14 +11570,21 @@ function App() {
         deletePolicy={deletePolicy}
         saveProfile={saveProfile}
       />
+      {showV22Migration && <div style={{position:'fixed',inset:0,zIndex:10002,background:'rgba(0,0,0,.85)',display:'flex',alignItems:'center',justifyContent:'center',padding:16}}>
+        <div style={{background:'#1a2332',borderRadius:16,border:'1px solid rgba(201,169,110,.2)',maxWidth:400,width:'100%',padding:'28px 24px',textAlign:'center'}}>
+          <div style={{fontSize:28,marginBottom:12}}>📂</div>
+          <h2 style={{fontSize:16,fontWeight:700,color:'#e8e8e8',margin:'0 0 8px'}}>Setting up multi-client structure</h2>
+          <p style={{fontSize:13,color:'#aaa'}}>{v22MigrationProgress ? v22MigrationProgress.current + ' of ' + v22MigrationProgress.total + ' clients…' : 'Preparing…'}</p>
+        </div>
+      </div>}
       <DriveReconnectBar />
       <Header />
       <div style={{flex:1,overflow:'auto',padding:'12px clamp(10px, 3vw, 20px) 40px'}}>
         {tab==='profile' && <ErrorBoundary key="profile"><ProfileTab /></ErrorBoundary>}
         {tab==='dashboard' && <ErrorBoundary key="dashboard"><Dashboard /></ErrorBoundary>}
         <div style={{display:tab==='policies'?'block':'none'}}><Policies /></div>
-        {tab==='repository' && <ErrorBoundary key="repo"><Repository /></ErrorBoundary>}
-        {tab==='funds' && <FundLookup />}
+        {tab==='clients' && <ErrorBoundary key="clients"><ClientsTab /></ErrorBoundary>}
+        {tab==='repository' && <ErrorBoundary key="repo"><RepositoryTab /></ErrorBoundary>}
         {tab==='report' && <ErrorBoundary key="report"><ReportTab /></ErrorBoundary>}
         {tab==='settings' && <Settings />}
       </div>
@@ -12552,7 +12884,8 @@ function DriveConflictModal({ conflictData, onResolve, clientProfile, clientName
       // Fetch fresh headRevisionId, then PATCH with it
       const meta = await driveClient.getFileMetadata(conflictData.fileId);
       const states = await PolicyDB.getAllDriveStates();
-      const ds = states[0];
+      const ds = states.find(s => s.clientId === conflictData.clientId);
+      if (!ds) { setErrMsg('Client not found'); setBusy(null); return; }
       const payload = buildDriveClientPayload(ds.clientId, clientProfile, policies);
       const newHead = await driveClient.updateClientFile(ds.fileId, payload, meta.headRevisionId);
       await PolicyDB.saveDriveState({ ...ds, headRevisionId: newHead, lastSyncedAt: new Date().toISOString(), pendingWrite: false });
@@ -12598,7 +12931,7 @@ function DriveConflictModal({ conflictData, onResolve, clientProfile, clientName
       await saveProfile(enrichedProfile);
       // Update drive_state
       const states = await PolicyDB.getAllDriveStates();
-      const ds = states[0];
+      const ds = states.find(s => s.clientId === conflictData.clientId);
       await PolicyDB.saveDriveState({ ...ds, headRevisionId: meta.headRevisionId, lastSyncedAt: new Date().toISOString(), pendingWrite: false });
       onResolve();
       try { toast('Pulled from Drive (kept remote version)', 'success', 3000); } catch(_){}
@@ -12689,8 +13022,203 @@ function DriveStatusChip() {
   }, m.icon + ' ' + m.label);
 }
 
+// ── v2.2.0-rc1: Repository subtab wrapper ──
+function RepositoryTab() {
+  const [sub, setSub] = useState(() => {
+    try { return localStorage.getItem('policylens_repository_subtab') || 'policy'; } catch(_) { return 'policy'; }
+  });
+  const setSubTab = (s) => { setSub(s); try { localStorage.setItem('policylens_repository_subtab', s); } catch(_) {} };
+  return (
+    <div className="fade-in">
+      <div style={{display:'flex',gap:6,marginBottom:12}}>
+        {[{id:'policy',label:'Policy Repository'},{id:'fund',label:'Fund Repository'}].map(t => (
+          <button key={t.id} onClick={() => setSubTab(t.id)}
+            style={{background:sub===t.id?'rgba(212,169,106,.12)':'transparent',color:sub===t.id?'var(--gold)':'var(--text3)',border:sub===t.id?'1px solid rgba(212,169,106,.2)':'1px solid var(--border)',padding:'6px 14px',borderRadius:8,fontSize:11,fontWeight:sub===t.id?600:400,cursor:'pointer'}}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+      {sub === 'policy' && <ErrorBoundary key="repo"><Repository /></ErrorBoundary>}
+      {sub === 'fund' && <ErrorBoundary key="fund"><FundLookup /></ErrorBoundary>}
+    </div>
+  );
+}
+
+// ── v2.2.0-rc1: Clients tab ──
+function ClientsTab() {
+  const { switchClient, setTab, activeClientId, policies: activePolicies } = useContext(AppCtx);
+  const [filter, setFilter] = useState('all');
+  const [allStates, setAllStates] = useState([]);
+  const [allPolicies, setAllPolicies] = useState([]);
+  const [showNewClient, setShowNewClient] = useState(false);
+  useEffect(() => {
+    const load = async () => {
+      setAllStates(await PolicyDB.getAllDriveStates().catch(() => []));
+      setAllPolicies(await dbGetAll('policies').catch(() => []));
+    };
+    load();
+    const h = () => load();
+    window.addEventListener('policylens-sync-status-change', h);
+    return () => window.removeEventListener('policylens-sync-status-change', h);
+  }, []);
+  const filtered = filter === 'all' ? allStates : allStates.filter(ds => (filter === 'unassigned' ? ds.tier === null : ds.tier === filter.toUpperCase()));
+  const chips = [{id:'all',label:'All'},{id:'A',label:'A'},{id:'B',label:'B'},{id:'C',label:'C'},{id:'unassigned',label:'Unassigned'}];
+  return (
+    <div className="fade-in">
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:12}}>
+        <div style={{display:'flex',gap:4}}>
+          {chips.map(c => (
+            <button key={c.id} onClick={() => setFilter(c.id)}
+              style={{background:filter===c.id?'rgba(212,169,106,.12)':'transparent',color:filter===c.id?'var(--gold)':'var(--text3)',border:filter===c.id?'1px solid rgba(212,169,106,.2)':'1px solid var(--border)',padding:'4px 10px',borderRadius:6,fontSize:10,fontWeight:filter===c.id?600:400,cursor:'pointer'}}>
+              {c.label}
+            </button>
+          ))}
+        </div>
+        <button onClick={() => setShowNewClient(true)}
+          style={{background:'var(--gold)',color:'#0b0f1a',border:'none',borderRadius:8,padding:'6px 14px',fontSize:11,fontWeight:600,cursor:'pointer'}}>
+          + New Client
+        </button>
+      </div>
+      {filtered.length === 0 && allStates.length === 0 && (
+        <div style={{textAlign:'center',padding:'60px 20px',color:'var(--text3)'}}>
+          <div style={{fontSize:40,marginBottom:12}}>👥</div>
+          <p style={{fontSize:14,marginBottom:16}}>No clients yet. Create your first client to get started.</p>
+          <button onClick={() => setShowNewClient(true)}
+            style={{background:'var(--gold)',color:'#0b0f1a',border:'none',borderRadius:8,padding:'8px 20px',fontSize:13,fontWeight:600,cursor:'pointer'}}>
+            + New Client
+          </button>
+        </div>
+      )}
+      {filtered.length === 0 && allStates.length > 0 && (
+        <div style={{textAlign:'center',padding:'40px 20px',color:'var(--text3)',fontSize:13}}>No clients match this filter.</div>
+      )}
+      <div style={{display:'grid',gap:8}}>
+        {filtered.map(ds => {
+          const isActive = ds.clientId === activeClientId;
+          const clientPols = allPolicies.filter(p => p.clientId === ds.clientId);
+          const totalPrem = clientPols.reduce((sum, p) => sum + (parseFloat(p.premium) || 0), 0);
+          const tierLabel = ds.tier || 'Unassigned';
+          const tierColor = ds.tier === 'A' ? 'var(--green)' : ds.tier === 'B' ? 'var(--gold)' : ds.tier === 'C' ? 'var(--orange)' : 'var(--text3)';
+          return (
+            <div key={ds.clientId} onClick={() => { switchClient(ds.clientId); setTab('profile'); }}
+              style={{background:isActive?'rgba(212,169,106,.06)':'var(--bg2)',border:isActive?'1px solid rgba(212,169,106,.4)':'1px solid var(--border)',borderRadius:10,padding:'12px 14px',cursor:'pointer',transition:'border-color .15s'}}>
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+                <span style={{fontSize:14,fontWeight:600,color:'var(--text)'}}>{ds.clientName || 'Untitled'}</span>
+                <span style={{fontSize:9,fontWeight:600,color:tierColor,padding:'2px 8px',borderRadius:4,background:'rgba(148,163,184,.08)',border:'1px solid rgba(148,163,184,.15)'}}>{tierLabel}</span>
+              </div>
+              <div style={{fontSize:11,color:'var(--text3)',marginTop:4}}>
+                {totalPrem > 0 ? '$' + Math.round(totalPrem).toLocaleString() + '/yr' : 'No premiums'} · {clientPols.length} {clientPols.length===1?'policy':'policies'} · {ds.lastReviewedAt ? 'reviewed ' + fmtRelativeTime(ds.lastReviewedAt) : 'never reviewed'}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+      {showNewClient && <NewClientModal allStates={allStates} allPolicies={allPolicies} onClose={() => setShowNewClient(false)} />}
+    </div>
+  );
+}
+
+// ── v2.2.0-rc1: New Client modal ──
+function NewClientModal({ allStates, allPolicies, onClose }) {
+  const { switchClient, setTab } = useContext(AppCtx);
+  const [name, setName] = useState('');
+  const [matches, setMatches] = useState([]);
+  const [profiles, setProfiles] = useState({});
+  const [creating, setCreating] = useState(false);
+  // Debounced fuzzy match
+  useEffect(() => {
+    const timer = setTimeout(async () => {
+      if (!name.trim()) { setMatches([]); return; }
+      const q = name.toLowerCase().trim();
+      const qTokens = _tokenSort(name);
+      const scored = allStates.map(ds => {
+        const n = (ds.clientName || '').toLowerCase().trim();
+        const lev = _levenshtein(q, n);
+        const tokenMatch = _tokenSort(ds.clientName || '') === qTokens;
+        const score = n === q ? 0 : lev <= 1 ? 1 : lev <= 2 ? 2 : tokenMatch ? 3 : 99;
+        return { ds, score };
+      }).filter(m => m.score < 99).sort((a, b) => a.score - b.score).slice(0, 5);
+      setMatches(scored.map(m => m.ds));
+      // Load profiles for matched clients
+      const profs = {};
+      for (const m of scored) {
+        if (!profiles[m.ds.clientId]) {
+          const rec = await dbGet('settings', 'clientProfile_' + m.ds.clientId).catch(() => null);
+          if (rec?.value) profs[m.ds.clientId] = rec.value;
+        }
+      }
+      if (Object.keys(profs).length > 0) setProfiles(prev => ({...prev, ...profs}));
+    }, 200);
+    return () => clearTimeout(timer);
+  }, [name]);
+
+  const handleCreate = async () => {
+    if (!name.trim()) return;
+    setCreating(true);
+    try {
+      const clientId = crypto.randomUUID();
+      const trimName = name.trim();
+      const rootFolderId = await driveClient.ensureFolder();
+      const tierFolderId = await driveClient.ensureTierFolder(null);
+      const clientFolderId = await driveClient.ensureClientFolder(tierFolderId, trimName);
+      const profile = {name:trimName,nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[]};
+      const payload = buildDriveClientPayload(clientId, profile, []);
+      const { fileId, headRevisionId } = await driveClient.createClientFile(clientFolderId, payload);
+      await PolicyDB.saveDriveState({
+        clientId, fileId, folderId: clientFolderId, tierFolderId,
+        headRevisionId, lastSyncedAt: new Date().toISOString(), pendingWrite: false,
+        clientName: trimName, tier: null, lastReviewedAt: null,
+      });
+      await dbPut('settings', { key: 'clientProfile_' + clientId, value: profile });
+      await dbPut('settings', { key: 'clientName_' + clientId, value: trimName });
+      await switchClient(clientId);
+      setTab('profile');
+      onClose();
+      try { toast('Created client: ' + trimName, 'success'); } catch(_) {}
+    } catch (err) {
+      try { toast('Failed: ' + (err.message || err), 'error'); } catch(_) {}
+    } finally { setCreating(false); }
+  };
+
+  return (
+    <div onClick={e => { if (e.target === e.currentTarget) onClose(); }}
+      style={{position:'fixed',inset:0,zIndex:10000,background:'rgba(0,0,0,.7)',display:'flex',alignItems:'center',justifyContent:'center',padding:16}}>
+      <div style={{background:'#1a2332',borderRadius:16,border:'1px solid rgba(201,169,110,.2)',maxWidth:480,width:'100%',padding:'24px',boxShadow:'0 20px 60px rgba(0,0,0,.5)'}}>
+        <h2 style={{fontSize:16,fontWeight:700,color:'#e8e8e8',margin:'0 0 12px'}}>New Client</h2>
+        <input value={name} onChange={e => setName(e.target.value)} placeholder="Client name"
+          autoFocus style={{width:'100%',padding:'10px 12px',background:'var(--bg3)',border:'1px solid var(--border2)',borderRadius:8,color:'var(--text)',fontSize:14,outline:'none',boxSizing:'border-box'}} />
+        {matches.length > 0 && (
+          <div style={{marginTop:10}}>
+            <div style={{fontSize:10,color:'var(--text3)',marginBottom:6,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Existing clients matching "{name.trim()}"</div>
+            {matches.map(ds => {
+              const cp = profiles[ds.clientId];
+              const age = cp ? getProfileAge(cp) : null;
+              return (
+                <div key={ds.clientId} onClick={() => { switchClient(ds.clientId); setTab('profile'); onClose(); }}
+                  style={{padding:'8px 10px',background:'var(--bg3)',border:'1px solid var(--border)',borderRadius:6,marginBottom:4,cursor:'pointer',fontSize:12,color:'var(--text2)'}}>
+                  <strong>{ds.clientName}</strong>
+                  {age != null && <span> · age {age}</span>}
+                  {cp?.occupation && <span> · {cp.occupation}</span>}
+                  {cp?.annualIncome && <span> · ${Number(cp.annualIncome).toLocaleString()}/yr</span>}
+                </div>
+              );
+            })}
+          </div>
+        )}
+        <div style={{display:'flex',gap:8,marginTop:12,justifyContent:'flex-end'}}>
+          <button onClick={onClose} style={{background:'var(--bg3)',color:'var(--text2)',border:'1px solid var(--border2)',borderRadius:8,padding:'8px 16px',fontSize:12,cursor:'pointer'}}>Cancel</button>
+          <button onClick={handleCreate} disabled={!name.trim() || creating}
+            style={{background:'var(--gold)',color:'#0b0f1a',border:'none',borderRadius:8,padding:'8px 16px',fontSize:12,fontWeight:600,cursor:creating||!name.trim()?'not-allowed':'pointer',opacity:creating||!name.trim()?.5:1}}>
+            {creating ? 'Creating…' : matches.length > 0 ? 'None of these — create new' : 'Create client'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function Header() {
-  const {tab,setTab,policies,clientName,clientProfile,savePolicy,deletePolicy,saveProfile,setPresentMode,driveState} = useContext(AppCtx);
+  const {tab,setTab,policies,clientName,clientProfile,savePolicy,deletePolicy,saveProfile,setPresentMode,driveState,activeClientId,switchClient,destroyClient} = useContext(AppCtx);
   const loadRef = useRef(null);
   const isMobile = useViewportIsMobile();
   const [syncStatus, setSyncStatus] = useState('idle'); // idle | saving | saved
@@ -12793,8 +13321,8 @@ function Header() {
     {id:'profile',label:'My Profile',icon:'👤'},
     {id:'dashboard',label:'Dashboard',icon:'📊'},
     {id:'policies',label:'Policies',icon:'📋'},
+    {id:'clients',label:'Clients',icon:'👥'},
     {id:'repository',label:'Repository',icon:'🗄️'},
-    {id:'funds',label:'Funds',icon:'📉'},
     {id:'report',label:'Report',icon:'📄'},
     {id:'settings',label:'Settings',icon:'⚙️'},
   ];
@@ -12832,23 +13360,15 @@ function Header() {
             <span style={{fontSize:13}}>▶</span> Present
           </button>
           <button onClick={async()=>{
-            if(!confirm('⚠️ WIPE PORTFOLIO DATA?\n\nThis will permanently delete:\n• All policies\n• Client profile (name, NRIC, dependants)\n• Saved drafts\n• Scan cache\n\nYour API keys and sign-in will be preserved.\n\nThis cannot be undone.')) return;
-            if(!confirm('Are you SURE?\n\nOK = Yes, wipe portfolio data\nCancel = Keep my data')) return;
-            try {
-              for(const pol of policies) await deletePolicy(pol.id);
-              await saveProfile({name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[]});
-              try {
-                const db = await openDB();
-                const tx = db.transaction('extractCache','readwrite');
-                tx.objectStore('extractCache').clear();
-                await new Promise((res,rej)=>{ tx.oncomplete=res; tx.onerror=()=>rej(tx.error); });
-              } catch(e){}
-              try { sessionStorage.removeItem('policylens_pendingExtract'); } catch(e){}
-              toast('Portfolio wiped. API keys and sign-in preserved.','success');
-            } catch(e){ console.warn('Wipe error:', e); toast('Wipe error: '+e.message,'error'); }
+            const cname = clientProfile?.name || clientName || 'this client';
+            if(!driveState) { toast('No active client to destroy','warning'); return; }
+            if(!confirm('Destroy client '+cname+'?\n\nThis will delete their folder and all files from Google Drive. Files go to Drive Trash (30-day recovery window).\n\nThis affects ONLY this client — your other clients are untouched.')) return;
+            if(!confirm('Are you absolutely sure?\n\nThis action removes '+cname+' from your client list AND moves their Drive folder to Trash.')) return;
+            try { await destroyClient(); } catch(e) { toast('Destroy error: '+e.message,'error'); }
           }}
-            title="Wipe Portfolio Data"
-            style={{background:'rgba(239,83,80,.08)',color:'var(--red)',border:'1px solid rgba(239,83,80,.15)',width:28,height:28,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:11,fontWeight:700,flexShrink:0}}>
+            title="Destroy client — removes from PolicyLens and moves Drive folder to Trash"
+            disabled={!driveState}
+            style={{background:'rgba(239,83,80,.08)',color:'var(--red)',border:'1px solid rgba(239,83,80,.15)',width:28,height:28,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:driveState?'pointer':'not-allowed',fontSize:11,fontWeight:700,flexShrink:0,opacity:driveState?1:.4}}>
             🗑
           </button>
         </div>
@@ -15672,7 +16192,7 @@ function AssumptionsCard({ p, set, houseDefaults }) {
 }
 
 function ProfileTab() {
-  const {clientProfile,saveProfile,apiKey,houseDefaults} = useContext(AppCtx);
+  const {clientProfile,saveProfile,apiKey,houseDefaults,policies,deletePolicy} = useContext(AppCtx);
   const [p, setP] = useState(clientProfile);
   const [scanning, setScanning] = useState(false);
   const camRef = useRef(null);
@@ -15822,31 +16342,30 @@ function ProfileTab() {
           <button style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',fontSize:11,padding:'5px 10px',borderRadius:8,cursor:'pointer',fontWeight:500}} onClick={()=>{const inp=document.createElement('input');inp.type='file';inp.accept='image/*';inp.multiple=true;inp.onchange=e=>{if(e.target.files.length) scanProfile(e.target.files);};inp.click();}} disabled={scanning}>🖼 Gallery</button>
           <button style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',fontSize:11,padding:'5px 10px',borderRadius:8,cursor:'pointer',fontWeight:500}} onClick={()=>uploadRef.current?.click()} disabled={scanning}>{scanning?'…':'📄 Upload'}</button>
           <button className="btn-sm" style={{background:'rgba(239,83,80,.08)',color:'var(--red)',border:'1px solid rgba(239,83,80,.15)',fontSize:10,padding:'5px 10px',borderRadius:8,cursor:'pointer'}} onClick={()=>{
-            if(!confirm('Delete all client profile data?\n\nClears name, NRIC, DOB, income, expenses, CPF settings, dependants.\n\nPolicies will NOT be deleted.')) return;
-            // Blank profile seeds from firm-level defaults — so a fresh client
-            // starts with the firm's baseline planning assumptions.
-            // v2.1.0m: globalAssumptions seeded from the 5 Firm Defaults fields.
+            if(!confirm('Reset all data for '+(p.name||'this client')+'?\n\nPolicies, profile fields, and assumptions will be cleared. The client record stays.')) return;
+            // Delete policies for this client
+            for(const pol of policies) deletePolicy(pol.id);
+            // v2.2.0-rc1: keep name so client record stays intact
             const blank = {
-              name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[],
+              name: p.name, nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[],
               annualIncome:'',
               retirementAge: String(houseDefaults.retirementAge),
               monthlyExpenses:'',mortgagePayment:'',dependantSupport:'',medicalBudget:'',desiredRetIncome:'',
               inflationRate: String(houseDefaults.inflationRate),
-              cpfScheme: houseDefaults.cpfScheme,
-              cpfPlan: houseDefaults.cpfPlan,
-              cpfStartAge: String(houseDefaults.cpfStartAge),
-              cpfTopUp:'',cpfCurrentMonthly:'',
+              cpfScheme: houseDefaults.cpfScheme, cpfPlan: houseDefaults.cpfPlan,
+              cpfStartAge: String(houseDefaults.cpfStartAge), cpfTopUp:'',cpfCurrentMonthly:'',
               otherRetIncome:[],
               globalAssumptions: {
-                inflationPct: houseDefaults.inflationRate,
-                endowmentYieldPct: houseDefaults.endowmentYieldPct,
-                ilpYieldPct: houseDefaults.ilpYieldPct,
-                retirementAge: houseDefaults.retirementAge,
+                inflationPct: houseDefaults.inflationRate, endowmentYieldPct: houseDefaults.endowmentYieldPct,
+                ilpYieldPct: houseDefaults.ilpYieldPct, retirementAge: houseDefaults.retirementAge,
                 lifeExpectancy: houseDefaults.lifeExpectancy,
               },
             };
-            setP(blank); saveProfile(blank); toast('Profile cleared','success');
-          }}>🗑 Clear Profile</button>
+            setP(blank); saveProfile(blank);
+            try { openDB().then(db=>{const tx=db.transaction('extractCache','readwrite');tx.objectStore('extractCache').clear();}); } catch(_){}
+            try { sessionStorage.removeItem('policylens_pendingExtract'); } catch(_){}
+            toast('Client data reset. Drive autosave will sync the blank state.','success');
+          }}>🗑 Reset Client Data</button>
         </div>
       </div>
 
