@@ -608,11 +608,24 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.2.0-rc1.2';
-const APP_VERSION_DATE = '2026-04-13';
-const APP_VERSION_NAME = 'Backend-mediated silent refresh (opt-in)';
+const APP_VERSION = 'v2.2.0-rc1.3';
+const APP_VERSION_DATE = '2026-04-14';
+const APP_VERSION_NAME = 'OAuth loader polish';
 
 const CHANGELOG = [
+  {
+    version: 'v2.2.0-rc1.3',
+    date: '2026-04-14',
+    name: 'OAuth loader polish',
+    sections: [
+      {
+        heading: 'Changed',
+        items: [
+          'Loading screen during Google OAuth return shows rotating insurance-themed messages instead of static "Loading PolicyLens\u2026". Reduces FC anxiety during the 2-5 second token exchange window.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.2.0-rc1.2',
     date: '2026-04-13',
@@ -10264,6 +10277,33 @@ function ReconcileSyncModal({ data, onChoose, onClose }) {
   );
 }
 
+// v2.2.0-rc1.3: Rotating loader messages shown during OAuth redirect-return
+const _OAUTH_LOADER_MESSAGES = [
+  'Underwriting your access\u2026',
+  'Calculating coverage premium\u2026',
+  'Reviewing the policy schedule\u2026',
+  'Onboarding your client folders\u2026',
+  'Filing the paperwork\u2026',
+  'Almost ready \u2014 running due diligence\u2026',
+  'Verifying beneficiary (you)\u2026',
+  'Final approval from the underwriter\u2026',
+];
+function OAuthReturnLoader() {
+  const [idx, setIdx] = useState(() => Math.floor(Math.random() * _OAUTH_LOADER_MESSAGES.length));
+  useEffect(() => {
+    const id = setInterval(() => setIdx(i => (i + 1) % _OAUTH_LOADER_MESSAGES.length), 1500);
+    return () => clearInterval(id);
+  }, []);
+  return (
+    <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh'}}>
+      <div style={{textAlign:'center'}}>
+        <LogoMark size={36} />
+        <div style={{color:'var(--text2)',fontSize:14,marginTop:8}}>{_OAUTH_LOADER_MESSAGES[idx]}</div>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const [tab, setTab] = useState('dashboard');
   const [policies, setPolicies] = useState([]);
@@ -11478,9 +11518,16 @@ function App() {
 
   const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,deletePolicy,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,tab,setTab,presentMode,setPresentMode,showChangelog,setShowChangelog,houseDefaults,saveHouseDefaults,runCloudSync:()=>runCloudSyncRef.current?.({force:true}),driveState,activeClientId,switchClient,destroyClient};
 
-  if(loading) return <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh'}}>
-    <div style={{textAlign:'center'}}><LogoMark size={36} /><div style={{color:'var(--text2)',fontSize:14,marginTop:8}}>Loading PolicyLens…</div></div>
-  </div>;
+  if(loading) {
+    const _h = window.location.hash || '';
+    const _s = window.location.search || '';
+    if (_h.includes('access_token=') || _h.includes('error=') || _s.includes('code=')) {
+      return <OAuthReturnLoader />;
+    }
+    return <div style={{display:'flex',alignItems:'center',justifyContent:'center',height:'100vh'}}>
+      <div style={{textAlign:'center'}}><LogoMark size={36} /><div style={{color:'var(--text2)',fontSize:14,marginTop:8}}>Loading PolicyLens…</div></div>
+    </div>;
+  }
 
   // ── PRESENT MODE: full-screen presentation UI ──
   // Replaces the entire normal app shell (Header + tab bar + content) with
