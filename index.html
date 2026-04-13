@@ -608,11 +608,33 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.2.0-rc1';
+const APP_VERSION = 'v2.2.0-rc1.2';
 const APP_VERSION_DATE = '2026-04-13';
-const APP_VERSION_NAME = 'Multi-client foundation';
+const APP_VERSION_NAME = 'Backend-mediated silent refresh (opt-in)';
 
 const CHANGELOG = [
+  {
+    version: 'v2.2.0-rc1.2',
+    date: '2026-04-13',
+    name: 'Backend-mediated silent refresh (opt-in)',
+    sections: [
+      {
+        heading: 'Changed',
+        items: [
+          'Google Drive silent refresh routed through backend Edge Function (Supabase). Gated behind policylens_drive_backend_dev localStorage flag (default OFF). Enable via DevTools console to opt in.',
+          'Existing users upgrade organically: next Reconnect click uses the new auth code flow, storing a server-side refresh token. Subsequent token expiries refresh silently.'
+        ]
+      },
+      {
+        heading: 'Internal',
+        items: [
+          'Auth code flow with PKCE routed through drive-auth-dev Edge Function. client_secret never in browser bundle.',
+          'refresh_token stored server-side in drive_tokens table (Supabase), never sent to client.',
+          'Feature flag useBackendFlow() gates all new code paths. When OFF, behavior is identical to v2.2.0-rc1.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.2.0-rc1',
     date: '2026-04-13',
@@ -8494,6 +8516,7 @@ const DRIVE_REFRESH_WARN_MS = 6 * 24 * 60 * 60 * 1000; // 6 days — banner thre
 // normalization here; the value must remain literally string-equal to the
 // console registration.
 const DRIVE_REDIRECT_URI = 'https://fundlens-sg.github.io/Policylens-Community/';
+const DRIVE_BACKEND_URL = 'https://mgbxxwoasrwlraffcvab.supabase.co/functions/v1/drive-auth-dev';
 const DRIVE_INTENT_KEY = 'policylens_drive_pending_intent';
 const DRIVE_INTENT_TTL_MS = 5 * 60 * 1000; // 5 minutes — stale intent guard
 // Generic admin contact string used in the 403 access_denied path.
@@ -8511,6 +8534,12 @@ const DRIVE_LS = {
 const driveLSGet = (k) => { try { return localStorage.getItem(k); } catch (_) { return null; } };
 const driveLSSet = (k, v) => { try { localStorage.setItem(k, v); } catch (_) {} };
 const driveLSDel = (k) => { try { localStorage.removeItem(k); } catch (_) {} };
+
+// v2.2.0-rc1.2: Feature flag for backend-mediated auth flow.
+// Default OFF. Set via DevTools: localStorage.setItem('policylens_drive_backend_dev', '1')
+function useBackendFlow() {
+  try { return localStorage.getItem('policylens_drive_backend_dev') === '1'; } catch (_) { return false; }
+}
 
 // Default Local-only mode to ON for v2.1.0. v2.1.0-rc (Phase C) flips
 // the default to OFF after a week of stable Phase B operation. Until
@@ -8816,17 +8845,22 @@ async function _waitForGIS(timeoutMs = 5000) {
 //   See https://datatracker.ietf.org/doc/html/rfc7636 for PKCE spec.
 // ═══════════════════════════════════════════════════════════════
 
-function _buildOAuthURL(state) {
-  const params = new URLSearchParams({
+function _buildOAuthURL(state, codeChallenge) {
+  const p = {
     client_id: DRIVE_CLIENT_ID,
     redirect_uri: DRIVE_REDIRECT_URI,
-    response_type: 'token',
+    response_type: useBackendFlow() ? 'code' : 'token',
     scope: DRIVE_SCOPE,
     state: state,
     include_granted_scopes: 'true',
     prompt: 'consent',
-  });
-  return 'https://accounts.google.com/o/oauth2/v2/auth?' + params.toString();
+  };
+  if (useBackendFlow() && codeChallenge) {
+    p.access_type = 'offline';
+    p.code_challenge = codeChallenge;
+    p.code_challenge_method = 'S256';
+  }
+  return 'https://accounts.google.com/o/oauth2/v2/auth?' + new URLSearchParams(p).toString();
 }
 
 // Generate a 16-byte hex nonce for OAuth state CSRF protection.
@@ -8834,6 +8868,18 @@ function _generateOAuthState() {
   const buf = new Uint8Array(16);
   crypto.getRandomValues(buf);
   return Array.from(buf).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// v2.2.0-rc1.2: PKCE helpers for authorization code flow (backend-mediated).
+// Only used when useBackendFlow() === true.
+function _generateCodeVerifier() {
+  const buf = new Uint8Array(48);
+  crypto.getRandomValues(buf);
+  return btoa(String.fromCharCode(...buf)).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
+}
+async function _codeChallenge(verifier) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier));
+  return btoa(String.fromCharCode(...new Uint8Array(digest))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
 }
 
 // ──────────────────────────────────────────────
@@ -8856,24 +8902,20 @@ function _generateOAuthState() {
 //     silently clears the intent and returns null. This handles the abort case
 //     (user closes Google tab without consenting) without showing any toast.
 // ──────────────────────────────────────────────
-function _consumeOAuthRedirect() {
+// v2.2.0-rc1.2: Async rewrite. Handles both auth code flow (flag ON,
+// exchanges via backend Edge Function) and implicit flow (flag OFF,
+// parses #access_token from hash). Legacy implicit path preserved for
+// flag-OFF and any in-flight redirects during rollout.
+async function _consumeOAuthRedirect() {
+  const search = window.location.search || '';
   const hash = window.location.hash || '';
-  // v2.1.0g: Use includes() instead of startsWith() — Google returns OAuth
-  // fragment params in variable order (#state=...&access_token=... OR
-  // #access_token=...&state=...). startsWith('#access_token=') failed when
-  // state came first, causing a silent false-negative that discarded the token.
+  const hasAuthCode = useBackendFlow() && search.includes('code=');
   const hasOAuthFragment = hash.includes('access_token=') || hash.includes('error=');
-  // Read intent regardless — needed for both consume-success and orphan-cleanup paths
-  let intent = null;
-  try {
-    const raw = sessionStorage.getItem(DRIVE_INTENT_KEY);
-    if (raw) intent = JSON.parse(raw);
-  } catch (_) {}
 
-  if (!hasOAuthFragment) {
-    // No OAuth fragment in URL. Sub-cases:
-    //   - No intent → fresh page load, do nothing
-    //   - Intent present → aborted flow OR stale orphan; clean up silently
+  let intent = null;
+  try { const raw = sessionStorage.getItem(DRIVE_INTENT_KEY); if (raw) intent = JSON.parse(raw); } catch (_) {}
+
+  if (!hasAuthCode && !hasOAuthFragment) {
     if (intent) {
       try { sessionStorage.removeItem(DRIVE_INTENT_KEY); } catch (_) {}
       console.log('[Drive] Aborted/stale OAuth intent detected — cleaned up silently');
@@ -8881,46 +8923,52 @@ function _consumeOAuthRedirect() {
     return null;
   }
 
-  // We have an OAuth fragment. Always clean the URL first so subsequent code
-  // can't accidentally re-process and so the token can't leak via referrer.
-  try { history.replaceState({}, '', window.location.pathname + window.location.search); } catch (_) {}
-  // Always clear the intent — single-use, we're consuming or rejecting it now.
+  // Clean URL — strip query string only if auth code flow (preserves rc1 behavior for implicit flow)
+  const targetUrl = hasAuthCode ? window.location.pathname : window.location.pathname + window.location.search;
+  try { history.replaceState({}, '', targetUrl); } catch (_) {}
   try { sessionStorage.removeItem(DRIVE_INTENT_KEY); } catch (_) {}
 
-  // Intent missing or expired
   if (!intent || (intent.expiresAt && Date.now() > intent.expiresAt)) {
     return { kind: 'expired' };
   }
 
-  const params = new URLSearchParams(hash.slice(1));
-  const returnedState = params.get('state');
-  // CSRF state validation
-  if (returnedState !== intent.state) {
-    return { kind: 'state-mismatch', returnTab: intent.returnTab };
+  // ── AUTH CODE FLOW (backend-mediated, flag ON) ──
+  if (hasAuthCode) {
+    const params = new URLSearchParams(search.slice(1));
+    if (params.get('state') !== intent.state) return { kind: 'state-mismatch', returnTab: intent.returnTab };
+    const err = params.get('error');
+    if (err) return { kind: 'error', error: err, errorDescription: params.get('error_description') || '', returnTab: intent.returnTab };
+    const code = params.get('code');
+    if (!code) return { kind: 'unknown' };
+    // Read PKCE verifier from sessionStorage (stored by signInInteractive), delete immediately
+    let verifier = null;
+    try { verifier = sessionStorage.getItem('policylens_drive_pkce_verifier'); sessionStorage.removeItem('policylens_drive_pkce_verifier'); } catch (_) {}
+    if (!verifier) return { kind: 'error', error: 'pkce_missing', errorDescription: 'PKCE verifier not found.', returnTab: intent.returnTab };
+    // Exchange via Edge Function — refresh_token stored server-side, never returned to client
+    const s = getSB();
+    if (!s) return { kind: 'error', error: 'no_supabase', errorDescription: 'Supabase client not initialized.', returnTab: intent.returnTab };
+    try {
+      const { data, error: fnErr } = await s.functions.invoke('drive-auth-dev', {
+        body: { mode: 'exchange', code, code_verifier: verifier },
+      });
+      if (fnErr || !data?.access_token) {
+        const detail = fnErr?.message || data?.error || 'Token exchange failed';
+        return { kind: 'error', error: 'exchange_failed', errorDescription: detail, returnTab: intent.returnTab };
+      }
+      return { kind: 'success', accessToken: data.access_token, expiresIn: data.expires_in || 3599, returnTab: intent.returnTab };
+    } catch (e) {
+      return { kind: 'error', error: 'network', errorDescription: 'Exchange network error: ' + (e.message || e), returnTab: intent.returnTab };
+    }
   }
 
-  // Error path
-  const err = params.get('error');
-  if (err) {
-    return {
-      kind: 'error',
-      error: err,
-      errorDescription: params.get('error_description') || '',
-      returnTab: intent.returnTab,
-    };
-  }
-
-  // Success path
-  const accessToken = params.get('access_token');
+  // ── IMPLICIT FLOW (flag OFF or legacy in-flight redirect) ──
+  const fParams = new URLSearchParams(hash.slice(1));
+  if (fParams.get('state') !== intent.state) return { kind: 'state-mismatch', returnTab: intent.returnTab };
+  const fErr = fParams.get('error');
+  if (fErr) return { kind: 'error', error: fErr, errorDescription: fParams.get('error_description') || '', returnTab: intent.returnTab };
+  const accessToken = fParams.get('access_token');
   if (accessToken) {
-    return {
-      kind: 'success',
-      accessToken,
-      tokenType: params.get('token_type'),
-      expiresIn: parseInt(params.get('expires_in') || '3599'),
-      scope: params.get('scope'),
-      returnTab: intent.returnTab,
-    };
+    return { kind: 'success', accessToken, tokenType: fParams.get('token_type'), expiresIn: parseInt(fParams.get('expires_in') || '3599'), scope: fParams.get('scope'), returnTab: intent.returnTab };
   }
   return { kind: 'unknown' };
 }
@@ -8988,16 +9036,39 @@ function mapDriveError(err) {
 
 // ── Wrap fetch to a Drive endpoint with auth + error mapping ──
 async function _driveFetch(url, opts) {
+  // v2.2.0-rc1.2: If no access token, try backend refresh before throwing
   if (!_driveAccessToken) {
-    const e = new Error('Not signed in to Google Drive');
-    e.status = 401;
-    throw e;
+    if (useBackendFlow()) {
+      const refreshed = await driveClient.refreshAccessToken();
+      if (!refreshed) {
+        const e = new Error('Not signed in to Google Drive');
+        e.status = 401;
+        throw e;
+      }
+    } else {
+      const e = new Error('Not signed in to Google Drive');
+      e.status = 401;
+      throw e;
+    }
   }
   const headers = Object.assign({}, opts?.headers || {}, {
     'Authorization': 'Bearer ' + _driveAccessToken,
   });
   const resp = await fetch(url, Object.assign({}, opts, { headers }));
   if (!resp.ok) {
+    // v2.2.0-rc1.2: On 401, try silent refresh once (backend flow only).
+    // _retried flag prevents infinite loop (max 2 fetches per original call).
+    if (resp.status === 401 && useBackendFlow() && !opts?._retried) {
+      const refreshed = await driveClient.refreshAccessToken();
+      if (refreshed) {
+        return _driveFetch(url, Object.assign({}, opts, {
+          _retried: true,
+          headers: Object.assign({}, opts?.headers || {}, {
+            'Authorization': 'Bearer ' + _driveAccessToken,
+          }),
+        }));
+      }
+    }
     let body = null;
     try { body = await resp.json(); } catch (_) {}
     const err = new Error('Drive ' + resp.status + ': ' + (body?.error?.message || resp.statusText));
@@ -9005,7 +9076,6 @@ async function _driveFetch(url, opts) {
     err.error = body?.error?.status || body?.error?.errors?.[0]?.reason;
     err.detail = body?.error?.message;
     if (resp.status === 401) {
-      // Token died — drop it so next call forces reconnect
       _driveAccessToken = null;
       driveLSDel('policylens_drive_token');
       setDriveStatus('reconnect-needed');
@@ -9037,6 +9107,14 @@ const driveClient = {
   async signInInteractive(opts) {
     const returnTab = (opts && opts.returnTab) || 'settings';
     const state = _generateOAuthState();
+    let challenge;
+    if (useBackendFlow()) {
+      const verifier = _generateCodeVerifier();
+      challenge = await _codeChallenge(verifier);
+      try { sessionStorage.setItem('policylens_drive_pkce_verifier', verifier); } catch (e) {
+        console.warn('[Drive] Could not persist PKCE verifier:', e);
+      }
+    }
     const intent = {
       state,
       returnTab,
@@ -9046,13 +9124,10 @@ const driveClient = {
     try {
       sessionStorage.setItem(DRIVE_INTENT_KEY, JSON.stringify(intent));
     } catch (e) {
-      // sessionStorage write failed (Safari private mode, quota, etc.) —
-      // we still attempt the redirect but warn the user that recovery may fail.
       console.warn('[Drive] Could not persist OAuth intent — recovery on return may fail:', e);
     }
     console.log('[Drive] Redirecting to Google for consent (state:', state.slice(0,8) + '…)');
-    // Navigate the entire tab. The page unmounts here.
-    window.location.href = _buildOAuthURL(state);
+    window.location.href = _buildOAuthURL(state, challenge);
     // Return a never-resolving Promise. The await in handleConnect will
     // never return because the page is about to be replaced. The new
     // mount after redirect-back starts fresh with busy=false (useState
@@ -9116,6 +9191,10 @@ const driveClient = {
 
   // ── signOut: revoke token + clear all Drive localStorage ──
   async signOut() {
+    // v2.2.0-rc1.2: Notify backend to revoke + delete server-side refresh token
+    if (useBackendFlow()) {
+      try { const s = getSB(); if (s) await s.functions.invoke('drive-auth-dev', { body: { mode: 'signout' } }); } catch (_) {}
+    }
     if (_driveAccessToken && window.google?.accounts?.oauth2?.revoke) {
       try { window.google.accounts.oauth2.revoke(_driveAccessToken, () => {}); } catch (_) {}
     }
@@ -9131,6 +9210,35 @@ const driveClient = {
     _clientFolderCache = {};
     setDriveStatus('disconnected');
     console.log('[Drive] Signed out');
+  },
+
+  // v2.2.0-rc1.2: Silent access token refresh via backend Edge Function.
+  // Only called when useBackendFlow() === true. Backend reads refresh_token
+  // from drive_tokens table (server-side), exchanges for new access_token.
+  // Refresh token never touches the client.
+  async refreshAccessToken() {
+    if (!useBackendFlow()) return false;
+    const s = getSB();
+    if (!s) return false;
+    try {
+      const { data, error: fnErr } = await s.functions.invoke('drive-auth-dev', {
+        body: { mode: 'refresh' },
+      });
+      if (fnErr || !data?.access_token) return false;
+      _driveAccessToken = data.access_token;
+      // sbGetUserId() is synchronous (returns window._user?.id || null)
+      const uid = sbGetUserId();
+      if (uid) {
+        localStorage.setItem('policylens_drive_token', JSON.stringify({
+          token: data.access_token,
+          expiresAt: Date.now() + (data.expires_in || 3599) * 1000,
+          userId: uid,
+        }));
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
   },
 
   // ── getStatus: derived from in-memory token + day-6 timestamp check ──
@@ -10181,9 +10289,10 @@ function App() {
   useEffect(() => {
     (async () => {
     // v2.1.0k: Restore Drive token from localStorage on mount.
-    // Skip if an OAuth fragment is present (the fragment parser handles that).
+    // Skip if an OAuth return is present (code flow or legacy implicit).
     const _hash = window.location.hash || '';
-    const _hasOAuthReturn = _hash.includes('access_token=') || _hash.includes('error=');
+    const _search = window.location.search || '';
+    const _hasOAuthReturn = _hash.includes('access_token=') || _hash.includes('error=') || _search.includes('code=');
     if (!_hasOAuthReturn && driveLSGet(DRIVE_LS.oauthGrantedAt) && driveLSGet(DRIVE_LS.localOnlyMode) !== '1') {
       try {
         const raw = localStorage.getItem('policylens_drive_token');
@@ -10223,7 +10332,7 @@ function App() {
         }
       } catch(e) { console.warn('[Drive] Token restore failed:', e); }
     }
-    const result = _consumeOAuthRedirect();
+    const result = await _consumeOAuthRedirect();
     if (!result) return;
     if (result.kind === 'success') {
       // v2.1.0h: Wait for Supabase session hydration before deciding
