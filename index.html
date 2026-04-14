@@ -620,11 +620,25 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.2.0-rc2.1.5';
+const APP_VERSION = 'v2.2.0-rc2.1.6';
 const APP_VERSION_DATE = '2026-04-14';
-const APP_VERSION_NAME = 'Optimistic UI on tier picker (instant badge flip on click)';
+const APP_VERSION_NAME = 'Client rename propagates to Drive folder';
 
 const CHANGELOG = [
+  {
+    version: 'v2.2.0-rc2.1.6',
+    date: '2026-04-14',
+    name: 'Client rename propagates to Drive folder',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'When FC changes client Full Name, the containing Drive folder is now renamed alongside the JSON file. Previously, only the JSON file name updated while the folder kept the original name.',
+          'Per-client serialization via _folderRenameChains prevents race conditions when multiple renames occur in quick succession.',
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.2.0-rc2.1.5',
     date: '2026-04-14',
@@ -934,7 +948,7 @@ const CHANGELOG = [
           'Checkpoint creation and per-client checkpoint subview not yet built.',
           'Tier filter chips render but do not filter (wiring lands in v2.2.0).',
           '"Mark as reviewed" button and auto-derived "Needs Review" badge not yet built.',
-          'Client rename prompt (file + folder rename on name change) not yet built.',
+          'Client rename (folder rename on name change) shipped in v2.2.0-rc2.1.6.',
           'Policies loaded via full-table-scan filtered by clientId. Performant at current scale; a clientId index on the policies store is a future optimization (~30 lines, separate batch).'
         ]
       }
@@ -8797,6 +8811,10 @@ let _clientFolderCache = {};
 // Each key is a clientId; value is a Promise chain. Consecutive tier changes
 // for the same client execute sequentially; different clients run in parallel.
 const _tierMoveChains = new Map();
+// v2.2.0-rc2.1.6: Per-client folder-rename serialization queue.
+// Same pattern as _tierMoveChains — consecutive renames for the same client
+// execute sequentially; different clients run in parallel.
+const _folderRenameChains = new Map();
 const DRIVE_REFRESH_WARN_MS = 6 * 24 * 60 * 60 * 1000; // 6 days — banner threshold
 // v2.1.0c: Hardcoded redirect URI for the manual implicit-grant flow.
 // Must match EXACTLY the value registered in Google Cloud Console under
@@ -9098,6 +9116,44 @@ async function _performTierMove(clientId, newTier, oldTier) {
     console.warn('[TierMove] Drive folder move failed for', ds.clientName || clientId, ':', e.message);
     try { toast('⚠ Drive folder move failed — tier updated locally only. Check Drive and retry.', 'warning', 5000); } catch(_) {}
   }
+}
+
+// v2.2.0-rc2.1.6: Rename a client's Drive folder when FC changes Full Name.
+// Mirrors _performTierMove pattern — reads drive_state, PATCHes folder name, updates IDB.
+async function _performFolderRename(clientId, newName) {
+  const ds = await PolicyDB.getDriveState(clientId).catch(() => null);
+  if (!ds || !ds.folderId) return;
+  try {
+    await _driveFetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(ds.folderId), {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: newName }),
+    });
+    // Update IDB (re-read in case concurrent write changed other fields)
+    const fresh = await PolicyDB.getDriveState(clientId).catch(() => ds);
+    await PolicyDB.saveDriveState({...fresh, clientName: newName});
+    // Refresh _clientFolderCache: remove stale old-name entry, set new-name entry
+    if (ds.tierFolderId) {
+      const oldKey = ds.tierFolderId + '/' + ds.clientName;
+      const newKey = ds.tierFolderId + '/' + newName;
+      delete _clientFolderCache[oldKey];
+      _clientFolderCache[newKey] = ds.folderId;
+    }
+    console.log('[FolderRename] ✓ Renamed', ds.clientName, '→', newName);
+    try { toast('✓ Drive folder renamed to "' + newName + '"', 'success', 3000); } catch(_) {}
+  } catch (e) {
+    console.warn('[FolderRename] Drive folder rename failed for', ds.clientName || clientId, ':', e.message);
+    try { toast('⚠ Drive folder rename failed — name updated locally only.', 'warning', 5000); } catch(_) {}
+  }
+}
+
+// v2.2.0-rc2.1.6: Dispatcher — enqueue a folder rename, serialized per-client.
+function handleClientRename(clientId, newName) {
+  const prevChain = _folderRenameChains.get(clientId) || Promise.resolve();
+  const nextChain = prevChain
+    .catch(() => {})
+    .then(() => _performFolderRename(clientId, newName));
+  _folderRenameChains.set(clientId, nextChain);
 }
 
 // v2.2.0-rc2.1.2: Change a client's tier — optimistic drive_state update + background Drive folder move.
@@ -11723,11 +11779,13 @@ function App() {
     if (activeClientId) {
       await dbPut('settings',{key:'clientProfile_'+activeClientId,value:enriched});
       await dbPut('settings',{key:'clientName_'+activeClientId,value:enriched.name||''});
-      // Mirror name into drive_state for switcher display
+      // Mirror name into drive_state for switcher display + rename Drive folder
       try {
         const ds = await PolicyDB.getDriveState(activeClientId);
         if (ds && ds.clientName !== (enriched.name||'')) {
           await PolicyDB.saveDriveState({...ds, clientName: enriched.name||''});
+          // v2.2.0-rc2.1.6: Rename the Drive folder to match (fire-and-forget, serialized)
+          if (ds.folderId) handleClientRename(activeClientId, enriched.name||'');
         }
       } catch(_){}
     } else {
