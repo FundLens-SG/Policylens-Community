@@ -620,11 +620,26 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.2.0-rc2.1.4';
+const APP_VERSION = 'v2.2.0-rc2.1.5';
 const APP_VERSION_DATE = '2026-04-14';
-const APP_VERSION_NAME = 'Single source of truth for client tier (drive_state authoritative)';
+const APP_VERSION_NAME = 'Optimistic UI on tier picker (instant badge flip on click)';
 
 const CHANGELOG = [
+  {
+    version: 'v2.2.0-rc2.1.5',
+    date: '2026-04-14',
+    name: 'Optimistic UI on tier picker (instant badge flip on click)',
+    sections: [
+      {
+        heading: 'UX polish',
+        items: [
+          'Tier picker badge now flips color and label instantly on click (previously lagged 2-3 seconds until Drive sync completed).',
+          'Internal change only: TierPicker component tracks an optimistic local tier state that renders immediately, then clears when the real drive_state value propagates through AppCtx.',
+          'No change to underlying data flow \u2014 handleTierChange, Drive folder move, and sync logic are all identical to rc2.1.4.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.2.0-rc2.1.4',
     date: '2026-04-14',
@@ -31884,7 +31899,11 @@ function TierPicker({ currentTier, tierDefinitions, onTierChange, disabled, size
   const [focusedIndex, setFocusedIndex] = useState(-1);
   const triggerRef = useRef(null);
   const popoverRef = useRef(null);
-  const ts = tierStyle(currentTier, tierDefinitions);
+  // v2.2.0-rc2.1.5: Optimistic local tier — set immediately on click so badge color/label
+  // flip instantly. Cleared when currentTier prop catches up via AppCtx propagation.
+  const [optimisticTier, setOptimisticTier] = useState(null);
+  const effectiveTier = optimisticTier ?? currentTier;
+  const ts = tierStyle(effectiveTier, tierDefinitions);
   const tiers = tierDefinitions;
 
   useEffect(() => {
@@ -31911,12 +31930,22 @@ function TierPicker({ currentTier, tierDefinitions, onTierChange, disabled, size
   }, [open, focusedIndex, tiers]);
 
   useEffect(() => {
-    if (open) setFocusedIndex(Math.max(0, tiers.indexOf(currentTier)));
+    if (open) setFocusedIndex(Math.max(0, tiers.indexOf(effectiveTier)));
   }, [open]);
+
+  // Clear optimistic state once the real currentTier prop catches up
+  useEffect(() => {
+    if (optimisticTier !== null && optimisticTier === currentTier) {
+      setOptimisticTier(null);
+    }
+  }, [currentTier, optimisticTier]);
 
   const handleSelect = (newTier) => {
     setOpen(false);
-    if (newTier !== currentTier) onTierChange(newTier);
+    if (newTier !== effectiveTier) {
+      setOptimisticTier(newTier);
+      onTierChange(newTier);
+    }
   };
 
   const isSm = size === 'sm';
@@ -31944,7 +31973,7 @@ function TierPicker({ currentTier, tierDefinitions, onTierChange, disabled, size
           }}>
           {tiers.map((t, i) => {
             const tColor = tierColor(t, tiers);
-            const isCurrent = t === currentTier;
+            const isCurrent = t === effectiveTier;
             const isFocused = focusedIndex === i;
             return (
               <div key={t} onMouseEnter={() => setFocusedIndex(i)}
