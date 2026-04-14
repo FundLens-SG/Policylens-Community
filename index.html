@@ -620,11 +620,26 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.2.0-rc2.1.2';
+const APP_VERSION = 'v2.2.0-rc2.1.3';
 const APP_VERSION_DATE = '2026-04-14';
-const APP_VERSION_NAME = 'Hotfix: tier sync race (saveProfile overwrite)';
+const APP_VERSION_NAME = 'Hotfix: replace native <select> with custom TierPicker';
 
 const CHANGELOG = [
+  {
+    version: 'v2.2.0-rc2.1.3',
+    date: '2026-04-14',
+    name: 'Hotfix: replace native <select> with custom TierPicker',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Fixed striped/unreadable tier badges on Profile tab and Clients tab cards by replacing native <select> elements with a custom TierPicker component. The native <select> rendering could not be reliably styled on Chrome/Windows when using appearance:none with narrow widths and inline SVG chevrons.',
+          'Custom TierPicker features: styled trigger button with color-coded tier pill, popover dropdown with color swatches, keyboard navigation (Escape, Up/Down arrows, Enter), and click-outside-to-close behavior.',
+          'Tier sync behaviour on both tabs unchanged — all callback plumbing from rc2.1.1/rc2.1.2 preserved; the tier write pipeline is identical, only the rendering layer changed.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.2.0-rc2.1.2',
     date: '2026-04-14',
@@ -13531,10 +13546,16 @@ function ClientsTab() {
               style={{background:isActive?'rgba(212,169,106,.06)':'var(--bg2)',border:isActive?'1px solid rgba(212,169,106,.4)':'1px solid var(--border)',borderRadius:10,padding:'12px 14px',cursor:'pointer',transition:'border-color .15s'}}>
               <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
                 <span style={{fontSize:14,fontWeight:600,color:'var(--text)'}}>{ds.clientName || 'Untitled'}</span>
-                <select value={tierLabel} onClick={e => e.stopPropagation()} onChange={e => { e.stopPropagation(); const newTier = e.target.value; handleTierChange(ds.clientId, newTier, tierLabel, (cid, nt) => { setAllStates(prev => prev.map(s => s.clientId === cid ? {...s, tier: nt} : s)); }); }}
-                  style={{fontSize:9,fontWeight:600,color:ts.color,padding:'3px 22px 3px 10px',borderRadius:4,background:ts.bg,border:'1px solid '+ts.border,cursor:'pointer',appearance:'none',WebkitAppearance:'none',minWidth:60,backgroundImage:'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'6\' height=\'4\' viewBox=\'0 0 6 4\'%3E%3Cpath d=\'M0 0l3 4 3-4z\' fill=\''+encodeURIComponent(ts.color)+'\' /%3E%3C/svg%3E")',backgroundRepeat:'no-repeat',backgroundPosition:'right 6px center',outline:'none'}}>
-                  {tierDefinitions.map(t => <option key={t} value={t} style={{background:'var(--bg2)',color:'var(--text)'}}>{t}</option>)}
-                </select>
+                <TierPicker
+                  currentTier={tierLabel}
+                  tierDefinitions={tierDefinitions}
+                  size="sm"
+                  onTierChange={(newTier) => {
+                    handleTierChange(ds.clientId, newTier, tierLabel, (cid, nt) => {
+                      setAllStates(prev => prev.map(s => s.clientId === cid ? {...s, tier: nt} : s));
+                    });
+                  }}
+                />
               </div>
               <div style={{fontSize:11,color:'var(--text3)',marginTop:4}}>
                 {totalPrem > 0 ? '$' + Math.round(totalPrem).toLocaleString() + '/yr' : 'No premiums'} · {clientPols.length} {clientPols.length===1?'policy':'policies'} · {ds.lastReviewedAt ? 'reviewed ' + fmtRelativeTime(ds.lastReviewedAt) : 'never reviewed'}
@@ -16743,21 +16764,21 @@ function ProfileTab() {
         <div>
           <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
             <h2 style={{fontSize:18,fontWeight:600,margin:0}}>My Profile</h2>
-            {/* v2.2.0-rc2.1: Interactive tier picker (replaces read-only badge) */}
+            {/* v2.2.0-rc2.1.3: Custom TierPicker (replaces native <select>) */}
             {(() => {
               const tier = p.tier || UNASSIGNED_TIER;
-              const ts = tierStyle(tier, tierDefinitions);
               return (
-                <select value={tier} onChange={e => {
-                  const newTier = e.target.value;
-                  set('tier', newTier);
-                  handleTierChange(activeClientId, newTier, tier, (cid, nt) => {
-                    setP(prev => prev?.tier === nt ? prev : {...prev, tier: nt});
-                  });
-                }}
-                  style={{fontSize:10,fontWeight:700,padding:'3px 9px',borderRadius:10,background:ts.bg,color:ts.color,border:'1px solid '+ts.border,cursor:'pointer',appearance:'none',WebkitAppearance:'none',paddingRight:18,backgroundImage:'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'8\' height=\'5\' viewBox=\'0 0 8 5\'%3E%3Cpath d=\'M0 0l4 5 4-5z\' fill=\''+encodeURIComponent(ts.color)+'\' /%3E%3C/svg%3E")',backgroundRepeat:'no-repeat',backgroundPosition:'right 6px center',outline:'none'}}>
-                  {tierDefinitions.map(t => <option key={t} value={t} style={{background:'var(--bg2)',color:'var(--text)'}}>{t}</option>)}
-                </select>
+                <TierPicker
+                  currentTier={tier}
+                  tierDefinitions={tierDefinitions}
+                  size="md"
+                  onTierChange={(newTier) => {
+                    set('tier', newTier);
+                    handleTierChange(activeClientId, newTier, tier, (cid, nt) => {
+                      setP(prev => prev?.tier === nt ? prev : {...prev, tier: nt});
+                    });
+                  }}
+                />
               );
             })()}
             {/* v2.0.2: Last reviewed display */}
@@ -31813,6 +31834,95 @@ function ChangelogModal({ onClose }) {
           <div style={{fontSize:10,color:'#666'}}>Built for Singapore Financial Consultants</div>
         </div>
       </div>
+    </div>
+  );
+}
+
+// v2.2.0-rc2.1.3: Custom tier picker — replaces native <select> to fix striped-badge rendering bug.
+// Styled trigger button + popover dropdown with color swatches, keyboard nav, click-outside close.
+function TierPicker({ currentTier, tierDefinitions, onTierChange, disabled, size }) {
+  const [open, setOpen] = useState(false);
+  const [focusedIndex, setFocusedIndex] = useState(-1);
+  const triggerRef = useRef(null);
+  const popoverRef = useRef(null);
+  const ts = tierStyle(currentTier, tierDefinitions);
+  const tiers = tierDefinitions;
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e) => {
+      if (triggerRef.current?.contains(e.target)) return;
+      if (popoverRef.current?.contains(e.target)) return;
+      setOpen(false);
+    };
+    document.addEventListener('mousedown', handler);
+    return () => document.removeEventListener('mousedown', handler);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const handler = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); setOpen(false); triggerRef.current?.focus(); return; }
+      if (e.key === 'ArrowDown') { e.preventDefault(); setFocusedIndex(i => Math.min(i + 1, tiers.length - 1)); return; }
+      if (e.key === 'ArrowUp') { e.preventDefault(); setFocusedIndex(i => Math.max(i - 1, 0)); return; }
+      if (e.key === 'Enter' && focusedIndex >= 0) { e.preventDefault(); handleSelect(tiers[focusedIndex]); return; }
+    };
+    document.addEventListener('keydown', handler);
+    return () => document.removeEventListener('keydown', handler);
+  }, [open, focusedIndex, tiers]);
+
+  useEffect(() => {
+    if (open) setFocusedIndex(Math.max(0, tiers.indexOf(currentTier)));
+  }, [open]);
+
+  const handleSelect = (newTier) => {
+    setOpen(false);
+    if (newTier !== currentTier) onTierChange(newTier);
+  };
+
+  const isSm = size === 'sm';
+  return (
+    <div style={{position:'relative', display:'inline-block'}}>
+      <button ref={triggerRef} type="button" disabled={disabled}
+        onClick={e => { e.stopPropagation(); if (!disabled) setOpen(o => !o); }}
+        style={{
+          fontSize:isSm?9:10, fontWeight:isSm?600:700,
+          padding:'3px 22px 3px 10px', borderRadius:isSm?4:10,
+          minWidth:isSm?60:70, background:ts.bg, color:ts.color,
+          border:'1px solid '+ts.border, cursor:disabled?'default':'pointer',
+          outline:'none', textAlign:'left', position:'relative', whiteSpace:'nowrap'
+        }}>
+        {ts.label}
+        <span style={{position:'absolute', right:6, top:'50%', transform:'translateY(-50%)', fontSize:8, opacity:0.7}}>▼</span>
+      </button>
+      {open && (
+        <div ref={popoverRef} onClick={e => e.stopPropagation()}
+          style={{
+            position:'absolute', top:'100%', right:0, marginTop:4,
+            background:'var(--bg2)', border:'1px solid var(--border)',
+            borderRadius:6, boxShadow:'0 4px 12px rgba(0,0,0,0.3)',
+            minWidth:140, maxHeight:260, overflowY:'auto', zIndex:1000, padding:'4px 0'
+          }}>
+          {tiers.map((t, i) => {
+            const tColor = tierColor(t, tiers);
+            const isCurrent = t === currentTier;
+            const isFocused = focusedIndex === i;
+            return (
+              <div key={t} onMouseEnter={() => setFocusedIndex(i)}
+                onClick={e => { e.stopPropagation(); handleSelect(t); }}
+                style={{
+                  padding:'6px 10px', display:'flex', alignItems:'center', gap:8,
+                  cursor:'pointer', background:isFocused?'rgba(212,169,106,.08)':'transparent',
+                  fontSize:11, color:'var(--text)', fontWeight:isCurrent?600:400
+                }}>
+                <span style={{width:8, height:8, borderRadius:'50%', background:tColor, flexShrink:0}} />
+                <span style={{flex:1}}>{t}</span>
+                {isCurrent && <span style={{fontSize:9, color:'var(--gold)'}}>✓</span>}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }
