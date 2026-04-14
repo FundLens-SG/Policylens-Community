@@ -620,11 +620,26 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.2.0-rc2.1.1';
+const APP_VERSION = 'v2.2.0-rc2.1.2';
 const APP_VERSION_DATE = '2026-04-14';
-const APP_VERSION_NAME = 'Hotfix: tier change write storm + sync + badge';
+const APP_VERSION_NAME = 'Hotfix: tier sync race (saveProfile overwrite)';
 
 const CHANGELOG = [
+  {
+    version: 'v2.2.0-rc2.1.2',
+    date: '2026-04-14',
+    name: 'Hotfix: tier sync race (saveProfile overwrite)',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Fixed race where saveProfile overwrote clientProfile.tier back to the pre-change value after a tier edit, causing Clients tab changes to appear lost on Profile tab and triggering spurious Drive sync conflict modals.',
+          'Root cause: Profile tab React state was stale when tier was edited from another path. Fix: tier changes from any path now update Profile tab\'s React state directly via callback, so saveProfile flushes the correct value on next push.',
+          'Reverted the redundant clientProfile.tier dbPut added in rc2.1.1 (the callback-based approach supersedes it and removes the double-write race).'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.2.0-rc2.1.1',
     date: '2026-04-14',
@@ -9038,24 +9053,18 @@ async function _performTierMove(clientId, newTier, oldTier) {
   }
 }
 
-// v2.2.0-rc2.1.1: Change a client's tier — optimistic IDB update + background Drive folder move.
-// localStateUpdater is an optional (clientId, newTier) => void callback for direct React state
-// updates. Replaces the event-bus pattern that caused render-cascade write storms in rc2.1.
+// v2.2.0-rc2.1.2: Change a client's tier — optimistic drive_state update + background Drive folder move.
+// localStateUpdater is an optional (clientId, newTier) => void callback for caller to update
+// their own React state (e.g. ProfileTab.setP, ClientsTab.setAllStates). The caller owns
+// propagation to clientProfile via their existing save pipeline (avoids double-write race).
 async function handleTierChange(clientId, newTier, oldTier, localStateUpdater) {
   if (newTier === oldTier) return;
-  // Step 1: Optimistic IDB update — drive_state
+  // Step 1: Optimistic IDB update — drive_state only
   const ds = await PolicyDB.getDriveState(clientId).catch(() => null);
   if (ds) {
     await PolicyDB.saveDriveState({...ds, tier: newTier});
   }
-  // v2.2.0-rc2.1.1: Also update clientProfile.tier so Profile tab shows current tier
-  try {
-    const profRec = await dbGet('settings', 'clientProfile_' + clientId);
-    if (profRec?.value) {
-      await dbPut('settings', { key: 'clientProfile_' + clientId, value: {...profRec.value, tier: newTier} });
-    }
-  } catch (e) { console.warn('[TierChange] Failed to update clientProfile.tier:', e); }
-  // Call localStateUpdater if provided (replaces event-bus dispatch)
+  // Call localStateUpdater if provided — caller updates their own React state
   if (typeof localStateUpdater === 'function') {
     try { localStateUpdater(clientId, newTier); } catch (_) {}
   }
@@ -16742,7 +16751,9 @@ function ProfileTab() {
                 <select value={tier} onChange={e => {
                   const newTier = e.target.value;
                   set('tier', newTier);
-                  handleTierChange(activeClientId, newTier, tier);
+                  handleTierChange(activeClientId, newTier, tier, (cid, nt) => {
+                    setP(prev => prev?.tier === nt ? prev : {...prev, tier: nt});
+                  });
                 }}
                   style={{fontSize:10,fontWeight:700,padding:'3px 9px',borderRadius:10,background:ts.bg,color:ts.color,border:'1px solid '+ts.border,cursor:'pointer',appearance:'none',WebkitAppearance:'none',paddingRight:18,backgroundImage:'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'8\' height=\'5\' viewBox=\'0 0 8 5\'%3E%3Cpath d=\'M0 0l4 5 4-5z\' fill=\''+encodeURIComponent(ts.color)+'\' /%3E%3C/svg%3E")',backgroundRepeat:'no-repeat',backgroundPosition:'right 6px center',outline:'none'}}>
                   {tierDefinitions.map(t => <option key={t} value={t} style={{background:'var(--bg2)',color:'var(--text)'}}>{t}</option>)}
