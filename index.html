@@ -620,11 +620,28 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.2.0-rc2.1.3';
+const APP_VERSION = 'v2.2.0-rc2.1.4';
 const APP_VERSION_DATE = '2026-04-14';
-const APP_VERSION_NAME = 'Hotfix: replace native <select> with custom TierPicker';
+const APP_VERSION_NAME = 'Single source of truth for client tier (drive_state authoritative)';
 
 const CHANGELOG = [
+  {
+    version: 'v2.2.0-rc2.1.4',
+    date: '2026-04-14',
+    name: 'Single source of truth for client tier (drive_state authoritative)',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Fixed persistent Profile tab tier display bug where badge showed an older tier value than what was actually saved. Root cause: tier was duplicated in both drive_state and clientProfile, and the two stores drifted whenever they were written by different code paths.',
+          'drive_state.tier is now the single source of truth. Profile tab reads tier directly from drive_state (via AppCtx). clientProfile no longer stores tier.',
+          'One-time migration on app mount: strips the stale tier field from existing clientProfile_* records (gated by policylens_clientprofile_tier_strip localStorage flag; runs once per device).',
+          'Removed redundant setP callback wiring on Profile tab tier picker (the callback was defensive for a two-source-of-truth race that no longer exists).',
+          'Symmetric fix: Clients tab tier change now updates driveState in AppCtx when the changed client is the active client, preventing stale tier on Profile tab after switching tabs.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.2.0-rc2.1.3',
     date: '2026-04-14',
@@ -10909,6 +10926,25 @@ function App() {
         try { localStorage.setItem('policylens_tier_null_cleanup', '1'); } catch(_) {}
       }
 
+      // v2.2.0-rc2.1.4: One-time migration — strip stale tier field from clientProfile_* records.
+      // drive_state.tier is now the single source of truth; clientProfile should not store tier.
+      if (driveLSGet('policylens_clientprofile_tier_strip') !== '1') {
+        try {
+          const allSettings = await dbGetAll('settings');
+          const profiles = allSettings.filter(r => r.key?.startsWith('clientProfile_'));
+          let stripped = 0;
+          for (const rec of profiles) {
+            if (rec.value && 'tier' in rec.value) {
+              const { tier: _, ...valueWithoutTier } = rec.value;
+              await dbPut('settings', { key: rec.key, value: valueWithoutTier });
+              stripped++;
+            }
+          }
+          if (stripped > 0) console.log('[Migration] Stripped tier from', stripped, 'clientProfile records');
+          driveLSSet('policylens_clientprofile_tier_strip', '1');
+        } catch (e) { console.warn('[Migration] clientProfile tier strip failed:', e); }
+      }
+
       // 2. Determine active client
       const refreshedStates = await PolicyDB.getAllDriveStates().catch(() => []);
       if (refreshedStates.length > 0) {
@@ -11660,10 +11696,12 @@ function App() {
     await dbPut('settings',{key:'clientName',value:n});
   };
   const saveProfile = async (p) => {
+    // v2.2.0-rc2.1.4: Strip tier from clientProfile — drive_state.tier is the single source of truth
+    const { tier: _tierIgnored, ...profileWithoutTier } = p;
     // ── CLOUD SYNC: bump field versions, push fire-and-forget ──
     const oldVersions = clientProfile?._fieldVersions || {};
-    const newVersions = bumpFieldVersions(p, clientProfile, oldVersions);
-    const enriched = {...p, _fieldVersions: newVersions};
+    const newVersions = bumpFieldVersions(profileWithoutTier, clientProfile, oldVersions);
+    const enriched = {...profileWithoutTier, _fieldVersions: newVersions};
     setClientProfile(enriched);
     setClientName(enriched.name||'');
     // v2.2.0-rc1: Per-client profile keys
@@ -11800,7 +11838,7 @@ function App() {
     try { toast('Client destroyed. Drive files moved to Trash (30-day recovery).', 'success'); } catch(_) {}
   };
 
-  const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,deletePolicy,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,tab,setTab,presentMode,setPresentMode,showChangelog,setShowChangelog,houseDefaults,saveHouseDefaults,tierDefinitions,saveTierDefinitions,runCloudSync:()=>runCloudSyncRef.current?.({force:true}),driveState,activeClientId,switchClient,destroyClient};
+  const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,deletePolicy,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,tab,setTab,presentMode,setPresentMode,showChangelog,setShowChangelog,houseDefaults,saveHouseDefaults,tierDefinitions,saveTierDefinitions,runCloudSync:()=>runCloudSyncRef.current?.({force:true}),driveState,setDriveState,activeClientId,switchClient,destroyClient};
 
   if(loading) {
     if (_isOAuthReturn) return <OAuthReturnLoader />;
@@ -13483,7 +13521,7 @@ function RepositoryTab() {
 
 // ── v2.2.0-rc1: Clients tab ──
 function ClientsTab() {
-  const { switchClient, setTab, activeClientId, policies: activePolicies, tierDefinitions } = useContext(AppCtx);
+  const { switchClient, setTab, activeClientId, policies: activePolicies, tierDefinitions, driveState, setDriveState } = useContext(AppCtx);
   const [filter, setFilter] = useState('all');
   const [allStates, setAllStates] = useState([]);
   const [allPolicies, setAllPolicies] = useState([]);
@@ -13553,6 +13591,9 @@ function ClientsTab() {
                   onTierChange={(newTier) => {
                     handleTierChange(ds.clientId, newTier, tierLabel, (cid, nt) => {
                       setAllStates(prev => prev.map(s => s.clientId === cid ? {...s, tier: nt} : s));
+                      if (cid === activeClientId && driveState) {
+                        setDriveState({...driveState, tier: nt});
+                      }
                     });
                   }}
                 />
@@ -16643,7 +16684,7 @@ function AssumptionsCard({ p, set, houseDefaults }) {
 }
 
 function ProfileTab() {
-  const {clientProfile,saveProfile,apiKey,houseDefaults,tierDefinitions,policies,deletePolicy,activeClientId,driveState} = useContext(AppCtx);
+  const {clientProfile,saveProfile,apiKey,houseDefaults,tierDefinitions,policies,deletePolicy,activeClientId,driveState,setDriveState} = useContext(AppCtx);
   const [p, setP] = useState(clientProfile);
   const [scanning, setScanning] = useState(false);
   const camRef = useRef(null);
@@ -16764,19 +16805,17 @@ function ProfileTab() {
         <div>
           <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
             <h2 style={{fontSize:18,fontWeight:600,margin:0}}>My Profile</h2>
-            {/* v2.2.0-rc2.1.3: Custom TierPicker (replaces native <select>) */}
+            {/* v2.2.0-rc2.1.4: TierPicker reads from driveState (single source of truth) */}
             {(() => {
-              const tier = p.tier || UNASSIGNED_TIER;
+              const tier = driveState?.tier || UNASSIGNED_TIER;
               return (
                 <TierPicker
                   currentTier={tier}
                   tierDefinitions={tierDefinitions}
                   size="md"
                   onTierChange={(newTier) => {
-                    set('tier', newTier);
-                    handleTierChange(activeClientId, newTier, tier, (cid, nt) => {
-                      setP(prev => prev?.tier === nt ? prev : {...prev, tier: nt});
-                    });
+                    handleTierChange(activeClientId, newTier, tier);
+                    if (driveState) setDriveState({...driveState, tier: newTier});
                   }}
                 />
               );
