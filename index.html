@@ -620,11 +620,32 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.2.0-rc1.10';
+const APP_VERSION = 'v2.2.0-rc1.11';
 const APP_VERSION_DATE = '2026-04-14';
-const APP_VERSION_NAME = 'Pre-React loader color match';
+const APP_VERSION_NAME = 'Drive backend flag flip + cleanup';
 
 const CHANGELOG = [
+  {
+    version: 'v2.2.0-rc1.11',
+    date: '2026-04-14',
+    name: 'Drive backend flag flip + cleanup',
+    sections: [
+      {
+        heading: 'Drive sync',
+        items: [
+          'Backend-mediated OAuth flow now universal (flag policylens_drive_backend_dev removed).',
+          'Silent refresh (within-session + mount-time) enabled for all users by default.'
+        ]
+      },
+      {
+        heading: 'Cleanup',
+        items: [
+          'Removed dead signInSilent function (unused since v2.1.0k).',
+          'Updated stale comment on access token persistence to reflect current architecture.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.2.0-rc1.10',
     date: '2026-04-14',
@@ -738,7 +759,7 @@ const CHANGELOG = [
       {
         heading: 'Changed',
         items: [
-          'Google Drive silent refresh routed through backend Edge Function (Supabase). Gated behind policylens_drive_backend_dev localStorage flag (default OFF). Enable via DevTools console to opt in.',
+          'Google Drive silent refresh routed through backend Edge Function (Supabase). Originally gated behind policylens_drive_backend_dev flag; made universal in rc1.11.',
           'Existing users upgrade organically: next Reconnect click uses the new auth code flow, storing a server-side refresh token. Subsequent token expiries refresh silently.'
         ]
       },
@@ -747,7 +768,7 @@ const CHANGELOG = [
         items: [
           'Auth code flow with PKCE routed through drive-auth-dev Edge Function. client_secret never in browser bundle.',
           'refresh_token stored server-side in drive_tokens table (Supabase), never sent to client.',
-          'Feature flag useBackendFlow() gates all new code paths. When OFF, behavior is identical to v2.2.0-rc1.'
+          'Feature flag useBackendFlow() originally gated all new code paths. Removed in rc1.11 — backend flow is now universal.'
         ]
       }
     ]
@@ -8652,11 +8673,8 @@ const driveLSGet = (k) => { try { return localStorage.getItem(k); } catch (_) { 
 const driveLSSet = (k, v) => { try { localStorage.setItem(k, v); } catch (_) {} };
 const driveLSDel = (k) => { try { localStorage.removeItem(k); } catch (_) {} };
 
-// v2.2.0-rc1.2: Feature flag for backend-mediated auth flow.
-// Default OFF. Set via DevTools: localStorage.setItem('policylens_drive_backend_dev', '1')
-function useBackendFlow() {
-  try { return localStorage.getItem('policylens_drive_backend_dev') === '1'; } catch (_) { return false; }
-}
+// v2.2.0-rc1.11: Backend-mediated auth flow is now universal (flag removed).
+// Previously gated behind localStorage policylens_drive_backend_dev flag.
 
 // Default Local-only mode to ON for v2.1.0. v2.1.0-rc (Phase C) flips
 // the default to OFF after a week of stable Phase B operation. Until
@@ -8671,12 +8689,9 @@ function setDriveLocalOnly(on) {
   driveLSSet(DRIVE_LS.localOnlyMode, on ? '1' : '0');
 }
 
-// ── In-memory state (NOT persisted) ──
-// Access tokens are intentionally never written to localStorage. On
-// app load, signInSilent attempts a prompt:'none' re-auth using the
-// stored oauth_granted_at timestamp as a hint that consent has been
-// given previously. Tokens live for ~1 hour and we let GIS handle
-// the refresh transparently.
+// Drive access tokens are ephemeral — never persisted client-side.
+// Refresh token lives server-side in Supabase drive_tokens (RLS, service-role only).
+// _driveFetch handles 401 retry; mount-time refresh handles expired tokens across sessions.
 let _driveAccessToken = null;
 let _driveTokenClient = null;
 let _driveStatus = 'disconnected'; // 'disconnected' | 'connected' | 'reconnect-needed'
@@ -8966,13 +8981,13 @@ function _buildOAuthURL(state, codeChallenge) {
   const p = {
     client_id: DRIVE_CLIENT_ID,
     redirect_uri: DRIVE_REDIRECT_URI,
-    response_type: useBackendFlow() ? 'code' : 'token',
+    response_type: 'code',
     scope: DRIVE_SCOPE,
     state: state,
     include_granted_scopes: 'true',
     prompt: 'consent',
   };
-  if (useBackendFlow() && codeChallenge) {
+  if (codeChallenge) {
     p.access_type = 'offline';
     p.code_challenge = codeChallenge;
     p.code_challenge_method = 'S256';
@@ -8988,7 +9003,6 @@ function _generateOAuthState() {
 }
 
 // v2.2.0-rc1.2: PKCE helpers for authorization code flow (backend-mediated).
-// Only used when useBackendFlow() === true.
 function _generateCodeVerifier() {
   const buf = new Uint8Array(48);
   crypto.getRandomValues(buf);
@@ -9026,7 +9040,7 @@ async function _codeChallenge(verifier) {
 async function _consumeOAuthRedirect() {
   const search = window.location.search || '';
   const hash = window.location.hash || '';
-  const hasAuthCode = useBackendFlow() && search.includes('code=');
+  const hasAuthCode = search.includes('code=');
   const hasOAuthFragment = hash.includes('access_token=') || hash.includes('error=');
 
   let intent = null;
@@ -9091,9 +9105,8 @@ async function _consumeOAuthRedirect() {
 }
 
 // ── Initialize the OAuth token client (idempotent) ──
-// v2.1.0c: This is now used ONLY by signInSilent (iframe-based silent
-// re-auth via prompt:'none'). signInInteractive bypasses GIS entirely
-// and uses the manual implicit-grant redirect flow above.
+// v2.1.0c: signInInteractive bypasses GIS entirely and uses the manual
+// authorization code + PKCE redirect flow above.
 function _ensureDriveTokenClient() {
   if (_driveTokenClient) return _driveTokenClient;
   if (!window.google?.accounts?.oauth2) return null;
@@ -9155,14 +9168,8 @@ function mapDriveError(err) {
 async function _driveFetch(url, opts) {
   // v2.2.0-rc1.2: If no access token, try backend refresh before throwing
   if (!_driveAccessToken) {
-    if (useBackendFlow()) {
-      const refreshed = await driveClient.refreshAccessToken();
-      if (!refreshed) {
-        const e = new Error('Not signed in to Google Drive');
-        e.status = 401;
-        throw e;
-      }
-    } else {
+    const refreshed = await driveClient.refreshAccessToken();
+    if (!refreshed) {
       const e = new Error('Not signed in to Google Drive');
       e.status = 401;
       throw e;
@@ -9175,7 +9182,7 @@ async function _driveFetch(url, opts) {
   if (!resp.ok) {
     // v2.2.0-rc1.2: On 401, try silent refresh once (backend flow only).
     // _retried flag prevents infinite loop (max 2 fetches per original call).
-    if (resp.status === 401 && useBackendFlow() && !opts?._retried) {
+    if (resp.status === 401 && !opts?._retried) {
       const refreshed = await driveClient.refreshAccessToken();
       if (refreshed) {
         return _driveFetch(url, Object.assign({}, opts, {
@@ -9224,13 +9231,10 @@ const driveClient = {
   async signInInteractive(opts) {
     const returnTab = (opts && opts.returnTab) || 'settings';
     const state = _generateOAuthState();
-    let challenge;
-    if (useBackendFlow()) {
-      const verifier = _generateCodeVerifier();
-      challenge = await _codeChallenge(verifier);
-      try { sessionStorage.setItem('policylens_drive_pkce_verifier', verifier); } catch (e) {
-        console.warn('[Drive] Could not persist PKCE verifier:', e);
-      }
+    const verifier = _generateCodeVerifier();
+    const challenge = await _codeChallenge(verifier);
+    try { sessionStorage.setItem('policylens_drive_pkce_verifier', verifier); } catch (e) {
+      console.warn('[Drive] Could not persist PKCE verifier:', e);
     }
     const intent = {
       state,
@@ -9252,66 +9256,10 @@ const driveClient = {
     return new Promise(() => {});
   },
 
-  // ── signInSilent: tries prompt:'none' re-auth on app load ──
-  // v2.1.0k: UNUSED — retained for potential Phase B fallback. GIS iframe
-  // silent re-auth fails in 2025+ Chrome due to third-party cookie deprecation.
-  // Mount path now uses localStorage token persistence instead.
-  // Returns true if a token was obtained, false otherwise (silent fail).
-  async signInSilent() {
-    const granted = driveLSGet(DRIVE_LS.oauthGrantedAt);
-    if (!granted) return false;
-    const ready = await _waitForGIS();
-    if (!ready) return false;
-    const tokenClient = _ensureDriveTokenClient();
-    if (!tokenClient) return false;
-    return new Promise((resolve) => {
-      // v2.1.0a (Bug 2+3): same settled-once guard as signInInteractive,
-      // since silent re-auth has the same hang risk if GIS fires neither
-      // callback nor error_callback (rare but documented).
-      let settled = false;
-      const safeResolve = (v) => { if (settled) return; settled = true; resolve(v); };
-      tokenClient.callback = (resp) => {
-        if (resp.error) {
-          // Silent failure is expected — fall back to interactive
-          console.log('[Drive] Silent re-auth failed:', resp.error, '— Reconnect required');
-          setDriveStatus('reconnect-needed');
-          safeResolve(false);
-          return;
-        }
-        _driveAccessToken = resp.access_token;
-        // Day-6 check on the persisted timestamp
-        const ageMs = Date.now() - parseInt(granted);
-        if (ageMs > DRIVE_REFRESH_WARN_MS) {
-          setDriveStatus('reconnect-needed');
-          console.log('[Drive] Silent re-auth ok but grant is', Math.round(ageMs / 86400000), 'days old — Reconnect recommended');
-        } else {
-          setDriveStatus('connected');
-          console.log('[Drive] ✓ Silent re-auth ok');
-        }
-        safeResolve(true);
-      };
-      // v2.1.0a (Bug 2+3): error_callback for popup-level / silent failures.
-      // Resolves false (not throws) because silent re-auth is meant to fail
-      // gracefully and fall back to interactive on the user's next click.
-      tokenClient.error_callback = (err) => {
-        console.log('[Drive] Silent re-auth error_callback:', err?.type || '(unknown)');
-        setDriveStatus('reconnect-needed');
-        safeResolve(false);
-      };
-      try {
-        tokenClient.requestAccessToken({ prompt: 'none' });
-      } catch (_) {
-        safeResolve(false);
-      }
-    });
-  },
-
   // ── signOut: revoke token + clear all Drive localStorage ──
   async signOut() {
     // v2.2.0-rc1.2: Notify backend to revoke + delete server-side refresh token
-    if (useBackendFlow()) {
-      try { const s = getSB(); if (s) await s.functions.invoke('drive-auth-dev', { body: { mode: 'signout' } }); } catch (_) {}
-    }
+    try { const s = getSB(); if (s) await s.functions.invoke('drive-auth-dev', { body: { mode: 'signout' } }); } catch (_) {}
     if (_driveAccessToken && window.google?.accounts?.oauth2?.revoke) {
       try { window.google.accounts.oauth2.revoke(_driveAccessToken, () => {}); } catch (_) {}
     }
@@ -9330,11 +9278,9 @@ const driveClient = {
   },
 
   // v2.2.0-rc1.2: Silent access token refresh via backend Edge Function.
-  // Only called when useBackendFlow() === true. Backend reads refresh_token
-  // from drive_tokens table (server-side), exchanges for new access_token.
-  // Refresh token never touches the client.
+  // Backend reads refresh_token from drive_tokens table (server-side),
+  // exchanges for new access_token. Refresh token never touches the client.
   async refreshAccessToken() {
-    if (!useBackendFlow()) return false;
     const s = getSB();
     if (!s) return false;
     try {
@@ -10476,19 +10422,14 @@ function App() {
             if (stored.userId && uid && stored.userId !== uid) {
               console.log('[Drive] Stored token userId mismatch — cleared (stored:', stored.userId?.slice(0,8), 'current:', uid?.slice(0,8) + ')');
             } else {
-              if (useBackendFlow()) {
-                console.log('[Drive] Stored token expired — attempting silent refresh');
-                const refreshed = await driveClient.refreshAccessToken();
-                if (refreshed) {
-                  console.log('[Drive] ✓ Silent refresh succeeded on mount');
-                  setDriveStatus('connected');
-                } else {
-                  console.log('[Drive] Silent refresh failed — reconnect needed');
-                  setDriveStatus('reconnect-needed');
-                }
+              console.log('[Drive] Stored token expired — attempting silent refresh');
+              const refreshed = await driveClient.refreshAccessToken();
+              if (refreshed) {
+                console.log('[Drive] ✓ Silent refresh succeeded on mount');
+                setDriveStatus('connected');
               } else {
+                console.log('[Drive] Silent refresh failed — reconnect needed');
                 setDriveStatus('reconnect-needed');
-                console.log('[Drive] Stored token expired or invalid — reconnect needed');
               }
             }
           }
