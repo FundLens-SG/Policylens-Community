@@ -620,11 +620,26 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.2.0-rc2.1';
+const APP_VERSION = 'v2.2.0-rc2.1.1';
 const APP_VERSION_DATE = '2026-04-14';
-const APP_VERSION_NAME = 'Tier assignment UX + moveFolder (Session 2B)';
+const APP_VERSION_NAME = 'Hotfix: tier change write storm + sync + badge';
 
 const CHANGELOG = [
+  {
+    version: 'v2.2.0-rc2.1.1',
+    date: '2026-04-14',
+    name: 'Hotfix: tier change write storm + sync + badge',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Fixed tier change write storm — single click now fires exactly one tier move (was firing 2+ due to event-bus render cascade).',
+          'Fixed Clients tab → Profile tab desync — clientProfile.tier now updates when tier is changed from Clients tab.',
+          'Fixed striped/hatched rendering on narrow tier badges (single-character tier names) in Clients tab cards.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.2.0-rc2.1',
     date: '2026-04-14',
@@ -9023,17 +9038,27 @@ async function _performTierMove(clientId, newTier, oldTier) {
   }
 }
 
-// v2.2.0-rc2.1: Change a client's tier — optimistic IDB update + background Drive folder move.
-// Dispatches 'policylens-sync-status-change' so ClientsTab re-reads allStates.
-async function handleTierChange(clientId, newTier, oldTier) {
+// v2.2.0-rc2.1.1: Change a client's tier — optimistic IDB update + background Drive folder move.
+// localStateUpdater is an optional (clientId, newTier) => void callback for direct React state
+// updates. Replaces the event-bus pattern that caused render-cascade write storms in rc2.1.
+async function handleTierChange(clientId, newTier, oldTier, localStateUpdater) {
   if (newTier === oldTier) return;
-  // Step 1: Optimistic IDB update
+  // Step 1: Optimistic IDB update — drive_state
   const ds = await PolicyDB.getDriveState(clientId).catch(() => null);
   if (ds) {
     await PolicyDB.saveDriveState({...ds, tier: newTier});
   }
-  // Notify listeners (ClientsTab, etc.) to re-read state
-  try { window.dispatchEvent(new Event('policylens-sync-status-change')); } catch(_) {}
+  // v2.2.0-rc2.1.1: Also update clientProfile.tier so Profile tab shows current tier
+  try {
+    const profRec = await dbGet('settings', 'clientProfile_' + clientId);
+    if (profRec?.value) {
+      await dbPut('settings', { key: 'clientProfile_' + clientId, value: {...profRec.value, tier: newTier} });
+    }
+  } catch (e) { console.warn('[TierChange] Failed to update clientProfile.tier:', e); }
+  // Call localStateUpdater if provided (replaces event-bus dispatch)
+  if (typeof localStateUpdater === 'function') {
+    try { localStateUpdater(clientId, newTier); } catch (_) {}
+  }
   // Step 2: Enqueue background Drive folder move (serialized per-client)
   const prevChain = _tierMoveChains.get(clientId) || Promise.resolve();
   const nextChain = prevChain
@@ -13497,8 +13522,8 @@ function ClientsTab() {
               style={{background:isActive?'rgba(212,169,106,.06)':'var(--bg2)',border:isActive?'1px solid rgba(212,169,106,.4)':'1px solid var(--border)',borderRadius:10,padding:'12px 14px',cursor:'pointer',transition:'border-color .15s'}}>
               <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
                 <span style={{fontSize:14,fontWeight:600,color:'var(--text)'}}>{ds.clientName || 'Untitled'}</span>
-                <select value={tierLabel} onClick={e => e.stopPropagation()} onChange={e => { e.stopPropagation(); handleTierChange(ds.clientId, e.target.value, tierLabel); }}
-                  style={{fontSize:9,fontWeight:600,color:ts.color,padding:'2px 8px',borderRadius:4,background:ts.bg,border:'1px solid '+ts.border,cursor:'pointer',appearance:'none',WebkitAppearance:'none',paddingRight:14,backgroundImage:'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'6\' height=\'4\' viewBox=\'0 0 6 4\'%3E%3Cpath d=\'M0 0l3 4 3-4z\' fill=\''+encodeURIComponent(ts.color)+'\' /%3E%3C/svg%3E")',backgroundRepeat:'no-repeat',backgroundPosition:'right 4px center',outline:'none'}}>
+                <select value={tierLabel} onClick={e => e.stopPropagation()} onChange={e => { e.stopPropagation(); const newTier = e.target.value; handleTierChange(ds.clientId, newTier, tierLabel, (cid, nt) => { setAllStates(prev => prev.map(s => s.clientId === cid ? {...s, tier: nt} : s)); }); }}
+                  style={{fontSize:9,fontWeight:600,color:ts.color,padding:'3px 22px 3px 10px',borderRadius:4,background:ts.bg,border:'1px solid '+ts.border,cursor:'pointer',appearance:'none',WebkitAppearance:'none',minWidth:60,backgroundImage:'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'6\' height=\'4\' viewBox=\'0 0 6 4\'%3E%3Cpath d=\'M0 0l3 4 3-4z\' fill=\''+encodeURIComponent(ts.color)+'\' /%3E%3C/svg%3E")',backgroundRepeat:'no-repeat',backgroundPosition:'right 6px center',outline:'none'}}>
                   {tierDefinitions.map(t => <option key={t} value={t} style={{background:'var(--bg2)',color:'var(--text)'}}>{t}</option>)}
                 </select>
               </div>
