@@ -237,7 +237,7 @@ label{display:block;font-size:11px;font-weight:600;text-transform:uppercase;lett
       <path d="M30 50 L32 51.5 L34 50 L32 48.5Z" fill="#d4a96a" opacity="0.8"/>
       <path d="M66 50 L68 51.5 L70 50 L68 48.5Z" fill="#d4a96a" opacity="0.8"/>
     </svg>
-    <div id="auth-loading-text" style="color:#c8c8c8;font-size:14px;margin-top:8px;font-family:system-ui,sans-serif"><span>Loading PolicyLens…</span><span>Polishing the lenses…</span><span>Stretching before the work…</span><span>Warming up the engines…</span><span>Brewing your dashboard…</span><span>Tuning the instruments…</span><span>Sharpening the pencils…</span><span>Sweeping out the cobwebs…</span><span>Setting the table…</span></div>
+    <div id="auth-loading-text" style="color:#a39580;font-size:14px;margin-top:8px;font-family:system-ui,sans-serif"><span>Loading PolicyLens…</span><span>Polishing the lenses…</span><span>Stretching before the work…</span><span>Warming up the engines…</span><span>Brewing your dashboard…</span><span>Tuning the instruments…</span><span>Sharpening the pencils…</span><span>Sweeping out the cobwebs…</span><span>Setting the table…</span></div>
   </div>
 </div>
 
@@ -620,11 +620,24 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.2.0-rc1.9';
+const APP_VERSION = 'v2.2.0-rc1.10';
 const APP_VERSION_DATE = '2026-04-14';
-const APP_VERSION_NAME = 'Auto-refresh on mount for expired tokens';
+const APP_VERSION_NAME = 'Pre-React loader color match';
 
 const CHANGELOG = [
+  {
+    version: 'v2.2.0-rc1.10',
+    date: '2026-04-14',
+    name: 'Pre-React loader color match',
+    sections: [
+      {
+        heading: 'Changed',
+        items: [
+          'Pre-React loading screen color now matches the rest of the app UI (muted champagne #a39580, matching var(--text2)).'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.2.0-rc1.9',
     date: '2026-04-14',
