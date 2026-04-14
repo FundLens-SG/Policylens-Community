@@ -620,11 +620,29 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.2.0-rc2.0';
+const APP_VERSION = 'v2.2.0-rc2.1';
 const APP_VERSION_DATE = '2026-04-14';
-const APP_VERSION_NAME = 'Dynamic client tiers (Session 2A)';
+const APP_VERSION_NAME = 'Tier assignment UX + moveFolder (Session 2B)';
 
 const CHANGELOG = [
+  {
+    version: 'v2.2.0-rc2.1',
+    date: '2026-04-14',
+    name: 'Tier assignment UX + moveFolder (Session 2B)',
+    sections: [
+      {
+        heading: 'Multi-client',
+        items: [
+          'Tier badge at top of Profile tab is now an interactive picker — click to reassign client tier.',
+          'Each Clients tab card now has a tier picker directly on the card (no need to open the client).',
+          'Changing a client\'s tier now physically moves their Drive folder to the new tier folder in the background.',
+          'Consecutive tier changes for the same client are queued in order (prevents Drive folder from landing in the wrong tier when clicking fast).',
+          'Removed redundant "Client Tier" dropdown from Income & Retirement section (single source of truth at top of Profile tab).',
+          'Clients tab filter chips now filter the client list by tier.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.2.0-rc2.0',
     date: '2026-04-14',
@@ -8698,6 +8716,10 @@ const DRIVE_FOLDER_NAME = 'PolicyLens';
 // v2.2.0-rc1: Tier/client folder caches (cleared on signOut)
 let _tierFolderCache = {};
 let _clientFolderCache = {};
+// v2.2.0-rc2.1: Per-client tier-move serialization queue.
+// Each key is a clientId; value is a Promise chain. Consecutive tier changes
+// for the same client execute sequentially; different clients run in parallel.
+const _tierMoveChains = new Map();
 const DRIVE_REFRESH_WARN_MS = 6 * 24 * 60 * 60 * 1000; // 6 days — banner threshold
 // v2.1.0c: Hardcoded redirect URI for the manual implicit-grant flow.
 // Must match EXACTLY the value registered in Google Cloud Console under
@@ -8980,6 +9002,44 @@ async function _runV22Migration(states, setProgress) {
   }
   driveLSSet('policylens_v22_migrated', '1');
   console.log('[Migration] ✓ v2.2 migration complete');
+}
+
+// v2.2.0-rc2.1: Move a client's Drive folder to a new tier folder.
+// Called internally by handleTierChange via the serialized queue.
+async function _performTierMove(clientId, newTier, oldTier) {
+  const ds = await PolicyDB.getDriveState(clientId).catch(() => null);
+  if (!ds || !ds.folderId) return;
+  try {
+    const newTierFolderId = await driveClient.ensureTierFolder(newTier);
+    const oldTierFolderId = ds.tierFolderId || await driveClient.ensureTierFolder(oldTier || UNASSIGNED_TIER);
+    if (newTierFolderId === oldTierFolderId) return; // already in correct folder
+    await driveClient.moveFolder(ds.folderId, newTierFolderId, oldTierFolderId);
+    await PolicyDB.saveDriveState({...ds, tierFolderId: newTierFolderId, tier: newTier});
+    console.log('[TierMove] ✓ Moved', ds.clientName || clientId, '→', newTier);
+    try { toast('✓ ' + (ds.clientName || 'Client') + ' moved to ' + newTier + ' tier', 'success', 3000); } catch(_) {}
+  } catch (e) {
+    console.warn('[TierMove] Drive folder move failed for', ds.clientName || clientId, ':', e.message);
+    try { toast('⚠ Drive folder move failed — tier updated locally only. Check Drive and retry.', 'warning', 5000); } catch(_) {}
+  }
+}
+
+// v2.2.0-rc2.1: Change a client's tier — optimistic IDB update + background Drive folder move.
+// Dispatches 'policylens-sync-status-change' so ClientsTab re-reads allStates.
+async function handleTierChange(clientId, newTier, oldTier) {
+  if (newTier === oldTier) return;
+  // Step 1: Optimistic IDB update
+  const ds = await PolicyDB.getDriveState(clientId).catch(() => null);
+  if (ds) {
+    await PolicyDB.saveDriveState({...ds, tier: newTier});
+  }
+  // Notify listeners (ClientsTab, etc.) to re-read state
+  try { window.dispatchEvent(new Event('policylens-sync-status-change')); } catch(_) {}
+  // Step 2: Enqueue background Drive folder move (serialized per-client)
+  const prevChain = _tierMoveChains.get(clientId) || Promise.resolve();
+  const nextChain = prevChain
+    .catch(() => {}) // swallow previous failure so it doesn't block this move
+    .then(() => _performTierMove(clientId, newTier, oldTier));
+  _tierMoveChains.set(clientId, nextChain);
 }
 
 // ── Wait for the GIS library to load (5s timeout) ──
@@ -13389,6 +13449,7 @@ function ClientsTab() {
     window.addEventListener('policylens-sync-status-change', h);
     return () => window.removeEventListener('policylens-sync-status-change', h);
   }, []);
+  // v2.2.0-rc2.1: Filter chips now functional (backing logic was correct since rc2.0; wiring verified)
   const filtered = filter === 'all' ? allStates : allStates.filter(ds => (ds.tier || UNASSIGNED_TIER) === filter);
   const chips = [{id:'all',label:'All'}, ...tierDefinitions.map(t => ({id:t, label:t}))];
   return (
@@ -13436,7 +13497,10 @@ function ClientsTab() {
               style={{background:isActive?'rgba(212,169,106,.06)':'var(--bg2)',border:isActive?'1px solid rgba(212,169,106,.4)':'1px solid var(--border)',borderRadius:10,padding:'12px 14px',cursor:'pointer',transition:'border-color .15s'}}>
               <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
                 <span style={{fontSize:14,fontWeight:600,color:'var(--text)'}}>{ds.clientName || 'Untitled'}</span>
-                <span style={{fontSize:9,fontWeight:600,color:ts.color,padding:'2px 8px',borderRadius:4,background:ts.bg,border:'1px solid '+ts.border}}>{ts.label}</span>
+                <select value={tierLabel} onClick={e => e.stopPropagation()} onChange={e => { e.stopPropagation(); handleTierChange(ds.clientId, e.target.value, tierLabel); }}
+                  style={{fontSize:9,fontWeight:600,color:ts.color,padding:'2px 8px',borderRadius:4,background:ts.bg,border:'1px solid '+ts.border,cursor:'pointer',appearance:'none',WebkitAppearance:'none',paddingRight:14,backgroundImage:'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'6\' height=\'4\' viewBox=\'0 0 6 4\'%3E%3Cpath d=\'M0 0l3 4 3-4z\' fill=\''+encodeURIComponent(ts.color)+'\' /%3E%3C/svg%3E")',backgroundRepeat:'no-repeat',backgroundPosition:'right 4px center',outline:'none'}}>
+                  {tierDefinitions.map(t => <option key={t} value={t} style={{background:'var(--bg2)',color:'var(--text)'}}>{t}</option>)}
+                </select>
               </div>
               <div style={{fontSize:11,color:'var(--text3)',marginTop:4}}>
                 {totalPrem > 0 ? '$' + Math.round(totalPrem).toLocaleString() + '/yr' : 'No premiums'} · {clientPols.length} {clientPols.length===1?'policy':'policies'} · {ds.lastReviewedAt ? 'reviewed ' + fmtRelativeTime(ds.lastReviewedAt) : 'never reviewed'}
@@ -16524,7 +16588,7 @@ function AssumptionsCard({ p, set, houseDefaults }) {
 }
 
 function ProfileTab() {
-  const {clientProfile,saveProfile,apiKey,houseDefaults,tierDefinitions,policies,deletePolicy} = useContext(AppCtx);
+  const {clientProfile,saveProfile,apiKey,houseDefaults,tierDefinitions,policies,deletePolicy,activeClientId,driveState} = useContext(AppCtx);
   const [p, setP] = useState(clientProfile);
   const [scanning, setScanning] = useState(false);
   const camRef = useRef(null);
@@ -16645,14 +16709,19 @@ function ProfileTab() {
         <div>
           <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
             <h2 style={{fontSize:18,fontWeight:600,margin:0}}>My Profile</h2>
-            {/* v2.0.2: Tier badge */}
+            {/* v2.2.0-rc2.1: Interactive tier picker (replaces read-only badge) */}
             {(() => {
-              const tier = p.tier || 'Unassigned';
+              const tier = p.tier || UNASSIGNED_TIER;
               const ts = tierStyle(tier, tierDefinitions);
               return (
-                <span style={{fontSize:10,fontWeight:700,padding:'3px 9px',borderRadius:10,background:ts.bg,color:ts.color,border:'1px solid '+ts.border,whiteSpace:'nowrap'}}>
-                  {ts.label}
-                </span>
+                <select value={tier} onChange={e => {
+                  const newTier = e.target.value;
+                  set('tier', newTier);
+                  handleTierChange(activeClientId, newTier, tier);
+                }}
+                  style={{fontSize:10,fontWeight:700,padding:'3px 9px',borderRadius:10,background:ts.bg,color:ts.color,border:'1px solid '+ts.border,cursor:'pointer',appearance:'none',WebkitAppearance:'none',paddingRight:18,backgroundImage:'url("data:image/svg+xml,%3Csvg xmlns=\'http://www.w3.org/2000/svg\' width=\'8\' height=\'5\' viewBox=\'0 0 8 5\'%3E%3Cpath d=\'M0 0l4 5 4-5z\' fill=\''+encodeURIComponent(ts.color)+'\' /%3E%3C/svg%3E")',backgroundRepeat:'no-repeat',backgroundPosition:'right 6px center',outline:'none'}}>
+                  {tierDefinitions.map(t => <option key={t} value={t} style={{background:'var(--bg2)',color:'var(--text)'}}>{t}</option>)}
+                </select>
               );
             })()}
             {/* v2.0.2: Last reviewed display */}
@@ -16832,13 +16901,6 @@ function ProfileTab() {
         <div className="resp-2col" style={{gap:16}}>
           <div style={{background:'var(--bg3)',borderRadius:8,padding:12,border:'1px solid var(--border)'}}>
             <div style={{fontSize:10,fontWeight:700,color:'var(--gold)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8}}>Income & Retirement</div>
-            {/* v2.0.2: Client tier */}
-            <div className="field"><label>Client Tier</label>
-              <select value={p.tier||UNASSIGNED_TIER} onChange={e=>set('tier',e.target.value)}>
-                {tierDefinitions.map(t => <option key={t} value={t}>{t}</option>)}
-              </select>
-              <div style={{fontSize:10,color:'var(--text3)'}}>Used for prioritisation in the v2.1 client list view</div>
-            </div>
             <div className="field"><label>Gross Annual Income ($)</label><input type="number" value={p.annualIncome||''} onChange={e=>set('annualIncome',e.target.value)} placeholder="e.g. 120000" /><div style={{fontSize:10,color:'var(--text3)'}}>{p.annualIncome ? '$'+(Math.round(p.annualIncome/12)).toLocaleString()+'/mth' : ''}</div></div>
             <div className="field"><label>Desired Monthly Income in Retirement</label><input type="number" value={p.desiredRetIncome||''} onChange={e=>set('desiredRetIncome',e.target.value)} placeholder="e.g. 5000" /><div style={{fontSize:10,color:'var(--text3)'}}>Target lifestyle expense in today's dollars</div></div>
             <div style={{fontSize:9,color:'var(--text3)',fontStyle:'italic',marginTop:6}}>Retirement age and inflation rate are now set in the <strong>Assumptions</strong> card below.</div>
