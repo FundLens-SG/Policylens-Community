@@ -620,11 +620,24 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2c.3b';
+const APP_VERSION = 'v2.3.0-rc2c.3b.1';
 const APP_VERSION_DATE = '2026-04-16';
-const APP_VERSION_NAME = 'AI Name Detection on Extraction';
+const APP_VERSION_NAME = 'EMERGENCY HOTFIX: async handler for name detection await';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2c.3b.1',
+    date: '2026-04-16',
+    name: 'EMERGENCY HOTFIX: async handler for name detection await',
+    sections: [
+      {
+        heading: 'Critical bug fix',
+        items: [
+          'rc2c.3b broke the app entirely — queue handler used await without being async, causing a SyntaxError that prevented React from mounting. Fixed by making the handler async.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2c.3b',
     date: '2026-04-16',
@@ -22681,7 +22694,7 @@ function Policies() {
   // ═══════════════════════════════════════════════════════════════
   const [queueJobs, setQueueJobs] = useState([]);
   useEffect(() => {
-    const handler = (e) => {
+    const handler = async (e) => {
       const jobs = e.detail?.jobs || [];
       setQueueJobs(jobs);
       // Map job states to existing UI state
