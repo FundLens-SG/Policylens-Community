@@ -620,11 +620,27 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2c.2a';
+const APP_VERSION = 'v2.3.0-rc2c.2a.1';
 const APP_VERSION_DATE = '2026-04-15';
-const APP_VERSION_NAME = 'Checkpoint Save/Load + Replace/Copy + migration framework';
+const APP_VERSION_NAME = 'Hotfix: Save dropdown, unicode rendering, cross-client checkpoint listing';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2c.2a.1',
+    date: '2026-04-15',
+    name: 'Hotfix: Save dropdown, unicode rendering, cross-client checkpoint listing',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Save button dropdown now opens correctly (previously closed immediately due to click-outside handler treating the trigger button as "outside").',
+          'Replaced literal Unicode escape sequences with actual characters in checkpoint UI — buttons now show 💾 📁 ← instead of escape codes.',
+          'OtherClientCheckpointPicker now queries Drive directly when a client has no local IDB summary cache. Auto-backup checkpoints from Replace operations are now visible across clients.',
+          'Auto-backup checkpoints styled consistently (italic, reduced opacity) in the Other Clients checkpoint picker.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2c.2a',
     date: '2026-04-15',
@@ -9349,6 +9365,14 @@ async function overwriteCheckpoint(checkpointId) {
 }
 
 // v2.3.0-rc2c.2a: Fetch checkpoint payload from Drive + migrate.
+// v2.3.0-rc2c.2a.1: Parse label from checkpoint filename (best-effort reverse of the safe-label encoding).
+function parseLabelFromCheckpointFilename(filename) {
+  if (!filename) return 'Untitled checkpoint';
+  const match = filename.match(/^(.+?)_(.+)\.json$/);
+  if (!match) return filename.replace(/\.json$/, '');
+  return match[2].split('-').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+}
+
 async function _fetchCheckpointPayload(driveFileId) {
   const resp = await _driveFetch(
     'https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(driveFileId) + '?alt=media'
@@ -10014,6 +10038,22 @@ const driveClient = {
     _clientFolderCache[cacheKey] = created.id;
     console.log('[Drive] ✓ Created checkpoints folder in', clientFolderId, created.id);
     return created.id;
+  },
+
+  // v2.3.0-rc2c.2a.1: List checkpoint files in a client's checkpoints folder (Drive query).
+  async listCheckpointFiles(clientFolderId) {
+    const cpFolderId = await this.ensureCheckpointsFolder(clientFolderId);
+    const q = encodeURIComponent("'" + cpFolderId + "' in parents and trashed=false");
+    const resp = await _driveFetch(
+      'https://www.googleapis.com/drive/v3/files?q=' + q +
+      '&fields=files(id,name,size,modifiedTime)&orderBy=modifiedTime desc&pageSize=200'
+    );
+    const data = await resp.json();
+    return (data.files || []).map(f => ({
+      driveFileId: f.id, filename: f.name,
+      sizeBytes: f.size ? parseInt(f.size, 10) : 0,
+      modifiedTime: f.modifiedTime
+    }));
   },
 
   async moveFile(fileId, newParentFolderId, oldParentFolderId) {
@@ -14085,6 +14125,7 @@ function Header() {
   const isMobile = useViewportIsMobile();
   const [saveOpen, setSaveOpen] = useState(false);
   const [loadOpen, setLoadOpen] = useState(false);
+  const saveButtonRef = useRef(null);
 
   // v2.3.0-rc2c.2a: First-launch toast for repurposed buttons
   useEffect(() => {
@@ -14121,11 +14162,11 @@ function Header() {
           <SyncStatusPill driveState={driveState} />
           {/* v2.3.0-rc2c.2a: Save = checkpoint popover */}
           <div style={{position:'relative',display:'inline-block'}}>
-            <button title="Save checkpoint" onClick={() => setSaveOpen(o => !o)} disabled={!activeClientId}
+            <button ref={saveButtonRef} title="Save checkpoint" onClick={() => setSaveOpen(o => !o)} disabled={!activeClientId}
               style={saveBtnStyle}>
               💾
             </button>
-            <CheckpointSavePopover open={saveOpen} onClose={() => setSaveOpen(false)} clientId={activeClientId} />
+            <CheckpointSavePopover open={saveOpen} onClose={() => setSaveOpen(false)} clientId={activeClientId} anchorRef={saveButtonRef} />
           </div>
           {/* v2.3.0-rc2c.2a: Load = checkpoint modal */}
           <button title="Load checkpoint" onClick={() => setLoadOpen(true)} disabled={!activeClientId}
@@ -16979,7 +17020,7 @@ function AssumptionsCard({ p, set, houseDefaults }) {
 }
 
 // v2.3.0-rc2c.2a: Checkpoint Save Popover (compact dropdown anchored to Save button).
-function CheckpointSavePopover({ open, onClose, clientId }) {
+function CheckpointSavePopover({ open, onClose, clientId, anchorRef }) {
   const [checkpoints, setCheckpoints] = useState([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(null); // null | 'new' | checkpointId
@@ -16993,13 +17034,17 @@ function CheckpointSavePopover({ open, onClose, clientId }) {
       .catch(() => { setCheckpoints([]); setLoading(false); });
   }, [open, clientId]);
 
-  // Close on outside click
+  // Close on outside click (exclude anchor button to prevent open-then-close race)
   useEffect(() => {
     if (!open) return;
-    const h = (e) => { if (ref.current && !ref.current.contains(e.target)) onClose(); };
+    const h = (e) => {
+      if (ref.current && ref.current.contains(e.target)) return;
+      if (anchorRef?.current && anchorRef.current.contains(e.target)) return;
+      onClose();
+    };
     setTimeout(() => document.addEventListener('mousedown', h), 0);
     return () => document.removeEventListener('mousedown', h);
-  }, [open]);
+  }, [open, anchorRef]);
 
   if (!open) return null;
   const popStyle = {position:'absolute',top:'100%',right:0,marginTop:4,width:280,background:'#1a2332',border:'1px solid rgba(201,169,110,.25)',borderRadius:10,boxShadow:'0 8px 32px rgba(0,0,0,.5)',zIndex:9999,padding:8,fontSize:11};
@@ -17056,7 +17101,7 @@ function CheckpointSavePopover({ open, onClose, clientId }) {
       </button>
       <button onClick={handleSaveAsFile} disabled={!!busy}
         style={{width:'100%',textAlign:'left',padding:'8px 10px',background:'transparent',color:'var(--text2)',border:'1px solid var(--border)',borderRadius:6,cursor:'pointer',fontSize:11,marginBottom:4}}>
-        {busy === 'file' ? 'Saving\u2026' : '\uD83D\uDCBE Save as file to device'}
+        {busy === 'file' ? 'Saving\u2026' : '💾 Save as file to device'}
       </button>
       {isDrive && (
         <>
@@ -17103,8 +17148,12 @@ function RestoreChoiceModal({ checkpoint, onClose, switchClient, setTab, isDrive
   const handleReplace = async () => {
     setBusy('replace');
     try {
-      if (hasDriveFileId) {
+      if (hasDriveFileId && !checkpoint.id?.startsWith('drive:')) {
         await restoreCheckpointAsReplace(checkpoint.id, activeClientId);
+      } else if (hasDriveFileId) {
+        // Drive-only checkpoint (cross-device/cross-client) — fetch then apply
+        const cp = await _fetchCheckpointPayload(checkpoint.driveFileId);
+        await restoreFromPayload(activeClientId, cp, isDrive);
       } else if (parsedPayload) {
         await restoreFromPayload(activeClientId, parsedPayload, isDrive);
       }
@@ -17258,7 +17307,7 @@ function CheckpointLoadModal({ open, onClose, clientId, switchClient, setTab }) 
           onChange={e => { if (e.target.files[0]) handleFilePick(e.target.files[0]); e.target.value = ''; }} />
         <button onClick={() => fileRef.current?.click()}
           style={{padding:'8px 14px',background:'var(--bg3)',color:'var(--text2)',border:'1px solid var(--border)',borderRadius:6,cursor:'pointer',fontSize:11,marginBottom:12}}>
-          \uD83D\uDCC1 Choose file
+          📁 Choose file
         </button>
 
         {/* Section: Other clients */}
@@ -17267,7 +17316,7 @@ function CheckpointLoadModal({ open, onClose, clientId, switchClient, setTab }) 
             <div style={{fontSize:10,fontWeight:700,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.5px',marginBottom:8,borderTop:'1px solid var(--border)',paddingTop:12}}>Other clients</div>
             <button onClick={() => setShowOtherClients(true)}
               style={{padding:'8px 14px',background:'var(--bg3)',color:'var(--text2)',border:'1px solid var(--border)',borderRadius:6,cursor:'pointer',fontSize:11,marginBottom:12}}>
-              Load from another client\u2019s checkpoints
+              Load from another client's checkpoints
             </button>
           </>
         )}
@@ -17303,7 +17352,18 @@ function OtherClientCheckpointPicker({ onClose, onCloseAll, switchClient, setTab
   const pickClient = async (ds) => {
     setPickedClient(ds);
     setCpLoading(true);
-    const list = await PolicyDB.getCheckpointsByClient(ds.clientId).catch(() => []);
+    let list = await PolicyDB.getCheckpointsByClient(ds.clientId).catch(() => []);
+    // If IDB empty and client has a Drive folder, query Drive directly
+    if ((!list || list.length === 0) && ds.folderId) {
+      try {
+        const driveFiles = await driveClient.listCheckpointFiles(ds.folderId);
+        list = driveFiles.map(df => ({
+          id: 'drive:' + df.driveFileId, driveFileId: df.driveFileId,
+          clientId: ds.clientId, label: parseLabelFromCheckpointFilename(df.filename),
+          timestamp: df.modifiedTime || new Date().toISOString(), sizeBytes: df.sizeBytes || 0
+        }));
+      } catch (e) { console.warn('[Checkpoints] Drive query for', ds.clientName, 'failed:', e.message); }
+    }
     setCheckpoints(list);
     setCpLoading(false);
   };
@@ -17314,6 +17374,7 @@ function OtherClientCheckpointPicker({ onClose, onCloseAll, switchClient, setTab
     setRestoreTarget(cp);
   };
 
+  const isAuto = (label) => /^Auto-backup/i.test(label) || /^auto backup/i.test(label);
   const modalBg = {position:'fixed',inset:0,zIndex:10002,background:'rgba(0,0,0,.7)',display:'flex',alignItems:'center',justifyContent:'center',padding:16};
   const modalBox = {background:'#1a2332',borderRadius:16,border:'1px solid rgba(201,169,110,.2)',maxWidth:480,width:'100%',padding:24,boxShadow:'0 20px 60px rgba(0,0,0,.5)',maxHeight:'80vh',overflowY:'auto'};
 
@@ -17347,7 +17408,7 @@ function OtherClientCheckpointPicker({ onClose, onCloseAll, switchClient, setTab
           : <div style={{display:'flex',flexDirection:'column',gap:4}}>
               {checkpoints.map(cp => (
                 <button key={cp.id} onClick={() => handleSelect(cp)}
-                  style={{width:'100%',textAlign:'left',padding:'8px 10px',background:'var(--bg3)',border:'1px solid var(--border)',borderRadius:6,cursor:'pointer',fontSize:11}}>
+                  style={{width:'100%',textAlign:'left',padding:'8px 10px',background:'var(--bg3)',border:'1px solid var(--border)',borderRadius:6,cursor:'pointer',fontSize:11,fontStyle:isAuto(cp.label)?'italic':'normal',opacity:isAuto(cp.label)?.7:1}}>
                   <div style={{fontWeight:600,color:'var(--text)'}}>{cp.label}</div>
                   <div style={{fontSize:9,color:'var(--text3)',marginTop:2}}>
                     {fmtRelativeTime(cp.timestamp)}
@@ -17359,7 +17420,7 @@ function OtherClientCheckpointPicker({ onClose, onCloseAll, switchClient, setTab
         )}
         <div style={{display:'flex',gap:8,marginTop:16}}>
           {pickedClient && <button onClick={() => { setPickedClient(null); setCheckpoints([]); }}
-            style={{background:'var(--bg3)',color:'var(--text2)',border:'1px solid var(--border2)',borderRadius:6,padding:'6px 12px',fontSize:11,cursor:'pointer'}}>\u2190 Back</button>}
+            style={{background:'var(--bg3)',color:'var(--text2)',border:'1px solid var(--border2)',borderRadius:6,padding:'6px 12px',fontSize:11,cursor:'pointer'}}>← Back</button>}
           <button onClick={onClose} style={{background:'transparent',border:'none',color:'var(--text3)',fontSize:11,cursor:'pointer'}}>Cancel</button>
         </div>
       </div>
