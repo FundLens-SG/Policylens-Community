@@ -620,11 +620,31 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2c.2a.1';
+const APP_VERSION = 'v2.3.0-rc2c.2a.2';
 const APP_VERSION_DATE = '2026-04-15';
-const APP_VERSION_NAME = 'Hotfix: Save dropdown, unicode rendering, cross-client checkpoint listing';
+const APP_VERSION_NAME = 'Hotfix: Save dropdown visibility, PDF text-layer extraction';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2c.2a.2',
+    date: '2026-04-15',
+    name: 'Hotfix: Save dropdown visibility, PDF text-layer extraction',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Save button dropdown is now visible when opened. Previously the popover was clipped invisible by the Header container\'s overflow:hidden — switched to position:fixed with anchor-based coordinates.',
+          'Fresh PDF uploads now extract policies correctly. The text-layer fast path returned raw PDF text which the OCR stage handler tried to JSON.parse (silently returning 0 policies). Text-layer results now route to the extracting stage for AI extraction.'
+        ]
+      },
+      {
+        heading: 'Notes',
+        items: [
+          'Gemini 503 "high demand" errors during peak hours are normal Google Cloud capacity throttling, not a PolicyLens bug. The fallback chain (Gemini 2.5 → 3.1-lite → Claude Sonnet 4.6) handles this transparently.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2c.2a.1',
     date: '2026-04-15',
@@ -5429,12 +5449,20 @@ async function processJob(job) {
             inputTokens: ocrResult.inputTokens, outputTokens: ocrResult.outputTokens,
           });
         } catch(_) {}
-        // The OCR result IS the extraction result for the current pipeline
-        // (performOCR calls callAI with the full extraction prompt+schema)
         job.ocrText = ocrResult.text;
         job.ocrConfidence = ocrResult.confidence;
         job.ocrModel = ocrResult.model;
-        // Parse the result as extracted policies
+        // v2.3.0-rc2c.2a.2: Text-layer returns raw PDF text, not extracted JSON.
+        // Route to 'extracting' stage which sends it through callAI for extraction.
+        if (ocrResult.model === 'text-layer') {
+          console.log('[Queue] Text-layer OCR for', job.fileName, '— advancing to extracting stage');
+          job.stage = 'extracting';
+          job.status = 'queued';
+          job.updatedAt = Date.now();
+          await PolicyDB.putJob(job);
+          break;
+        }
+        // Tier 1/2 path: results are already extracted JSON — parse and validate
         let parsed;
         try {
           const normalized = normalizeClaudeText(ocrResult.text);
@@ -17024,6 +17052,7 @@ function CheckpointSavePopover({ open, onClose, clientId, anchorRef }) {
   const [checkpoints, setCheckpoints] = useState([]);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(null); // null | 'new' | checkpointId
+  const [position, setPosition] = useState({top:0,right:0});
   const ref = useRef(null);
   const isDrive = getDriveStatus() === 'connected' && !isDriveLocalOnly();
 
@@ -17046,8 +17075,22 @@ function CheckpointSavePopover({ open, onClose, clientId, anchorRef }) {
     return () => document.removeEventListener('mousedown', h);
   }, [open, anchorRef]);
 
+  // v2.3.0-rc2c.2a.2: Compute fixed position from anchor button rect.
+  // Header container has overflow:hidden which clips position:absolute popovers.
+  useEffect(() => {
+    if (!open || !anchorRef?.current) return;
+    const update = () => {
+      const rect = anchorRef.current.getBoundingClientRect();
+      setPosition({ top: rect.bottom + 4, right: window.innerWidth - rect.right });
+    };
+    update();
+    window.addEventListener('resize', update);
+    window.addEventListener('scroll', update, true);
+    return () => { window.removeEventListener('resize', update); window.removeEventListener('scroll', update, true); };
+  }, [open, anchorRef]);
+
   if (!open) return null;
-  const popStyle = {position:'absolute',top:'100%',right:0,marginTop:4,width:280,background:'#1a2332',border:'1px solid rgba(201,169,110,.25)',borderRadius:10,boxShadow:'0 8px 32px rgba(0,0,0,.5)',zIndex:9999,padding:8,fontSize:11};
+  const popStyle = {position:'fixed',top:position.top,right:position.right,width:280,background:'#1a2332',border:'1px solid rgba(201,169,110,.25)',borderRadius:10,boxShadow:'0 8px 32px rgba(0,0,0,.5)',zIndex:9999,padding:8,fontSize:11};
 
   const handleNew = async () => {
     const label = window.prompt('Checkpoint label (leave blank for auto-date):', '');
