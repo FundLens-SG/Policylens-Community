@@ -620,11 +620,25 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2c.2a.2';
+const APP_VERSION = 'v2.3.0-rc2c.2a.3';
 const APP_VERSION_DATE = '2026-04-15';
-const APP_VERSION_NAME = 'Hotfix: Save dropdown visibility, PDF text-layer extraction';
+const APP_VERSION_NAME = 'Hotfix: Auto-clear stale jobs + dynamic file-type label';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2c.2a.3',
+    date: '2026-04-15',
+    name: 'Hotfix: Auto-clear stale jobs + dynamic file-type label',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Extraction job queue auto-clears on every app launch. Previously, jobs from past sessions accumulated in IndexedDB causing the AI Extraction card to show misleading counts like "47/49 batches". Cache (extract_cache, ocr_cache) is preserved.',
+          'AI Extraction staged-files banner now shows actual file types: PDFs as "1 PDF staged", images as "1 photo staged", documents as "1 document staged". Mixed batches show breakdown. Previously everything was hardcoded as "photo".'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2c.2a.2',
     date: '2026-04-15',
@@ -3708,6 +3722,29 @@ function recordSessionCost(model, inputTokens, outputTokens) {
   _sessionCost.costUsd += computeTokenCost(model, inputTokens || 0, outputTokens || 0);
   _sessionCost.models[model] = (_sessionCost.models[model] || 0) + 1;
   window.dispatchEvent(new CustomEvent('policylens-cost-update', { detail: _sessionCost }));
+}
+
+// v2.3.0-rc2c.2a.3: Dynamic file-type label for staged files.
+function stagedFileLabel(files) {
+  const icons = {pdf:'\uD83D\uDCC4',photo:'\uD83D\uDCF7',doc:'\uD83D\uDCDD',sheet:'\uD83D\uDCCA',file:'\uD83D\uDCCE'};
+  const nouns = {pdf:['PDF','PDFs'],photo:['photo','photos'],doc:['document','documents'],sheet:['spreadsheet','spreadsheets'],file:['file','files']};
+  const counts = {pdf:0,photo:0,doc:0,sheet:0,file:0};
+  for (const s of files) {
+    const name = (s.file?.name||s.fileName||'').toLowerCase();
+    const type = (s.file?.type||s.fileType||'').toLowerCase();
+    if (type==='application/pdf'||name.endsWith('.pdf')) counts.pdf++;
+    else if (type.startsWith('image/')) counts.photo++;
+    else if (name.endsWith('.docx')||name.endsWith('.doc')) counts.doc++;
+    else if (name.endsWith('.xlsx')||name.endsWith('.xls')||name.endsWith('.csv')) counts.sheet++;
+    else counts.file++;
+  }
+  const nonZero = Object.entries(counts).filter(([,v])=>v>0);
+  if (nonZero.length===1) {
+    const [t,n] = nonZero[0];
+    return (icons[t]||'\uD83D\uDCCE')+' '+n+' '+(n>1?nouns[t][1]:nouns[t][0])+' staged';
+  }
+  const parts = nonZero.map(([t,n])=>n+' '+(n>1?nouns[t][1]:nouns[t][0])).join(', ');
+  return '\uD83D\uDCCE '+files.length+' files staged ('+parts+')';
 }
 
 function emitTelemetry(event, data) {
@@ -8601,6 +8638,12 @@ const PolicyDB = {
   putJob: (job) => dbPut('extraction_jobs', {...job, updatedAt: Date.now()}),
   getAllJobs: () => dbGetAll('extraction_jobs'),
   deleteJob: (id) => dbDel('extraction_jobs', id),
+  // v2.3.0-rc2c.2a.3: Clear all extraction job records (session-scoped cleanup).
+  clearAllJobs: async () => {
+    const all = await dbGetAll('extraction_jobs');
+    for (const j of all) await dbDel('extraction_jobs', j.id);
+    return all.length;
+  },
   getJobsByStatus: async (status) => {
     const db = await openDB();
     return new Promise((res, rej) => {
@@ -10988,6 +11031,13 @@ function App() {
       return h.includes('access_token=') || h.includes('error=') || s.includes('code=');
     } catch (_) { return false; }
   });
+
+  // v2.3.0-rc2c.2a.3: Auto-clear stale extraction jobs on every session launch.
+  useEffect(() => {
+    if (typeof _tickerActive !== 'undefined' && _tickerActive) return;
+    PolicyDB.clearAllJobs().then(n => { if (n > 0) console.log('[Init] Cleared', n, 'stale extraction job(s) from previous session(s)'); })
+      .catch(e => console.warn('[Init] Job cleanup failed:', e.message));
+  }, []);
 
   // ── v2.1.0c: OAUTH REDIRECT-RETURN HANDLER ──
   // Runs once on mount. If the URL contains an OAuth fragment from a
@@ -19439,7 +19489,7 @@ function Dashboard() {
       {welcomeStaged.length > 0 && (
         <div className="card" style={{maxWidth:420,margin:'0 auto 16px',padding:14,borderLeft:'3px solid var(--blue)',textAlign:'left'}}>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
-            <div style={{fontSize:13,fontWeight:600}}>📷 {welcomeStaged.length} photo{welcomeStaged.length>1?'s':''} staged</div>
+            <div style={{fontSize:13,fontWeight:600}}>{stagedFileLabel(welcomeStaged)}</div>
             <div style={{display:'flex',gap:6}}>
               <button className="btn-secondary btn-sm" onClick={async()=>{const files=await openCameraModal();if(files&&files.length){const newStaged=files.map(f=>({file:f,preview:URL.createObjectURL(f)}));setWelcomeStaged(prev=>[...prev,...newStaged].slice(0,200));}}}>+ More</button>
               <button className="btn-primary btn-sm" onClick={handleWelcomeExtract}>✨ Extract All</button>
@@ -26223,7 +26273,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
         <div className="card" style={{marginBottom:12,padding:14,borderLeft:'3px solid var(--blue)'}}>
           <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8,flexWrap:'wrap',gap:6}}>
             <div style={{fontSize:13,fontWeight:600}}>
-              📷 {staged.length} photo{staged.length>1?'s':''} staged
+              {stagedFileLabel(staged)}
               {(extractingCount > 0 || doneCount > 0) && (
                 <span style={{fontSize:10,fontWeight:400,color:'var(--text3)',marginLeft:6}}>
                   {doneCount > 0 && <span style={{color:'var(--green2)'}}>{doneCount} done</span>}
