@@ -620,11 +620,25 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2c.2a.3';
+const APP_VERSION = 'v2.3.0-rc2c.3a';
 const APP_VERSION_DATE = '2026-04-15';
-const APP_VERSION_NAME = 'Hotfix: Auto-clear stale jobs + dynamic file-type label';
+const APP_VERSION_NAME = 'New Client button + Life Assured badge';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2c.3a',
+    date: '2026-04-15',
+    name: 'New Client button + Life Assured badge',
+    sections: [
+      {
+        heading: 'New features',
+        items: [
+          'Prominent + New Client button in 3 places: Header (gold circle), Profile tab header, and Clients tab. Click opens a guard modal with save-first options (Save checkpoint to Drive, Save as file, Skip, Cancel) before opening the New Client modal.',
+          'Life Assured (LA) badge shown in the insurance policy list when lifeInsured differs from policy holder. Displays as a small gold "LA: <name>" badge with tooltip. Useful for dependant policies (spouse/child/parent).'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2c.2a.3',
     date: '2026-04-15',
@@ -14044,7 +14058,7 @@ function ClientsTab() {
           })}
         </div>
         <button onClick={() => setShowNewClient(true)}
-          style={{background:'var(--gold)',color:'#0b0f1a',border:'none',borderRadius:8,padding:'6px 14px',fontSize:11,fontWeight:600,cursor:'pointer'}}>
+          style={{background:'rgba(212,169,106,.15)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.4)',borderRadius:8,padding:'6px 14px',fontSize:11,fontWeight:600,cursor:'pointer'}}>
           + New Client
         </button>
       </div>
@@ -14053,7 +14067,7 @@ function ClientsTab() {
           <div style={{fontSize:40,marginBottom:12}}>👥</div>
           <p style={{fontSize:14,marginBottom:16}}>No clients yet. Create your first client to get started.</p>
           <button onClick={() => setShowNewClient(true)}
-            style={{background:'var(--gold)',color:'#0b0f1a',border:'none',borderRadius:8,padding:'8px 20px',fontSize:13,fontWeight:600,cursor:'pointer'}}>
+            style={{background:'rgba(212,169,106,.15)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.4)',borderRadius:8,padding:'8px 20px',fontSize:13,fontWeight:600,cursor:'pointer'}}>
             + New Client
           </button>
         </div>
@@ -14203,6 +14217,9 @@ function Header() {
   const isMobile = useViewportIsMobile();
   const [saveOpen, setSaveOpen] = useState(false);
   const [loadOpen, setLoadOpen] = useState(false);
+  const [newClientGuardOpen, setNewClientGuardOpen] = useState(false);
+  const [newClientModalOpen, setNewClientModalOpen] = useState(false);
+  const [newClientData, setNewClientData] = useState({allStates:[],allPolicies:[]});
   const saveButtonRef = useRef(null);
 
   // v2.3.0-rc2c.2a: First-launch toast for repurposed buttons
@@ -14236,6 +14253,9 @@ function Header() {
           {clientName && <span style={{fontSize:10,color:'var(--text3)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',minWidth:0}}>— {clientName}</span>}
         </div>
         <div style={{display:'flex',alignItems:'center',gap:4,flexShrink:0}}>
+          {/* v2.3.0-rc2c.3a: + New Client button */}
+          <button title="New Client" onClick={() => setNewClientGuardOpen(true)}
+            style={{background:'rgba(212,169,106,.15)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.4)',width:28,height:28,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:14,fontWeight:700,flexShrink:0}}>+</button>
           {/* v2.2.0-beta: Desktop sync status pill — left of Save */}
           <SyncStatusPill driveState={driveState} />
           {/* v2.3.0-rc2c.2a: Save = checkpoint popover */}
@@ -14253,6 +14273,14 @@ function Header() {
           </button>
           <CheckpointLoadModal open={loadOpen} onClose={() => setLoadOpen(false)} clientId={activeClientId}
             switchClient={switchClient} setTab={setTab} />
+          <NewClientGuardModal open={newClientGuardOpen} onClose={() => setNewClientGuardOpen(false)}
+            onProceed={async () => {
+              setNewClientGuardOpen(false);
+              const [states, pols] = await Promise.all([PolicyDB.getAllDriveStates().catch(()=>[]), dbGetAll('policies').catch(()=>[])]);
+              setNewClientData({allStates:states,allPolicies:pols});
+              setNewClientModalOpen(true);
+            }} currentClientName={clientName} />
+          {newClientModalOpen && <NewClientModal allStates={newClientData.allStates} allPolicies={newClientData.allPolicies} onClose={() => setNewClientModalOpen(false)} />}
           <button onClick={()=>window.dispatchEvent(new Event('policylens-open-guide'))}
             title="Guide"
             style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.2)',width:28,height:28,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:13,fontWeight:700,flexShrink:0}}>
@@ -17216,6 +17244,69 @@ function CheckpointSavePopover({ open, onClose, clientId, anchorRef }) {
   );
 }
 
+// v2.3.0-rc2c.3a: Gate new client creation behind explicit save choice.
+function NewClientGuardModal({ open, onClose, onProceed, currentClientName }) {
+  const [busy, setBusy] = useState(null);
+  const isDrive = getDriveStatus() === 'connected' && !isDriveLocalOnly();
+  const { activeClientId } = useContext(AppCtx);
+  if (!open) return null;
+  const handleSaveCheckpoint = async () => {
+    setBusy('checkpoint');
+    try {
+      const label = 'Auto-save before new client \u2014 ' + new Date().toLocaleString('en-SG', {dateStyle:'short',timeStyle:'short'});
+      await createCheckpoint(activeClientId, label);
+      toast('\u2713 Checkpoint saved', 'success', 3000);
+      onProceed();
+    } catch(e) { toast('\u26A0 Save failed: '+(e.message||'unknown'), 'warning', 5000); setBusy(null); }
+  };
+  const handleSaveAsFile = async () => {
+    setBusy('file');
+    try {
+      const cp = await buildCheckpointPayload(activeClientId, 'Pre-new-client save');
+      const blob = new Blob([JSON.stringify(cp,null,2)], {type:'application/json'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'PolicyLens_Checkpoint_'+(currentClientName||'Client').replace(/\s+/g,'_')+'_'+new Date().toISOString().slice(0,10)+'.json';
+      a.click();
+      URL.revokeObjectURL(url);
+      toast('\u2713 File saved', 'success', 2000);
+      onProceed();
+    } catch(e) { toast('\u26A0 Save failed: '+(e.message||'unknown'), 'warning', 5000); setBusy(null); }
+  };
+  const modalBg = {position:'fixed',inset:0,zIndex:10001,background:'rgba(0,0,0,.7)',display:'flex',alignItems:'center',justifyContent:'center',padding:16};
+  const modalBox = {background:'#1a2332',borderRadius:16,border:'1px solid rgba(201,169,110,.2)',maxWidth:440,width:'100%',padding:24,boxShadow:'0 20px 60px rgba(0,0,0,.5)'};
+  const btnStyle = (active) => ({width:'100%',padding:'12px 14px',background:active?'rgba(212,169,106,.1)':'transparent',border:'1px solid '+(active?'rgba(212,169,106,.3)':'var(--border)'),borderRadius:8,cursor:'pointer',marginBottom:8,textAlign:'left'});
+  return (
+    <div onClick={e => { if (e.target === e.currentTarget && !busy) onClose(); }} style={modalBg}>
+      <div style={modalBox}>
+        <h2 style={{fontSize:16,fontWeight:700,color:'#e8e8e8',margin:'0 0 4px'}}>Create new client?</h2>
+        <p style={{fontSize:11,color:'var(--text3)',marginBottom:16}}>
+          {currentClientName ? <>Your current client (<strong style={{color:'var(--text2)'}}>{currentClientName}</strong>) won't be lost. Save first?</> : 'Save current state before creating new client?'}
+        </p>
+        {isDrive && activeClientId && (
+          <button onClick={handleSaveCheckpoint} disabled={!!busy} style={btnStyle(true)}>
+            <div style={{fontWeight:700,fontSize:13,color:'var(--gold)'}}>{busy==='checkpoint'?'Saving\u2026':'☁ Save checkpoint to Drive'}</div>
+            <div style={{fontSize:10,color:'var(--text3)',marginTop:4}}>Snapshot saved to Drive — restore anytime via Load button.</div>
+          </button>
+        )}
+        {activeClientId && (
+          <button onClick={handleSaveAsFile} disabled={!!busy} style={btnStyle(false)}>
+            <div style={{fontWeight:700,fontSize:13,color:'var(--text)'}}>{busy==='file'?'Saving\u2026':'💾 Save as file to device'}</div>
+            <div style={{fontSize:10,color:'var(--text3)',marginTop:4}}>Download checkpoint JSON to your computer.</div>
+          </button>
+        )}
+        <button onClick={onProceed} disabled={!!busy} style={btnStyle(false)}>
+          <div style={{fontWeight:700,fontSize:13,color:'var(--text2)'}}>Skip and create new</div>
+          <div style={{fontSize:10,color:'var(--text3)',marginTop:4}}>{isDrive?'Auto-sync to Drive is still active — current client is safe in cloud.':'Current client data stays in local storage.'}</div>
+        </button>
+        <button onClick={onClose} disabled={!!busy}
+          style={{width:'100%',marginTop:4,padding:'8px',background:'transparent',border:'none',color:'var(--text3)',fontSize:11,cursor:'pointer'}}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
 // v2.3.0-rc2c.2a: RestoreChoiceModal — Replace or Copy.
 function RestoreChoiceModal({ checkpoint, onClose, switchClient, setTab, isDrive }) {
   const { activeClientId } = useContext(AppCtx);
@@ -17522,9 +17613,12 @@ function OtherClientCheckpointPicker({ onClose, onCloseAll, switchClient, setTab
 }
 
 function ProfileTab() {
-  const {clientProfile,saveProfile,apiKey,houseDefaults,tierDefinitions,policies,deletePolicy,activeClientId,driveState,setDriveState} = useContext(AppCtx);
+  const {clientProfile,saveProfile,apiKey,houseDefaults,tierDefinitions,policies,deletePolicy,activeClientId,driveState,setDriveState,switchClient,setTab} = useContext(AppCtx);
   const [p, setP] = useState(clientProfile);
   const [scanning, setScanning] = useState(false);
+  const [newClientGuardOpen, setNewClientGuardOpen] = useState(false);
+  const [newClientModalOpen, setNewClientModalOpen] = useState(false);
+  const [newClientData, setNewClientData] = useState({allStates:[],allPolicies:[]});
   const camRef = useRef(null);
   const uploadRef = useRef(null);
 
@@ -17666,6 +17760,11 @@ function ProfileTab() {
             <button onClick={() => { const now = new Date().toISOString(); set('lastReviewedAt', now); try { toast('✓ Marked as reviewed','success',2000); } catch(_){} }}
               style={{fontSize:10,fontWeight:600,padding:'4px 10px',borderRadius:6,background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',cursor:'pointer'}}>
               ✓ Mark Reviewed
+            </button>
+            {/* v2.3.0-rc2c.3a: + New Client button on Profile tab */}
+            <button onClick={() => setNewClientGuardOpen(true)}
+              style={{fontSize:10,fontWeight:600,padding:'4px 10px',borderRadius:6,background:'rgba(212,169,106,.15)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.4)',cursor:'pointer',outline:'none',whiteSpace:'nowrap'}}>
+              + New Client
             </button>
           </div>
           <p style={{fontSize:12,color:'var(--text3)',marginTop:4}}>Client details used across all policies — fill once, use everywhere</p>
@@ -18140,6 +18239,14 @@ function ProfileTab() {
         ))}
       </div>
 
+      <NewClientGuardModal open={newClientGuardOpen} onClose={() => setNewClientGuardOpen(false)}
+        onProceed={async () => {
+          setNewClientGuardOpen(false);
+          const [states, pols] = await Promise.all([PolicyDB.getAllDriveStates().catch(()=>[]), dbGetAll('policies').catch(()=>[])]);
+          setNewClientData({allStates:states,allPolicies:pols});
+          setNewClientModalOpen(true);
+        }} currentClientName={p.name} />
+      {newClientModalOpen && <NewClientModal allStates={newClientData.allStates} allPolicies={newClientData.allPolicies} onClose={() => setNewClientModalOpen(false)} />}
     </div>
   );
 }
@@ -26537,6 +26644,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
                                 {p.userRemarks && <div style={{fontSize:9,color:'var(--gold)',fontStyle:'italic',display:'flex',alignItems:'center',gap:3}}>"{p.userRemarks.length>35?p.userRemarks.substring(0,35)+'…':p.userRemarks}" <span style={{cursor:'pointer',fontSize:7,opacity:.5}} onClick={e=>{e.stopPropagation();savePolicy({...p,userRemarks:''});}}>✕</span></div>}
                                 <div style={{display:'flex',gap:3,marginTop:2,alignItems:'center',flexWrap:'wrap'}}>
                                   {bens.length>0 && bens.map((b,i)=><span key={i} style={{fontSize:7,fontWeight:700,padding:'1px 3px',borderRadius:3,background:b.c+'22',color:b.c}}>{b.l}</span>)}
+                                  {p.lifeInsured && p.lifeInsured.trim() && <span title={'Life Assured: '+p.lifeInsured} style={{fontSize:8,fontWeight:600,padding:'1px 5px',borderRadius:3,background:'rgba(212,169,106,.12)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',maxWidth:100,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>LA: {p.lifeInsured}</span>}
                                   {p.excludeFromRetirement && <span title="Excluded from retirement plan calculations" style={{fontSize:8,fontWeight:700,padding:'1px 5px',borderRadius:3,background:'rgba(244,63,94,.12)',color:'#dc2626',border:'1px solid rgba(244,63,94,.25)'}}>🚫 Not in retirement</span>}
                                 </div>
                               </td>
