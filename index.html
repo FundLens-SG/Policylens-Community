@@ -620,11 +620,32 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2c.3b.2';
+const APP_VERSION = 'v2.3.0-rc2c.3b.3';
 const APP_VERSION_DATE = '2026-04-16';
-const APP_VERSION_NAME = 'EMERGENCY HOTFIX: client switch data corruption';
+const APP_VERSION_NAME = 'Disable Supabase client data sync in Drive mode + dedupe cleanup';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2c.3b.3',
+    date: '2026-04-16',
+    name: 'Disable Supabase client data sync in Drive mode + dedupe cleanup',
+    sections: [
+      {
+        heading: 'Critical bug fix',
+        items: [
+          'Cross-device sync no longer duplicates policies. Legacy Supabase user_policies and user_client_profile tables (no clientId scoping) are now disabled when Drive mode is active. Drive is the sole source of truth for client data.',
+          'One-time cleanup on first launch: existing cross-sync duplicate policies auto-removed (keeps most-recently-updated row per clientId + policyNumber).'
+        ]
+      },
+      {
+        heading: 'Notes',
+        items: [
+          'App settings (houseDefaults, tierDefinitions) continue to sync via Supabase — FC-scoped, not client-scoped.',
+          'Non-Drive mode (legacy local-only) retains full Supabase sync unchanged.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2c.3b.2',
     date: '2026-04-16',
@@ -9174,6 +9195,14 @@ function setDriveStatus(s) {
 }
 function getDriveStatus() { return _driveStatus; }
 
+// v2.3.0-rc2c.3b.3: Drive mode = sole source of truth for client data.
+// Supabase user_policies + user_client_profile sync disabled in Drive mode
+// (no clientId scoping → causes cross-client duplication). App settings sync stays active.
+function isSupabaseClientDataSyncEnabled() {
+  try { return !(getDriveStatus() === 'connected' && !isDriveLocalOnly()); }
+  catch(_) { return true; }
+}
+
 // ── Drive file schema v2 (v2.2.0-beta) ──
 // v2 removes the redundant top-level globalAssumptions field.
 // Real data lives in clientProfile.globalAssumptions.
@@ -10524,6 +10553,7 @@ function mergePerField(localData, cloudData, localVersions, cloudVersions) {
 
 // ── Profile cloud push/pull ──
 async function sbProfilePush(profile, versions) {
+  if (!isSupabaseClientDataSyncEnabled()) return false;
   const s = getSB();
   const uid = sbGetUserId();
   if (!s || !uid) return false;
@@ -10544,6 +10574,7 @@ async function sbProfilePush(profile, versions) {
 }
 
 async function sbProfilePull() {
+  if (!isSupabaseClientDataSyncEnabled()) return null;
   const s = getSB();
   const uid = sbGetUserId();
   if (!s || !uid) return null;
@@ -10557,6 +10588,7 @@ async function sbProfilePull() {
 
 // ── Policy cloud push/pull/delete ──
 async function sbPolicyPush(policy, versions) {
+  if (!isSupabaseClientDataSyncEnabled()) return false;
   const s = getSB();
   const uid = sbGetUserId();
   if (!s || !uid || !policy?.id) return false;
@@ -10577,6 +10609,7 @@ async function sbPolicyPush(policy, versions) {
 }
 
 async function sbPolicyDelete(id) {
+  if (!isSupabaseClientDataSyncEnabled()) return false;
   const s = getSB();
   const uid = sbGetUserId();
   if (!s || !uid || !id) return false;
@@ -10592,6 +10625,7 @@ async function sbPolicyDelete(id) {
 }
 
 async function sbPoliciesPull() {
+  if (!isSupabaseClientDataSyncEnabled()) return null;
   const s = getSB();
   const uid = sbGetUserId();
   if (!s || !uid) return null;
@@ -11149,6 +11183,45 @@ function App() {
     PolicyDB.clearAllJobs().then(n => { if (n > 0) console.log('[Init] Cleared', n, 'stale extraction job(s) from previous session(s)'); })
       .catch(e => console.warn('[Init] Job cleanup failed:', e.message));
   }, []);
+
+  // v2.3.0-rc2c.3b.3: One-time dedupe of cross-sync duplicate policies (Drive mode only).
+  useEffect(() => {
+    if (loading) return;
+    const FLAG = 'policylens_rc2c3b3_dedupe_done';
+    if (localStorage.getItem(FLAG) === '1') return;
+    if (!(getDriveStatus() === 'connected' && !isDriveLocalOnly())) {
+      try { localStorage.setItem(FLAG, '1'); } catch(_) {}
+      return;
+    }
+    (async () => {
+      try {
+        const all = await dbGetAll('policies');
+        const groups = new Map();
+        for (const p of all) {
+          if (!p||!p.id) continue;
+          const pn = (p.policyNumber||'').trim().toUpperCase();
+          if (!pn) continue;
+          const key = (p.clientId||'') + '|' + pn;
+          if (!groups.has(key)) groups.set(key, []);
+          groups.get(key).push(p);
+        }
+        let del = 0;
+        for (const [,dupes] of groups) {
+          if (dupes.length <= 1) continue;
+          dupes.sort((a,b) => (b.updatedAt||0) - (a.updatedAt||0));
+          for (let i = 1; i < dupes.length; i++) {
+            try { await dbDel('policies', dupes[i].id); del++; } catch(_) {}
+          }
+        }
+        if (del > 0) {
+          console.log('[Dedupe] Removed', del, 'duplicate polic'+(del===1?'y':'ies'));
+          setPolicies(await dbGetAll('policies'));
+          try { toast('Cleaned up '+del+' duplicate polic'+(del===1?'y':'ies'), 'success', 5000); } catch(_) {}
+        } else { console.log('[Dedupe] No duplicates found'); }
+        try { localStorage.setItem(FLAG, '1'); } catch(_) {}
+      } catch (e) { console.warn('[Dedupe] Failed:', e.message); }
+    })();
+  }, [loading]);
 
   // ── v2.1.0c: OAUTH REDIRECT-RETURN HANDLER ──
   // Runs once on mount. If the URL contains an OAuth fragment from a
@@ -11743,16 +11816,18 @@ function App() {
     cloudSyncRanRef.current = true;
     console.log('[Sync] Running cloud sync for user', uid);
     try {
-      // Pull all three in parallel
+      // v2.3.0-rc2c.3b.3: Skip client data sync in Drive mode (prevents duplication)
+      const _clientSyncOn = isSupabaseClientDataSyncEnabled();
+      if (!_clientSyncOn) console.log('[Sync] Drive mode — skipping Supabase clientProfile + policies sync. Settings sync only.');
       const [cloudProfileRec, cloudPolicyRecs, cloudSettingsRec] = await Promise.all([
-        sbProfilePull(),
-        sbPoliciesPull(),
+        _clientSyncOn ? sbProfilePull() : Promise.resolve(null),
+        _clientSyncOn ? sbPoliciesPull() : Promise.resolve(null),
         sbAppSettingsPull(),
       ]);
-      const cloudProfile = cloudProfileRec; // {data, versions} | null
-      const cloudPolicies = cloudPolicyRecs || []; // [{id, data, versions, deleted}]
-      const cloudSettings = cloudSettingsRec; // {data, versions} | null
-      console.log('[Sync] Cloud:', cloudProfile ? 'profile yes' : 'profile no', '·', cloudPolicies.length, 'policies', '·', cloudSettings ? 'settings yes' : 'settings no');
+      const cloudProfile = cloudProfileRec;
+      const cloudPolicies = cloudPolicyRecs || [];
+      const cloudSettings = cloudSettingsRec;
+      console.log('[Sync] Cloud:', cloudProfile ? 'profile yes' : 'profile skipped/no', '·', cloudPolicies.length, 'policies', '·', cloudSettings ? 'settings yes' : 'settings no');
 
       // First-sync detection
       const initFlagRec = await dbGet('settings', 'cloudSyncInitialized').catch(() => null);
@@ -12060,52 +12135,32 @@ function App() {
       }
       return false;
     };
-    const channel = sb.channel('user-data-' + uid)
-      .on('postgres_changes', {
-        event: '*',
-        schema: 'public',
-        table: 'user_policies',
-        filter: 'user_id=eq.' + uid,
-      }, async (payload) => {
-        try {
-          console.log('[Realtime] Policy event:', payload.eventType, payload.new?.id || payload.old?.id);
-          if (shouldSkipRealtime()) return;
-          if (runCloudSyncRef.current) {
-            await runCloudSyncRef.current({ force: true });
-          }
-        } catch (err) { console.warn('[Realtime] Policy handler error:', err); }
-      })
-      .on('postgres_changes', {
-        event: '*',
-        schema: 'public',
-        table: 'user_client_profile',
-        filter: 'user_id=eq.' + uid,
-      }, async (payload) => {
-        try {
-          console.log('[Realtime] Profile event:', payload.eventType);
-          if (shouldSkipRealtime()) return;
-          if (runCloudSyncRef.current) {
-            await runCloudSyncRef.current({ force: true });
-          }
-        } catch (err) { console.warn('[Realtime] Profile handler error:', err); }
-      })
-      .on('postgres_changes', {
-        event: '*',
-        schema: 'public',
-        table: 'user_app_settings',
-        filter: 'user_id=eq.' + uid,
-      }, async (payload) => {
-        try {
-          console.log('[Realtime] Settings event:', payload.eventType);
-          if (shouldSkipRealtime()) return;
-          if (runCloudSyncRef.current) {
-            await runCloudSyncRef.current({ force: true });
-          }
-        } catch (err) { console.warn('[Realtime] Settings handler error:', err); }
-      })
-      .subscribe((status) => {
-        console.log('[Realtime] Channel status:', status);
-      });
+    // v2.3.0-rc2c.3b.3: Only subscribe to user_policies + user_client_profile when
+    // Supabase client data sync is enabled (Drive mode disables them to prevent duplication).
+    let channel = sb.channel('user-data-' + uid);
+    if (isSupabaseClientDataSyncEnabled()) {
+      channel = channel
+        .on('postgres_changes', { event:'*', schema:'public', table:'user_policies', filter:'user_id=eq.'+uid },
+          async (payload) => {
+            try { console.log('[Realtime] Policy event:', payload.eventType, payload.new?.id||payload.old?.id); if (shouldSkipRealtime()) return; if (runCloudSyncRef.current) await runCloudSyncRef.current({force:true}); }
+            catch (err) { console.warn('[Realtime] Policy handler error:', err); }
+          })
+        .on('postgres_changes', { event:'*', schema:'public', table:'user_client_profile', filter:'user_id=eq.'+uid },
+          async (payload) => {
+            try { console.log('[Realtime] Profile event:', payload.eventType); if (shouldSkipRealtime()) return; if (runCloudSyncRef.current) await runCloudSyncRef.current({force:true}); }
+            catch (err) { console.warn('[Realtime] Profile handler error:', err); }
+          });
+    } else {
+      console.log('[Realtime] Drive mode — skipping user_policies + user_client_profile subscriptions');
+    }
+    // user_app_settings always stays active (FC-scoped, no multi-client conflict)
+    channel = channel
+      .on('postgres_changes', { event:'*', schema:'public', table:'user_app_settings', filter:'user_id=eq.'+uid },
+        async (payload) => {
+          try { console.log('[Realtime] Settings event:', payload.eventType); if (shouldSkipRealtime()) return; if (runCloudSyncRef.current) await runCloudSyncRef.current({force:true}); }
+          catch (err) { console.warn('[Realtime] Settings handler error:', err); }
+        })
+      .subscribe((status) => { console.log('[Realtime] Channel status:', status); });
 
     return () => {
       console.log('[Realtime] Unsubscribing');
