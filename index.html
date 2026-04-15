@@ -620,11 +620,24 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2c.3b.1';
+const APP_VERSION = 'v2.3.0-rc2c.3b.2';
 const APP_VERSION_DATE = '2026-04-16';
-const APP_VERSION_NAME = 'EMERGENCY HOTFIX: async handler for name detection await';
+const APP_VERSION_NAME = 'EMERGENCY HOTFIX: client switch data corruption';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2c.3b.2',
+    date: '2026-04-16',
+    name: 'EMERGENCY HOTFIX: client switch data corruption',
+    sections: [
+      {
+        heading: 'Critical bug fix',
+        items: [
+          'Switching between clients no longer overwrites the destination client\'s profile with the previous client\'s data. ProfileTab local state now re-syncs on activeClientId change, auto-save is guarded against firing on re-sync, and the legacy migration runs once per client instead of once per session.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2c.3b.1',
     date: '2026-04-16',
@@ -17762,16 +17775,23 @@ function ProfileTab() {
   const camRef = useRef(null);
   const uploadRef = useRef(null);
 
-  // v2.0.3: One-shot migration of legacy top-level retirementAge / inflationRate
-  // into clientProfile.globalAssumptions. Runs once on mount per session.
-  // Old fields are LEFT IN PLACE for backward compat (if user opens v2.0.2 or
-  // earlier, those fields still work). New code reads via getRetirementAge /
-  // getInflationPct helpers which prefer globalAssumptions but fall back to
-  // the legacy keys.
-  const _migratedRef = useRef(false);
+  // v2.3.0-rc2c.3b.2: Re-sync local p to clientProfile on client switch.
+  // Prevents stale p (from previous client) being auto-saved to new client.
+  const _activeClientIdSyncRef = useRef(activeClientId);
+  const _skipNextSaveRef = useRef(true); // skip initial save on mount
   useEffect(() => {
-    if (_migratedRef.current) return;
-    _migratedRef.current = true;
+    if (_activeClientIdSyncRef.current === activeClientId) return;
+    _activeClientIdSyncRef.current = activeClientId;
+    _skipNextSaveRef.current = true;
+    setP(clientProfile);
+  }, [activeClientId, clientProfile]);
+
+  // v2.0.3: One-shot migration of legacy retirementAge / inflationRate
+  // into clientProfile.globalAssumptions. Runs once PER CLIENT.
+  const _migratedForClientRef = useRef(null);
+  useEffect(() => {
+    if (_migratedForClientRef.current === activeClientId) return;
+    _migratedForClientRef.current = activeClientId;
     const ga = (clientProfile && clientProfile.globalAssumptions) || {};
     const next = { ...ga };
     let changed = false;
@@ -17784,15 +17804,18 @@ function ProfileTab() {
       changed = true;
     }
     if (changed) {
-      console.log('[v2.0.3 migration] Copied legacy retirementAge/inflationRate into globalAssumptions');
+      console.log('[v2.0.3 migration] Copied legacy retirementAge/inflationRate into globalAssumptions for', activeClientId);
+      _skipNextSaveRef.current = true;
       setP(prev => ({ ...prev, globalAssumptions: next }));
     }
-  }, [clientProfile]);
+  }, [activeClientId, clientProfile]);
 
-  // Auto-save on change — debounced to avoid cascade on every keystroke
-  // Input fields update instantly (local state), but IndexedDB write + gap recalc waits 500ms
+  // Auto-save on change — debounced, guarded against re-sync saves
   const debouncedSave = useDebounce((profile) => { saveProfile(profile); }, 500);
-  useEffect(() => { debouncedSave(p); }, [p]);
+  useEffect(() => {
+    if (_skipNextSaveRef.current) { _skipNextSaveRef.current = false; return; }
+    debouncedSave(p);
+  }, [p]);
 
   // Pick up files dropped from Dashboard
   useEffect(() => {
