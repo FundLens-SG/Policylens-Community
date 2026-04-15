@@ -620,11 +620,34 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2c.3a';
-const APP_VERSION_DATE = '2026-04-15';
-const APP_VERSION_NAME = 'New Client button + Life Assured badge';
+const APP_VERSION = 'v2.3.0-rc2c.3b';
+const APP_VERSION_DATE = '2026-04-16';
+const APP_VERSION_NAME = 'AI Name Detection on Extraction';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2c.3b',
+    date: '2026-04-16',
+    name: 'AI Name Detection on Extraction',
+    sections: [
+      {
+        heading: 'New features',
+        items: [
+          'After extracting policies, PolicyLens scans policy owner names and prompts when a name doesn\'t match the current client. Choose: Same as current (false positive), Life Assured / Dependant, Existing client (fuzzy match suggestion), or Create as new client.',
+          'New client routing auto-saves current client to a checkpoint, then opens the New Client modal pre-filled with the detected name. Policies are attached to the new client on creation.',
+          'Clients tab + New Client button now routes through the guard modal when an active client exists — consistent UX across all entry points.'
+        ]
+      },
+      {
+        heading: 'Technical',
+        items: [
+          'Helper functions: normalizeName, normalizeNRIC, nricMatches (handles masked formats like S****567X), fuzzyNameMatch (token + substring lenient match).',
+          'collectDetectedClients scans extracted policies, groups by detected owner name, and suggests existing client matches via fuzzy lookup against drive_state records.',
+          'NewClientModal accepts optional initialName + onCreated callback for name-detection-driven creation with policy attachment.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2c.3a',
     date: '2026-04-15',
@@ -3786,6 +3809,54 @@ let _extractAbortController = null;
 // a raw response object, or (from the chunked image path) an array of
 // JSON strings. This helper coerces all shapes to a single string before
 // any .trim() / JSON.parse / regex touches the value.
+// v2.3.0-rc2c.3b: Name detection helpers for extraction routing.
+function normalizeName(name) { return (name||'').toString().trim().toLowerCase().replace(/\s+/g,' '); }
+function normalizeNRIC(nric) { return (nric||'').toString().toUpperCase().replace(/[\s\-_]/g,''); }
+function nricMatches(a, b) {
+  const na = normalizeNRIC(a), nb = normalizeNRIC(b);
+  if (!na||!nb) return false;
+  if (na===nb) return true;
+  if (/\*{2,}/.test(na)||/\*{2,}/.test(nb)) {
+    const sig = s => s.length>=5 ? s[0]+s.slice(-4) : s;
+    return sig(na)===sig(nb);
+  }
+  return false;
+}
+function fuzzyNameMatch(extracted, candidate) {
+  const a = normalizeName(extracted), b = normalizeName(candidate);
+  if (!a||!b) return false;
+  if (a===b) return true;
+  if (a.includes(b)||b.includes(a)) return true;
+  const ta = a.split(' ').filter(t=>t.length>=2), tb = b.split(' ').filter(t=>t.length>=2);
+  if (!ta.length||!tb.length) return false;
+  const setA = new Set(ta);
+  const overlap = tb.filter(t=>setA.has(t));
+  const shorter = ta.length<=tb.length?ta:tb;
+  return overlap.length>=2||(overlap.length===shorter.length&&shorter.length>=1);
+}
+
+// v2.3.0-rc2c.3b: Scan extracted policies for owner names not matching current client.
+function collectDetectedClients(policies, currentProfile, allDriveStates) {
+  const currentName = currentProfile?.name||'';
+  const detected = new Map();
+  policies.forEach((p,idx) => {
+    const ownerName = (p.policyOwner||'').trim();
+    if (!ownerName) return;
+    if (fuzzyNameMatch(ownerName, currentName)) return;
+    const key = normalizeName(ownerName);
+    if (!detected.has(key)) {
+      const candidates = (allDriveStates||[]).filter(ds => ds.clientName);
+      let suggestedMatch = null;
+      for (const ds of candidates) {
+        if (fuzzyNameMatch(ownerName, ds.clientName)) { suggestedMatch = ds; break; }
+      }
+      detected.set(key, {displayName:ownerName, policyIndices:[], suggestedMatch});
+    }
+    detected.get(key).policyIndices.push(idx);
+  });
+  return detected;
+}
+
 function normalizeClaudeText(resp) {
   if (typeof resp === 'string') return resp;
   if (Array.isArray(resp)) {
@@ -14024,11 +14095,12 @@ function RepositoryTab() {
 
 // ── v2.2.0-rc1: Clients tab ──
 function ClientsTab() {
-  const { switchClient, setTab, activeClientId, policies: activePolicies, tierDefinitions, driveState, setDriveState } = useContext(AppCtx);
+  const { switchClient, setTab, activeClientId, policies: activePolicies, tierDefinitions, driveState, setDriveState, clientName } = useContext(AppCtx);
   const [filter, setFilter] = useState('all');
   const [allStates, setAllStates] = useState([]);
   const [allPolicies, setAllPolicies] = useState([]);
   const [showNewClient, setShowNewClient] = useState(false);
+  const [clientsGuardOpen, setClientsGuardOpen] = useState(false);
   useEffect(() => {
     const load = async () => {
       setAllStates(await PolicyDB.getAllDriveStates().catch(() => []));
@@ -14057,7 +14129,7 @@ function ClientsTab() {
             );
           })}
         </div>
-        <button onClick={() => setShowNewClient(true)}
+        <button onClick={() => activeClientId ? setClientsGuardOpen(true) : setShowNewClient(true)}
           style={{background:'rgba(212,169,106,.15)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.4)',borderRadius:8,padding:'6px 14px',fontSize:11,fontWeight:600,cursor:'pointer'}}>
           + New Client
         </button>
@@ -14066,7 +14138,7 @@ function ClientsTab() {
         <div style={{textAlign:'center',padding:'60px 20px',color:'var(--text3)'}}>
           <div style={{fontSize:40,marginBottom:12}}>👥</div>
           <p style={{fontSize:14,marginBottom:16}}>No clients yet. Create your first client to get started.</p>
-          <button onClick={() => setShowNewClient(true)}
+          <button onClick={() => activeClientId ? setClientsGuardOpen(true) : setShowNewClient(true)}
             style={{background:'rgba(212,169,106,.15)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.4)',borderRadius:8,padding:'8px 20px',fontSize:13,fontWeight:600,cursor:'pointer'}}>
             + New Client
           </button>
@@ -14109,14 +14181,17 @@ function ClientsTab() {
         })}
       </div>
       {showNewClient && <NewClientModal allStates={allStates} allPolicies={allPolicies} onClose={() => setShowNewClient(false)} />}
+      <NewClientGuardModal open={clientsGuardOpen} onClose={() => setClientsGuardOpen(false)}
+        onProceed={() => { setClientsGuardOpen(false); setShowNewClient(true); }}
+        currentClientName={clientName} />
     </div>
   );
 }
 
 // ── v2.2.0-rc1: New Client modal ──
-function NewClientModal({ allStates, allPolicies, onClose }) {
+function NewClientModal({ allStates, allPolicies, onClose, initialName, onCreated }) {
   const { switchClient, setTab } = useContext(AppCtx);
-  const [name, setName] = useState('');
+  const [name, setName] = useState(initialName || '');
   const [matches, setMatches] = useState([]);
   const [profiles, setProfiles] = useState({});
   const [creating, setCreating] = useState(false);
@@ -14168,6 +14243,7 @@ function NewClientModal({ allStates, allPolicies, onClose }) {
       await dbPut('settings', { key: 'clientName_' + clientId, value: trimName });
       await switchClient(clientId);
       setTab('profile');
+      if (typeof onCreated === 'function') await onCreated(clientId);
       onClose();
       try { toast('Created client: ' + trimName, 'success'); } catch(_) {}
     } catch (err) {
@@ -17240,6 +17316,57 @@ function CheckpointSavePopover({ open, onClose, clientId, anchorRef }) {
           ))}
         </>
       )}
+    </div>
+  );
+}
+
+// v2.3.0-rc2c.3b: Review extracted owner names that don't match current client.
+function NameDetectionReviewModal({ open, detected, currentClientName, onClose, onConfirm }) {
+  const [routes, setRoutes] = useState({});
+  useEffect(() => {
+    if (!open||!detected) return;
+    const init = {};
+    for (const [key, info] of detected.entries()) {
+      init[key] = info.suggestedMatch ? 'existing:'+info.suggestedMatch.clientId : 'new';
+    }
+    setRoutes(init);
+  }, [open, detected]);
+  if (!open||!detected||detected.size===0) return null;
+  const modalBg = {position:'fixed',inset:0,zIndex:10001,background:'rgba(0,0,0,.7)',display:'flex',alignItems:'center',justifyContent:'center',padding:16};
+  const modalBox = {background:'#1a2332',borderRadius:16,border:'1px solid rgba(201,169,110,.2)',maxWidth:560,width:'100%',padding:24,boxShadow:'0 20px 60px rgba(0,0,0,.5)',maxHeight:'80vh',overflowY:'auto'};
+  return (
+    <div onClick={e => { if (e.target===e.currentTarget) onClose(); }} style={modalBg}>
+      <div style={modalBox}>
+        <h2 style={{fontSize:16,fontWeight:700,color:'#e8e8e8',margin:'0 0 4px'}}>Review extracted names</h2>
+        <p style={{fontSize:11,color:'var(--text3)',marginBottom:16}}>
+          Found {detected.size} name{detected.size>1?'s':''} that don't match <strong style={{color:'var(--text2)'}}>{currentClientName}</strong>. Choose how to route each:
+        </p>
+        {Array.from(detected.entries()).map(([key, info]) => (
+          <div key={key} style={{padding:'12px 14px',background:'var(--bg3)',border:'1px solid var(--border)',borderRadius:8,marginBottom:10}}>
+            <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',marginBottom:8}}>
+              <div style={{fontWeight:700,fontSize:13,color:'var(--text)'}}>{info.displayName}</div>
+              <div style={{fontSize:10,color:'var(--text3)'}}>{info.policyIndices.length} polic{info.policyIndices.length>1?'ies':'y'}</div>
+            </div>
+            <select value={routes[key]||'new'} onChange={e => setRoutes(r => ({...r,[key]:e.target.value}))}
+              style={{width:'100%',padding:'8px 10px',background:'var(--bg2)',border:'1px solid var(--border2)',borderRadius:6,color:'var(--text)',fontSize:11,outline:'none'}}>
+              <option value="current">Same as current client (false positive)</option>
+              <option value="lifeAssured">Life Assured / Dependant of current client</option>
+              {info.suggestedMatch && <option value={'existing:'+info.suggestedMatch.clientId}>Existing client: {info.suggestedMatch.clientName}</option>}
+              <option value="new">Create as new client</option>
+            </select>
+            <div style={{fontSize:10,color:'var(--text3)',marginTop:6,fontStyle:'italic'}}>
+              {routes[key]==='current' && '→ Keep as-is, attach to '+currentClientName}
+              {routes[key]==='lifeAssured' && '→ Set "'+info.displayName+'" as Life Assured on these policies'}
+              {routes[key]?.startsWith('existing:') && info.suggestedMatch && '→ Switch to '+info.suggestedMatch.clientName+' and add policies there'}
+              {routes[key]==='new' && '→ Auto-save current client, then create "'+info.displayName+'" as new client'}
+            </div>
+          </div>
+        ))}
+        <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:16}}>
+          <button onClick={onClose} style={{background:'transparent',color:'var(--text3)',border:'1px solid var(--border2)',borderRadius:6,padding:'8px 14px',fontSize:11,cursor:'pointer'}}>Cancel</button>
+          <button onClick={() => onConfirm(routes)} style={{background:'var(--gold)',color:'#0b0f1a',border:'none',borderRadius:6,padding:'8px 16px',fontSize:11,fontWeight:700,cursor:'pointer'}}>Apply routing →</button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -22479,7 +22606,7 @@ class ErrorBoundary extends React.Component {
 }
 
 function Policies() {
-  const {policies,savePolicy,deletePolicy,repo,apiKey,saveRepo,clientProfile,saveProfile} = useContext(AppCtx);
+  const {policies,savePolicy,deletePolicy,repo,apiKey,saveRepo,clientProfile,saveProfile,activeClientId,clientName,switchClient,setTab} = useContext(AppCtx);
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState(null);
   const [filter, setFilter] = useState('all');
@@ -22545,6 +22672,9 @@ function Policies() {
   const fileFailureRef = useRef(new Map());
   const [draftBanner, setDraftBanner] = useState(false);
   const [bulkExtracted, setBulkExtracted] = useState(null); // for verification modal
+  const [pendingNameDetection, setPendingNameDetection] = useState(null);
+  const [newClientModalOpen, setNewClientModalOpen] = useState(false);
+  const [newClientData, setNewClientData] = useState({allStates:[],allPolicies:[]});
 
   // ═══════════════════════════════════════════════════════════════
   // v15: QUEUE SUBSCRIPTION — bridges ticker events to React state
@@ -22597,6 +22727,17 @@ function Policies() {
             _pipelineVersion: EXTRACT_PIPELINE_VERSION,
           }));
           const deduped = typeof dedupePolicies === 'function' ? dedupePolicies(processed) : processed;
+          // v2.3.0-rc2c.3b: Name detection — check before opening BulkVerifyModal
+          try {
+            const allDS = await PolicyDB.getAllDriveStates().catch(()=>[]);
+            const detected = collectDetectedClients(deduped, clientProfile, allDS);
+            if (detected.size > 0) {
+              setPendingNameDetection({policies:deduped, detected});
+              setScanProgress(null);
+              setStaged(prev => prev.map(s => { if(!s._jobId) return s; const j=jobs.find(j2=>j2.id===s._jobId); return j?{...s,_status:j.stage==='done'?'done':j.stage==='failed'?'failed':j.stage==='cancelled'?'cancelled':s._status}:s; }));
+              return;
+            }
+          } catch(e) { console.warn('[NameDetect]', e.message); }
           setBulkExtracted(deduped);
           const dupsRemoved = processed.length - deduped.length;
           try { toast('✅ Imported '+deduped.length+' policies'+(dupsRemoved>0?' ('+dupsRemoved+' duplicates merged)':''),'success',5000); } catch(_) {}
@@ -26758,6 +26899,66 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
       </>)}
 
       {/* Bulk Verification Modal */}
+      {/* v2.3.0-rc2c.3b: Name Detection Review Modal */}
+      {pendingNameDetection && <NameDetectionReviewModal
+        open={true}
+        detected={pendingNameDetection.detected}
+        currentClientName={clientProfile?.name||clientName}
+        onClose={() => { setBulkExtracted(pendingNameDetection.policies); setPendingNameDetection(null); }}
+        onConfirm={async (routes) => {
+          const {policies:allPols, detected} = pendingNameDetection;
+          const policyAssignments = new Map();
+          for (const [key, info] of detected.entries()) {
+            for (const idx of info.policyIndices) policyAssignments.set(idx, routes[key]);
+          }
+          const forCurrent = [];
+          const forNew = new Map();
+          allPols.forEach((p,idx) => {
+            const route = policyAssignments.get(idx);
+            if (!route||route==='current') { forCurrent.push(p); return; }
+            if (route==='lifeAssured') {
+              const di = Array.from(detected.values()).find(i=>i.policyIndices.includes(idx));
+              forCurrent.push({...p, lifeInsured:di?.displayName||p.policyOwner, policyOwner:clientProfile?.name||''});
+              return;
+            }
+            if (route.startsWith('existing:')) {
+              forCurrent.push(p); // simplified: toast about switch needed
+              return;
+            }
+            if (route==='new') {
+              const di = Array.from(detected.entries()).find(([,i])=>i.policyIndices.includes(idx));
+              if (!di) return;
+              const [nk,ni] = di;
+              if (!forNew.has(nk)) forNew.set(nk,{displayName:ni.displayName,policies:[]});
+              forNew.get(nk).policies.push(p);
+            }
+          });
+          if (forCurrent.length>0) setBulkExtracted(forCurrent);
+          setPendingNameDetection(null);
+          const existingRouted = Array.from(detected.entries()).filter(([k])=>routes[k]?.startsWith('existing:')).length;
+          if (existingRouted>0) try{toast(existingRouted+' name(s) routed to existing client — switch client and re-import','info',7000);}catch(_){}
+          if (forNew.size>0) {
+            try { if(activeClientId) { await createCheckpoint(activeClientId,'Auto-save before new client \u2014 '+new Date().toLocaleString('en-SG',{dateStyle:'short',timeStyle:'short'})); toast('\u2713 Auto-backed up '+clientName,'success',3000); } } catch(_){}
+            const [fk,fi] = Array.from(forNew.entries())[0];
+            window._pendingNewClientPolicies = fi.policies;
+            const [st,pl] = await Promise.all([PolicyDB.getAllDriveStates().catch(()=>[]),dbGetAll('policies').catch(()=>[])]);
+            setNewClientData({allStates:st,allPolicies:pl,initialName:fi.displayName});
+            setNewClientModalOpen(true);
+            if (forNew.size>1) try{toast('Multiple new clients detected — handling "'+fi.displayName+'" first. Re-scan for remaining.','info',7000);}catch(_){}
+          }
+        }}
+      />}
+      {newClientModalOpen && <NewClientModal allStates={newClientData.allStates} allPolicies={newClientData.allPolicies}
+        initialName={newClientData.initialName}
+        onCreated={async (clientId) => {
+          const pols = window._pendingNewClientPolicies;
+          if (pols && pols.length) {
+            for (const p of pols) await savePolicy({...p, id:'p_'+Date.now()+'_'+Math.random().toString(36).slice(2,5), clientId});
+            try{toast('\u2713 '+pols.length+' polic'+(pols.length>1?'ies':'y')+' added to new client','success',4000);}catch(_){}
+          }
+          window._pendingNewClientPolicies = null;
+        }}
+        onClose={() => { setNewClientModalOpen(false); window._pendingNewClientPolicies=null; }} />}
       {bulkExtracted && <BulkVerifyModal extracted={bulkExtracted} repo={repo} policies={policies} onSavePolicy={savePolicy} scanProgress={scanProgress} onClose={()=>{
         try{sessionStorage.removeItem('policylens_pendingExtract')}catch(e){}
         // Progressive session ends — reset accumulator and clear
