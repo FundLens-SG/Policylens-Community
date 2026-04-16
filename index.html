@@ -620,11 +620,32 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2c.3b.3';
+const APP_VERSION = 'v2.3.0-rc2c.3c';
 const APP_VERSION_DATE = '2026-04-16';
-const APP_VERSION_NAME = 'Disable Supabase client data sync in Drive mode + dedupe cleanup';
+const APP_VERSION_NAME = 'Drive Client Discovery (cross-device)';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2c.3c',
+    date: '2026-04-16',
+    name: 'Drive Client Discovery (cross-device)',
+    sections: [
+      {
+        heading: 'New features',
+        items: [
+          'Cross-device client list sync. When you sign into PolicyLens on a new device, it automatically discovers all client files from your Drive and adds them to the Clients tab. Each device maintains its own active client — discovery syncs the LIST.',
+          'New Settings → Drive Sync section with a "Discover Clients from Drive" button. Use when a client is missing on one device or after restoring files externally.'
+        ]
+      },
+      {
+        heading: 'Notes',
+        items: [
+          'Discovery only adds missing clients — never modifies or deletes existing entries. Safe to run multiple times.',
+          'Discovery does not pull policy data — click a client to load from Drive.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2c.3b.3',
     date: '2026-04-16',
@@ -9690,6 +9711,70 @@ async function handleTierChange(clientId, newTier, oldTier, localStateUpdater) {
   _tierMoveChains.set(clientId, nextChain);
 }
 
+// v2.3.0-rc2c.3c: Discover existing Drive client files and populate local drive_state.
+// Uses appProperties filter to find all autosave files in a single query.
+// Only ADDS missing rows — never modifies or deletes existing drive_state.
+async function discoverDriveClients() {
+  if (getDriveStatus() !== 'connected' || isDriveLocalOnly()) {
+    console.log('[Discovery] Skipped — Drive not connected');
+    return { added: 0, skipped: 0, errors: 0 };
+  }
+  let added = 0, skipped = 0, errors = 0;
+  try {
+    const q = encodeURIComponent("trashed=false and appProperties has { key='kind' and value='autosave' }");
+    const resp = await _driveFetch(
+      'https://www.googleapis.com/drive/v3/files?q=' + q +
+      '&fields=files(id,name,headRevisionId,modifiedTime,appProperties,parents)&pageSize=200'
+    );
+    const data = await resp.json();
+    const files = data.files || [];
+    console.log('[Discovery] Found', files.length, 'autosave file(s) in Drive');
+    const existingStates = await PolicyDB.getAllDriveStates().catch(() => []);
+    const existingClientIds = new Set(existingStates.map(s => s.clientId));
+    const existingFileIds = new Set(existingStates.map(s => s.fileId).filter(Boolean));
+    for (const file of files) {
+      try {
+        const ap = file.appProperties || {};
+        const clientId = ap.clientId;
+        if (!clientId) { errors++; continue; }
+        if (existingClientIds.has(clientId) || existingFileIds.has(file.id)) { skipped++; continue; }
+        // Parse client name from filename: "PolicyLens — <name>.json"
+        let clientName = '';
+        const m = (file.name || '').match(/^PolicyLens\s*[\u2014\-]\s*(.+?)\.json$/i);
+        if (m && m[1]) clientName = m[1].trim();
+        // Resolve parent folders for tier info (best-effort)
+        let folderId = null, tierFolderId = null, tier = null;
+        if (Array.isArray(file.parents) && file.parents.length > 0) {
+          folderId = file.parents[0];
+          try {
+            const fr = await _driveFetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(folderId) + '?fields=id,name,parents');
+            const fd = await fr.json();
+            if (Array.isArray(fd.parents) && fd.parents.length > 0) {
+              tierFolderId = fd.parents[0];
+              try {
+                const tr = await _driveFetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(tierFolderId) + '?fields=id,name');
+                const td = await tr.json();
+                if (td.name && td.name !== 'PolicyLens') tier = td.name;
+              } catch(_) {}
+            }
+          } catch(_) {}
+        }
+        await PolicyDB.saveDriveState({
+          clientId, fileId: file.id, folderId, tierFolderId,
+          tier: tier || UNASSIGNED_TIER, clientName,
+          headRevisionId: file.headRevisionId || null,
+          lastSyncedAt: file.modifiedTime || new Date().toISOString(),
+          pendingWrite: false,
+        });
+        if (clientName) try { await dbPut('settings', { key: 'clientName_' + clientId, value: clientName }); } catch(_) {}
+        added++;
+      } catch (e) { console.warn('[Discovery] File error:', file.id, e.message); errors++; }
+    }
+    console.log('[Discovery] \u2713 Added', added, 'new client(s),', skipped, 'already known,', errors, 'errors');
+  } catch (err) { console.warn('[Discovery] Failed:', err.message); errors++; }
+  return { added, skipped, errors };
+}
+
 // ── Wait for the GIS library to load (5s timeout) ──
 // Lazy-loaded via async <script> tag in <head>. If user clicks Connect
 // before the script finishes, poll for window.google.accounts.oauth2
@@ -11617,7 +11702,18 @@ function App() {
       }
 
       // 2. Determine active client
-      const refreshedStates = await PolicyDB.getAllDriveStates().catch(() => []);
+      let refreshedStates = await PolicyDB.getAllDriveStates().catch(() => []);
+      // v2.3.0-rc2c.3c: Auto-discover Drive clients when local list is empty
+      if (refreshedStates.length === 0 && getDriveStatus() === 'connected' && !isDriveLocalOnly()) {
+        console.log('[Init] No local drive_state but Drive connected — running discovery');
+        try {
+          const result = await discoverDriveClients();
+          if (result.added > 0) {
+            try { toast('Discovered ' + result.added + ' client' + (result.added===1?'':'s') + ' from Drive', 'success', 5000); } catch(_) {}
+            refreshedStates = await PolicyDB.getAllDriveStates().catch(() => []);
+          }
+        } catch (e) { console.warn('[Init] Discovery failed (non-blocking):', e.message); }
+      }
       if (refreshedStates.length > 0) {
         let savedId; try { savedId = localStorage.getItem('policylens_active_client_id'); } catch(_) {}
         const match = savedId && refreshedStates.find(s => s.clientId === savedId);
@@ -14190,7 +14286,8 @@ function ClientsTab() {
     load();
     const h = () => load();
     window.addEventListener('policylens-sync-status-change', h);
-    return () => window.removeEventListener('policylens-sync-status-change', h);
+    window.addEventListener('policylens-clients-changed', h);
+    return () => { window.removeEventListener('policylens-sync-status-change', h); window.removeEventListener('policylens-clients-changed', h); };
   }, []);
   // v2.2.0-rc2.1: Filter chips now functional (backing logic was correct since rc2.0; wiring verified)
   const filtered = filter === 'all' ? allStates : allStates.filter(ds => (ds.tier || UNASSIGNED_TIER) === filter);
@@ -32876,6 +32973,43 @@ function DriveConnectionCard() {
 // ── v2.2.0-beta: Local JSON Backup card (Settings) ──
 // Belt-and-suspenders: always available regardless of Drive state.
 // Will be removed once Drive sync is fully trusted.
+// v2.3.0-rc2c.3c: Manual client discovery from Drive.
+function DriveDiscoveryCard() {
+  const [busy, setBusy] = useState(false);
+  const isDriveOn = getDriveStatus() === 'connected' && !isDriveLocalOnly();
+  const handleDiscover = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const result = await discoverDriveClients();
+      if (result.added > 0) {
+        toast('\u2713 Discovered ' + result.added + ' new client' + (result.added===1?'':'s') + ' from Drive', 'success', 5000);
+        window.dispatchEvent(new Event('policylens-clients-changed'));
+      } else if (result.skipped > 0 && result.errors === 0) {
+        toast('All ' + result.skipped + ' Drive client' + (result.skipped===1?'':'s') + ' already on this device', 'info', 4000);
+      } else if (result.errors > 0) {
+        toast('Discovery completed with ' + result.errors + ' error(s) — see console', 'warning', 5000);
+      } else {
+        toast('No client files found in Drive', 'info', 4000);
+      }
+    } catch (e) { toast('Discovery failed: ' + (e.message || 'unknown'), 'error', 5000); }
+    finally { setBusy(false); }
+  };
+  return (
+    <div className="card" style={{marginBottom:16}}>
+      <h3 style={{fontSize:14,fontWeight:600,marginBottom:4}}>Drive Sync</h3>
+      <p style={{fontSize:11,color:'var(--text3)',marginBottom:10,lineHeight:1.5}}>
+        {isDriveOn ? 'Find clients saved in Drive that aren\'t showing on this device. Useful when switching devices or after a fresh install.'
+          : 'Connect to Google Drive first to enable cross-device sync.'}
+      </p>
+      <button onClick={handleDiscover} disabled={!isDriveOn || busy}
+        style={{background:(!isDriveOn||busy)?'rgba(212,169,106,.08)':'rgba(212,169,106,.15)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.4)',borderRadius:8,padding:'8px 16px',fontSize:12,fontWeight:600,cursor:(!isDriveOn||busy)?'not-allowed':'pointer',opacity:(!isDriveOn||busy)?.5:1}}>
+        {busy ? 'Scanning Drive\u2026' : '\uD83D\uDD0D Discover Clients from Drive'}
+      </button>
+    </div>
+  );
+}
+
 function LocalBackupCard() {
   const { policies, clientProfile, clientName, savePolicy, deletePolicy, saveProfile } = useContext(AppCtx);
   const loadRef = useRef(null);
@@ -33442,6 +33576,9 @@ function Settings() {
 
       {/* ═══ v2.2.0-beta: LOCAL BACKUP (belt-and-suspenders) ═══ */}
       <LocalBackupCard />
+
+      {/* ═══ v2.3.0-rc2c.3c: DRIVE DISCOVERY ═══ */}
+      <DriveDiscoveryCard />
 
       {/* ═══ CLOUD SYNC ═══ */}
       <CloudSyncCard />
