@@ -620,11 +620,32 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2c.4d';
+const APP_VERSION = 'v2.3.0-rc2c.4e';
 const APP_VERSION_DATE = '2026-04-17';
-const APP_VERSION_NAME = 'Fix post-connect race + migration guard + orphan cleanup';
+const APP_VERSION_NAME = 'Kill migration zombie cycle + robust orphan cleanup';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2c.4e',
+    date: '2026-04-17',
+    name: 'Kill migration zombie cycle + robust orphan cleanup',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Fixed migration prompt ("Enable Google Drive Sync?") creating zombie duplicate clients from garbage IDB data. Prompt now waits for Drive discovery to complete and checks for prior Drive usage via folder structure — survives localStorage clears.',
+          'Fixed unattached policy cleanup not running when Drive had zero clients but folder structure existed. Cleanup is now a standalone function gated on folder structure, not on client count.',
+          'Removed fragile hasEverConnected localStorage guard (from rc2c.4d) — replaced with Drive-native folder structure check that survives cache clears.'
+        ]
+      },
+      {
+        heading: 'Notes',
+        items: [
+          'Profile changes (including age) sync to other devices via Drive on window focus. Both devices must have the same client (same clientId). If age edits aren\'t appearing on another device, tab away and back to trigger refresh.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2c.4d',
     date: '2026-04-17',
@@ -9805,17 +9826,21 @@ async function handleTierChange(clientId, newTier, oldTier, localStateUpdater) {
 
 // v2.3.0-rc2c.4: Post-connect discovery flag — fires once per session after Drive connects.
 let _postConnectDiscoveryRan = false;
+// v2.3.0-rc2c.4e: Discovery session flags for migration prompt + unattached cleanup gating.
+let _discoveryCompletedThisSession = false;
+let _driveHasFolderStructure = false;
 
 // v2.3.0-rc2c.3c v2: Discover Drive client files. Returns list — does NOT modify local state.
 // Caller (FoundInDriveReviewModal) decides per-client whether to Add or Delete.
 async function discoverDriveClients() {
   if (getDriveStatus() !== 'connected' || isDriveLocalOnly()) {
     console.log('[Discovery] Skipped — Drive not connected');
-    return { found: [], skippedExisting: 0, errors: 0, driveClientIds: new Set() };
+    return { found: [], skippedExisting: 0, errors: 0, driveClientIds: new Set(), hasFolderStructure: false };
   }
   const found = [];
   const driveClientIds = new Set();
   let skippedExisting = 0, errors = 0;
+  let hasFolderStructure = false;
   try {
     // v2.3.0-rc2c.4b: Folder tree traversal (appProperties search is eventually consistent, misses new files)
     const rootId = await driveClient.ensureFolder();
@@ -9823,6 +9848,7 @@ async function discoverDriveClients() {
     const tierResp = await _driveFetch('https://www.googleapis.com/drive/v3/files?q=' + tierQ + '&fields=files(id,name)&pageSize=100');
     const tierData = await tierResp.json();
     const tierFolders = tierData.files || [];
+    hasFolderStructure = tierFolders.length > 0; // v2.3.0-rc2c.4e: signal prior Drive use
     console.log('[Discovery] Found', tierFolders.length, 'tier folder(s)');
     const existingStates = await PolicyDB.getAllDriveStates().catch(() => []);
     const existingClientIds = new Set(existingStates.map(s => s.clientId));
@@ -9881,7 +9907,7 @@ async function discoverDriveClients() {
     }
     console.log('[Discovery]', found.length, 'new,', skippedExisting, 'already known,', errors, 'errors');
   } catch (err) { console.warn('[Discovery] Failed:', err.message); errors++; }
-  return { found, skippedExisting, errors, driveClientIds };
+  return { found, skippedExisting, errors, driveClientIds, hasFolderStructure };
 }
 
 // v2.3.0-rc2c.4c: Remove local drive_state entries that no longer exist in Drive.
@@ -9909,22 +9935,29 @@ async function purgeOrphanClients(driveClientIds) {
     console.log('[Reconcile] Purged', purged, 'orphan client(s)');
     window.dispatchEvent(new Event('policylens-clients-changed'));
   }
-  // v2.3.0-rc2c.4d: Clean up unattached policies (clientId doesn't match any remaining drive_state).
-  // Only deletes policies with a non-empty clientId that references a now-gone client.
-  // Policies with empty/null clientId are preserved (legacy pre-multi-client data).
+  return purged;
+}
+
+// v2.3.0-rc2c.4e: Standalone unattached-policy cleanup (independent of purgeOrphanClients' empty-Drive safety guard).
+// Only called when Drive folder structure exists (protects first-time users with legitimate pre-migration data).
+// Deletes policies whose non-empty clientId references a client that no longer exists in drive_state.
+async function cleanupUnattachedPolicies() {
   try {
     const remainingStates = await PolicyDB.getAllDriveStates().catch(() => []);
     const validClientIds = new Set(remainingStates.map(s => s.clientId));
     const allPols = await dbGetAll('policies');
-    let orphanPols = 0;
+    let cleaned = 0;
     for (const pol of allPols) {
       if (pol.clientId && !validClientIds.has(pol.clientId)) {
-        try { if (pol.id) { await dbDel('policies', pol.id); orphanPols++; } } catch(_) {}
+        try { if (pol.id) { await dbDel('policies', pol.id); cleaned++; } } catch(_) {}
       }
     }
-    if (orphanPols > 0) console.log('[Reconcile] Cleaned up', orphanPols, 'unattached polic' + (orphanPols===1?'y':'ies'));
-  } catch (e) { console.warn('[Reconcile] Unattached policy cleanup failed:', e.message); }
-  return purged;
+    if (cleaned > 0) {
+      console.log('[Reconcile] Cleaned up', cleaned, 'unattached polic' + (cleaned===1?'y':'ies'));
+      window.dispatchEvent(new Event('policylens-clients-changed'));
+    }
+    return cleaned;
+  } catch (e) { console.warn('[Reconcile] Unattached policy cleanup failed:', e.message); return 0; }
 }
 
 // ── Wait for the GIS library to load (5s timeout) ──
@@ -11443,8 +11476,11 @@ function App() {
       console.log('[Discovery] Post-connect scan triggered');
       try {
         const result = await discoverDriveClients();
+        _discoveryCompletedThisSession = true;
+        _driveHasFolderStructure = result.hasFolderStructure;
         if (result.found.length > 0) setFoundInDrive({ found: result.found });
         await purgeOrphanClients(result.driveClientIds);
+        if (result.hasFolderStructure) await cleanupUnattachedPolicies();
       } catch (e) { console.warn('[Discovery] Post-connect scan failed:', e.message); }
     };
     runDiscoveryAndPurge();
@@ -11929,11 +11965,14 @@ function App() {
         console.log('[Init] Drive connected — scanning Drive for clients');
         try {
           const result = await discoverDriveClients();
+          _discoveryCompletedThisSession = true;
+          _driveHasFolderStructure = result.hasFolderStructure;
           if (result.found.length > 0) {
             setFoundInDrive({ found: result.found });
           }
           // v2.3.0-rc2c.4c: Purge orphan local clients (deleted from Drive elsewhere)
           const purged = await purgeOrphanClients(result.driveClientIds);
+          if (result.hasFolderStructure) await cleanupUnattachedPolicies();
           if (purged > 0) refreshedStates = await PolicyDB.getAllDriveStates().catch(() => []);
         } catch (e) { console.warn('[Init] Discovery failed (non-blocking):', e.message); }
       }
@@ -12009,9 +12048,12 @@ function App() {
       if (_driveMigrationDismissed) return;
       if (getDriveStatus() !== 'connected') return;
       if (foundInDrive) return; // v2.3.0-rc2c.4: Discovery modal takes priority
-      // v2.3.0-rc2c.4d: Don't show migration prompt if FC has used Drive before.
-      // Leftover IDB data at this point is garbage from old sync, not un-migrated data.
-      if (driveLSGet(DRIVE_LS.hasEverConnected)) return;
+      // v2.3.0-rc2c.4e: Wait for discovery to complete before deciding. Without this, prompt
+      // races with discovery and creates duplicates.
+      if (getDriveStatus() === 'connected' && !_discoveryCompletedThisSession) return;
+      // v2.3.0-rc2c.4e: If Drive has folder structure, this FC has used Drive before.
+      // Leftover IDB data is garbage, not un-migrated real data. Survives localStorage clears.
+      if (_driveHasFolderStructure) return;
       const hasData = policies.length > 0 || (clientProfile?.name && clientProfile.name.trim() !== '');
       if (!hasData) return;
       const states = await PolicyDB.getAllDriveStates().catch(() => []);
@@ -33363,8 +33405,11 @@ function DriveDiscoveryCard() {
     setBusy(true);
     try {
       const result = await discoverDriveClients();
+      _discoveryCompletedThisSession = true;
+      _driveHasFolderStructure = result.hasFolderStructure;
       // v2.3.0-rc2c.4c: Purge orphans as part of manual discover
       const purged = await purgeOrphanClients(result.driveClientIds);
+      if (result.hasFolderStructure) await cleanupUnattachedPolicies();
       if (result.found.length > 0) {
         window.dispatchEvent(new CustomEvent('policylens-discovery-found', { detail: { found: result.found } }));
         toast('Found ' + result.found.length + ' client' + (result.found.length===1?'':'s') + ' to review', 'info', 4000);
