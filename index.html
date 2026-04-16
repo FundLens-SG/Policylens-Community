@@ -622,25 +622,27 @@ const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,me
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
 const APP_VERSION = 'v2.3.0-rc2c.3c';
 const APP_VERSION_DATE = '2026-04-16';
-const APP_VERSION_NAME = 'Drive Client Discovery (cross-device)';
+const APP_VERSION_NAME = 'Drive Client Discovery with review modal';
 
 const CHANGELOG = [
   {
     version: 'v2.3.0-rc2c.3c',
     date: '2026-04-16',
-    name: 'Drive Client Discovery (cross-device)',
+    name: 'Drive Client Discovery with review modal',
     sections: [
       {
         heading: 'New features',
         items: [
-          'Cross-device client list sync. When you sign into PolicyLens on a new device, it automatically discovers all client files from your Drive and adds them to the Clients tab. Each device maintains its own active client — discovery syncs the LIST.',
-          'New Settings → Drive Sync section with a "Discover Clients from Drive" button. Use when a client is missing on one device or after restoring files externally.'
+          'Cross-device client discovery. When signing in on a new device, PolicyLens scans Drive for existing clients and opens a review modal — choose Add (sync to device) or Delete (trash from Drive) per client.',
+          'Settings → Drive Sync → "Discover Clients from Drive" button for manual rescan.',
+          'Delete from Drive requires per-row confirmation checkbox and warns about 30-day Drive trash recovery.'
         ]
       },
       {
         heading: 'Notes',
         items: [
-          'Discovery only adds missing clients — never modifies or deletes existing entries. Safe to run multiple times.',
+          'Auto-discovery only triggers when local client list is empty AND Drive connected. Manual button always available.',
+          'Cancel = skip for this session, retry next time. No changes until Apply.',
           'Discovery does not pull policy data — click a client to load from Drive.'
         ]
       }
@@ -9711,15 +9713,15 @@ async function handleTierChange(clientId, newTier, oldTier, localStateUpdater) {
   _tierMoveChains.set(clientId, nextChain);
 }
 
-// v2.3.0-rc2c.3c: Discover existing Drive client files and populate local drive_state.
-// Uses appProperties filter to find all autosave files in a single query.
-// Only ADDS missing rows — never modifies or deletes existing drive_state.
+// v2.3.0-rc2c.3c v2: Discover Drive client files. Returns list — does NOT modify local state.
+// Caller (FoundInDriveReviewModal) decides per-client whether to Add or Delete.
 async function discoverDriveClients() {
   if (getDriveStatus() !== 'connected' || isDriveLocalOnly()) {
     console.log('[Discovery] Skipped — Drive not connected');
-    return { added: 0, skipped: 0, errors: 0 };
+    return { found: [], skippedExisting: 0, errors: 0 };
   }
-  let added = 0, skipped = 0, errors = 0;
+  const found = [];
+  let skippedExisting = 0, errors = 0;
   try {
     const q = encodeURIComponent("trashed=false and appProperties has { key='kind' and value='autosave' }");
     const resp = await _driveFetch(
@@ -9728,7 +9730,7 @@ async function discoverDriveClients() {
     );
     const data = await resp.json();
     const files = data.files || [];
-    console.log('[Discovery] Found', files.length, 'autosave file(s) in Drive');
+    console.log('[Discovery] Drive returned', files.length, 'autosave file(s)');
     const existingStates = await PolicyDB.getAllDriveStates().catch(() => []);
     const existingClientIds = new Set(existingStates.map(s => s.clientId));
     const existingFileIds = new Set(existingStates.map(s => s.fileId).filter(Boolean));
@@ -9737,12 +9739,10 @@ async function discoverDriveClients() {
         const ap = file.appProperties || {};
         const clientId = ap.clientId;
         if (!clientId) { errors++; continue; }
-        if (existingClientIds.has(clientId) || existingFileIds.has(file.id)) { skipped++; continue; }
-        // Parse client name from filename: "PolicyLens — <name>.json"
+        if (existingClientIds.has(clientId) || existingFileIds.has(file.id)) { skippedExisting++; continue; }
         let clientName = '';
         const m = (file.name || '').match(/^PolicyLens\s*[\u2014\-]\s*(.+?)\.json$/i);
         if (m && m[1]) clientName = m[1].trim();
-        // Resolve parent folders for tier info (best-effort)
         let folderId = null, tierFolderId = null, tier = null;
         if (Array.isArray(file.parents) && file.parents.length > 0) {
           folderId = file.parents[0];
@@ -9759,20 +9759,17 @@ async function discoverDriveClients() {
             }
           } catch(_) {}
         }
-        await PolicyDB.saveDriveState({
+        found.push({
           clientId, fileId: file.id, folderId, tierFolderId,
-          tier: tier || UNASSIGNED_TIER, clientName,
+          tier: tier || UNASSIGNED_TIER, clientName: clientName || '(unnamed)',
           headRevisionId: file.headRevisionId || null,
-          lastSyncedAt: file.modifiedTime || new Date().toISOString(),
-          pendingWrite: false,
+          modifiedTime: file.modifiedTime || null,
         });
-        if (clientName) try { await dbPut('settings', { key: 'clientName_' + clientId, value: clientName }); } catch(_) {}
-        added++;
       } catch (e) { console.warn('[Discovery] File error:', file.id, e.message); errors++; }
     }
-    console.log('[Discovery] \u2713 Added', added, 'new client(s),', skipped, 'already known,', errors, 'errors');
+    console.log('[Discovery]', found.length, 'new,', skippedExisting, 'already known,', errors, 'errors');
   } catch (err) { console.warn('[Discovery] Failed:', err.message); errors++; }
-  return { added, skipped, errors };
+  return { found, skippedExisting, errors };
 }
 
 // ── Wait for the GIS library to load (5s timeout) ──
@@ -11251,6 +11248,7 @@ function App() {
   const [clientProfile, setClientProfile] = useState({name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[]});
   const [loading, setLoading] = useState(true);
   const [repoSource, setRepoSource] = useState('loading'); // 'supabase' | 'local' | 'loading'
+  const [foundInDrive, setFoundInDrive] = useState(null); // v2.3.0-rc2c.3c: {found:[...]}
   // v2.2.0-rc1.4: Capture OAuth-return URL state ONCE on mount.
   // _consumeOAuthRedirect strips ?code= via history.replaceState during
   // loading; without this, subsequent re-renders see empty URL.
@@ -11267,6 +11265,13 @@ function App() {
     if (typeof _tickerActive !== 'undefined' && _tickerActive) return;
     PolicyDB.clearAllJobs().then(n => { if (n > 0) console.log('[Init] Cleared', n, 'stale extraction job(s) from previous session(s)'); })
       .catch(e => console.warn('[Init] Job cleanup failed:', e.message));
+  }, []);
+
+  // v2.3.0-rc2c.3c: Listen for manual discovery event from Settings
+  useEffect(() => {
+    const h = (e) => { const f = e.detail?.found; if (f && f.length > 0) setFoundInDrive({found:f}); };
+    window.addEventListener('policylens-discovery-found', h);
+    return () => window.removeEventListener('policylens-discovery-found', h);
   }, []);
 
   // v2.3.0-rc2c.3b.3: One-time dedupe of cross-sync duplicate policies (Drive mode only).
@@ -11703,14 +11708,13 @@ function App() {
 
       // 2. Determine active client
       let refreshedStates = await PolicyDB.getAllDriveStates().catch(() => []);
-      // v2.3.0-rc2c.3c: Auto-discover Drive clients when local list is empty
+      // v2.3.0-rc2c.3c v2: Scan Drive for existing clients — open review modal instead of auto-adding
       if (refreshedStates.length === 0 && getDriveStatus() === 'connected' && !isDriveLocalOnly()) {
-        console.log('[Init] No local drive_state but Drive connected — running discovery');
+        console.log('[Init] No local drive_state but Drive connected — scanning Drive');
         try {
           const result = await discoverDriveClients();
-          if (result.added > 0) {
-            try { toast('Discovered ' + result.added + ' client' + (result.added===1?'':'s') + ' from Drive', 'success', 5000); } catch(_) {}
-            refreshedStates = await PolicyDB.getAllDriveStates().catch(() => []);
+          if (result.found.length > 0) {
+            setFoundInDrive({ found: result.found });
           }
         } catch (e) { console.warn('[Init] Discovery failed (non-blocking):', e.message); }
       }
@@ -12589,6 +12593,37 @@ function App() {
     try { toast('Client destroyed. Drive files moved to Trash (30-day recovery).', 'success'); } catch(_) {}
   };
 
+  // v2.3.0-rc2c.3c: Apply discovery review choices (Add / Delete per found client)
+  const applyDiscoveryChoices = async (foundList, choices) => {
+    let added = 0, deleted = 0, errs = 0;
+    for (const f of foundList) {
+      const choice = choices[f.clientId];
+      try {
+        if (choice === 'add') {
+          await PolicyDB.saveDriveState({
+            clientId: f.clientId, fileId: f.fileId, folderId: f.folderId, tierFolderId: f.tierFolderId,
+            tier: f.tier || UNASSIGNED_TIER, clientName: f.clientName === '(unnamed)' ? '' : f.clientName,
+            headRevisionId: f.headRevisionId, lastSyncedAt: f.modifiedTime || new Date().toISOString(), pendingWrite: false,
+          });
+          if (f.clientName && f.clientName !== '(unnamed)') try { await dbPut('settings', { key: 'clientName_' + f.clientId, value: f.clientName }); } catch(_) {}
+          added++;
+        } else if (choice === 'delete') {
+          if (f.folderId) { await driveClient.trashFolder(f.folderId); }
+          else if (f.fileId) { await _driveFetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(f.fileId), { method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify({trashed:true}) }); }
+          console.log('[Discovery] Trashed:', f.clientName, f.folderId || f.fileId);
+          deleted++;
+        }
+      } catch (e) { console.warn('[Discovery] Apply failed for', f.clientName, e.message); errs++; }
+    }
+    window.dispatchEvent(new Event('policylens-clients-changed'));
+    const parts = [];
+    if (added > 0) parts.push('Added ' + added);
+    if (deleted > 0) parts.push('Deleted ' + deleted + ' from Drive');
+    if (errs > 0) parts.push(errs + ' error(s)');
+    try { toast(parts.length > 0 ? parts.join(' \u00b7 ') : 'No changes', errs > 0 ? 'warning' : 'success', 5000); } catch(_) {}
+    return { added, deleted, errors: errs };
+  };
+
   const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,deletePolicy,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,tab,setTab,presentMode,setPresentMode,showChangelog,setShowChangelog,houseDefaults,saveHouseDefaults,tierDefinitions,saveTierDefinitions,runCloudSync:()=>runCloudSyncRef.current?.({force:true}),driveState,setDriveState,activeClientId,switchClient,destroyClient};
 
   if(loading) {
@@ -12814,6 +12849,17 @@ function App() {
         {tab==='report' && <ErrorBoundary key="report"><ReportTab /></ErrorBoundary>}
         {tab==='settings' && <Settings />}
       </div>
+      {foundInDrive && <FoundInDriveReviewModal open={true} found={foundInDrive.found}
+        onClose={() => setFoundInDrive(null)}
+        onApply={async (choices) => {
+          await applyDiscoveryChoices(foundInDrive.found, choices);
+          setFoundInDrive(null);
+          const fresh = await PolicyDB.getAllDriveStates().catch(() => []);
+          if (fresh.length > 0 && !activeClientId) {
+            const next = fresh.reduce((a,b) => (a.lastSyncedAt||'') > (b.lastSyncedAt||'') ? a : b);
+            await switchClient(next.clientId);
+          }
+        }} />}
       <OrientationLock />
     </AppCtx.Provider>
   );
@@ -17543,6 +17589,84 @@ function NameDetectionReviewModal({ open, detected, currentClientName, onClose, 
         <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:16}}>
           <button onClick={onClose} style={{background:'transparent',color:'var(--text3)',border:'1px solid var(--border2)',borderRadius:6,padding:'8px 14px',fontSize:11,cursor:'pointer'}}>Cancel</button>
           <button onClick={() => onConfirm(routes)} style={{background:'var(--gold)',color:'#0b0f1a',border:'none',borderRadius:6,padding:'8px 16px',fontSize:11,fontWeight:700,cursor:'pointer'}}>Apply routing →</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// v2.3.0-rc2c.3c: Review modal for clients found in Drive but not on this device.
+function FoundInDriveReviewModal({ open, found, onClose, onApply }) {
+  const [choices, setChoices] = useState({});
+  const [confirms, setConfirms] = useState({});
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (!open || !found) return;
+    const init = {};
+    for (const f of found) init[f.clientId] = 'add';
+    setChoices(init);
+    setConfirms({});
+  }, [open, found]);
+  if (!open || !found || found.length === 0) return null;
+  const invalidDeletes = found.filter(f => choices[f.clientId] === 'delete' && !confirms[f.clientId]);
+  const canApply = invalidDeletes.length === 0 && !busy;
+  const fmtTime = (iso) => { if (!iso) return '\u2014'; try { return new Date(iso).toLocaleString('en-SG', {dateStyle:'medium',timeStyle:'short'}); } catch(_) { return iso; } };
+  const modalBg = {position:'fixed',inset:0,zIndex:10001,background:'rgba(0,0,0,.7)',display:'flex',alignItems:'center',justifyContent:'center',padding:16};
+  const modalBox = {background:'#1a2332',borderRadius:16,border:'1px solid rgba(201,169,110,.2)',maxWidth:640,width:'100%',padding:24,boxShadow:'0 20px 60px rgba(0,0,0,.5)',maxHeight:'85vh',overflowY:'auto'};
+  return (
+    <div onClick={e => { if (e.target === e.currentTarget && !busy) onClose(); }} style={modalBg}>
+      <div style={modalBox}>
+        <h2 style={{fontSize:16,fontWeight:700,color:'#e8e8e8',margin:'0 0 4px'}}>
+          Found {found.length} client{found.length===1?'':'s'} in Drive
+        </h2>
+        <p style={{fontSize:11,color:'var(--text3)',margin:'0 0 16px',lineHeight:1.5}}>
+          These clients exist in your Drive but aren't on this device.
+          <br/><strong style={{color:'var(--gold)'}}>Add</strong> = sync to this device.
+          <strong style={{color:'#dc2626',marginLeft:6}}>Delete</strong> = permanently trash the Drive folder (recoverable 30 days).
+        </p>
+        {found.map(f => (
+          <div key={f.clientId} style={{padding:'12px 14px',background:'var(--bg3)',border:'1px solid var(--border)',borderRadius:8,marginBottom:10}}>
+            <div style={{marginBottom:8}}>
+              <div style={{fontWeight:700,fontSize:13,color:'var(--text)',marginBottom:2}}>{f.clientName}</div>
+              <div style={{fontSize:10,color:'var(--text3)'}}>Tier: {f.tier} · Last modified: {fmtTime(f.modifiedTime)}</div>
+            </div>
+            <div style={{display:'flex',gap:14,fontSize:11}}>
+              <label style={{display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}>
+                <input type="radio" name={'c_'+f.clientId} checked={choices[f.clientId]==='add'}
+                  onChange={() => { setChoices(c => ({...c,[f.clientId]:'add'})); setConfirms(cf => ({...cf,[f.clientId]:false})); }} />
+                <span style={{color:'var(--gold)',fontWeight:600}}>Add to this device</span>
+              </label>
+              <label style={{display:'flex',alignItems:'center',gap:6,cursor:'pointer'}}>
+                <input type="radio" name={'c_'+f.clientId} checked={choices[f.clientId]==='delete'}
+                  onChange={() => setChoices(c => ({...c,[f.clientId]:'delete'}))} />
+                <span style={{color:'#dc2626',fontWeight:600}}>Delete from Drive</span>
+              </label>
+            </div>
+            {choices[f.clientId] === 'delete' && (
+              <div style={{marginTop:8,padding:'8px 10px',background:'rgba(244,63,94,.08)',border:'1px solid rgba(244,63,94,.2)',borderRadius:6}}>
+                <label style={{display:'flex',alignItems:'flex-start',gap:8,cursor:'pointer',fontSize:11,color:'var(--text2)',lineHeight:1.4}}>
+                  <input type="checkbox" checked={!!confirms[f.clientId]}
+                    onChange={e => setConfirms(cf => ({...cf,[f.clientId]:e.target.checked}))} style={{marginTop:2,flexShrink:0}} />
+                  <span>I understand this permanently trashes "<strong>{f.clientName}</strong>" and all its contents from Drive.</span>
+                </label>
+              </div>
+            )}
+          </div>
+        ))}
+        {invalidDeletes.length > 0 && (
+          <div style={{padding:'8px 10px',background:'rgba(244,63,94,.08)',border:'1px solid rgba(244,63,94,.2)',borderRadius:6,marginBottom:12,fontSize:11,color:'#dc2626'}}>
+            {invalidDeletes.length} delete{invalidDeletes.length===1?'':'s'} need confirmation checkbox.
+          </div>
+        )}
+        <div style={{display:'flex',gap:8,justifyContent:'flex-end',marginTop:12}}>
+          <button onClick={onClose} disabled={busy}
+            style={{background:'transparent',color:'var(--text3)',border:'1px solid var(--border2)',borderRadius:6,padding:'8px 14px',fontSize:11,cursor:busy?'not-allowed':'pointer'}}>
+            Cancel (skip for now)
+          </button>
+          <button onClick={async () => { if (!canApply) return; setBusy(true); try { await onApply(choices); } finally { setBusy(false); } }} disabled={!canApply}
+            style={{background:canApply?'var(--gold)':'rgba(212,169,106,.3)',color:'#0b0f1a',border:'none',borderRadius:6,padding:'8px 16px',fontSize:11,fontWeight:700,cursor:canApply?'pointer':'not-allowed'}}>
+            {busy ? 'Applying\u2026' : 'Apply choices \u2192'}
+          </button>
         </div>
       </div>
     </div>
@@ -32973,7 +33097,7 @@ function DriveConnectionCard() {
 // ── v2.2.0-beta: Local JSON Backup card (Settings) ──
 // Belt-and-suspenders: always available regardless of Drive state.
 // Will be removed once Drive sync is fully trusted.
-// v2.3.0-rc2c.3c: Manual client discovery from Drive.
+// v2.3.0-rc2c.3c v2: Manual client discovery from Drive — opens review modal via event.
 function DriveDiscoveryCard() {
   const [busy, setBusy] = useState(false);
   const isDriveOn = getDriveStatus() === 'connected' && !isDriveLocalOnly();
@@ -32982,11 +33106,11 @@ function DriveDiscoveryCard() {
     setBusy(true);
     try {
       const result = await discoverDriveClients();
-      if (result.added > 0) {
-        toast('\u2713 Discovered ' + result.added + ' new client' + (result.added===1?'':'s') + ' from Drive', 'success', 5000);
-        window.dispatchEvent(new Event('policylens-clients-changed'));
-      } else if (result.skipped > 0 && result.errors === 0) {
-        toast('All ' + result.skipped + ' Drive client' + (result.skipped===1?'':'s') + ' already on this device', 'info', 4000);
+      if (result.found.length > 0) {
+        window.dispatchEvent(new CustomEvent('policylens-discovery-found', { detail: { found: result.found } }));
+        toast('Found ' + result.found.length + ' client' + (result.found.length===1?'':'s') + ' to review', 'info', 4000);
+      } else if (result.skippedExisting > 0 && result.errors === 0) {
+        toast('All ' + result.skippedExisting + ' Drive client' + (result.skippedExisting===1?'':'s') + ' already on this device', 'info', 4000);
       } else if (result.errors > 0) {
         toast('Discovery completed with ' + result.errors + ' error(s) — see console', 'warning', 5000);
       } else {
@@ -32999,7 +33123,7 @@ function DriveDiscoveryCard() {
     <div className="card" style={{marginBottom:16}}>
       <h3 style={{fontSize:14,fontWeight:600,marginBottom:4}}>Drive Sync</h3>
       <p style={{fontSize:11,color:'var(--text3)',marginBottom:10,lineHeight:1.5}}>
-        {isDriveOn ? 'Find clients saved in Drive that aren\'t showing on this device. Useful when switching devices or after a fresh install.'
+        {isDriveOn ? 'Find clients saved in Drive that aren\'t showing on this device. You can review and choose to add or delete each one.'
           : 'Connect to Google Drive first to enable cross-device sync.'}
       </p>
       <button onClick={handleDiscover} disabled={!isDriveOn || busy}
