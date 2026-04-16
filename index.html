@@ -620,11 +620,32 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2c.5m';
+const APP_VERSION = 'v2.3.0-rc2c.5n';
 const APP_VERSION_DATE = '2026-04-17';
-const APP_VERSION_NAME = 'Mobile UI cleanup + fix poll overwriting edits';
+const APP_VERSION_NAME = 'Profile live refresh + Destroy moved to Clients tab';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2c.5n',
+    date: '2026-04-17',
+    name: 'Profile live refresh + Destroy moved to Clients tab',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Fixed profile changes from Drive refresh (polling/focus/load/switch) not appearing in ProfileTab until tab switch. ProfileTab now listens for Drive refresh events and updates immediately.'
+        ]
+      },
+      {
+        heading: 'Improvements',
+        items: [
+          'Moved Destroy Client button from header to per-client delete (✕) on each client card in Clients tab. Reduces header clutter and makes deletion more intentional.',
+          'Consolidated Drive refresh state updates into shared helper function (reduces duplication across 5 call sites).',
+          'Clients tab: smaller "+ New Client" button on mobile.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2c.5m',
     date: '2026-04-17',
@@ -11638,6 +11659,8 @@ function App() {
           await PolicyDB.saveDriveState(updated);
           setDriveState(updated);
         }
+        // v2.3.0-rc2c.5n: Notify ProfileTab to re-sync
+        try { window.dispatchEvent(new CustomEvent('policylens-drive-data-refreshed', { detail: { clientProfile: driveProfile } })); } catch(_) {}
         console.log('[AutoPull] Loaded', drivePolicies.length, 'policies from Drive');
         try { toast('Loaded ' + drivePolicies.length + ' policies from Drive', 'success', 3000); } catch(_) {}
       } catch (e) {
@@ -11655,9 +11678,7 @@ function App() {
     (async () => {
       const result = await refreshClientFromDrive(activeClientId);
       if (result && result.pulled) {
-        setPolicies(result.policies.map(p => ({ ...p, clientId: activeClientId })));
-        if (result.clientProfile) { setClientProfile(result.clientProfile); setClientName(result.clientProfile.name || ''); }
-        setDriveState(result.driveState);
+        applyDriveRefresh(result, activeClientId);
         console.log('[Init] Refreshed active client from Drive');
       }
     })();
@@ -11673,11 +11694,7 @@ function App() {
     if (getDriveStatus() !== 'connected' || isDriveLocalOnly()) return;
     (async () => {
       const result = await refreshClientFromDrive(activeClientId);
-      if (result && result.pulled) {
-        setPolicies(result.policies.map(p => ({ ...p, clientId: activeClientId })));
-        if (result.clientProfile) { setClientProfile(result.clientProfile); setClientName(result.clientProfile.name || ''); }
-        setDriveState(result.driveState);
-      }
+      if (result && result.pulled) applyDriveRefresh(result, activeClientId);
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeClientId]);
@@ -11692,9 +11709,7 @@ function App() {
       try {
         const result = await refreshClientFromDrive(activeClientId);
         if (result && result.pulled) {
-          setPolicies(result.policies.map(p => ({ ...p, clientId: activeClientId })));
-          if (result.clientProfile) { setClientProfile(result.clientProfile); setClientName(result.clientProfile.name || ''); }
-          setDriveState(result.driveState);
+          applyDriveRefresh(result, activeClientId);
           console.log('[Poll] Updated from Drive');
         }
       } catch(_) {}
@@ -12000,9 +12015,7 @@ function App() {
             // v2.3.0-rc2c.4f: Delegate pull to shared helper (with internal throttle)
             const result = await refreshClientFromDrive(cid);
             if (result && result.pulled) {
-              setPolicies(result.policies.map(p => ({ ...p, clientId: cid })));
-              if (result.clientProfile) { setClientProfile(result.clientProfile); setClientName(result.clientProfile.name || ''); }
-              setDriveState(result.driveState);
+              applyDriveRefresh(result, cid);
               console.log('[Drive] Focus-refresh: pulled updated data from Drive');
             }
           } finally {
@@ -13086,6 +13099,19 @@ function App() {
     if (errs > 0) parts.push(errs + ' error(s)');
     try { toast(parts.length > 0 ? parts.join(' \u00b7 ') : 'No changes', errs > 0 ? 'warning' : 'success', 5000); } catch(_) {}
     return { added, deleted, errors: errs };
+  };
+
+  // v2.3.0-rc2c.5n: Apply Drive refresh result to React state + notify ProfileTab to re-sync.
+  const applyDriveRefresh = (result, cid) => {
+    if (!result || !result.pulled) return;
+    const clientId = cid || activeClientIdRef.current;
+    setPolicies(result.policies.map(p => ({ ...p, clientId })));
+    if (result.clientProfile) {
+      setClientProfile(result.clientProfile);
+      setClientName(result.clientProfile.name || '');
+    }
+    setDriveState(result.driveState);
+    try { window.dispatchEvent(new CustomEvent('policylens-drive-data-refreshed', { detail: { clientProfile: result.clientProfile } })); } catch(_) {}
   };
 
   const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,deletePolicy,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,tab,setTab,presentMode,setPresentMode,showChangelog,setShowChangelog,houseDefaults,saveHouseDefaults,tierDefinitions,saveTierDefinitions,runCloudSync:()=>runCloudSyncRef.current?.({force:true}),driveState,setDriveState,activeClientId,switchClient,destroyClient};
@@ -14791,7 +14817,8 @@ function RepositoryTab() {
 
 // ── v2.2.0-rc1: Clients tab ──
 function ClientsTab() {
-  const { switchClient, setTab, activeClientId, policies: activePolicies, tierDefinitions, driveState, setDriveState, clientName } = useContext(AppCtx);
+  const { switchClient, setTab, activeClientId, policies: activePolicies, tierDefinitions, driveState, setDriveState, clientName, destroyClient } = useContext(AppCtx);
+  const isMobile = useViewportIsMobile();
   const [filter, setFilter] = useState('all');
   const [allStates, setAllStates] = useState([]);
   const [allPolicies, setAllPolicies] = useState([]);
@@ -14827,7 +14854,7 @@ function ClientsTab() {
           })}
         </div>
         <button onClick={() => activeClientId ? setClientsGuardOpen(true) : setShowNewClient(true)}
-          style={{background:'rgba(212,169,106,.15)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.4)',borderRadius:8,padding:'6px 14px',fontSize:11,fontWeight:600,cursor:'pointer'}}>
+          style={{background:'rgba(212,169,106,.15)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.4)',borderRadius:8,padding:isMobile?'4px 10px':'6px 14px',fontSize:isMobile?10:11,fontWeight:600,cursor:'pointer'}}>
           + New Client
         </button>
       </div>
@@ -14854,21 +14881,38 @@ function ClientsTab() {
           return (
             <div key={ds.clientId} onClick={() => { switchClient(ds.clientId); setTab('profile'); }}
               style={{background:isActive?'rgba(212,169,106,.06)':'var(--bg2)',border:isActive?'1px solid rgba(212,169,106,.4)':'1px solid var(--border)',borderRadius:10,padding:'12px 14px',cursor:'pointer',transition:'border-color .15s'}}>
-              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between'}}>
-                <span style={{fontSize:14,fontWeight:600,color:'var(--text)'}}>{ds.clientName || 'Untitled'}</span>
-                <TierPicker
-                  currentTier={tierLabel}
-                  tierDefinitions={tierDefinitions}
-                  size="sm"
-                  onTierChange={(newTier) => {
-                    handleTierChange(ds.clientId, newTier, tierLabel, (cid, nt) => {
-                      setAllStates(prev => prev.map(s => s.clientId === cid ? {...s, tier: nt} : s));
-                      if (cid === activeClientId && driveState) {
-                        setDriveState({...driveState, tier: nt});
-                      }
-                    });
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
+                <span style={{fontSize:14,fontWeight:600,color:'var(--text)',flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{ds.clientName || 'Untitled'}</span>
+                <div style={{display:'flex',alignItems:'center',gap:6,flexShrink:0}}>
+                  <TierPicker
+                    currentTier={tierLabel}
+                    tierDefinitions={tierDefinitions}
+                    size="sm"
+                    onTierChange={(newTier) => {
+                      handleTierChange(ds.clientId, newTier, tierLabel, (cid, nt) => {
+                        setAllStates(prev => prev.map(s => s.clientId === cid ? {...s, tier: nt} : s));
+                        if (cid === activeClientId && driveState) {
+                          setDriveState({...driveState, tier: nt});
+                        }
+                      });
+                    }}
+                  />
+                  {/* v2.3.0-rc2c.5n: Per-client delete */}
+                  <button onClick={async (e) => {
+                    e.stopPropagation();
+                    const cname = ds.clientName || 'this client';
+                    if (!confirm('Destroy ' + cname + '?\n\nDrive folder will be moved to Trash (30-day recovery window).')) return;
+                    if (!confirm('Are you sure? This cannot be undone from PolicyLens.')) return;
+                    if (ds.clientId !== activeClientId) await switchClient(ds.clientId);
+                    try { await destroyClient(); toast('Client destroyed', 'success'); } catch(err) { toast('Error: ' + err.message, 'error'); }
                   }}
-                />
+                    title={'Delete ' + (ds.clientName || 'client')}
+                    style={{background:'transparent',color:'var(--text3)',border:'none',width:24,height:24,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:14,opacity:0.5,flexShrink:0}}
+                    onMouseEnter={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.color = 'var(--red)'; }}
+                    onMouseLeave={e => { e.currentTarget.style.opacity = '0.5'; e.currentTarget.style.color = 'var(--text3)'; }}>
+                    ✕
+                  </button>
+                </div>
               </div>
               <div style={{fontSize:11,color:'var(--text3)',marginTop:4}}>
                 {totalPrem > 0 ? '$' + Math.round(totalPrem).toLocaleString() + '/yr' : 'No premiums'} · {clientPols.length} {clientPols.length===1?'policy':'policies'} · {ds.lastReviewedAt ? 'reviewed ' + fmtRelativeTime(ds.lastReviewedAt) : 'never reviewed'}
@@ -14986,7 +15030,7 @@ function NewClientModal({ allStates, allPolicies, onClose, initialName, onCreate
 }
 
 function Header() {
-  const {tab,setTab,policies,clientName,clientProfile,savePolicy,deletePolicy,saveProfile,setPresentMode,driveState,activeClientId,switchClient,destroyClient} = useContext(AppCtx);
+  const {tab,setTab,policies,clientName,clientProfile,savePolicy,deletePolicy,saveProfile,setPresentMode,driveState,activeClientId,switchClient} = useContext(AppCtx);
   const isMobile = useViewportIsMobile();
   const [saveOpen, setSaveOpen] = useState(false);
   const [loadOpen, setLoadOpen] = useState(false);
@@ -15066,18 +15110,6 @@ function Header() {
             style={{background:policies.length===0?'var(--bg3)':'linear-gradient(135deg,#d4a96a,#b8935a)',color:policies.length===0?'var(--text3)':'#0b0f1a',border:'1px solid rgba(212,169,106,.3)',padding:isMobile?'0 8px':'0 10px',height:28,borderRadius:14,display:'flex',alignItems:'center',justifyContent:'center',cursor:policies.length===0?'not-allowed':'pointer',fontSize:11,fontWeight:700,flexShrink:0,opacity:policies.length===0?.4:1,gap:4}}>
             <span style={{fontSize:13}}>▶</span>{!isMobile && ' Present'}
           </button>
-          {!isMobile && <button onClick={async()=>{
-            const cname = clientProfile?.name || clientName || 'this client';
-            if(!driveState) { toast('No active client to destroy','warning'); return; }
-            if(!confirm('Destroy client '+cname+'?\n\nThis will delete their folder and all files from Google Drive. Files go to Drive Trash (30-day recovery window).\n\nThis affects ONLY this client — your other clients are untouched.')) return;
-            if(!confirm('Are you absolutely sure?\n\nThis action removes '+cname+' from your client list AND moves their Drive folder to Trash.')) return;
-            try { await destroyClient(); } catch(e) { toast('Destroy error: '+e.message,'error'); }
-          }}
-            title="Destroy client — removes from PolicyLens and moves Drive folder to Trash"
-            disabled={!driveState}
-            style={{background:'rgba(239,83,80,.08)',color:'var(--red)',border:'1px solid rgba(239,83,80,.15)',width:28,height:28,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:driveState?'pointer':'not-allowed',fontSize:11,fontWeight:700,flexShrink:0,opacity:driveState?1:.4}}>
-            🗑
-          </button>}
         </div>
       </div>
       {/* ── Row 2: Tab bar — icons + short labels, fits on one line ── */}
@@ -18529,6 +18561,17 @@ function ProfileTab() {
   // Prevents stale p (from previous client) being auto-saved to new client.
   const _activeClientIdSyncRef = useRef(activeClientId);
   const _skipNextSaveRef = useRef(true); // skip initial save on mount
+
+  // v2.3.0-rc2c.5n: Re-sync local p when Drive refresh updates clientProfile.
+  // Without this, poll/focus updates App state but ProfileTab's local p stays stale until tab switch.
+  useEffect(() => {
+    const h = (e) => {
+      const cp = e.detail?.clientProfile;
+      if (cp) { _skipNextSaveRef.current = true; setP(cp); }
+    };
+    window.addEventListener('policylens-drive-data-refreshed', h);
+    return () => window.removeEventListener('policylens-drive-data-refreshed', h);
+  }, []);
   useEffect(() => {
     if (_activeClientIdSyncRef.current === activeClientId) return;
     _activeClientIdSyncRef.current = activeClientId;
