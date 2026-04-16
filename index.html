@@ -622,11 +622,32 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2c.5q';
+const APP_VERSION = 'v2.3.0-rc2c.5r';
 const APP_VERSION_DATE = '2026-04-17';
-const APP_VERSION_NAME = 'User Management in Settings + fix tier divergence';
+const APP_VERSION_NAME = 'Auto-retry on conflict + orientation lock fix + tier await';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2c.5r',
+    date: '2026-04-17',
+    name: 'Auto-retry on conflict + orientation lock fix + tier await',
+    sections: [
+      {
+        heading: 'Architecture',
+        items: [
+          'Replaced the legacy Drive conflict modal with silent auto-retry. The modal was designed for dual-sync with field versioning; in the current Drive-only architecture with IDB-reading autosave and 30s polling, a "conflict" just means another device wrote since our last pull — the correct resolution is to fetch the fresh headRevisionId and retry, which now happens automatically. The old modal also had hidden bugs (stripped tier/lastReviewedAt on Keep Mine, cascading autosaves on Keep Theirs).'
+        ]
+      },
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Fixed tier changes sometimes only appearing on other devices after an unrelated edit. Tier picker callbacks now await the IDB write before triggering the Drive write, eliminating a race.',
+          'Fixed "only one device can edit after conflict" symptom. With auto-retry, both devices complete their writes silently and polling reconciles.',
+          'Fixed orientation lock button doing nothing on mobile. The browser requires fullscreen before screen.orientation.lock() can be called, and the call must originate from a user gesture. Fullscreen is now requested on tap, lock is applied in the onClick handler, and toast feedback shows the result. Button is hidden entirely on browsers lacking fullscreen or orientation API support.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2c.5q',
     date: '2026-04-17',
@@ -9569,14 +9590,31 @@ async function _performDriveSync(ds, clientProfile, policies, opts) {
     return true;
   } catch (err) {
     if (err instanceof DriveConflictError) {
-      window.dispatchEvent(new CustomEvent('policylens-drive-conflict', {
-        detail: { clientId: ds.clientId, fileId: ds.fileId, localHead: ds.headRevisionId }
-      }));
+      // v2.3.0-rc2c.5r: Auto-retry with fresh headRevisionId (last-write-wins).
+      console.log('[Drive] Conflict detected — auto-retrying with fresh headRevisionId');
+      try {
+        const meta = await driveClient.getFileMetadata(ds.fileId);
+        const states = await PolicyDB.getAllDriveStates();
+        const freshDs = states.find(s => s.clientId === ds.clientId) || ds;
+        const retryPayload = buildDriveClientPayload(freshDs.clientId, clientProfile, policies, { tier: freshDs.tier, lastReviewedAt: freshDs.lastReviewedAt });
+        const newHead = await driveClient.updateClientFile(freshDs.fileId, retryPayload, meta.headRevisionId);
+        await PolicyDB.saveDriveState({ ...freshDs, headRevisionId: newHead, lastSyncedAt: new Date().toISOString(), pendingWrite: false });
+        _driveSyncJustSaved = true;
+        _notifySyncStatus();
+        setTimeout(() => { _driveSyncJustSaved = false; _notifySyncStatus(); }, 1500);
+        if (opts?.showToast) { try { toast('Synced to Drive', 'success', 2000); } catch(_){} }
+        console.log('[Drive] ✓ Auto-retry succeeded');
+        return true;
+      } catch (retryErr) {
+        console.warn('[Drive] Auto-retry failed:', retryErr.message || retryErr);
+        if (opts?.showToast) { try { toast('Sync failed — will retry on next edit', 'warning', 3500); } catch(_){} }
+        return false;
+      }
     } else {
       if (opts?.showToast) { try { toast('Sync failed: ' + (err.message || err), 'error', 4000); } catch(_){} }
       else { console.warn('[Drive] Sync failed (non-blocking):', err.message || err); }
+      return false;
     }
-    return false;
   }
 }
 
@@ -12078,7 +12116,6 @@ function App() {
   // ── v2.2.0-rc1: Active client + Drive state ──
   const [activeClientId, setActiveClientId] = useState(null);
   const [driveState, setDriveState] = useState(null);
-  const [conflictData, setConflictData] = useState(null);
   const [showV22Migration, setShowV22Migration] = useState(false);
   const [v22MigrationProgress, setV22MigrationProgress] = useState(null);
 
@@ -12110,7 +12147,6 @@ function App() {
     clearTimeout(_driveSyncTimer);
     _driveSyncTimer = null;
     _notifySyncStatus();
-    setConflictData(null);
     setActiveClientId(clientId);
     activeClientIdRef.current = clientId;
     try { localStorage.setItem('policylens_active_client_id', clientId); } catch(_) {}
@@ -12131,12 +12167,7 @@ function App() {
     window.addEventListener('policylens-sync-status-change', h);
     return () => window.removeEventListener('policylens-sync-status-change', h);
   }, []);
-  // Listen for conflict events
-  useEffect(() => {
-    const h = (e) => setConflictData(e.detail);
-    window.addEventListener('policylens-drive-conflict', h);
-    return () => window.removeEventListener('policylens-drive-conflict', h);
-  }, []);
+  // v2.3.0-rc2c.5r: Conflict modal removed — _performDriveSync auto-retries on conflict.
   // ── v2.2.0-beta: Focus-based Drive refresh (refactored in v2.3.0-rc2c.4f to use refreshClientFromDrive) ──
   useEffect(() => {
     const onFocus = async () => {
@@ -12169,7 +12200,9 @@ function App() {
             _notifySyncStatus();
           }
         } else {
-          setConflictData({ clientId: ds.clientId, fileId: ds.fileId, localHead: ds.headRevisionId });
+          // v2.3.0-rc2c.5r: Pending local write detected during focus refresh.
+          // Skip pulling — let the local write complete, its own conflict path will auto-retry.
+          console.log('[Drive] Focus-refresh: pending local write — skipping pull (autosave will auto-retry on conflict)');
         }
       } catch (err) {
         console.warn('[Drive] Focus-refresh failed (non-blocking):', err.message || err);
@@ -13476,16 +13509,7 @@ function App() {
           setShowDriveMigration(false);
         }}
       />}
-      <DriveConflictModal
-        conflictData={conflictData}
-        onResolve={() => setConflictData(null)}
-        clientProfile={clientProfile}
-        clientName={clientName}
-        policies={policies}
-        savePolicy={savePolicy}
-        deletePolicy={deletePolicy}
-        saveProfile={saveProfile}
-      />
+      {/* v2.3.0-rc2c.5r: DriveConflictModal unmounted — _performDriveSync auto-retries on conflict. Component definition retained as safety net. */}
       {showV22Migration && <div style={{position:'fixed',inset:0,zIndex:10002,background:'rgba(0,0,0,.85)',display:'flex',alignItems:'center',justifyContent:'center',padding:16}}>
         <div style={{background:'#1a2332',borderRadius:16,border:'1px solid rgba(201,169,110,.2)',maxWidth:400,width:'100%',padding:'28px 24px',textAlign:'center'}}>
           <div style={{fontSize:28,marginBottom:12}}>📂</div>
@@ -14646,41 +14670,52 @@ function PresentMode() {
 //   without API: still tracks the preference for visual feedback and CSS
 //   When in 'auto' mode, the OS decides — no override.
 const OrientationLock = memo(function OrientationLock() {
-  // v2.2.0-beta: Gate on viewport width (<768px) instead of screen.orientation.lock
-  // API check. More predictable mobile/desktop split, shares the viewport listener
-  // with the sync status indicator.
   const isMobile = useViewportIsMobile();
   const [mode, setMode] = useState(() => {
     try { return localStorage.getItem('policylens-orientation-lock') || 'auto'; }
     catch(e) { return 'auto'; }
   });
+  // v2.3.0-rc2c.5r: Check both orientation API + fullscreen API. Browsers (incl. iOS Safari)
+  // that lack either will have the button hidden instead of silently failing on tap.
+  const [supported] = useState(() => {
+    if (typeof screen === 'undefined' || !screen.orientation) return false;
+    if (typeof screen.orientation.lock !== 'function') return false;
+    if (typeof document.documentElement.requestFullscreen !== 'function') return false;
+    return true;
+  });
 
-  // Apply the lock when mode changes (only fires on mobile,
-  // but the effect itself is unconditional to keep hook count constant)
-  useEffect(() => {
-    if (!isMobile) return;
-    try { localStorage.setItem('policylens-orientation-lock', mode); } catch(e) {}
-    const so = (typeof screen !== 'undefined') && screen.orientation;
-    if (!so) return;
-    const apply = async () => {
-      try {
-        if(mode === 'auto') {
-          if(so.unlock) so.unlock();
-        } else if(so.lock) {
-          await so.lock(mode === 'portrait' ? 'portrait-primary' : 'landscape-primary');
+  useEffect(() => { try { localStorage.setItem('policylens-orientation-lock', mode); } catch(e) {} }, [mode]);
+
+  if (!isMobile || !supported) return null;
+
+  // v2.3.0-rc2c.5r: Apply lock inside onClick (user gesture required by browser).
+  // Also must be in fullscreen first — request fullscreen then call lock.
+  const cycle = async () => {
+    const newMode = mode === 'auto' ? 'portrait' : mode === 'portrait' ? 'landscape' : 'auto';
+    setMode(newMode);
+    try {
+      if (newMode === 'auto') {
+        try { if (screen.orientation.unlock) screen.orientation.unlock(); } catch(_) {}
+        if (document.fullscreenElement) { try { await document.exitFullscreen(); } catch(_) {} }
+        try { toast('Orientation: Auto', 'info', 1800); } catch(_) {}
+      } else {
+        if (!document.fullscreenElement) {
+          try { await document.documentElement.requestFullscreen(); }
+          catch (fsErr) {
+            console.warn('[Orientation] fullscreen denied:', fsErr.message);
+            try { toast('Orientation lock needs fullscreen support (not available on this browser)', 'warning', 3500); } catch(_) {}
+            setMode('auto');
+            return;
+          }
         }
-      } catch(e) {
-        console.log('[Orientation] lock unavailable:', e?.message || e);
+        await screen.orientation.lock(newMode === 'portrait' ? 'portrait-primary' : 'landscape-primary');
+        try { toast('Orientation: ' + (newMode === 'portrait' ? 'Portrait' : 'Landscape'), 'success', 1800); } catch(_) {}
       }
-    };
-    apply();
-  }, [mode, isMobile]);
-
-  // v2.2.0-beta: Hide on desktop viewports (>= 768px).
-  if (!isMobile) return null;
-
-  const cycle = () => {
-    setMode(m => m === 'auto' ? 'portrait' : m === 'portrait' ? 'landscape' : 'auto');
+    } catch (err) {
+      console.warn('[Orientation] lock failed:', err.message);
+      try { toast('Orientation lock failed: ' + err.message, 'error', 3500); } catch(_) {}
+      setMode('auto');
+    }
   };
 
   const labels = {auto: 'AUTO', portrait: 'PORTRAIT', landscape: 'LANDSCAPE'};
@@ -15067,14 +15102,16 @@ function ClientsTab() {
                     currentTier={tierLabel}
                     tierDefinitions={tierDefinitions}
                     size="sm"
-                    onTierChange={(newTier) => {
-                      handleTierChange(ds.clientId, newTier, tierLabel, (cid, nt) => {
-                        setAllStates(prev => prev.map(s => s.clientId === cid ? {...s, tier: nt} : s));
-                        if (cid === activeClientId && driveState) {
-                          setDriveState({...driveState, tier: nt});
-                        }
-                      });
-                      // v2.3.0-rc2c.5p: trigger Drive write so tier change propagates via polling
+                    onTierChange={async (newTier) => {
+                      // v2.3.0-rc2c.5r: await IDB write before dispatching Drive write trigger (race fix)
+                      try {
+                        await handleTierChange(ds.clientId, newTier, tierLabel, (cid, nt) => {
+                          setAllStates(prev => prev.map(s => s.clientId === cid ? {...s, tier: nt} : s));
+                          if (cid === activeClientId && driveState) {
+                            setDriveState({...driveState, tier: nt});
+                          }
+                        });
+                      } catch(_) {}
                       try { window.dispatchEvent(new CustomEvent('policylens-trigger-drive-write', { detail: { clientId: ds.clientId } })); } catch(_) {}
                     }}
                   />
@@ -18882,10 +18919,10 @@ function ProfileTab() {
                   currentTier={tier}
                   tierDefinitions={tierDefinitions}
                   size="md"
-                  onTierChange={(newTier) => {
-                    handleTierChange(activeClientId, newTier, tier);
+                  onTierChange={async (newTier) => {
+                    // v2.3.0-rc2c.5r: await IDB write before dispatching Drive write trigger (race fix)
+                    try { await handleTierChange(activeClientId, newTier, tier); } catch(_) {}
                     if (driveState) setDriveState({...driveState, tier: newTier});
-                    // v2.3.0-rc2c.5p: trigger Drive write
                     try { window.dispatchEvent(new CustomEvent('policylens-trigger-drive-write', { detail: { clientId: activeClientId } })); } catch(_) {}
                   }}
                 />
