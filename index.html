@@ -620,11 +620,34 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2c.3c';
+const APP_VERSION = 'v2.3.0-rc2c.4';
 const APP_VERSION_DATE = '2026-04-16';
-const APP_VERSION_NAME = 'Drive Client Discovery with review modal';
+const APP_VERSION_NAME = 'Fix OAuth return sync race + post-connect discovery';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2c.4',
+    date: '2026-04-16',
+    name: 'Fix OAuth return sync race + post-connect discovery',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Fixed critical race condition where Supabase synced all policies before Drive connected on OAuth return, causing duplicate/misplaced policies on new devices.',
+          'Fixed realtime subscriptions set up for Supabase client data before Drive connection established on OAuth return.',
+          'Fixed Drive client discovery not firing on devices connecting to Drive for the first time (ran before Drive connected).',
+          'Fixed discovery not finding new Drive clients when device already had some clients synced (overly strict empty-check removed).',
+          'Fixed migration prompt and discovery modal conflicting when both triggered simultaneously after Drive connects.'
+        ]
+      },
+      {
+        heading: 'Improvements',
+        items: [
+          'Drive client discovery now triggers automatically after any Drive connection (not just on init with empty client list). Manual Settings button still available.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2c.3c',
     date: '2026-04-16',
@@ -9713,6 +9736,9 @@ async function handleTierChange(clientId, newTier, oldTier, localStateUpdater) {
   _tierMoveChains.set(clientId, nextChain);
 }
 
+// v2.3.0-rc2c.4: Post-connect discovery flag — fires once per session after Drive connects.
+let _postConnectDiscoveryRan = false;
+
 // v2.3.0-rc2c.3c v2: Discover Drive client files. Returns list — does NOT modify local state.
 // Caller (FoundInDriveReviewModal) decides per-client whether to Add or Delete.
 async function discoverDriveClients() {
@@ -11274,6 +11300,23 @@ function App() {
     return () => window.removeEventListener('policylens-discovery-found', h);
   }, []);
 
+  // v2.3.0-rc2c.4: Post-connect discovery — fires once per session after Drive connects.
+  // Covers OAuth return (Drive connects after init) + manual reconnect from Settings.
+  useEffect(() => {
+    if (loading) return;
+    const unsub = onDriveStatusChange(async () => {
+      if (_postConnectDiscoveryRan) return;
+      if (getDriveStatus() !== 'connected' || isDriveLocalOnly()) return;
+      _postConnectDiscoveryRan = true;
+      console.log('[Discovery] Post-connect scan triggered');
+      try {
+        const result = await discoverDriveClients();
+        if (result.found.length > 0) setFoundInDrive({ found: result.found });
+      } catch (e) { console.warn('[Discovery] Post-connect scan failed:', e.message); }
+    });
+    return unsub;
+  }, [loading]);
+
   // v2.3.0-rc2c.3b.3: One-time dedupe of cross-sync duplicate policies (Drive mode only).
   useEffect(() => {
     if (loading) return;
@@ -11709,7 +11752,8 @@ function App() {
       // 2. Determine active client
       let refreshedStates = await PolicyDB.getAllDriveStates().catch(() => []);
       // v2.3.0-rc2c.3c v2: Scan Drive for existing clients — open review modal instead of auto-adding
-      if (refreshedStates.length === 0 && getDriveStatus() === 'connected' && !isDriveLocalOnly()) {
+      // v2.3.0-rc2c.4: Removed refreshedStates.length === 0 gate — discovery already skips known clients internally.
+      if (getDriveStatus() === 'connected' && !isDriveLocalOnly()) {
         console.log('[Init] No local drive_state but Drive connected — scanning Drive');
         try {
           const result = await discoverDriveClients();
@@ -11789,6 +11833,7 @@ function App() {
       if (isDriveLocalOnly()) return;
       if (_driveMigrationDismissed) return;
       if (getDriveStatus() !== 'connected') return;
+      if (foundInDrive) return; // v2.3.0-rc2c.4: Discovery modal takes priority
       const hasData = policies.length > 0 || (clientProfile?.name && clientProfile.name.trim() !== '');
       if (!hasData) return;
       const states = await PolicyDB.getAllDriveStates().catch(() => []);
@@ -12180,11 +12225,23 @@ function App() {
   // can always invoke the freshest version.
   runCloudSyncRef.current = runCloudSync;
 
-  // Trigger cloud sync when local loading completes (catches the
-  // case where auth fired BEFORE the load was done — in that case
-  // the auth handler bailed and we need this useEffect to run it).
+  // Trigger cloud sync when local loading completes.
+  // v2.3.0-rc2c.4: On OAuth return, defer until Drive status resolves so
+  // isSupabaseClientDataSyncEnabled() evaluates AFTER Drive connection completes.
   useEffect(() => {
     if (loading) return;
+    if (_isOAuthReturn) {
+      console.log('[Sync] OAuth return detected — deferring cloud sync until Drive status resolves');
+      let fired = false;
+      const fire = () => {
+        if (fired) return; fired = true;
+        console.log('[Sync] Drive status resolved (status=' + getDriveStatus() + ') — running deferred cloud sync');
+        runCloudSync().catch(err => console.warn('[Sync] runCloudSync failed:', err));
+      };
+      const unsub = onDriveStatusChange(fire);
+      const timer = setTimeout(() => { unsub(); fire(); }, 10000);
+      return () => { unsub(); clearTimeout(timer); };
+    }
     runCloudSync().catch(err => console.warn('[Sync] runCloudSync failed:', err));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading]);
@@ -12210,62 +12267,58 @@ function App() {
     const sb = getSB();
     if (!sb) return;
 
-    console.log('[Realtime] Subscribing to live updates for', uid);
-    // Cooldown check shared by all three handlers — skip if EITHER:
-    //   1. We synced within the last 2 seconds (rapid event chains)
-    //   2. We pushed something to ANY synced table within the last
-    //      3 seconds (this event is almost certainly our own echo)
-    // The self-push cooldown is the more important one — it
-    // eliminates the "uploaded a policy and got 4 sync toasts"
-    // problem entirely. Cross-device events still propagate within
-    // a few seconds because the user's NEXT action (or the periodic
-    // mount-time sync) re-triggers a fresh round.
-    const REALTIME_SYNC_COOLDOWN_MS = 2000;
-    const REALTIME_PUSH_COOLDOWN_MS = 3000;
-    const shouldSkipRealtime = () => {
-      const sinceLastSync = Date.now() - lastSyncRef.current;
-      if (sinceLastSync < REALTIME_SYNC_COOLDOWN_MS) {
-        console.log('[Realtime] Skipping — synced', sinceLastSync, 'ms ago');
-        return true;
+    // v2.3.0-rc2c.4: Extract channel setup into a function so it can be deferred on OAuth return.
+    const setupRealtimeSubs = () => {
+      console.log('[Realtime] Subscribing to live updates for', uid);
+      const REALTIME_SYNC_COOLDOWN_MS = 2000;
+      const REALTIME_PUSH_COOLDOWN_MS = 3000;
+      const shouldSkipRealtime = () => {
+        const sinceLastSync = Date.now() - lastSyncRef.current;
+        if (sinceLastSync < REALTIME_SYNC_COOLDOWN_MS) { console.log('[Realtime] Skipping — synced', sinceLastSync, 'ms ago'); return true; }
+        const sinceLastPush = Date.now() - lastSelfPushRef.current;
+        if (sinceLastPush < REALTIME_PUSH_COOLDOWN_MS) { console.log('[Realtime] Skipping — self-push', sinceLastPush, 'ms ago (own echo)'); return true; }
+        return false;
+      };
+      let channel = sb.channel('user-data-' + uid);
+      if (isSupabaseClientDataSyncEnabled()) {
+        channel = channel
+          .on('postgres_changes', { event:'*', schema:'public', table:'user_policies', filter:'user_id=eq.'+uid },
+            async (payload) => {
+              try { console.log('[Realtime] Policy event:', payload.eventType, payload.new?.id||payload.old?.id); if (shouldSkipRealtime()) return; if (runCloudSyncRef.current) await runCloudSyncRef.current({force:true}); }
+              catch (err) { console.warn('[Realtime] Policy handler error:', err); }
+            })
+          .on('postgres_changes', { event:'*', schema:'public', table:'user_client_profile', filter:'user_id=eq.'+uid },
+            async (payload) => {
+              try { console.log('[Realtime] Profile event:', payload.eventType); if (shouldSkipRealtime()) return; if (runCloudSyncRef.current) await runCloudSyncRef.current({force:true}); }
+              catch (err) { console.warn('[Realtime] Profile handler error:', err); }
+            });
+      } else {
+        console.log('[Realtime] Drive mode — skipping user_policies + user_client_profile subscriptions');
       }
-      const sinceLastPush = Date.now() - lastSelfPushRef.current;
-      if (sinceLastPush < REALTIME_PUSH_COOLDOWN_MS) {
-        console.log('[Realtime] Skipping — self-push', sinceLastPush, 'ms ago (own echo)');
-        return true;
-      }
-      return false;
-    };
-    // v2.3.0-rc2c.3b.3: Only subscribe to user_policies + user_client_profile when
-    // Supabase client data sync is enabled (Drive mode disables them to prevent duplication).
-    let channel = sb.channel('user-data-' + uid);
-    if (isSupabaseClientDataSyncEnabled()) {
       channel = channel
-        .on('postgres_changes', { event:'*', schema:'public', table:'user_policies', filter:'user_id=eq.'+uid },
+        .on('postgres_changes', { event:'*', schema:'public', table:'user_app_settings', filter:'user_id=eq.'+uid },
           async (payload) => {
-            try { console.log('[Realtime] Policy event:', payload.eventType, payload.new?.id||payload.old?.id); if (shouldSkipRealtime()) return; if (runCloudSyncRef.current) await runCloudSyncRef.current({force:true}); }
-            catch (err) { console.warn('[Realtime] Policy handler error:', err); }
+            try { console.log('[Realtime] Settings event:', payload.eventType); if (shouldSkipRealtime()) return; if (runCloudSyncRef.current) await runCloudSyncRef.current({force:true}); }
+            catch (err) { console.warn('[Realtime] Settings handler error:', err); }
           })
-        .on('postgres_changes', { event:'*', schema:'public', table:'user_client_profile', filter:'user_id=eq.'+uid },
-          async (payload) => {
-            try { console.log('[Realtime] Profile event:', payload.eventType); if (shouldSkipRealtime()) return; if (runCloudSyncRef.current) await runCloudSyncRef.current({force:true}); }
-            catch (err) { console.warn('[Realtime] Profile handler error:', err); }
-          });
-    } else {
-      console.log('[Realtime] Drive mode — skipping user_policies + user_client_profile subscriptions');
-    }
-    // user_app_settings always stays active (FC-scoped, no multi-client conflict)
-    channel = channel
-      .on('postgres_changes', { event:'*', schema:'public', table:'user_app_settings', filter:'user_id=eq.'+uid },
-        async (payload) => {
-          try { console.log('[Realtime] Settings event:', payload.eventType); if (shouldSkipRealtime()) return; if (runCloudSyncRef.current) await runCloudSyncRef.current({force:true}); }
-          catch (err) { console.warn('[Realtime] Settings handler error:', err); }
-        })
-      .subscribe((status) => { console.log('[Realtime] Channel status:', status); });
-
-    return () => {
-      console.log('[Realtime] Unsubscribing');
-      try { sb.removeChannel(channel); } catch(e) { console.warn('[Realtime] Cleanup error:', e); }
+        .subscribe((status) => { console.log('[Realtime] Channel status:', status); });
+      return () => { console.log('[Realtime] Unsubscribing'); try { sb.removeChannel(channel); } catch(e) { console.warn('[Realtime] Cleanup error:', e); } };
     };
+
+    // v2.3.0-rc2c.4: Defer realtime setup on OAuth return until Drive status resolves.
+    if (_isOAuthReturn) {
+      console.log('[Realtime] OAuth return — deferring subscription setup until Drive status resolves');
+      let subCleanup = null;
+      let resolved = false;
+      const unsub = onDriveStatusChange(() => {
+        if (resolved) return; resolved = true;
+        subCleanup = setupRealtimeSubs();
+      });
+      const timer = setTimeout(() => { unsub(); if (!resolved) { resolved = true; subCleanup = setupRealtimeSubs(); } }, 10000);
+      return () => { unsub(); clearTimeout(timer); if (subCleanup) subCleanup(); };
+    }
+    const cleanup = setupRealtimeSubs();
+    return cleanup;
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [loading]);
 
