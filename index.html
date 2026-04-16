@@ -620,11 +620,32 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2c.4b';
+const APP_VERSION = 'v2.3.0-rc2c.4c';
 const APP_VERSION_DATE = '2026-04-17';
-const APP_VERSION_NAME = 'Reliable discovery + auto-pull safety net';
+const APP_VERSION_NAME = 'Drive reconciliation — purge orphan clients';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2c.4c',
+    date: '2026-04-17',
+    name: 'Drive reconciliation — purge orphan clients',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Drive is now the true source of truth for the client list. On every app load (and manual Discover), local clients that no longer exist in Drive are automatically removed. Fixes ghost clients persisting across devices after deletion.',
+          'Manual Discover from Settings now reports orphan client cleanup count in toast.'
+        ]
+      },
+      {
+        heading: 'Notes',
+        items: [
+          'Safety guard: if Drive scan finds zero clients, purge is skipped (protects against scan failures wiping local data).',
+          'Purge only removes local IDB entries — does not trash Drive folders. The Drive folder is already gone, which is why the client is orphaned.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2c.4b',
     date: '2026-04-17',
@@ -9774,9 +9795,10 @@ let _postConnectDiscoveryRan = false;
 async function discoverDriveClients() {
   if (getDriveStatus() !== 'connected' || isDriveLocalOnly()) {
     console.log('[Discovery] Skipped — Drive not connected');
-    return { found: [], skippedExisting: 0, errors: 0 };
+    return { found: [], skippedExisting: 0, errors: 0, driveClientIds: new Set() };
   }
   const found = [];
+  const driveClientIds = new Set();
   let skippedExisting = 0, errors = 0;
   try {
     // v2.3.0-rc2c.4b: Folder tree traversal (appProperties search is eventually consistent, misses new files)
@@ -9807,6 +9829,7 @@ async function discoverDriveClients() {
             const ap = autosave.appProperties || {};
             const clientId = ap.clientId;
             if (!clientId) { errors++; continue; }
+            driveClientIds.add(clientId); // v2.3.0-rc2c.4c: track ALL Drive clientIds (before dedup) for orphan purge
             if (existingClientIds.has(clientId) || existingFileIds.has(autosave.id)) { skippedExisting++; continue; }
             let clientName = cf.name || '';
             if (!clientName) {
@@ -9827,7 +9850,35 @@ async function discoverDriveClients() {
     }
     console.log('[Discovery]', found.length, 'new,', skippedExisting, 'already known,', errors, 'errors');
   } catch (err) { console.warn('[Discovery] Failed:', err.message); errors++; }
-  return { found, skippedExisting, errors };
+  return { found, skippedExisting, errors, driveClientIds };
+}
+
+// v2.3.0-rc2c.4c: Remove local drive_state entries that no longer exist in Drive.
+// Called after discovery. Cleans up: drive_state row, policies, clientProfile, clientName.
+// SAFETY: If driveClientIds is empty (Drive scan found nothing), do NOT purge.
+async function purgeOrphanClients(driveClientIds) {
+  if (!driveClientIds || driveClientIds.size === 0) return 0;
+  const localStates = await PolicyDB.getAllDriveStates().catch(() => []);
+  let purged = 0;
+  for (const ds of localStates) {
+    if (driveClientIds.has(ds.clientId)) continue;
+    console.log('[Reconcile] Orphan client:', ds.clientName || ds.clientId, '— not in Drive, removing local data');
+    try {
+      await dbDel('drive_state', ds.clientId);
+      const allPols = await dbGetAll('policies');
+      for (const pol of allPols.filter(p => p.clientId === ds.clientId)) {
+        if (pol.id) await dbDel('policies', pol.id);
+      }
+      try { await dbDel('settings', 'clientProfile_' + ds.clientId); } catch(_) {}
+      try { await dbDel('settings', 'clientName_' + ds.clientId); } catch(_) {}
+      purged++;
+    } catch (e) { console.warn('[Reconcile] Failed to purge', ds.clientName, e.message); }
+  }
+  if (purged > 0) {
+    console.log('[Reconcile] Purged', purged, 'orphan client(s)');
+    window.dispatchEvent(new Event('policylens-clients-changed'));
+  }
+  return purged;
 }
 
 // ── Wait for the GIS library to load (5s timeout) ──
@@ -11344,6 +11395,7 @@ function App() {
       try {
         const result = await discoverDriveClients();
         if (result.found.length > 0) setFoundInDrive({ found: result.found });
+        await purgeOrphanClients(result.driveClientIds); // v2.3.0-rc2c.4c
       } catch (e) { console.warn('[Discovery] Post-connect scan failed:', e.message); }
     });
     return unsub;
@@ -11823,12 +11875,15 @@ function App() {
       // v2.3.0-rc2c.3c v2: Scan Drive for existing clients — open review modal instead of auto-adding
       // v2.3.0-rc2c.4: Removed refreshedStates.length === 0 gate — discovery already skips known clients internally.
       if (getDriveStatus() === 'connected' && !isDriveLocalOnly()) {
-        console.log('[Init] No local drive_state but Drive connected — scanning Drive');
+        console.log('[Init] Drive connected — scanning Drive for clients');
         try {
           const result = await discoverDriveClients();
           if (result.found.length > 0) {
             setFoundInDrive({ found: result.found });
           }
+          // v2.3.0-rc2c.4c: Purge orphan local clients (deleted from Drive elsewhere)
+          const purged = await purgeOrphanClients(result.driveClientIds);
+          if (purged > 0) refreshedStates = await PolicyDB.getAllDriveStates().catch(() => []);
         } catch (e) { console.warn('[Init] Discovery failed (non-blocking):', e.message); }
       }
       if (refreshedStates.length > 0) {
@@ -33254,9 +33309,13 @@ function DriveDiscoveryCard() {
     setBusy(true);
     try {
       const result = await discoverDriveClients();
+      // v2.3.0-rc2c.4c: Purge orphans as part of manual discover
+      const purged = await purgeOrphanClients(result.driveClientIds);
       if (result.found.length > 0) {
         window.dispatchEvent(new CustomEvent('policylens-discovery-found', { detail: { found: result.found } }));
         toast('Found ' + result.found.length + ' client' + (result.found.length===1?'':'s') + ' to review', 'info', 4000);
+      } else if (purged > 0) {
+        toast('Removed ' + purged + ' orphan client' + (purged===1?'':'s') + ' no longer in Drive', 'info', 4000);
       } else if (result.skippedExisting > 0 && result.errors === 0) {
         toast('All ' + result.skippedExisting + ' Drive client' + (result.skippedExisting===1?'':'s') + ' already on this device', 'info', 4000);
       } else if (result.errors > 0) {
