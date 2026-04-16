@@ -471,11 +471,13 @@ function authGrant(){
   document.getElementById('auth-loading').style.display='none';
   document.getElementById('auth-gate').style.display='none';
   document.getElementById('logout-pill').style.display='block';
-  if(_isAdmin)document.getElementById('admin-fab').style.display='flex';
+  // v2.3.0-rc2c.5q: admin-fab moved to Settings tab (User Management card)
   // Sync API keys from Supabase to IndexedDB on login
   syncKeysFromSupabase();
   // Check onboarding
   checkOnboarding();
+  // v2.3.0-rc2c.5q: Notify React of auth state change
+  try { window.dispatchEvent(new Event('policylens-auth-changed')); } catch(_) {}
 }
 
 // ── Sync API keys from Supabase user_settings → IndexedDB ──
@@ -620,11 +622,31 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2c.5p';
+const APP_VERSION = 'v2.3.0-rc2c.5q';
 const APP_VERSION_DATE = '2026-04-17';
-const APP_VERSION_NAME = 'Comprehensive sync gap closure (tier, review date, deletion)';
+const APP_VERSION_NAME = 'User Management in Settings + fix tier divergence';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2c.5q',
+    date: '2026-04-17',
+    name: 'User Management in Settings + fix tier divergence',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Fixed tier showing different values on Profile tab vs Clients tab on the same device. App-level driveState now refreshes from IDB when clients-changed fires.',
+          'Orientation lock button on mobile is no longer blocked by the admin User Management button (admin FAB hidden, z-index raised).'
+        ]
+      },
+      {
+        heading: 'Improvements',
+        items: [
+          'Moved User Management button from floating 👥 FAB to Settings tab (admins only). Cleaner mobile UI.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2c.5p',
     date: '2026-04-17',
@@ -11641,6 +11663,7 @@ function App() {
   const [loading, setLoading] = useState(true);
   const [repoSource, setRepoSource] = useState('loading'); // 'supabase' | 'local' | 'loading'
   const [foundInDrive, setFoundInDrive] = useState(null); // v2.3.0-rc2c.3c: {found:[...]}
+  const [isAdmin, setIsAdmin] = useState(() => !!window._isAdmin); // v2.3.0-rc2c.5q
   // v2.2.0-rc1.4: Capture OAuth-return URL state ONCE on mount.
   // _consumeOAuthRedirect strips ?code= via history.replaceState during
   // loading; without this, subsequent re-renders see empty URL.
@@ -11815,6 +11838,32 @@ function App() {
     return () => window.removeEventListener('policylens-client-trashed', h);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeClientId]);
+
+  // v2.3.0-rc2c.5q: Keep App driveState in sync with IDB. When IDB updates via discovery,
+  // name/tier reconciliation, or cross-device events, refresh the active client's state.
+  useEffect(() => {
+    const refresh = async () => {
+      if (!activeClientId) return;
+      try {
+        const ds = await PolicyDB.getDriveState(activeClientId);
+        if (!ds) return;
+        setDriveState(prev => {
+          if (!prev) return ds;
+          if (prev.tier !== ds.tier || prev.lastReviewedAt !== ds.lastReviewedAt || prev.clientName !== ds.clientName || prev.headRevisionId !== ds.headRevisionId) return ds;
+          return prev;
+        });
+      } catch(_) {}
+    };
+    window.addEventListener('policylens-clients-changed', refresh);
+    return () => window.removeEventListener('policylens-clients-changed', refresh);
+  }, [activeClientId]);
+
+  // v2.3.0-rc2c.5q: React isAdmin tracks window._isAdmin (set by auth flow)
+  useEffect(() => {
+    const h = () => setIsAdmin(!!window._isAdmin);
+    window.addEventListener('policylens-auth-changed', h);
+    return () => window.removeEventListener('policylens-auth-changed', h);
+  }, []);
 
   // v2.3.0-rc2c.3b.3: One-time dedupe of cross-sync duplicate policies (Drive mode only).
   useEffect(() => {
@@ -13230,7 +13279,7 @@ function App() {
     try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
   };
 
-  const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,deletePolicy,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,tab,setTab,presentMode,setPresentMode,showChangelog,setShowChangelog,houseDefaults,saveHouseDefaults,tierDefinitions,saveTierDefinitions,runCloudSync:()=>runCloudSyncRef.current?.({force:true}),driveState,setDriveState,activeClientId,switchClient,destroyClient};
+  const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,deletePolicy,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,tab,setTab,presentMode,setPresentMode,showChangelog,setShowChangelog,houseDefaults,saveHouseDefaults,tierDefinitions,saveTierDefinitions,runCloudSync:()=>runCloudSyncRef.current?.({force:true}),driveState,setDriveState,activeClientId,switchClient,destroyClient,isAdmin};
 
   if(loading) {
     if (_isOAuthReturn) return <OAuthReturnLoader />;
@@ -14647,7 +14696,7 @@ const OrientationLock = memo(function OrientationLock() {
         position:'fixed',
         bottom:14,
         right:14,
-        zIndex:1000,
+        zIndex:9997, // v2.3.0-rc2c.5q: raised to ensure visibility above other floating UI
         width:42,
         height:42,
         borderRadius:'50%',
@@ -34264,7 +34313,7 @@ function ClientTiersPanel({ tierDefinitions, saveTierDefinitions }) {
 }
 
 function Settings() {
-  const {apiKey,saveApiKey,clientName,saveClientName,policies,savePolicy,deletePolicy,houseDefaults,saveHouseDefaults,tierDefinitions,saveTierDefinitions,setShowChangelog} = useContext(AppCtx);
+  const {apiKey,saveApiKey,clientName,saveClientName,policies,savePolicy,deletePolicy,houseDefaults,saveHouseDefaults,tierDefinitions,saveTierDefinitions,setShowChangelog,isAdmin} = useContext(AppCtx);
   const [geminiKey, setGeminiKey] = useState('');
   const [anthropicKey, setAnthropicKey] = useState('');
   const [name, setName] = useState(clientName);
@@ -34366,6 +34415,18 @@ function Settings() {
 
       {/* ═══ v2.3.0-rc2c.3c: DRIVE DISCOVERY ═══ */}
       <DriveDiscoveryCard />
+
+      {/* ═══ v2.3.0-rc2c.5q: USER MANAGEMENT (admin only) ═══ */}
+      {isAdmin && (
+        <div className="card" style={{padding:16,marginBottom:16}}>
+          <h3 style={{fontSize:14,fontWeight:600,marginBottom:4}}>User Management</h3>
+          <p style={{fontSize:11,color:'var(--text3)',marginBottom:10}}>Approve or revoke team member access. Admin-only.</p>
+          <button onClick={() => { try { (window.openAdmin || openAdmin)(); } catch(e) { console.warn('[Admin] openAdmin failed:', e.message); } }}
+            style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',padding:'6px 14px',borderRadius:8,fontSize:12,fontWeight:600,cursor:'pointer'}}>
+            👥 Open User Management
+          </button>
+        </div>
+      )}
 
       {/* ═══ CLOUD SYNC ═══ */}
       <CloudSyncCard />
