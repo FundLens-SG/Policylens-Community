@@ -620,11 +620,24 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2c.4';
+const APP_VERSION = 'v2.3.0-rc2c.4a';
 const APP_VERSION_DATE = '2026-04-16';
-const APP_VERSION_NAME = 'Fix OAuth return sync race + post-connect discovery';
+const APP_VERSION_NAME = 'Pull Drive data on discovery add';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2c.4a',
+    date: '2026-04-16',
+    name: 'Pull Drive data on discovery add',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Discovery Add now downloads the client\'s full portfolio from Drive immediately. Previously only a pointer was created, leaving the client with 0 policies until a manual refresh.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2c.4',
     date: '2026-04-16',
@@ -12653,12 +12666,28 @@ function App() {
       const choice = choices[f.clientId];
       try {
         if (choice === 'add') {
+          // 1. Save drive_state pointer first (recoverable even if content pull fails)
           await PolicyDB.saveDriveState({
             clientId: f.clientId, fileId: f.fileId, folderId: f.folderId, tierFolderId: f.tierFolderId,
             tier: f.tier || UNASSIGNED_TIER, clientName: f.clientName === '(unnamed)' ? '' : f.clientName,
             headRevisionId: f.headRevisionId, lastSyncedAt: f.modifiedTime || new Date().toISOString(), pendingWrite: false,
           });
           if (f.clientName && f.clientName !== '(unnamed)') try { await dbPut('settings', { key: 'clientName_' + f.clientId, value: f.clientName }); } catch(_) {}
+          // 2. v2.3.0-rc2c.4a: Download Drive file content and save to IDB
+          try {
+            const { meta, content } = await driveClient.getFile(f.fileId);
+            const fileData = JSON.parse(content);
+            const { clientProfile: driveProfile, policies: drivePolicies } = parseDriveClientFile(fileData);
+            if (driveProfile) await dbPut('settings', { key: 'clientProfile_' + f.clientId, value: driveProfile });
+            for (const pol of (drivePolicies || [])) { pol.clientId = f.clientId; await dbPut('policies', pol); }
+            if (meta?.headRevisionId) {
+              const ds = await PolicyDB.getDriveState(f.clientId);
+              if (ds) await PolicyDB.saveDriveState({ ...ds, headRevisionId: meta.headRevisionId, lastSyncedAt: new Date().toISOString() });
+            }
+            console.log('[Discovery] Pulled', (drivePolicies || []).length, 'policies for', f.clientName);
+          } catch (pullErr) {
+            console.warn('[Discovery] Data pull failed for', f.clientName, '— pointer saved, retry via client switch:', pullErr.message);
+          }
           added++;
         } else if (choice === 'delete') {
           if (f.folderId) { await driveClient.trashFolder(f.folderId); }
