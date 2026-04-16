@@ -620,11 +620,27 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2c.5o';
+const APP_VERSION = 'v2.3.0-rc2c.5p';
 const APP_VERSION_DATE = '2026-04-17';
-const APP_VERSION_NAME = 'Fix stale autosave + deletePolicy sync + mobile feedback';
+const APP_VERSION_NAME = 'Comprehensive sync gap closure (tier, review date, deletion)';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2c.5p',
+    date: '2026-04-17',
+    name: 'Comprehensive sync gap closure',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Tier changes now sync across devices within 30 seconds. Drive file now includes tier (was hardcoded null). Tier changes trigger a Drive write so other devices detect via polling.',
+          'Mark Reviewed now syncs across devices. Fixed double bug: ProfileTab wrote to clientProfile, Clients tab read from drive_state — both now update, and the review date is written to the Drive file.',
+          'Client deletion now propagates within 30 seconds. Polling now detects trashed Drive files and removes local data automatically. Active client deletion triggers switch to another client.',
+          'Clients tab now updates live on polling (tier, review date, policy counts all refresh without manual reload).'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2c.5o',
     date: '2026-04-17',
@@ -9454,7 +9470,7 @@ const DRIVE_SCHEMA_VERSION = 2;
 // Build the JSON payload for a Drive client file.
 // Accepts the live React state values. Strips _fieldVersions (internal to
 // Supabase sync) so Drive files contain only user-facing data.
-function buildDriveClientPayload(clientId, clientProfile, policies) {
+function buildDriveClientPayload(clientId, clientProfile, policies, metadata) {
   const stripVersions = (obj) => {
     if (!obj) return obj;
     const { _fieldVersions, ...rest } = obj;
@@ -9465,8 +9481,9 @@ function buildDriveClientPayload(clientId, clientProfile, policies) {
     clientId,
     clientProfile: stripVersions(clientProfile) || {},
     policies: (policies || []).map(stripVersions),
-    tier: null,           // placeholder — client tier not yet in data model
-    lastReviewedAt: null, // placeholder — client-level review date not yet in data model
+    // v2.3.0-rc2c.5p: tier + lastReviewedAt now sourced from caller (was hardcoded null)
+    tier: metadata?.tier ?? null,
+    lastReviewedAt: metadata?.lastReviewedAt ?? null,
     updatedAt: new Date().toISOString(),
   };
 }
@@ -9479,7 +9496,8 @@ function parseDriveClientFile(data) {
   if ((data.schemaVersion || 1) < 2) {
     console.info('[Drive] Upgraded file from schema v1 → v2');
   }
-  return { clientProfile: cp, policies };
+  // v2.3.0-rc2c.5p: also return tier + lastReviewedAt (default null for old files)
+  return { clientProfile: cp, policies, tier: data.tier ?? null, lastReviewedAt: data.lastReviewedAt ?? null };
 }
 
 // ── Drive conflict error (thrown by updateClientFile on headRevisionId mismatch) ──
@@ -9518,7 +9536,8 @@ function _notifySyncStatus() {
 // Returns true on success, false on failure. Caller must set/clear _driveSyncInFlight.
 async function _performDriveSync(ds, clientProfile, policies, opts) {
   try {
-    const payload = buildDriveClientPayload(ds.clientId, clientProfile, policies);
+    // v2.3.0-rc2c.5p: Include tier + lastReviewedAt from drive_state so they sync to Drive file
+    const payload = buildDriveClientPayload(ds.clientId, clientProfile, policies, { tier: ds.tier, lastReviewedAt: ds.lastReviewedAt });
     const newHead = await driveClient.updateClientFile(ds.fileId, payload, ds.headRevisionId);
     await PolicyDB.saveDriveState({ ...ds, headRevisionId: newHead, lastSyncedAt: new Date().toISOString(), pendingWrite: false });
     _driveSyncJustSaved = true;
@@ -9961,6 +9980,21 @@ async function refreshClientFromDrive(clientId) {
   _lastRefreshTimes.set(clientId, now);
   try {
     const meta = await driveClient.getFileMetadata(ds.fileId);
+    // v2.3.0-rc2c.5p: Detect client trashed on another device — remove local data
+    if (meta.trashed === true) {
+      console.log('[DriveRefresh] Client', ds.clientName || clientId, 'was trashed — removing local data');
+      try {
+        await dbDel('drive_state', clientId);
+        const allPols = await dbGetAll('policies');
+        for (const pol of allPols.filter(p => p.clientId === clientId)) { if (pol.id) await dbDel('policies', pol.id); }
+        try { await dbDel('settings', 'clientProfile_' + clientId); } catch(_) {}
+        try { await dbDel('settings', 'clientName_' + clientId); } catch(_) {}
+      } catch (e) { console.warn('[DriveRefresh] Cleanup failed:', e.message); }
+      try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
+      try { window.dispatchEvent(new CustomEvent('policylens-client-trashed', { detail: { clientId, clientName: ds.clientName } })); } catch(_) {}
+      try { toast('Client ' + (ds.clientName || '') + ' was deleted on another device', 'info', 4000); } catch(_) {}
+      return { pulled: false, trashed: true };
+    }
     if (meta.headRevisionId === ds.headRevisionId) {
       console.log('[DriveRefresh] Up to date:', ds.clientName || clientId);
       return false;
@@ -9968,7 +10002,7 @@ async function refreshClientFromDrive(clientId) {
     console.log('[DriveRefresh] Stale data for', ds.clientName || clientId, '— pulling');
     const { meta: fullMeta, content } = await driveClient.getFile(ds.fileId);
     const fileData = JSON.parse(content);
-    const { clientProfile: driveProfile, policies: drivePolicies } = parseDriveClientFile(fileData);
+    const { clientProfile: driveProfile, policies: drivePolicies, tier: driveTier, lastReviewedAt: driveLastReviewed } = parseDriveClientFile(fileData);
     if (driveProfile) await dbPut('settings', { key: 'clientProfile_' + clientId, value: driveProfile });
     const oldPols = await dbGetAll('policies');
     for (const old of oldPols.filter(p => p.clientId === clientId)) {
@@ -9978,7 +10012,14 @@ async function refreshClientFromDrive(clientId) {
       pol.clientId = clientId;
       await dbPut('policies', pol);
     }
-    const updatedDs = { ...ds, headRevisionId: fullMeta.headRevisionId || meta.headRevisionId, lastSyncedAt: new Date().toISOString() };
+    // v2.3.0-rc2c.5p: sync tier + lastReviewedAt from file (fallback to existing ds values)
+    const updatedDs = {
+      ...ds,
+      headRevisionId: fullMeta.headRevisionId || meta.headRevisionId,
+      lastSyncedAt: new Date().toISOString(),
+      tier: driveTier ?? ds.tier,
+      lastReviewedAt: driveLastReviewed ?? ds.lastReviewedAt,
+    };
     await PolicyDB.saveDriveState(updatedDs);
     console.log('[DriveRefresh] Pulled', (drivePolicies || []).length, 'policies for', ds.clientName || clientId);
     return { pulled: true, clientProfile: driveProfile, policies: drivePolicies || [], driveState: updatedDs };
@@ -11739,6 +11780,42 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeClientId, loading]);
 
+  // v2.3.0-rc2c.5p: External trigger for Drive write (from tier changes, Mark Reviewed)
+  useEffect(() => {
+    const h = (e) => {
+      const cid = e.detail?.clientId;
+      if (cid !== activeClientId) return;
+      _driveSyncDebounced(() => _driveSyncCurrentClient(), 500);
+    };
+    window.addEventListener('policylens-trigger-drive-write', h);
+    return () => window.removeEventListener('policylens-trigger-drive-write', h);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeClientId]);
+
+  // v2.3.0-rc2c.5p: Active client was trashed on another device — switch or clear
+  useEffect(() => {
+    const h = async (e) => {
+      const cid = e.detail?.clientId;
+      if (cid !== activeClientId) return;
+      const remaining = await PolicyDB.getAllDriveStates().catch(() => []);
+      if (remaining.length > 0) {
+        const next = remaining.reduce((a, b) => (a.lastSyncedAt || '') > (b.lastSyncedAt || '') ? a : b);
+        switchClient(next.clientId);
+      } else {
+        setActiveClientId(null);
+        try { localStorage.removeItem('policylens_active_client_id'); } catch(_) {}
+        setPolicies([]);
+        setClientProfile({name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[]});
+        setClientName('');
+        setDriveState(null);
+        setTab('clients');
+      }
+    };
+    window.addEventListener('policylens-client-trashed', h);
+    return () => window.removeEventListener('policylens-client-trashed', h);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeClientId]);
+
   // v2.3.0-rc2c.3b.3: One-time dedupe of cross-sync duplicate policies (Drive mode only).
   useEffect(() => {
     if (loading) return;
@@ -13149,6 +13226,8 @@ function App() {
     }
     setDriveState(result.driveState);
     try { window.dispatchEvent(new CustomEvent('policylens-drive-data-refreshed', { detail: { clientProfile: result.clientProfile } })); } catch(_) {}
+    // v2.3.0-rc2c.5p: also fire clients-changed so ClientsTab refreshes tier/review/policy counts
+    try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
   };
 
   const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,deletePolicy,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,tab,setTab,presentMode,setPresentMode,showChangelog,setShowChangelog,houseDefaults,saveHouseDefaults,tierDefinitions,saveTierDefinitions,runCloudSync:()=>runCloudSyncRef.current?.({force:true}),driveState,setDriveState,activeClientId,switchClient,destroyClient};
@@ -14878,7 +14957,13 @@ function ClientsTab() {
     const h = () => load();
     window.addEventListener('policylens-sync-status-change', h);
     window.addEventListener('policylens-clients-changed', h);
-    return () => { window.removeEventListener('policylens-sync-status-change', h); window.removeEventListener('policylens-clients-changed', h); };
+    // v2.3.0-rc2c.5p: also refresh on poll updates so tier/review/counts stay live
+    window.addEventListener('policylens-drive-data-refreshed', h);
+    return () => {
+      window.removeEventListener('policylens-sync-status-change', h);
+      window.removeEventListener('policylens-clients-changed', h);
+      window.removeEventListener('policylens-drive-data-refreshed', h);
+    };
   }, []);
   // v2.2.0-rc2.1: Filter chips now functional (backing logic was correct since rc2.0; wiring verified)
   const filtered = filter === 'all' ? allStates : allStates.filter(ds => (ds.tier || UNASSIGNED_TIER) === filter);
@@ -14940,6 +15025,8 @@ function ClientsTab() {
                           setDriveState({...driveState, tier: nt});
                         }
                       });
+                      // v2.3.0-rc2c.5p: trigger Drive write so tier change propagates via polling
+                      try { window.dispatchEvent(new CustomEvent('policylens-trigger-drive-write', { detail: { clientId: ds.clientId } })); } catch(_) {}
                     }}
                   />
                   {/* v2.3.0-rc2c.5n: Per-client delete */}
@@ -18749,6 +18836,8 @@ function ProfileTab() {
                   onTierChange={(newTier) => {
                     handleTierChange(activeClientId, newTier, tier);
                     if (driveState) setDriveState({...driveState, tier: newTier});
+                    // v2.3.0-rc2c.5p: trigger Drive write
+                    try { window.dispatchEvent(new CustomEvent('policylens-trigger-drive-write', { detail: { clientId: activeClientId } })); } catch(_) {}
                   }}
                 />
               );
@@ -18758,7 +18847,18 @@ function ProfileTab() {
               Reviewed {fmtRelativeTime(p.lastReviewedAt)}
             </span>
             {/* v2.0.2: Mark Reviewed button */}
-            <button onClick={() => { const now = new Date().toISOString(); set('lastReviewedAt', now); try { toast('✓ Marked as reviewed','success',2000); } catch(_){} }}
+            <button onClick={async () => {
+                const now = new Date().toISOString();
+                set('lastReviewedAt', now);
+                // v2.3.0-rc2c.5p: Also update drive_state (Clients tab reads from here) + trigger Drive write
+                if (driveState) {
+                  const updatedDs = {...driveState, lastReviewedAt: now};
+                  setDriveState(updatedDs);
+                  try { await PolicyDB.saveDriveState(updatedDs); } catch(_) {}
+                  try { window.dispatchEvent(new CustomEvent('policylens-trigger-drive-write', { detail: { clientId: activeClientId } })); } catch(_) {}
+                }
+                try { toast('✓ Marked as reviewed','success',2000); } catch(_){}
+              }}
               style={{fontSize:10,fontWeight:600,padding:'4px 10px',borderRadius:6,background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',cursor:'pointer'}}>
               ✓ Mark Reviewed
             </button>
