@@ -620,11 +620,31 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2c.5n';
+const APP_VERSION = 'v2.3.0-rc2c.5o';
 const APP_VERSION_DATE = '2026-04-17';
-const APP_VERSION_NAME = 'Profile live refresh + Destroy moved to Clients tab';
+const APP_VERSION_NAME = 'Fix stale autosave + deletePolicy sync + mobile feedback';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2c.5o',
+    date: '2026-04-17',
+    name: 'Fix stale autosave + deletePolicy sync + mobile feedback',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'CRITICAL: Fixed autosave writing stale data to Drive after policy/profile changes. Root cause: Drive write function read from a React closure that captured pre-update state (setPolicies is batched). Now reads fresh data from IDB, which is always current.',
+          'Fixed policy deletions not syncing to Drive. deletePolicy now triggers a debounced Drive write.'
+        ]
+      },
+      {
+        heading: 'Improvements',
+        items: [
+          'Mobile now shows "Saving…" and "✓" feedback during Drive writes (previously invisible on mobile).'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2c.5n',
     date: '2026-04-17',
@@ -12819,15 +12839,30 @@ function App() {
   const _driveSyncCurrentClient = async () => {
     if (isDriveLocalOnly()) return;
     if (getDriveStatus() !== 'connected') return;
+    // v2.3.0-rc2c.5o: Use ref not closure (closure may be stale on rapid edits)
+    const cid = activeClientIdRef.current || activeClientId;
     let states;
     try { states = await PolicyDB.getAllDriveStates(); } catch (_) { return; }
     if (!states || states.length === 0) return;
-    const ds = states.find(s => s.clientId === activeClientId);
+    const ds = states.find(s => s.clientId === cid);
     if (!ds) return;
     _driveSyncInFlight = true;
     _notifySyncStatus();
     try {
-      await _performDriveSync(ds, clientProfile, policies, { showToast: false });
+      // v2.3.0-rc2c.5o: Read from IDB, NOT from React closure. setPolicies is batched,
+      // so the closure captures pre-update state. IDB is always current because
+      // savePolicy/saveProfile write to IDB synchronously before triggering this debounce.
+      let freshProfile = clientProfile;
+      let freshPolicies = policies;
+      try {
+        const profileRec = await dbGet('settings', 'clientProfile_' + cid);
+        if (profileRec?.value) freshProfile = profileRec.value;
+      } catch(_) {}
+      try {
+        const allPols = await dbGetAll('policies');
+        freshPolicies = allPols.filter(p => p.clientId === cid);
+      } catch(_) {}
+      await _performDriveSync(ds, freshProfile, freshPolicies, { showToast: false });
     } finally {
       _driveSyncInFlight = false;
       _notifySyncStatus();
@@ -12873,6 +12908,8 @@ function App() {
     // Cloud soft-delete (fire-and-forget)
     lastSelfPushRef.current = Date.now();
     sbPolicyDelete(id).catch(() => {});
+    // v2.3.0-rc2c.5o: Sync deletion to Drive (was missing — deleted policies persisted in Drive)
+    _driveSyncDebounced(() => _driveSyncCurrentClient(), 1000);
   };
 
   // Repo operations — Supabase primary, local fallback
@@ -14590,7 +14627,15 @@ function SyncStatusPill({ driveState }) {
     const iv = setInterval(h, 10000);
     return () => { window.removeEventListener('policylens-sync-status-change', h); clearInterval(iv); };
   }, []);
-  if (isMobile) return null;
+  // v2.3.0-rc2c.5o: Show minimal sync feedback on mobile (was: return null hiding all indication)
+  if (isMobile) {
+    if (!driveState || getDriveStatus() !== 'connected' || isDriveLocalOnly()) return null;
+    const saving = _driveSyncInFlight || _driveSyncTimer !== null;
+    if (!saving && !_driveSyncJustSaved) return null;
+    return React.createElement('span', {
+      style: {fontSize:9,color:saving?'var(--gold)':'var(--teal)',whiteSpace:'nowrap',flexShrink:0,padding:'0 4px'}
+    }, saving ? 'Saving\u2026' : '\u2713');
+  }
   if (!driveState || getDriveStatus() !== 'connected' || isDriveLocalOnly()) return null;
   const isSaving = _driveSyncInFlight || _driveSyncTimer !== null;
   if (isSaving) {
