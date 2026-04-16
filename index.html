@@ -620,11 +620,32 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2c.4f';
+const APP_VERSION = 'v2.3.0-rc2c.4g';
 const APP_VERSION_DATE = '2026-04-17';
-const APP_VERSION_NAME = 'Auto-refresh from Drive on load/switch + tier sync';
+const APP_VERSION_NAME = 'Periodic Drive polling (30s)';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2c.4g',
+    date: '2026-04-17',
+    name: 'Periodic Drive polling (30s)',
+    sections: [
+      {
+        heading: 'Improvements',
+        items: [
+          'Active client data now auto-refreshes from Drive every 30 seconds. Changes made on other devices appear within ~30 seconds without manual reload or tab-switching.',
+          'Polling uses one lightweight metadata check per tick (~200ms). Full file download only when changes are detected.'
+        ]
+      },
+      {
+        heading: 'Notes',
+        items: [
+          'Polling pauses automatically during active Drive writes (prevents read-during-write conflicts).',
+          'Google Drive API usage: ~2 calls/minute when idle. Well within quota limits.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2c.4f',
     date: '2026-04-17',
@@ -11635,6 +11656,28 @@ function App() {
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeClientId]);
+
+  // v2.3.0-rc2c.4g: Periodic Drive polling — check for cross-device updates every 30s.
+  // One lightweight getFileMetadata call per tick; full pull only when headRevisionId differs.
+  useEffect(() => {
+    if (loading) return;
+    if (!activeClientId) return;
+    const poll = async () => {
+      if (_driveSyncInFlight) return; // Skip mid-write to avoid read-during-write
+      try {
+        const result = await refreshClientFromDrive(activeClientId);
+        if (result && result.pulled) {
+          setPolicies(result.policies.map(p => ({ ...p, clientId: activeClientId })));
+          if (result.clientProfile) { setClientProfile(result.clientProfile); setClientName(result.clientProfile.name || ''); }
+          setDriveState(result.driveState);
+          console.log('[Poll] Updated from Drive');
+        }
+      } catch(_) {}
+    };
+    const id = setInterval(poll, 30000);
+    return () => clearInterval(id);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeClientId, loading]);
 
   // v2.3.0-rc2c.3b.3: One-time dedupe of cross-sync duplicate policies (Drive mode only).
   useEffect(() => {
