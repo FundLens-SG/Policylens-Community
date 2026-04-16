@@ -620,11 +620,28 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2c.4a';
-const APP_VERSION_DATE = '2026-04-16';
-const APP_VERSION_NAME = 'Pull Drive data on discovery add';
+const APP_VERSION = 'v2.3.0-rc2c.4b';
+const APP_VERSION_DATE = '2026-04-17';
+const APP_VERSION_NAME = 'Reliable discovery + auto-pull safety net';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2c.4b',
+    date: '2026-04-17',
+    name: 'Reliable discovery + auto-pull safety net',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Fixed Drive client discovery not finding recently-created clients. Root cause: Google Drive appProperties search is eventually consistent. Discovery now traverses the folder tree directly (root → tier → client folders → JSON), which reflects new files immediately.',
+          'Fixed "client name appears but 0 policies" — added automatic Drive pull when switching to a client with no local data. If discovery content pull fails, the safety net retries when you open the client.',
+          'Fixed discovery Add not switching to the newly added client when another client was already active. App now switches to the first added client and navigates to Clients tab.',
+          'Content pull failures during discovery now show a visible toast instead of silent console warning.',
+          'Empty orphan folders in Drive (from failed client creation) are now silently skipped during discovery.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2c.4a',
     date: '2026-04-16',
@@ -9762,49 +9779,51 @@ async function discoverDriveClients() {
   const found = [];
   let skippedExisting = 0, errors = 0;
   try {
-    const q = encodeURIComponent("trashed=false and appProperties has { key='kind' and value='autosave' }");
-    const resp = await _driveFetch(
-      'https://www.googleapis.com/drive/v3/files?q=' + q +
-      '&fields=files(id,name,headRevisionId,modifiedTime,appProperties,parents)&pageSize=200'
-    );
-    const data = await resp.json();
-    const files = data.files || [];
-    console.log('[Discovery] Drive returned', files.length, 'autosave file(s)');
+    // v2.3.0-rc2c.4b: Folder tree traversal (appProperties search is eventually consistent, misses new files)
+    const rootId = await driveClient.ensureFolder();
+    const tierQ = encodeURIComponent("'" + rootId + "' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false");
+    const tierResp = await _driveFetch('https://www.googleapis.com/drive/v3/files?q=' + tierQ + '&fields=files(id,name)&pageSize=100');
+    const tierData = await tierResp.json();
+    const tierFolders = tierData.files || [];
+    console.log('[Discovery] Found', tierFolders.length, 'tier folder(s)');
     const existingStates = await PolicyDB.getAllDriveStates().catch(() => []);
     const existingClientIds = new Set(existingStates.map(s => s.clientId));
     const existingFileIds = new Set(existingStates.map(s => s.fileId).filter(Boolean));
-    for (const file of files) {
+    for (const tier of tierFolders) {
       try {
-        const ap = file.appProperties || {};
-        const clientId = ap.clientId;
-        if (!clientId) { errors++; continue; }
-        if (existingClientIds.has(clientId) || existingFileIds.has(file.id)) { skippedExisting++; continue; }
-        let clientName = '';
-        const m = (file.name || '').match(/^PolicyLens\s*[\u2014\-]\s*(.+?)\.json$/i);
-        if (m && m[1]) clientName = m[1].trim();
-        let folderId = null, tierFolderId = null, tier = null;
-        if (Array.isArray(file.parents) && file.parents.length > 0) {
-          folderId = file.parents[0];
+        const clientQ = encodeURIComponent("'" + tier.id + "' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false");
+        const clientResp = await _driveFetch('https://www.googleapis.com/drive/v3/files?q=' + clientQ + '&fields=files(id,name)&pageSize=100');
+        const clientData = await clientResp.json();
+        const clientFolders = clientData.files || [];
+        for (const cf of clientFolders) {
           try {
-            const fr = await _driveFetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(folderId) + '?fields=id,name,parents');
-            const fd = await fr.json();
-            if (Array.isArray(fd.parents) && fd.parents.length > 0) {
-              tierFolderId = fd.parents[0];
-              try {
-                const tr = await _driveFetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(tierFolderId) + '?fields=id,name');
-                const td = await tr.json();
-                if (td.name && td.name !== 'PolicyLens') tier = td.name;
-              } catch(_) {}
+            const fileQ = encodeURIComponent("'" + cf.id + "' in parents and mimeType='application/json' and trashed=false");
+            const fileResp = await _driveFetch('https://www.googleapis.com/drive/v3/files?q=' + fileQ + '&fields=files(id,name,headRevisionId,modifiedTime,appProperties)&pageSize=10');
+            const fileData = await fileResp.json();
+            const files = fileData.files || [];
+            const autosave = files.find(f => (f.appProperties || {}).kind === 'autosave')
+              || files.find(f => /^PolicyLens\s*[\u2014\-]/i.test(f.name || ''));
+            if (!autosave) continue; // Empty orphan folder — skip silently
+            const ap = autosave.appProperties || {};
+            const clientId = ap.clientId;
+            if (!clientId) { errors++; continue; }
+            if (existingClientIds.has(clientId) || existingFileIds.has(autosave.id)) { skippedExisting++; continue; }
+            let clientName = cf.name || '';
+            if (!clientName) {
+              const m = (autosave.name || '').match(/^PolicyLens\s*[\u2014\-]\s*(.+?)\.json$/i);
+              if (m && m[1]) clientName = m[1].trim();
             }
-          } catch(_) {}
+            found.push({
+              clientId, fileId: autosave.id,
+              folderId: cf.id, tierFolderId: tier.id,
+              tier: tier.name === 'PolicyLens' ? UNASSIGNED_TIER : (tier.name || UNASSIGNED_TIER),
+              clientName: clientName || '(unnamed)',
+              headRevisionId: autosave.headRevisionId || null,
+              modifiedTime: autosave.modifiedTime || null,
+            });
+          } catch (e) { console.warn('[Discovery] Client folder error:', cf.name, e.message); errors++; }
         }
-        found.push({
-          clientId, fileId: file.id, folderId, tierFolderId,
-          tier: tier || UNASSIGNED_TIER, clientName: clientName || '(unnamed)',
-          headRevisionId: file.headRevisionId || null,
-          modifiedTime: file.modifiedTime || null,
-        });
-      } catch (e) { console.warn('[Discovery] File error:', file.id, e.message); errors++; }
+      } catch (e) { console.warn('[Discovery] Tier folder error:', tier.name, e.message); errors++; }
     }
     console.log('[Discovery]', found.length, 'new,', skippedExisting, 'already known,', errors, 'errors');
   } catch (err) { console.warn('[Discovery] Failed:', err.message); errors++; }
@@ -11330,6 +11349,43 @@ function App() {
     return unsub;
   }, [loading]);
 
+  // v2.3.0-rc2c.4b: Auto-pull safety net — if active client has 0 policies, pull from Drive.
+  // Catches failed discovery content pulls, stale pointers, cross-device gaps.
+  const _autoPullAttemptedRef = useRef(new Set());
+  useEffect(() => {
+    if (loading) return;
+    if (!activeClientId) return;
+    if (policies.length > 0) { _autoPullAttemptedRef.current.delete(activeClientId); return; }
+    if (_autoPullAttemptedRef.current.has(activeClientId)) return;
+    if (getDriveStatus() !== 'connected' || isDriveLocalOnly()) return;
+    _autoPullAttemptedRef.current.add(activeClientId);
+    (async () => {
+      try {
+        const ds = await PolicyDB.getDriveState(activeClientId).catch(() => null);
+        if (!ds || !ds.fileId) return;
+        console.log('[AutoPull] Active client', activeClientId, 'has 0 policies — pulling from Drive');
+        const { meta, content } = await driveClient.getFile(ds.fileId);
+        const fileData = JSON.parse(content);
+        const { clientProfile: driveProfile, policies: drivePolicies } = parseDriveClientFile(fileData);
+        if (!drivePolicies || drivePolicies.length === 0) { console.log('[AutoPull] Drive file also has 0 policies'); return; }
+        if (driveProfile) await dbPut('settings', { key: 'clientProfile_' + activeClientId, value: driveProfile });
+        for (const pol of drivePolicies) { pol.clientId = activeClientId; await dbPut('policies', pol); }
+        setPolicies(drivePolicies.map(p => ({ ...p, clientId: activeClientId })));
+        if (driveProfile) { setClientProfile(driveProfile); setClientName(driveProfile.name || ''); }
+        if (meta?.headRevisionId) {
+          const updated = { ...ds, headRevisionId: meta.headRevisionId, lastSyncedAt: new Date().toISOString() };
+          await PolicyDB.saveDriveState(updated);
+          setDriveState(updated);
+        }
+        console.log('[AutoPull] Loaded', drivePolicies.length, 'policies from Drive');
+        try { toast('Loaded ' + drivePolicies.length + ' policies from Drive', 'success', 3000); } catch(_) {}
+      } catch (e) {
+        console.warn('[AutoPull] Failed:', e.message);
+        try { toast('Could not load policies from Drive — try refreshing the page', 'warning', 5000); } catch(_) {}
+      }
+    })();
+  }, [activeClientId, policies.length, loading]);
+
   // v2.3.0-rc2c.3b.3: One-time dedupe of cross-sync duplicate policies (Drive mode only).
   useEffect(() => {
     if (loading) return;
@@ -12686,7 +12742,8 @@ function App() {
             }
             console.log('[Discovery] Pulled', (drivePolicies || []).length, 'policies for', f.clientName);
           } catch (pullErr) {
-            console.warn('[Discovery] Data pull failed for', f.clientName, '— pointer saved, retry via client switch:', pullErr.message);
+            console.warn('[Discovery] Data pull failed for', f.clientName, pullErr.message);
+            try { toast('Could not load policies for ' + f.clientName + ' — will retry when you open this client', 'warning', 5000); } catch(_) {}
           }
           added++;
         } else if (choice === 'delete') {
@@ -12934,12 +12991,21 @@ function App() {
       {foundInDrive && <FoundInDriveReviewModal open={true} found={foundInDrive.found}
         onClose={() => setFoundInDrive(null)}
         onApply={async (choices) => {
-          await applyDiscoveryChoices(foundInDrive.found, choices);
+          const foundList = foundInDrive.found; // capture before state change
+          const result = await applyDiscoveryChoices(foundList, choices);
           setFoundInDrive(null);
-          const fresh = await PolicyDB.getAllDriveStates().catch(() => []);
-          if (fresh.length > 0 && !activeClientId) {
-            const next = fresh.reduce((a,b) => (a.lastSyncedAt||'') > (b.lastSyncedAt||'') ? a : b);
-            await switchClient(next.clientId);
+          // v2.3.0-rc2c.4b: Always switch to first added client + navigate to Clients tab
+          if (result.added > 0) {
+            const fresh = await PolicyDB.getAllDriveStates().catch(() => []);
+            if (fresh.length > 0) {
+              const addedIds = new Set(foundList.filter(f => choices[f.clientId] === 'add').map(f => f.clientId));
+              const target = fresh.filter(s => addedIds.has(s.clientId))
+                .reduce((a, b) => (a && (a.lastSyncedAt || '') >= (b.lastSyncedAt || '')) ? a : b, null);
+              if (target) {
+                await switchClient(target.clientId);
+                setTab('clients');
+              }
+            }
           }
         }} />}
       <OrientationLock />
