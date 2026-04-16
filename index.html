@@ -620,11 +620,33 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2c.4g';
+const APP_VERSION = 'v2.3.0-rc2c.5m';
 const APP_VERSION_DATE = '2026-04-17';
-const APP_VERSION_NAME = 'Periodic Drive polling (30s)';
+const APP_VERSION_NAME = 'Mobile UI cleanup + fix poll overwriting edits';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2c.5m',
+    date: '2026-04-17',
+    name: 'Mobile UI cleanup + fix poll overwriting edits',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'CRITICAL: Fixed Drive polling/refresh overwriting local edits. When editing a field (e.g. age), the poll could pull old data from Drive before autosave finished, silently reverting the edit. Refresh now skips when a local write is pending (_driveSyncTimer or _driveSyncInFlight).'
+        ]
+      },
+      {
+        heading: 'Improvements',
+        items: [
+          'Removed "Snap & Go" button from Policies tab.',
+          'Mobile header: Guide and Destroy buttons hidden. Present button shows icon only.',
+          'Mobile Policies tab: action buttons show icons only (no text labels) — fits in one row.',
+          'Mobile Profile tab: "+ New Client" hidden (use header + button instead).'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2c.4g',
     date: '2026-04-17',
@@ -9884,6 +9906,9 @@ let _driveHasFolderStructure = false;
 async function refreshClientFromDrive(clientId) {
   if (getDriveStatus() !== 'connected' || isDriveLocalOnly()) return false;
   if (!clientId) return false;
+  // v2.3.0-rc2c.5m: CRITICAL — skip refresh when a local write is pending.
+  // Local is newer than Drive. Without this, poll/focus/switch overwrite local edits.
+  if (_driveSyncTimer !== null || _driveSyncInFlight) return false;
   let ds;
   try {
     const states = await PolicyDB.getAllDriveStates();
@@ -15029,19 +15054,19 @@ function Header() {
               setNewClientModalOpen(true);
             }} currentClientName={clientName} />
           {newClientModalOpen && <NewClientModal allStates={newClientData.allStates} allPolicies={newClientData.allPolicies} onClose={() => setNewClientModalOpen(false)} />}
-          <button onClick={()=>window.dispatchEvent(new Event('policylens-open-guide'))}
+          {!isMobile && <button onClick={()=>window.dispatchEvent(new Event('policylens-open-guide'))}
             title="Guide"
             style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.2)',width:28,height:28,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:13,fontWeight:700,flexShrink:0}}>
             ?
-          </button>
+          </button>}
           {/* v15 STAGE 10: SESSION COST METER */}
           <CostMeterChip />
           <button onClick={()=>setPresentMode(true)} disabled={policies.length===0}
             title="Present mode — full-screen client view"
-            style={{background:policies.length===0?'var(--bg3)':'linear-gradient(135deg,#d4a96a,#b8935a)',color:policies.length===0?'var(--text3)':'#0b0f1a',border:'1px solid rgba(212,169,106,.3)',padding:'0 10px',height:28,borderRadius:14,display:'flex',alignItems:'center',justifyContent:'center',cursor:policies.length===0?'not-allowed':'pointer',fontSize:11,fontWeight:700,flexShrink:0,opacity:policies.length===0?.4:1,gap:4}}>
-            <span style={{fontSize:13}}>▶</span> Present
+            style={{background:policies.length===0?'var(--bg3)':'linear-gradient(135deg,#d4a96a,#b8935a)',color:policies.length===0?'var(--text3)':'#0b0f1a',border:'1px solid rgba(212,169,106,.3)',padding:isMobile?'0 8px':'0 10px',height:28,borderRadius:14,display:'flex',alignItems:'center',justifyContent:'center',cursor:policies.length===0?'not-allowed':'pointer',fontSize:11,fontWeight:700,flexShrink:0,opacity:policies.length===0?.4:1,gap:4}}>
+            <span style={{fontSize:13}}>▶</span>{!isMobile && ' Present'}
           </button>
-          <button onClick={async()=>{
+          {!isMobile && <button onClick={async()=>{
             const cname = clientProfile?.name || clientName || 'this client';
             if(!driveState) { toast('No active client to destroy','warning'); return; }
             if(!confirm('Destroy client '+cname+'?\n\nThis will delete their folder and all files from Google Drive. Files go to Drive Trash (30-day recovery window).\n\nThis affects ONLY this client — your other clients are untouched.')) return;
@@ -15052,7 +15077,7 @@ function Header() {
             disabled={!driveState}
             style={{background:'rgba(239,83,80,.08)',color:'var(--red)',border:'1px solid rgba(239,83,80,.15)',width:28,height:28,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:driveState?'pointer':'not-allowed',fontSize:11,fontWeight:700,flexShrink:0,opacity:driveState?1:.4}}>
             🗑
-          </button>
+          </button>}
         </div>
       </div>
       {/* ── Row 2: Tab bar — icons + short labels, fits on one line ── */}
@@ -18491,6 +18516,7 @@ function OtherClientCheckpointPicker({ onClose, onCloseAll, switchClient, setTab
 
 function ProfileTab() {
   const {clientProfile,saveProfile,apiKey,houseDefaults,tierDefinitions,policies,deletePolicy,activeClientId,driveState,setDriveState,switchClient,setTab} = useContext(AppCtx);
+  const isMobile = useViewportIsMobile();
   const [p, setP] = useState(clientProfile);
   const [scanning, setScanning] = useState(false);
   const [newClientGuardOpen, setNewClientGuardOpen] = useState(false);
@@ -18648,11 +18674,11 @@ function ProfileTab() {
               style={{fontSize:10,fontWeight:600,padding:'4px 10px',borderRadius:6,background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',cursor:'pointer'}}>
               ✓ Mark Reviewed
             </button>
-            {/* v2.3.0-rc2c.3a: + New Client button on Profile tab */}
-            <button onClick={() => setNewClientGuardOpen(true)}
+            {/* v2.3.0-rc2c.3a: + New Client button on Profile tab (desktop only — mobile uses header + button) */}
+            {!isMobile && <button onClick={() => setNewClientGuardOpen(true)}
               style={{fontSize:10,fontWeight:600,padding:'4px 10px',borderRadius:6,background:'rgba(212,169,106,.15)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.4)',cursor:'pointer',outline:'none',whiteSpace:'nowrap'}}>
               + New Client
-            </button>
+            </button>}
           </div>
           <p style={{fontSize:12,color:'var(--text3)',marginTop:4}}>Client details used across all policies — fill once, use everywhere</p>
         </div>
@@ -23367,6 +23393,7 @@ class ErrorBoundary extends React.Component {
 
 function Policies() {
   const {policies,savePolicy,deletePolicy,repo,apiKey,saveRepo,clientProfile,saveProfile,activeClientId,clientName,switchClient,setTab} = useContext(AppCtx);
+  const isMobile = useViewportIsMobile();
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState(null);
   const [filter, setFilter] = useState('all');
@@ -23382,7 +23409,6 @@ function Policies() {
   const [scanning, setScanning] = useState(false);
   const [scanResult, setScanResult] = useState(null);
   const [staged, setStaged] = useState([]);
-  const [snapGoActive, setSnapGoActive] = useState(false);
   const [unsentCaptures, setUnsentCaptures] = useState([]);
   // Check for unsent snap captures on mount
   useEffect(() => {
@@ -26959,8 +26985,6 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
 
   return (
     <div className="fade-in">
-      {/* ── v14.3: SNAP & GO CAPTURE OVERLAY ── */}
-      {snapGoActive && <SnapGoCapture onDone={(files) => { setSnapGoActive(false); if (files && files.length > 0) stagePhotos(files); }} />}
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:16,flexWrap:'wrap',gap:8}}>
         <div style={{display:'flex',alignItems:'center',gap:8}}>
           <h2 style={{fontSize:18,fontWeight:600}}>Policies</h2>
@@ -26972,18 +26996,14 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
         <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
           <input ref={cameraRef} type="file" accept="image/*" capture="environment" style={{display:'none'}} onChange={e=>{stagePhotos(e.target.files);e.target.value='';}} />
           <input ref={uploadRef} type="file" accept="image/*,.pdf,.xlsx,.xls,.csv,.doc,.docx,.html,.htm,.txt,.rtf" multiple style={{display:'none'}} onChange={e=>{stagePhotos(Array.from(e.target.files));e.target.value='';}} />
-          <button disabled={scanning} title="Rapid multi-photo capture mode" onClick={() => setSnapGoActive(true)}
-            style={{background:'linear-gradient(135deg,#d4a96a,#b8935a)',color:'#0b0f1a',border:'none',padding:'5px 12px',borderRadius:8,fontSize:11,fontWeight:700,cursor:scanning?'not-allowed':'pointer',opacity:scanning?.4:1}}>
-            📸 Snap & Go
+          <button className="btn-secondary btn-sm" disabled={scanning} title={isMobile?'Camera':(scanning?'Finish current extraction first':'Camera')} onClick={async()=>{const files=await openCameraModal();if(files&&files.length){stagePhotos(files);}}}>
+            📷{!isMobile && ' Camera'}
           </button>
-          <button className="btn-secondary btn-sm" disabled={scanning} title={scanning?'Finish current extraction first':''} onClick={async()=>{const files=await openCameraModal();if(files&&files.length){stagePhotos(files);}}}>
-            📷 Camera
+          <button className="btn-secondary btn-sm" disabled={scanning} title={isMobile?'Gallery':(scanning?'Finish current extraction first':'Gallery')} onClick={()=>{const inp=document.createElement('input');inp.type='file';inp.accept='image/*';inp.multiple=true;inp.onchange=e=>{const files=Array.from(e.target.files);if(files.length){stagePhotos(files);}};inp.click();}}>
+            🖼{!isMobile && ' Gallery'}
           </button>
-          <button className="btn-secondary btn-sm" disabled={scanning} title={scanning?'Finish current extraction first':''} onClick={()=>{const inp=document.createElement('input');inp.type='file';inp.accept='image/*';inp.multiple=true;inp.onchange=e=>{const files=Array.from(e.target.files);if(files.length){stagePhotos(files);}};inp.click();}}>
-            🖼 Gallery
-          </button>
-          <button className="btn-secondary btn-sm" disabled={scanning} title={scanning?'Finish current extraction first':''} onClick={()=>uploadRef.current?.click()}>
-            📄 Upload
+          <button className="btn-secondary btn-sm" disabled={scanning} title={isMobile?'Upload':(scanning?'Finish current extraction first':'Upload')} onClick={()=>uploadRef.current?.click()}>
+            📄{!isMobile && ' Upload'}
           </button>
           <button className="btn-secondary btn-sm" disabled={scanning} title={scanning?'Finish current extraction first':''} onClick={async()=>{
             try {
@@ -26998,7 +27018,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
               else { const text = await navigator.clipboard.readText(); if(text && text.length > 20) { stagePhotos([new File([text],'paste.txt',{type:'text/plain'})]); } else { toast('No content in clipboard — copy a screenshot or text first','warning'); } }
             } catch(e) { toast('Clipboard access denied — try Ctrl+V on the drop zone','error'); }
           }} title={scanning?'Finish current extraction first':'Paste from clipboard'}>
-            📋 Paste
+            📋{!isMobile && ' Paste'}
           </button>
           <button className="btn-primary btn-sm" disabled={scanning} title={scanning?'Finish current extraction first':''} onClick={()=>{setEditing(null);setScanResult(null);setShowForm(true)}}>+ Add</button>
           {selected.size > 0 && <button className="btn-danger btn-sm" onClick={deleteSelected}>🗑 Delete ({selected.size})</button>}
@@ -27007,7 +27027,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
             if(!confirm('Final confirmation — permanently delete all policies?')) return;
             for(const pol of policies) await deletePolicy(pol.id);
             toast('All policies deleted','success');
-          }}>🗑 Delete All</button>}
+          }} title="Delete all policies">🗑{!isMobile && ' Delete All'}</button>}
         </div>
       </div>
 
