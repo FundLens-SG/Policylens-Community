@@ -620,11 +620,33 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2c.4e';
+const APP_VERSION = 'v2.3.0-rc2c.4f';
 const APP_VERSION_DATE = '2026-04-17';
-const APP_VERSION_NAME = 'Kill migration zombie cycle + robust orphan cleanup';
+const APP_VERSION_NAME = 'Auto-refresh from Drive on load/switch + tier sync';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2c.4f',
+    date: '2026-04-17',
+    name: 'Auto-refresh from Drive on load/switch + tier sync',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Fixed profile/policy changes not appearing on other devices on page reload. Active client data is now refreshed from Drive on every page load and client switch, not just on window focus.',
+          'Fixed tier changes not syncing across devices. Discovery now reconciles tier from Drive folder structure alongside client name.',
+          'Refactored Drive pull logic into shared refreshClientFromDrive() function — used by page load, client switch, and focus-refresh.'
+        ]
+      },
+      {
+        heading: 'Notes',
+        items: [
+          'Drive refresh is throttled to once per 5 seconds per client (prevents rapid re-pulls during UI transitions).',
+          'If Drive has newer data than local, the entire client file is pulled and local data is overwritten. Same behavior as existing focus-refresh.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2c.4e',
     date: '2026-04-17',
@@ -9400,6 +9422,8 @@ function _driveSyncDebounced(fn, ms) {
 let _driveSyncInFlight = false;
 let _driveSyncJustSaved = false;
 let _driveLastFocusRefreshAt = 0;
+// v2.3.0-rc2c.4f: Per-client throttle for refreshClientFromDrive (5s)
+const _lastRefreshTimes = new Map();
 function _notifySyncStatus() {
   window.dispatchEvent(new Event('policylens-sync-status-change'));
 }
@@ -9832,6 +9856,51 @@ let _driveHasFolderStructure = false;
 
 // v2.3.0-rc2c.3c v2: Discover Drive client files. Returns list — does NOT modify local state.
 // Caller (FoundInDriveReviewModal) decides per-client whether to Add or Delete.
+// v2.3.0-rc2c.4f: Check if Drive has newer data for a client, pull if so.
+// Shared by: on-load refresh, on-switch refresh, focus-refresh.
+// Returns {pulled, clientProfile, policies, driveState} on success, false on skip/no-op.
+// Does NOT update React state — caller does (function is module-scope).
+async function refreshClientFromDrive(clientId) {
+  if (getDriveStatus() !== 'connected' || isDriveLocalOnly()) return false;
+  if (!clientId) return false;
+  let ds;
+  try {
+    const states = await PolicyDB.getAllDriveStates();
+    ds = states.find(s => s.clientId === clientId);
+  } catch(_) { return false; }
+  if (!ds || !ds.fileId) return false;
+  const now = Date.now();
+  if (now - (_lastRefreshTimes.get(clientId) || 0) < 5000) return false;
+  _lastRefreshTimes.set(clientId, now);
+  try {
+    const meta = await driveClient.getFileMetadata(ds.fileId);
+    if (meta.headRevisionId === ds.headRevisionId) {
+      console.log('[DriveRefresh] Up to date:', ds.clientName || clientId);
+      return false;
+    }
+    console.log('[DriveRefresh] Stale data for', ds.clientName || clientId, '— pulling');
+    const { meta: fullMeta, content } = await driveClient.getFile(ds.fileId);
+    const fileData = JSON.parse(content);
+    const { clientProfile: driveProfile, policies: drivePolicies } = parseDriveClientFile(fileData);
+    if (driveProfile) await dbPut('settings', { key: 'clientProfile_' + clientId, value: driveProfile });
+    const oldPols = await dbGetAll('policies');
+    for (const old of oldPols.filter(p => p.clientId === clientId)) {
+      if (old.id) await dbDel('policies', old.id);
+    }
+    for (const pol of (drivePolicies || [])) {
+      pol.clientId = clientId;
+      await dbPut('policies', pol);
+    }
+    const updatedDs = { ...ds, headRevisionId: fullMeta.headRevisionId || meta.headRevisionId, lastSyncedAt: new Date().toISOString() };
+    await PolicyDB.saveDriveState(updatedDs);
+    console.log('[DriveRefresh] Pulled', (drivePolicies || []).length, 'policies for', ds.clientName || clientId);
+    return { pulled: true, clientProfile: driveProfile, policies: drivePolicies || [], driveState: updatedDs };
+  } catch (err) {
+    console.warn('[DriveRefresh] Failed for', ds.clientName || clientId, ':', err.message);
+    return false;
+  }
+}
+
 async function discoverDriveClients() {
   if (getDriveStatus() !== 'connected' || isDriveLocalOnly()) {
     console.log('[Discovery] Skipped — Drive not connected');
@@ -9873,15 +9942,22 @@ async function discoverDriveClients() {
             if (!clientId) { errors++; continue; }
             driveClientIds.add(clientId); // v2.3.0-rc2c.4c: track ALL Drive clientIds (before dedup) for orphan purge
             if (existingClientIds.has(clientId) || existingFileIds.has(autosave.id)) {
-              // v2.3.0-rc2c.4d: Reconcile name if Drive folder name differs from local
-              const driveName = cf.name || '';
-              if (driveName) {
-                const localState = existingStates.find(s => s.clientId === clientId);
-                if (localState && localState.clientName !== driveName) {
-                  console.log('[Discovery] Name reconcile:', localState.clientName, '→', driveName);
+              // v2.3.0-rc2c.4d+4f: Reconcile name + tier from Drive folder structure
+              const localState = existingStates.find(s => s.clientId === clientId);
+              if (localState) {
+                const driveName = cf.name || '';
+                const driveTier = tier.name === 'PolicyLens' ? UNASSIGNED_TIER : (tier.name || UNASSIGNED_TIER);
+                const nameChanged = driveName && localState.clientName !== driveName;
+                const tierChanged = localState.tier !== driveTier;
+                if (nameChanged || tierChanged) {
+                  if (nameChanged) console.log('[Discovery] Name reconcile:', localState.clientName, '→', driveName);
+                  if (tierChanged) console.log('[Discovery] Tier reconcile:', localState.tier, '→', driveTier);
                   try {
-                    await PolicyDB.saveDriveState({ ...localState, clientName: driveName });
-                    await dbPut('settings', { key: 'clientName_' + clientId, value: driveName });
+                    const updated = { ...localState };
+                    if (nameChanged) updated.clientName = driveName;
+                    if (tierChanged) updated.tier = driveTier;
+                    await PolicyDB.saveDriveState(updated);
+                    if (nameChanged) await dbPut('settings', { key: 'clientName_' + clientId, value: driveName });
                   } catch(_) {}
                 }
               }
@@ -11525,6 +11601,41 @@ function App() {
     })();
   }, [activeClientId, policies.length, loading]);
 
+  // v2.3.0-rc2c.4f: Refresh active client from Drive on page load.
+  useEffect(() => {
+    if (loading) return;
+    if (!activeClientId) return;
+    if (getDriveStatus() !== 'connected' || isDriveLocalOnly()) return;
+    (async () => {
+      const result = await refreshClientFromDrive(activeClientId);
+      if (result && result.pulled) {
+        setPolicies(result.policies.map(p => ({ ...p, clientId: activeClientId })));
+        if (result.clientProfile) { setClientProfile(result.clientProfile); setClientName(result.clientProfile.name || ''); }
+        setDriveState(result.driveState);
+        console.log('[Init] Refreshed active client from Drive');
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading]);
+
+  // v2.3.0-rc2c.4f: Refresh client from Drive on client switch.
+  const _initialLoadDoneRef = useRef(false);
+  useEffect(() => {
+    if (loading) return;
+    if (!_initialLoadDoneRef.current) { _initialLoadDoneRef.current = true; return; }
+    if (!activeClientId) return;
+    if (getDriveStatus() !== 'connected' || isDriveLocalOnly()) return;
+    (async () => {
+      const result = await refreshClientFromDrive(activeClientId);
+      if (result && result.pulled) {
+        setPolicies(result.policies.map(p => ({ ...p, clientId: activeClientId })));
+        if (result.clientProfile) { setClientProfile(result.clientProfile); setClientName(result.clientProfile.name || ''); }
+        setDriveState(result.driveState);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeClientId]);
+
   // v2.3.0-rc2c.3b.3: One-time dedupe of cross-sync duplicate policies (Drive mode only).
   useEffect(() => {
     if (loading) return;
@@ -11797,7 +11908,7 @@ function App() {
     window.addEventListener('policylens-drive-conflict', h);
     return () => window.removeEventListener('policylens-drive-conflict', h);
   }, []);
-  // ── v2.2.0-beta: Focus-based Drive refresh ──
+  // ── v2.2.0-beta: Focus-based Drive refresh (refactored in v2.3.0-rc2c.4f to use refreshClientFromDrive) ──
   useEffect(() => {
     const onFocus = async () => {
       if (getDriveStatus() !== 'connected') return;
@@ -11810,27 +11921,22 @@ function App() {
       if (Date.now() - _driveLastFocusRefreshAt < 15000) return;
       _driveLastFocusRefreshAt = Date.now();
       try {
+        // Check if Drive has newer data
         const meta = await driveClient.getFileMetadata(ds.fileId);
         if (meta.headRevisionId === ds.headRevisionId) return;
+        // Drive has newer data. Decide: pull or conflict modal.
         if (_driveSyncTimer === null && !_driveSyncInFlight) {
           _driveSyncInFlight = true;
           _notifySyncStatus();
           try {
-            const { meta: fullMeta, content } = await driveClient.getFile(ds.fileId);
-            const fileData = JSON.parse(content);
-            const { clientProfile: driveProfile, policies: drivePolicies } = parseDriveClientFile(fileData);
-            const ts = Date.now();
-            const profileVersions = {};
-            for (const key of Object.keys(driveProfile)) { if (!key.startsWith('_')) profileVersions[key] = ts; }
-            for (const pol of policiesRef.current) await deletePolicy(pol.id);
-            for (const pol of drivePolicies) {
-              const polVersions = {};
-              for (const key of Object.keys(pol)) { if (!key.startsWith('_')) polVersions[key] = ts; }
-              await savePolicy({ ...pol, _fieldVersions: polVersions });
+            // v2.3.0-rc2c.4f: Delegate pull to shared helper (with internal throttle)
+            const result = await refreshClientFromDrive(cid);
+            if (result && result.pulled) {
+              setPolicies(result.policies.map(p => ({ ...p, clientId: cid })));
+              if (result.clientProfile) { setClientProfile(result.clientProfile); setClientName(result.clientProfile.name || ''); }
+              setDriveState(result.driveState);
+              console.log('[Drive] Focus-refresh: pulled updated data from Drive');
             }
-            await saveProfile({ ...driveProfile, _fieldVersions: profileVersions });
-            await PolicyDB.saveDriveState({ ...ds, headRevisionId: fullMeta.headRevisionId, lastSyncedAt: new Date().toISOString(), pendingWrite: false });
-            console.log('[Drive] Focus-refresh: pulled updated data from Drive');
           } finally {
             _driveSyncInFlight = false;
             _notifySyncStatus();
