@@ -622,11 +622,26 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2c.5u';
+const APP_VERSION = 'v2.3.0-rc2d.1';
 const APP_VERSION_DATE = '2026-04-17';
-const APP_VERSION_NAME = 'Fix deleted client still showing until refresh';
+const APP_VERSION_NAME = 'XLSX local parse + column-map cache';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2d.1',
+    date: '2026-04-17',
+    name: 'XLSX local parse + column-map cache',
+    sections: [
+      {
+        heading: 'Extraction',
+        items: [
+          'Excel/CSV spreadsheets now parsed locally to structured JSON. Exact numeric values preserved — zero OCR hallucination risk for amounts.',
+          'New column-map cache: after the first AI column mapping for a spreadsheet format, subsequent uploads with matching headers skip AI entirely. Monthly portfolio exports extract at zero API cost after first run.',
+          'AI column-mapping uses Claude Haiku (cheapest tier). Falls back to full OCR path if column-map AI fails.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2c.5u',
     date: '2026-04-17',
@@ -3006,7 +3021,7 @@ async function pdfToImages(pdfDoc, maxPages=12) {
 // CLEAN even if the FC never actually reviewed anything. Bumping the version
 // forces a re-extraction next time those same files are uploaded, and the
 // one-time cleanup in App init purges the stale entries from IndexedDB.
-const EXTRACT_PIPELINE_VERSION = 'v14.4-2026-04-10-final-accuracy-r3';
+const EXTRACT_PIPELINE_VERSION = 'v14.5-2026-04-17-xlsx-structured';
 
 // ── v15: PROMPT VERSIONING ──
 const EXTRACT_PROMPT_VERSION = 'v14.1-2026-04-10-strict-fields';
@@ -5559,6 +5574,94 @@ async function downscaleImageIfNeeded(file) {
   }
 }
 
+// v2.3.0-rc2d.1: Parse XLSX/CSV to structured rows + compute header signature for column-map cache.
+async function parseXlsxToStructured(file) {
+  const results = [];
+  let workbook;
+  if (file.name?.match(/\.csv$/i)) {
+    const text = await file.text();
+    workbook = XLSX.read(text, { type: 'string' });
+  } else {
+    const ab = await getFileBytes(file);
+    workbook = XLSX.read(ab, { type: 'array' });
+  }
+  for (const sheetName of workbook.SheetNames) {
+    const ws = workbook.Sheets[sheetName];
+    if (!ws || !ws['!ref']) continue;
+    const rows = XLSX.utils.sheet_to_json(ws, { defval: '', raw: false });
+    if (rows.length === 0) continue;
+    const headers = Object.keys(rows[0]).filter(h => h && h.trim());
+    if (headers.length === 0) continue;
+    const normalized = headers.map(h => h.toLowerCase().replace(/\s+/g, ' ').trim()).sort().join('|');
+    const signature = await _sha256Hex(normalized);
+    const sampleRange = XLSX.utils.encode_range({ s: { r: 0, c: 0 }, e: { r: Math.min(5, rows.length), c: Math.min(headers.length, 20) - 1 } });
+    const rawSample = XLSX.utils.sheet_to_csv(ws, { range: sampleRange });
+    results.push({ sheetName, headers, rows, signature, rawSample });
+  }
+  return results;
+}
+async function _sha256Hex(str) {
+  const enc = new TextEncoder().encode(str);
+  const buf = await crypto.subtle.digest('SHA-256', enc);
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// v2.3.0-rc2d.1: Ask Claude Haiku to map spreadsheet columns to policy fields.
+async function extractColumnMapViaAI(headers, rawSample) {
+  const uid = window._user?.id || '';
+  const ck = ((await dbGet('settings','anthropicKey_'+uid).catch(()=>null))?.value || (await dbGet('settings','anthropicKey').catch(()=>null))?.value || '').trim();
+  if (!ck) throw new Error('No Anthropic key for column mapping');
+  const prompt = 'You are analyzing a Singapore insurance policy spreadsheet.\n\nColumn headers: ' + JSON.stringify(headers) + '\n\nSample rows:\n' + rawSample + '\n\nReturn a JSON object mapping policy fields to column header names. Use null if a field is not present.\n\nRequired fields: policyNumber, insurer, policyOwner, lifeInsured, productName, subType, sumAssured, annualPremium, premiumMode, premiumTerm, inceptionDate, maturityDate, cashValue\n\nCategories: Life, Critical Illness, ISP, Retirement, Endowment, Disability Income, Personal Accident, CareShield, ILP, Unit Trust, Maternity\n\nRespond ONLY with JSON:\n{"columnMap":{"policyNumber":"...","insurer":"...",...},"categoryColumn":"...or null","notes":"..."}';
+  const resp = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': ck, 'anthropic-version': '2023-06-01', 'anthropic-dangerous-direct-browser-access': 'true' },
+    body: JSON.stringify({ model: 'claude-haiku-4-5-20251001', max_tokens: 1024, messages: [{ role: 'user', content: prompt }] }),
+  });
+  if (!resp.ok) throw new Error('Column map AI call failed: ' + resp.status);
+  const data = await resp.json();
+  const text = data.content?.[0]?.text || '';
+  const clean = text.replace(/```json\s*|\s*```/g, '').trim();
+  const parsed = JSON.parse(clean);
+  if (!parsed.columnMap || typeof parsed.columnMap !== 'object') throw new Error('Invalid columnMap shape');
+  return parsed;
+}
+
+// v2.3.0-rc2d.1: Apply column map to parsed rows locally — zero AI calls.
+function applyColumnMap(rows, columnMap, categoryColumn) {
+  const policies = [];
+  for (const row of rows) {
+    const policy = {};
+    for (const [field, colName] of Object.entries(columnMap)) {
+      if (!colName) continue;
+      const val = row[colName];
+      if (val == null || val === '') continue;
+      if (field === 'sumAssured' || field === 'annualPremium' || field === 'cashValue') {
+        const num = parseFloat(String(val).replace(/[^\d.-]/g, ''));
+        policy[field] = isNaN(num) ? 0 : num;
+      } else if (field === 'premiumTerm') {
+        const num = parseInt(String(val).replace(/[^\d]/g, ''), 10);
+        policy[field] = isNaN(num) ? 0 : num;
+      } else {
+        policy[field] = String(val).trim();
+      }
+    }
+    if (categoryColumn && row[categoryColumn]) {
+      const t = String(row[categoryColumn]).toLowerCase();
+      policy.category = /critical|ci\b/.test(t)?'Critical Illness':/shield|isp|hospital/.test(t)?'ISP':/retire|annuity/.test(t)?'Retirement':/endow|saving/.test(t)?'Endowment':/disability|dii/.test(t)?'Disability Income':/accident|pa\b/.test(t)?'Personal Accident':/careshield|eldershield/.test(t)?'CareShield':/ilp|investment.*link/.test(t)?'ILP':/unit trust/.test(t)?'Unit Trust':/maternity/.test(t)?'Maternity':'Life';
+    }
+    if (!policy.policyNumber && !policy.productName && !policy.insurer) continue;
+    policies.push(policy);
+  }
+  return policies;
+}
+
+// v2.3.0-rc2d.1: Column map cache helpers
+async function getCachedColumnMap(sig) { try { return await dbGet('column_map_cache', sig); } catch(_) { return null; } }
+async function cacheColumnMap(sig, headers, columnMap, categoryColumn) {
+  try { await dbPut('column_map_cache', { signature: sig, headers, columnMap, categoryColumn, cachedAt: new Date().toISOString() }); }
+  catch(e) { console.warn('[XlsxCache] save failed:', e.message); }
+}
+
 async function processFile(file) {
   const isPDF = file.type === 'application/pdf' || file.name?.toLowerCase().endsWith('.pdf');
   const isExcel = file.name?.match(/\.(xlsx|xls|csv)$/i) || file.type?.includes('spreadsheet') || file.type?.includes('excel');
@@ -5960,6 +6063,47 @@ async function processJob(job) {
         }
         if (!file) {
           throw new Error('File not in memory for OCR — re-upload needed');
+        }
+        // v2.3.0-rc2d.1: Structured XLSX/CSV path — bypass OCR + extraction entirely
+        const _isXlsx = file.name?.match(/\.(xlsx|xls|csv)$/i);
+        if (_isXlsx && typeof XLSX !== 'undefined') {
+          try {
+            const sheets = await parseXlsxToStructured(file);
+            if (sheets.length > 0) {
+              const allPols = [];
+              for (const sheet of sheets) {
+                let colMap, catCol;
+                const cached = await getCachedColumnMap(sheet.signature);
+                if (cached) {
+                  console.log('[XlsxExtract] \u2713 Cache hit for signature', sheet.signature.slice(0,8));
+                  colMap = cached.columnMap;
+                  catCol = cached.categoryColumn;
+                } else {
+                  console.log('[XlsxExtract] Cache miss — asking AI for column map');
+                  const result = await extractColumnMapViaAI(sheet.headers, sheet.rawSample);
+                  colMap = result.columnMap;
+                  catCol = result.categoryColumn;
+                  await cacheColumnMap(sheet.signature, sheet.headers, colMap, catCol);
+                  console.log('[XlsxExtract] \u2713 Column map cached for future uploads');
+                }
+                allPols.push(...applyColumnMap(sheet.rows, colMap, catCol));
+              }
+              if (allPols.length > 0) {
+                job.result = allPols;
+                job.stage = 'done';
+                job.status = 'done';
+                job.ocrModel = 'xlsx-structured';
+                job.updatedAt = Date.now();
+                _sessionCost.files++;
+                await PolicyDB.putJob(job);
+                console.log('[Queue] \u2713', job.fileName, '\u2192', allPols.length, 'policies via xlsx-structured');
+                break;
+              }
+            }
+            console.log('[XlsxExtract] No policies extracted — falling through to OCR path');
+          } catch (xlsxErr) {
+            console.warn('[XlsxExtract] Structured path failed:', xlsxErr.message, '— falling through to OCR');
+          }
         }
         console.log('[Queue] OCR stage for', job.fileName);
         const ocrResult = await performOCR(job, file);
@@ -9008,7 +9152,7 @@ function isLikelyFundName(name) {
 // MODULE: INDEXEDDB — Database layer + batch operations
 // ═══════════════════════════════════════════════════════════════
 
-const DB_NAME='PolicyLensV4';const DB_VER=9;
+const DB_NAME='PolicyLensV4';const DB_VER=10;
 const openDB=()=>new Promise((res,rej)=>{
   const r=indexedDB.open(DB_NAME,DB_VER);
   r.onupgradeneeded=e=>{
@@ -9060,6 +9204,10 @@ const openDB=()=>new Promise((res,rej)=>{
     if(!db.objectStoreNames.contains('checkpoints')){
       const cps=db.createObjectStore('checkpoints',{keyPath:'id'});
       cps.createIndex('byClientId','clientId',{unique:false});
+    }
+    // v2.3.0-rc2d.1: Column map cache for XLSX extraction
+    if(!db.objectStoreNames.contains('column_map_cache')){
+      db.createObjectStore('column_map_cache',{keyPath:'signature'});
     }
   };
   r.onblocked=()=>{console.warn('[IDB] Blocked by another tab — close other PolicyLens tabs');try{toast('Close other PolicyLens tabs to complete the update','warning',8000)}catch(_){}};
