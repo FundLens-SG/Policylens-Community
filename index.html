@@ -2,9 +2,6 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<!-- rc2c.5s-debug1: Eruda mobile console (TEMPORARY — remove once tier sync bug diagnosed) -->
-<script src="https://cdn.jsdelivr.net/npm/eruda"></script>
-<script>eruda.init();</script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="browsermode" content="application">
 <title>PolicyLens</title>
@@ -625,11 +622,25 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2c.5s';
+const APP_VERSION = 'v2.3.0-rc2c.5t';
 const APP_VERSION_DATE = '2026-04-17';
-const APP_VERSION_NAME = 'Polling robustness + Settings cleanup';
+const APP_VERSION_NAME = 'CRITICAL: Fix tier sync closure trap';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2c.5t',
+    date: '2026-04-17',
+    name: 'CRITICAL: Fix tier sync closure trap',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'CRITICAL: Fixed tier changes not syncing cross-device. Root cause: the event listener for policylens-trigger-drive-write captured activeClientId via React closure at mount time; on certain init sequences the closure captured null and permanently filtered out all tier-change events. The listener now reads activeClientIdRef.current which is always current. Same fix applied to the policylens-client-trashed listener.',
+          'Removed temporary Eruda mobile console and diagnostic logs from rc2c.5s-debug1.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2c.5s',
     date: '2026-04-17',
@@ -9615,9 +9626,7 @@ async function _performDriveSync(ds, clientProfile, policies, opts) {
   try {
     // v2.3.0-rc2c.5p: Include tier + lastReviewedAt from drive_state so they sync to Drive file
     const payload = buildDriveClientPayload(ds.clientId, clientProfile, policies, { tier: ds.tier, lastReviewedAt: ds.lastReviewedAt });
-    console.log('[TierDebug] _performDriveSync writing \u2014 fileId:', ds.fileId, 'expectedHead:', ds.headRevisionId, 'tier in payload:', payload.tier);
     const newHead = await driveClient.updateClientFile(ds.fileId, payload, ds.headRevisionId);
-    console.log('[TierDebug] _performDriveSync success \u2014 newHead:', newHead);
     await PolicyDB.saveDriveState({ ...ds, headRevisionId: newHead, lastSyncedAt: new Date().toISOString(), pendingWrite: false });
     _driveSyncJustSaved = true;
     _notifySyncStatus();
@@ -11919,24 +11928,24 @@ function App() {
   }, [activeClientId]);
 
   // v2.3.0-rc2c.5p: External trigger for Drive write (from tier changes, Mark Reviewed)
+  // v2.3.0-rc2c.5t: Read activeClientIdRef.current, NOT closure activeClientId.
+  // Closure can capture stale null during init race; ref is always current.
   useEffect(() => {
     const h = (e) => {
       const cid = e.detail?.clientId;
-      console.log('[TierDebug] trigger-drive-write listener fired:', {received:cid, activeClientId, match:cid===activeClientId});
-      if (cid !== activeClientId) { console.warn('[TierDebug] \u26A0 SKIPPED — clientId mismatch, Drive will NOT be updated'); return; }
-      console.log('[TierDebug] Scheduling Drive write in 500ms');
+      const activeCid = activeClientIdRef.current;
+      if (cid !== activeCid) { console.log('[Drive] trigger-drive-write skipped — clientId', cid, 'not active (active:', activeCid + ')'); return; }
       _driveSyncDebounced(() => _driveSyncCurrentClient(), 500);
     };
     window.addEventListener('policylens-trigger-drive-write', h);
     return () => window.removeEventListener('policylens-trigger-drive-write', h);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeClientId]);
+  }, []);
 
-  // v2.3.0-rc2c.5p: Active client was trashed on another device — switch or clear
+  // v2.3.0-rc2c.5t: Same closure-trap fix as trigger-drive-write — use ref, not closure
   useEffect(() => {
     const h = async (e) => {
       const cid = e.detail?.clientId;
-      if (cid !== activeClientId) return;
+      if (cid !== activeClientIdRef.current) return;
       const remaining = await PolicyDB.getAllDriveStates().catch(() => []);
       if (remaining.length > 0) {
         const next = remaining.reduce((a, b) => (a.lastSyncedAt || '') > (b.lastSyncedAt || '') ? a : b);
@@ -11953,8 +11962,7 @@ function App() {
     };
     window.addEventListener('policylens-client-trashed', h);
     return () => window.removeEventListener('policylens-client-trashed', h);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeClientId]);
+  }, []);
 
   // v2.3.0-rc2c.5q: Keep App driveState in sync with IDB. When IDB updates via discovery,
   // name/tier reconciliation, or cross-device events, refresh the active client's state.
@@ -13075,17 +13083,14 @@ function App() {
   // No-ops silently when current client has no drive_state row.
   // v2.2.0-beta: delegates to _performDriveSync shared helper.
   const _driveSyncCurrentClient = async () => {
-    console.log('[TierDebug] _driveSyncCurrentClient called');
-    if (isDriveLocalOnly()) { console.log('[TierDebug] \u26A0 skipped: local-only'); return; }
-    if (getDriveStatus() !== 'connected') { console.log('[TierDebug] \u26A0 skipped: not connected'); return; }
+    if (isDriveLocalOnly()) return;
+    if (getDriveStatus() !== 'connected') return;
     const cid = activeClientIdRef.current || activeClientId;
-    console.log('[TierDebug] Writing for clientId:', cid);
     let states;
-    try { states = await PolicyDB.getAllDriveStates(); } catch (_) { console.warn('[TierDebug] \u26A0 getAllDriveStates failed'); return; }
-    if (!states || states.length === 0) { console.log('[TierDebug] \u26A0 no drive_states in IDB'); return; }
+    try { states = await PolicyDB.getAllDriveStates(); } catch (_) { return; }
+    if (!states || states.length === 0) return;
     const ds = states.find(s => s.clientId === cid);
-    if (!ds) { console.log('[TierDebug] \u26A0 no ds for clientId', cid); return; }
-    console.log('[TierDebug] ds.tier from IDB:', ds.tier, '\u00b7 headRevisionId:', ds.headRevisionId);
+    if (!ds) return;
     _driveSyncInFlight = true;
     _notifySyncStatus();
     try {
@@ -13099,9 +13104,7 @@ function App() {
         const allPols = await dbGetAll('policies');
         freshPolicies = allPols.filter(p => p.clientId === cid);
       } catch(_) {}
-      console.log('[TierDebug] About to write \u2014 tier:', ds.tier, 'policies:', freshPolicies.length);
       await _performDriveSync(ds, freshProfile, freshPolicies, { showToast: false });
-      console.log('[TierDebug] Write complete');
     } finally {
       _driveSyncInFlight = false;
       _notifySyncStatus();
@@ -15184,7 +15187,6 @@ function ClientsTab() {
                     tierDefinitions={tierDefinitions}
                     size="sm"
                     onTierChange={async (newTier) => {
-                      console.log('[TierDebug] ClientsTab onTierChange:', {clientId:ds.clientId, newTier, oldTier:tierLabel, isActive:ds.clientId===activeClientId});
                       try {
                         await handleTierChange(ds.clientId, newTier, tierLabel, (cid, nt) => {
                           setAllStates(prev => prev.map(s => s.clientId === cid ? {...s, tier: nt} : s));
@@ -15192,9 +15194,7 @@ function ClientsTab() {
                             setDriveState({...driveState, tier: nt});
                           }
                         });
-                        console.log('[TierDebug] handleTierChange completed for', ds.clientId);
-                      } catch(err) { console.warn('[TierDebug] handleTierChange threw:', err); }
-                      console.log('[TierDebug] Dispatching trigger-drive-write for', ds.clientId);
+                      } catch(_) {}
                       try { window.dispatchEvent(new CustomEvent('policylens-trigger-drive-write', { detail: { clientId: ds.clientId } })); } catch(_) {}
                     }}
                   />
@@ -19003,11 +19003,8 @@ function ProfileTab() {
                   tierDefinitions={tierDefinitions}
                   size="md"
                   onTierChange={async (newTier) => {
-                    console.log('[TierDebug] ProfileTab onTierChange:', {activeClientId, newTier, oldTier:tier});
-                    try { await handleTierChange(activeClientId, newTier, tier); console.log('[TierDebug] handleTierChange completed'); }
-                    catch(err) { console.warn('[TierDebug] handleTierChange threw:', err); }
+                    try { await handleTierChange(activeClientId, newTier, tier); } catch(_) {}
                     if (driveState) setDriveState({...driveState, tier: newTier});
-                    console.log('[TierDebug] Dispatching trigger-drive-write');
                     try { window.dispatchEvent(new CustomEvent('policylens-trigger-drive-write', { detail: { clientId: activeClientId } })); } catch(_) {}
                   }}
                 />
