@@ -2,6 +2,9 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
+<!-- rc2c.5s-debug1: Eruda mobile console (TEMPORARY — remove once tier sync bug diagnosed) -->
+<script src="https://cdn.jsdelivr.net/npm/eruda"></script>
+<script>eruda.init();</script>
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="browsermode" content="application">
 <title>PolicyLens</title>
@@ -9612,7 +9615,9 @@ async function _performDriveSync(ds, clientProfile, policies, opts) {
   try {
     // v2.3.0-rc2c.5p: Include tier + lastReviewedAt from drive_state so they sync to Drive file
     const payload = buildDriveClientPayload(ds.clientId, clientProfile, policies, { tier: ds.tier, lastReviewedAt: ds.lastReviewedAt });
+    console.log('[TierDebug] _performDriveSync writing \u2014 fileId:', ds.fileId, 'expectedHead:', ds.headRevisionId, 'tier in payload:', payload.tier);
     const newHead = await driveClient.updateClientFile(ds.fileId, payload, ds.headRevisionId);
+    console.log('[TierDebug] _performDriveSync success \u2014 newHead:', newHead);
     await PolicyDB.saveDriveState({ ...ds, headRevisionId: newHead, lastSyncedAt: new Date().toISOString(), pendingWrite: false });
     _driveSyncJustSaved = true;
     _notifySyncStatus();
@@ -11917,7 +11922,9 @@ function App() {
   useEffect(() => {
     const h = (e) => {
       const cid = e.detail?.clientId;
-      if (cid !== activeClientId) return;
+      console.log('[TierDebug] trigger-drive-write listener fired:', {received:cid, activeClientId, match:cid===activeClientId});
+      if (cid !== activeClientId) { console.warn('[TierDebug] \u26A0 SKIPPED — clientId mismatch, Drive will NOT be updated'); return; }
+      console.log('[TierDebug] Scheduling Drive write in 500ms');
       _driveSyncDebounced(() => _driveSyncCurrentClient(), 500);
     };
     window.addEventListener('policylens-trigger-drive-write', h);
@@ -13068,21 +13075,20 @@ function App() {
   // No-ops silently when current client has no drive_state row.
   // v2.2.0-beta: delegates to _performDriveSync shared helper.
   const _driveSyncCurrentClient = async () => {
-    if (isDriveLocalOnly()) return;
-    if (getDriveStatus() !== 'connected') return;
-    // v2.3.0-rc2c.5o: Use ref not closure (closure may be stale on rapid edits)
+    console.log('[TierDebug] _driveSyncCurrentClient called');
+    if (isDriveLocalOnly()) { console.log('[TierDebug] \u26A0 skipped: local-only'); return; }
+    if (getDriveStatus() !== 'connected') { console.log('[TierDebug] \u26A0 skipped: not connected'); return; }
     const cid = activeClientIdRef.current || activeClientId;
+    console.log('[TierDebug] Writing for clientId:', cid);
     let states;
-    try { states = await PolicyDB.getAllDriveStates(); } catch (_) { return; }
-    if (!states || states.length === 0) return;
+    try { states = await PolicyDB.getAllDriveStates(); } catch (_) { console.warn('[TierDebug] \u26A0 getAllDriveStates failed'); return; }
+    if (!states || states.length === 0) { console.log('[TierDebug] \u26A0 no drive_states in IDB'); return; }
     const ds = states.find(s => s.clientId === cid);
-    if (!ds) return;
+    if (!ds) { console.log('[TierDebug] \u26A0 no ds for clientId', cid); return; }
+    console.log('[TierDebug] ds.tier from IDB:', ds.tier, '\u00b7 headRevisionId:', ds.headRevisionId);
     _driveSyncInFlight = true;
     _notifySyncStatus();
     try {
-      // v2.3.0-rc2c.5o: Read from IDB, NOT from React closure. setPolicies is batched,
-      // so the closure captures pre-update state. IDB is always current because
-      // savePolicy/saveProfile write to IDB synchronously before triggering this debounce.
       let freshProfile = clientProfile;
       let freshPolicies = policies;
       try {
@@ -13093,7 +13099,9 @@ function App() {
         const allPols = await dbGetAll('policies');
         freshPolicies = allPols.filter(p => p.clientId === cid);
       } catch(_) {}
+      console.log('[TierDebug] About to write \u2014 tier:', ds.tier, 'policies:', freshPolicies.length);
       await _performDriveSync(ds, freshProfile, freshPolicies, { showToast: false });
+      console.log('[TierDebug] Write complete');
     } finally {
       _driveSyncInFlight = false;
       _notifySyncStatus();
@@ -15176,7 +15184,7 @@ function ClientsTab() {
                     tierDefinitions={tierDefinitions}
                     size="sm"
                     onTierChange={async (newTier) => {
-                      // v2.3.0-rc2c.5r: await IDB write before dispatching Drive write trigger (race fix)
+                      console.log('[TierDebug] ClientsTab onTierChange:', {clientId:ds.clientId, newTier, oldTier:tierLabel, isActive:ds.clientId===activeClientId});
                       try {
                         await handleTierChange(ds.clientId, newTier, tierLabel, (cid, nt) => {
                           setAllStates(prev => prev.map(s => s.clientId === cid ? {...s, tier: nt} : s));
@@ -15184,7 +15192,9 @@ function ClientsTab() {
                             setDriveState({...driveState, tier: nt});
                           }
                         });
-                      } catch(_) {}
+                        console.log('[TierDebug] handleTierChange completed for', ds.clientId);
+                      } catch(err) { console.warn('[TierDebug] handleTierChange threw:', err); }
+                      console.log('[TierDebug] Dispatching trigger-drive-write for', ds.clientId);
                       try { window.dispatchEvent(new CustomEvent('policylens-trigger-drive-write', { detail: { clientId: ds.clientId } })); } catch(_) {}
                     }}
                   />
@@ -18993,9 +19003,11 @@ function ProfileTab() {
                   tierDefinitions={tierDefinitions}
                   size="md"
                   onTierChange={async (newTier) => {
-                    // v2.3.0-rc2c.5r: await IDB write before dispatching Drive write trigger (race fix)
-                    try { await handleTierChange(activeClientId, newTier, tier); } catch(_) {}
+                    console.log('[TierDebug] ProfileTab onTierChange:', {activeClientId, newTier, oldTier:tier});
+                    try { await handleTierChange(activeClientId, newTier, tier); console.log('[TierDebug] handleTierChange completed'); }
+                    catch(err) { console.warn('[TierDebug] handleTierChange threw:', err); }
                     if (driveState) setDriveState({...driveState, tier: newTier});
+                    console.log('[TierDebug] Dispatching trigger-drive-write');
                     try { window.dispatchEvent(new CustomEvent('policylens-trigger-drive-write', { detail: { clientId: activeClientId } })); } catch(_) {}
                   }}
                 />
