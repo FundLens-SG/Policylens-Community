@@ -622,11 +622,24 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2c.5t';
+const APP_VERSION = 'v2.3.0-rc2c.5u';
 const APP_VERSION_DATE = '2026-04-17';
-const APP_VERSION_NAME = 'CRITICAL: Fix tier sync closure trap';
+const APP_VERSION_NAME = 'Fix deleted client still showing until refresh';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2c.5u',
+    date: '2026-04-17',
+    name: 'Fix deleted client still showing until refresh',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Fixed Clients tab still showing a deleted client until page reload. destroyClient now dispatches policylens-clients-changed so ClientsTab immediately reloads its state from IDB.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2c.5t',
     date: '2026-04-17',
@@ -13329,6 +13342,8 @@ function App() {
       setPolicies([]); setClientProfile({name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[]}); setClientName(''); setDriveState(null);
       setTab('clients');
     }
+    // v2.3.0-rc2c.5u: Notify ClientsTab and other listeners that the client list changed
+    try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
     try { toast('Client destroyed. Drive files moved to Trash (30-day recovery).', 'success'); } catch(_) {}
   };
 
