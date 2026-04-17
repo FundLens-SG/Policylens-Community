@@ -622,11 +622,42 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2c.5r';
+const APP_VERSION = 'v2.3.0-rc2c.5s';
 const APP_VERSION_DATE = '2026-04-17';
-const APP_VERSION_NAME = 'Auto-retry on conflict + orientation lock fix + tier await';
+const APP_VERSION_NAME = 'Polling robustness + Settings cleanup';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2c.5s',
+    date: '2026-04-17',
+    name: 'Polling robustness + Settings cleanup',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Fixed cross-device changes sometimes not appearing after 30s polling. getFileMetadata now sends cache-busting query param + Cache-Control: no-cache header.',
+          'Added immediate refresh on tab visibility change — changes pull within 1-2s when switching back to the PolicyLens tab.'
+        ]
+      },
+      {
+        heading: 'UI',
+        items: [
+          'Google Drive card redesigned: single ON/OFF toggle replaces separate local-only checkbox + connect/disconnect buttons. Integrated "Sync now" and "Find clients in Drive" buttons.',
+          'Removed redundant Cloud Sync card (Supabase client data sync disabled in Drive mode).',
+          'Removed standalone Drive Discovery card (functionality merged into Google Drive card).',
+          'Removed Firm Defaults panel. Per-client overrides still available on each profile\'s Assumptions card.',
+          'Mobile Clients tab: "+ New Client" button shrunk to compact + icon (32x32 circle).'
+        ]
+      },
+      {
+        heading: 'Improvements',
+        items: [
+          'Added "🔄 Sync now" manual refresh button in Drive card (Settings).',
+          'Added verbose console logs for every poll tick — makes diagnosing sync issues straightforward.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2c.5r',
     date: '2026-04-17',
@@ -10838,7 +10869,8 @@ const driveClient = {
 
   // ── getFileMetadata: metadata only (used for headRevisionId checks in Phase B) ──
   async getFileMetadata(fileId) {
-    const resp = await _driveFetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(fileId) + '?fields=id,name,headRevisionId,modifiedTime,mimeType,trashed,appProperties');
+    // v2.3.0-rc2c.5s: cache-bust + no-cache header to prevent stale headRevisionId from HTTP cache
+    const resp = await _driveFetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(fileId) + '?fields=id,name,headRevisionId,modifiedTime,mimeType,trashed,appProperties&_ts=' + Date.now(), { headers: { 'Cache-Control': 'no-cache' } });
     return await resp.json();
   },
 
@@ -11827,19 +11859,59 @@ function App() {
     if (loading) return;
     if (!activeClientId) return;
     const poll = async () => {
-      if (_driveSyncInFlight) return; // Skip mid-write to avoid read-during-write
+      // v2.3.0-rc2c.5s: verbose logging + guard both in-flight AND pending writes
+      if (_driveSyncInFlight) { console.log('[Poll] Skipping — local write in flight'); return; }
+      if (_driveSyncTimer !== null) { console.log('[Poll] Skipping — local write pending'); return; }
+      console.log('[Poll] Checking Drive for updates...');
       try {
         const result = await refreshClientFromDrive(activeClientId);
-        if (result && result.pulled) {
-          applyDriveRefresh(result, activeClientId);
-          console.log('[Poll] Updated from Drive');
-        }
-      } catch(_) {}
+        if (result && result.pulled) { applyDriveRefresh(result, activeClientId); console.log('[Poll] \u2713 Updated from Drive'); }
+        else if (result && result.trashed) { console.log('[Poll] Client was trashed on another device'); }
+        else { console.log('[Poll] No changes'); }
+      } catch(err) { console.warn('[Poll] Error:', err?.message || err); }
     };
     const id = setInterval(poll, 30000);
     return () => clearInterval(id);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeClientId, loading]);
+
+  // v2.3.0-rc2c.5s: Immediate refresh on tab visibility change (backgrounded tabs throttle setInterval)
+  useEffect(() => {
+    if (loading) return;
+    if (!activeClientId) return;
+    const onVisible = async () => {
+      if (document.visibilityState !== 'visible') return;
+      if (_driveSyncInFlight || _driveSyncTimer !== null) return;
+      try {
+        const result = await refreshClientFromDrive(activeClientId);
+        if (result && result.pulled) {
+          applyDriveRefresh(result, activeClientId);
+          console.log('[Visibility] Refreshed from Drive on tab focus');
+        }
+      } catch(_) {}
+    };
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeClientId, loading]);
+
+  // v2.3.0-rc2c.5s: Manual sync trigger from Settings → Drive card
+  useEffect(() => {
+    const h = async () => {
+      if (!activeClientId) { try { toast('No active client', 'warning', 2000); } catch(_) {} return; }
+      try {
+        try { toast('Checking Drive\u2026', 'info', 1500); } catch(_) {}
+        _lastRefreshTimes.delete(activeClientId);
+        const result = await refreshClientFromDrive(activeClientId);
+        if (result && result.pulled) { applyDriveRefresh(result, activeClientId); try { toast('\u2713 Pulled latest from Drive', 'success', 2500); } catch(_) {} }
+        else if (result && result.trashed) { try { toast('Client was deleted on another device', 'warning', 4000); } catch(_) {} }
+        else { try { toast('Already up to date', 'info', 2000); } catch(_) {} }
+      } catch (err) { try { toast('Sync check failed: ' + (err?.message || err), 'error', 3500); } catch(_) {} }
+    };
+    window.addEventListener('policylens-manual-sync', h);
+    return () => window.removeEventListener('policylens-manual-sync', h);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeClientId]);
 
   // v2.3.0-rc2c.5p: External trigger for Drive write (from tier changes, Mark Reviewed)
   useEffect(() => {
@@ -15068,8 +15140,9 @@ function ClientsTab() {
           })}
         </div>
         <button onClick={() => activeClientId ? setClientsGuardOpen(true) : setShowNewClient(true)}
-          style={{background:'rgba(212,169,106,.15)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.4)',borderRadius:8,padding:isMobile?'4px 10px':'6px 14px',fontSize:isMobile?10:11,fontWeight:600,cursor:'pointer'}}>
-          + New Client
+          title="New Client"
+          style={{background:'rgba(212,169,106,.15)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.4)',borderRadius:isMobile?'50%':8,width:isMobile?32:'auto',height:isMobile?32:'auto',padding:isMobile?0:'6px 14px',fontSize:isMobile?18:11,fontWeight:600,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,lineHeight:1}}>
+          {isMobile ? '+' : '+ New Client'}
         </button>
       </div>
       {filtered.length === 0 && allStates.length === 0 && (
@@ -33654,14 +33727,11 @@ function ExtractCacheEditor() {
 //     Supabase, applying per-field merge.
 //   • Last sync timestamp (read from a ref + state hook)
 
-// v2.1.0 Phase A — Google Drive connection card.
-// Lives in Settings between the API key cards and CloudSyncCard.
-// All Drive code is dormant by default (Local-only mode ON). The
-// FC must explicitly toggle Local-only OFF and click Connect to
-// trigger any actual Drive API call.
+// v2.3.0-rc2c.5s: Redesigned Drive card — single toggle + merged sync/discovery buttons.
 function DriveConnectionCard() {
   const [, force] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [discoverBusy, setDiscoverBusy] = useState(false);
   const [statusMsg, setStatusMsg] = useState(null);
   const [pingedEmail, setPingedEmail] = useState(null);
 
@@ -33747,91 +33817,66 @@ function DriveConnectionCard() {
     force(n => n + 1);
   };
 
-  // Status badge styling
-  const badgeFor = (() => {
-    if (localOnly) return { bg: 'rgba(148,163,184,.08)', color: 'var(--text3)', border: 'rgba(148,163,184,.2)', text: 'Local-only mode (Drive disabled)' };
-    if (status === 'connected') return { bg: 'rgba(91,168,160,.1)', color: 'var(--teal)', border: 'rgba(91,168,160,.3)', text: '● Connected' + (pingedEmail || cachedEmail ? ' as ' + (pingedEmail || cachedEmail) : '') };
-    if (status === 'reconnect-needed') return { bg: 'rgba(212,169,106,.12)', color: 'var(--gold)', border: 'rgba(212,169,106,.35)', text: '⚠ Reconnect needed' };
-    return { bg: 'var(--bg3)', color: 'var(--text3)', border: 'var(--border)', text: '○ Not connected' };
+  const toggleOn = !localOnly;
+  const handleToggle = async () => {
+    if (busy) return;
+    if (toggleOn) {
+      if (!confirm('Disable Google Drive sync?\n\nYour local data is unaffected. You can re-enable at any time.')) return;
+      setBusy(true);
+      try { if (status === 'connected') await driveClient.signOut(); driveClient.setLocalOnly(true); setPingedEmail(null); setStatusMsg({kind:'info',text:'Drive sync disabled.'}); setTimeout(()=>setStatusMsg(null),4000); }
+      finally { setBusy(false); force(n=>n+1); }
+    } else {
+      driveClient.setLocalOnly(false); force(n=>n+1);
+      if (driveClient.getStatus() !== 'connected') {
+        setBusy(true); setStatusMsg({kind:'info',text:'Redirecting to Google sign-in\u2026'});
+        try { await driveClient.signInInteractive({returnTab:'settings'}); }
+        catch(err) { setStatusMsg({kind:'error',text:(err.kind?err:{...mapDriveError(err)}).message}); setBusy(false); }
+      } else { setStatusMsg({kind:'success',text:'Drive sync enabled.'}); setTimeout(()=>setStatusMsg(null),4000); }
+    }
+  };
+  const handleReconnect = async () => {
+    setBusy(true); setStatusMsg({kind:'info',text:'Redirecting to Google sign-in\u2026'});
+    try { await driveClient.signInInteractive({returnTab:'settings'}); }
+    catch(err) { setStatusMsg({kind:'error',text:(err.kind?err:{...mapDriveError(err)}).message}); setBusy(false); }
+  };
+  const handleManualSync = () => { try { window.dispatchEvent(new Event('policylens-manual-sync')); } catch(_) {} };
+  const handleDiscover = async () => {
+    if (discoverBusy) return; setDiscoverBusy(true);
+    try {
+      const result = await discoverDriveClients();
+      if (result.found.length > 0) { window.dispatchEvent(new CustomEvent('policylens-discovery-found',{detail:{found:result.found}})); toast('Found '+result.found.length+' client'+(result.found.length===1?'':'s')+' to review','info',4000); }
+      else if (result.skippedExisting > 0 && result.errors === 0) { toast('All '+result.skippedExisting+' Drive client'+(result.skippedExisting===1?'':'s')+' already on this device','info',4000); }
+      else if (result.errors > 0) { toast('Discovery completed with '+result.errors+' error(s)','warning',5000); }
+      else { toast('No client files found in Drive','info',4000); }
+    } catch(e) { toast('Discovery failed: '+(e.message||'unknown'),'error',5000); }
+    finally { setDiscoverBusy(false); }
+  };
+  const statusPill = (() => {
+    if (!toggleOn) return {bg:'rgba(148,163,184,.08)',color:'var(--text3)',border:'rgba(148,163,184,.2)',text:'Local-only'};
+    if (status==='connected') return {bg:'rgba(91,168,160,.1)',color:'var(--teal)',border:'rgba(91,168,160,.3)',text:'\u25CF Connected'+(pingedEmail||cachedEmail?' as '+(pingedEmail||cachedEmail):'')};
+    if (status==='reconnect-needed') return {bg:'rgba(212,169,106,.12)',color:'var(--gold)',border:'rgba(212,169,106,.35)',text:'\u26A0 Reconnect needed'};
+    return {bg:'var(--bg3)',color:'var(--text3)',border:'var(--border)',text:'\u25CB Not connected'};
   })();
-
-  const msgColor = !statusMsg ? null
-    : statusMsg.kind === 'success' ? 'var(--teal)'
-    : statusMsg.kind === 'error' ? 'var(--red)'
-    : statusMsg.kind === 'warn' ? 'var(--gold)'
-    : 'var(--text2)';
-
+  const msgColor = !statusMsg ? null : statusMsg.kind==='success'?'var(--teal)':statusMsg.kind==='error'?'var(--red)':statusMsg.kind==='warn'?'var(--gold)':'var(--text2)';
   return (
     <div className="card" style={{marginBottom:16}}>
-      <h3 style={{fontSize:14,fontWeight:600,marginBottom:4}}>🗂 Google Drive</h3>
-      <p style={{fontSize:11,color:'var(--text3)',marginBottom:10}}>
-        Phase A — auth + primitives. Save flow, migration, and conflict resolution land in v2.1.0-beta. This release ships dormant by default — flip Local-only mode OFF below to enable.
-      </p>
-
-      {/* Help text — first-time connect warning */}
-      <div style={{fontSize:10,color:'var(--text3)',background:'var(--bg3)',padding:'8px 10px',borderRadius:6,marginBottom:10,lineHeight:1.5,border:'1px solid var(--border)'}}>
-        <div style={{fontWeight:600,color:'var(--text2)',marginBottom:4}}>First time connecting?</div>
-        PolicyLens is pending Google verification. You'll see a "Google hasn't verified this app" warning screen — click <strong>Advanced → Go to PolicyLens (unsafe)</strong> to continue. This is normal and will go away once verification completes.
-        <div style={{marginTop:6,fontWeight:600,color:'var(--text2)'}}>Refresh tokens</div>
-        Refresh tokens expire every 7 days while the app is in test mode. You'll see a Reconnect prompt periodically — usually one click.
+      <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:4,gap:12}}>
+        <h3 style={{fontSize:14,fontWeight:600,margin:0}}>🗂 Google Drive Sync</h3>
+        <button onClick={handleToggle} disabled={busy} aria-label="Toggle Drive sync"
+          style={{position:'relative',width:44,height:24,borderRadius:12,background:toggleOn?'var(--gold)':'var(--bg3)',border:'1px solid '+(toggleOn?'var(--gold)':'var(--border)'),cursor:busy?'wait':'pointer',opacity:busy?.6:1,transition:'background .2s, border-color .2s',padding:0,flexShrink:0}}>
+          <span style={{position:'absolute',top:2,left:toggleOn?22:2,width:18,height:18,borderRadius:'50%',background:toggleOn?'#0b0f1a':'var(--text3)',transition:'left .2s, background .2s'}}/>
+        </button>
       </div>
-
-      {/* Status + folder + last sync */}
+      <p style={{fontSize:11,color:'var(--text3)',marginBottom:10,lineHeight:1.5}}>When ON, client data syncs across all your devices via Google Drive. When OFF, data stays on this device only.</p>
+      {toggleOn && <div style={{fontSize:10,color:'var(--text3)',background:'var(--bg3)',padding:'8px 10px',borderRadius:6,marginBottom:10,lineHeight:1.5,border:'1px solid var(--border)'}}><strong style={{color:'var(--text2)'}}>Heads up:</strong> Refresh tokens expire every 7 days while the app is in Google test mode. You'll see a "Reconnect" prompt periodically — usually one click.</div>}
       <div style={{display:'flex',alignItems:'center',gap:10,marginBottom:10,flexWrap:'wrap'}}>
-        <div style={{fontSize:11,padding:'4px 10px',borderRadius:6,background:badgeFor.bg,color:badgeFor.color,border:'1px solid '+badgeFor.border}}>
-          {badgeFor.text}
-        </div>
-        {!localOnly && folderId && (
-          <a href={'https://drive.google.com/drive/folders/' + folderId} target="_blank" rel="noopener noreferrer"
-            style={{fontSize:11,color:'var(--gold)',textDecoration:'none'}}>
-            Open PolicyLens folder in Drive →
-          </a>
-        )}
-        {!localOnly && status === 'connected' && grantedRel && (
-          <span style={{fontSize:10,color:'var(--text3)'}}>Last sign-in {grantedRel}</span>
-        )}
+        <div style={{fontSize:11,padding:'4px 10px',borderRadius:6,background:statusPill.bg,color:statusPill.color,border:'1px solid '+statusPill.border}}>{statusPill.text}</div>
+        {toggleOn && folderId && <a href={'https://drive.google.com/drive/folders/'+folderId} target="_blank" rel="noopener noreferrer" style={{fontSize:11,color:'var(--gold)',textDecoration:'none'}}>Open folder in Drive \u2192</a>}
+        {toggleOn && status==='connected' && grantedRel && <span style={{fontSize:10,color:'var(--text3)'}}>Signed in {grantedRel}</span>}
       </div>
-
-      {/* Status message (transient) */}
-      {statusMsg && (
-        <div style={{fontSize:11,color:msgColor,marginBottom:10}}>{statusMsg.text}</div>
-      )}
-
-      {/* Buttons */}
-      <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap',marginBottom:12}}>
-        {!localOnly && status === 'disconnected' && (
-          <button className="btn-primary btn-sm" onClick={handleConnect} disabled={busy}>
-            {busy ? 'Connecting…' : 'Connect Google Drive'}
-          </button>
-        )}
-        {!localOnly && status === 'reconnect-needed' && (
-          <button className="btn-primary btn-sm" onClick={handleConnect} disabled={busy}
-            style={{background:'var(--gold)',color:'var(--bg)'}}>
-            {busy ? 'Reconnecting…' : 'Reconnect'}
-          </button>
-        )}
-        {!localOnly && status === 'connected' && (
-          <button className="btn-secondary btn-sm" onClick={handleDisconnect} disabled={busy}>
-            Disconnect
-          </button>
-        )}
-        {localOnly && (
-          <span style={{fontSize:11,color:'var(--text3)',fontStyle:'italic'}}>Drive integration is disabled in Local-only mode.</span>
-        )}
-      </div>
-
-      {/* Local-only dev toggle */}
-      <div style={{padding:'8px 10px',background:'var(--bg3)',borderRadius:6,border:'1px solid var(--border)'}}>
-        <label style={{display:'flex',alignItems:'center',gap:8,cursor:'pointer',fontSize:11}}>
-          <input type="checkbox" checked={localOnly} onChange={e => handleToggleLocalOnly(e.target.checked)} />
-          <span>
-            <strong style={{color:'var(--text2)'}}>Local-only mode (skip Drive entirely)</strong>
-            <div style={{fontSize:10,color:'var(--text3)',marginTop:2}}>
-              Default for v2.1.0. When ON, Drive code is fully bypassed and the app behaves identically to v2.0.x. Flip OFF to enable Drive auth and (in v2.1.0-beta) sync.
-            </div>
-          </span>
-        </label>
-      </div>
+      {statusMsg && <div style={{fontSize:11,color:msgColor,marginBottom:10}}>{statusMsg.text}</div>}
+      {toggleOn && status==='reconnect-needed' && <div style={{marginBottom:10}}><button className="btn-primary btn-sm" onClick={handleReconnect} disabled={busy} style={{background:'var(--gold)',color:'var(--bg)'}}>{busy?'Reconnecting\u2026':'Reconnect'}</button></div>}
+      {toggleOn && status==='connected' && <div style={{display:'flex',gap:8,flexWrap:'wrap'}}><button className="btn-secondary btn-sm" onClick={handleManualSync}>🔄 Sync now</button><button className="btn-secondary btn-sm" onClick={handleDiscover} disabled={discoverBusy}>{discoverBusy?'Scanning\u2026':'🔍 Find clients in Drive'}</button></div>}
     </div>
   );
 }
@@ -34450,8 +34495,7 @@ function Settings() {
       {/* ═══ v2.2.0-beta: LOCAL BACKUP (belt-and-suspenders) ═══ */}
       <LocalBackupCard />
 
-      {/* ═══ v2.3.0-rc2c.3c: DRIVE DISCOVERY ═══ */}
-      <DriveDiscoveryCard />
+      {/* v2.3.0-rc2c.5s: DriveDiscoveryCard merged into DriveConnectionCard */}
 
       {/* ═══ v2.3.0-rc2c.5q: USER MANAGEMENT (admin only) ═══ */}
       {isAdmin && (
@@ -34465,8 +34509,7 @@ function Settings() {
         </div>
       )}
 
-      {/* ═══ CLOUD SYNC ═══ */}
-      <CloudSyncCard />
+      {/* v2.3.0-rc2c.5s: CloudSyncCard removed (Supabase client data sync disabled in Drive mode) */}
 
       {/* ═══ ADMIN: REPOSITORY RESET ═══ */}
       {window._isAdmin && (
@@ -34489,73 +34532,7 @@ function Settings() {
         </div>
       )}
 
-      {/* ═══ FIRM DEFAULTS ═══ */}
-      {/* Firm-level projection assumptions. Applied only to new clients when
-          seeding globalAssumptions. Changing a value here never alters any
-          existing client's stored profile — it's a baseline, not a mandate. */}
-      <div className="card" style={{marginBottom:16, borderColor:'rgba(212,169,106,0.2)'}}>
-        <div style={{display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:4, gap:8, flexWrap:'wrap'}}>
-          <div style={{flex:1, minWidth:200}}>
-            <h3 style={{fontSize:14, fontWeight:600, marginBottom:4}}>🏛️ Firm Defaults for New Clients</h3>
-            <p style={{fontSize:11, color:'var(--text3)', marginBottom:0}}>
-              Projection assumptions seeded into new client profiles. Changing a value here never alters existing clients — only future ones. Per-client overrides live on the Assumptions card.
-            </p>
-          </div>
-          <button onClick={()=>{
-            if(confirm('Reset all Firm Defaults to their shipped baseline values?\n\nThis does not affect any existing client profiles.')) {
-              saveHouseDefaults(DEFAULT_HOUSE_VALUES);
-              toast('Firm defaults reset to baseline','success');
-            }
-          }} style={{
-            background:'var(--bg3)', color:'var(--text2)', border:'1px solid var(--border2)',
-            padding:'5px 10px', borderRadius:6, fontSize:10, cursor:'pointer', whiteSpace:'nowrap', flexShrink:0
-          }}>↺ Reset to baseline</button>
-        </div>
-        <div style={{marginTop:12, display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(220px, 1fr))', gap:10}}>
-          {HOUSE_DEFAULT_FIELDS.map(field => {
-            const current = houseDefaults[field.key];
-            const baseline = DEFAULT_HOUSE_VALUES[field.key];
-            const isOverridden = current !== baseline;
-            return (
-              <div key={field.key} style={{
-                padding:10, background:'var(--bg3)', borderRadius:8,
-                border: '1px solid ' + (isOverridden ? 'rgba(212,169,106,0.35)' : 'var(--border)'),
-              }}>
-                <div style={{display:'flex', justifyContent:'space-between', alignItems:'center', marginBottom:4}}>
-                  <label style={{fontSize:10, fontWeight:600, color:'var(--text2)', textTransform:'uppercase', letterSpacing:'0.4px'}}>
-                    {field.label}
-                  </label>
-                  {isOverridden && (
-                    <span title={`Baseline: ${baseline}`} style={{fontSize:8, color:'var(--gold)', fontWeight:700, padding:'1px 5px', background:'rgba(212,169,106,0.12)', borderRadius:3}}>
-                      CUSTOM
-                    </span>
-                  )}
-                </div>
-                {field.type === 'select' ? (
-                  <select value={current} onChange={e=>saveHouseDefaults({[field.key]: e.target.value})}
-                    style={{width:'100%', fontSize:12, padding:'5px 6px', background:'var(--bg2)', border:'1px solid var(--border)', borderRadius:5, color:'var(--text)'}}>
-                    {field.options.map(o => <option key={o} value={o}>{o}</option>)}
-                  </select>
-                ) : (
-                  <div style={{display:'flex', alignItems:'center', gap:4}}>
-                    <input type="number" value={current}
-                      min={field.min} max={field.max} step={field.step}
-                      onChange={e=>{
-                        const v = parseFloat(e.target.value);
-                        if(isNaN(v)) return;
-                        saveHouseDefaults({[field.key]: v});
-                      }}
-                      style={{flex:1, fontSize:12, padding:'5px 6px', background:'var(--bg2)', border:'1px solid var(--border)', borderRadius:5, color:'var(--text)'}}
-                    />
-                    {field.unit && <span style={{fontSize:9, color:'var(--text3)', flexShrink:0}}>{field.unit}</span>}
-                  </div>
-                )}
-                {field.hint && <div style={{fontSize:9, color:'var(--text3)', marginTop:4, lineHeight:1.3}}>{field.hint}</div>}
-              </div>
-            );
-          })}
-        </div>
-      </div>
+      {/* v2.3.0-rc2c.5s: Firm Defaults panel removed (values become silent DEFAULT_HOUSE_VALUES seeds). Backend preserved for AssumptionsCard ghost-text. */}
 
       {/* ═══ CLIENT TIERS ═══ */}
       <ClientTiersPanel tierDefinitions={tierDefinitions} saveTierDefinitions={saveTierDefinitions} />
