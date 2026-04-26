@@ -1,0 +1,17 @@
+name = "policylens-document-ai"
+main = "document-ai-proxy.js"
+compatibility_date = "2026-04-26"
+
+[vars]
+DOCUMENT_AI_PROJECT_ID = "policylens-493014"
+DOCUMENT_AI_LOCATION = "asia-southeast1"
+DOCUMENT_AI_PROCESSOR_ID = "5cd43d57e6998638"
+POLICYLENS_ALLOWED_ORIGIN = "https://fundlens-sg.github.io"
+
+# Optional auth hardening. If set, the Worker requires a valid PolicyLens
+# Supabase session token before it spends Document AI credits.
+# SUPABASE_URL = "https://mgbxxwoasrwlraffcvab.supabase.co"
+# SUPABASE_ANON_KEY = "<PolicyLens Supabase anon key>"
+
+# Add this separately as a secret:
+# wrangler secret put DOCUMENT_AI_SERVICE_ACCOUNT_JSON

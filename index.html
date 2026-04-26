@@ -6,13 +6,22 @@
 <meta name="browsermode" content="application">
 <title>PolicyLens</title>
 <script>window.onerror=function(m,s){if(!s||m==='Script error.')return true;return false};window.onunhandledrejection=function(e){if(!e||!e.reason)return;var r=String(e.reason);if(r==='Script error.')e.preventDefault();};
-// Suppress noisy library warnings
-(function(){var _warn=console.warn,_error=console.error;
-console.warn=function(){var m=arguments[0]||'';if(typeof m==='string'&&(m.includes('gotrue-js')||m.includes('lock:')||m.includes('not released within')||m.includes('this.lock')))return;_warn.apply(console,arguments)};
-console.error=function(){var m=arguments[0]||'';if(typeof m==='string'&&m.includes('deoptimised'))return;_error.apply(console,arguments)};
+// Suppress noisy library warnings and keep production consoles free of PII.
+(function(){var _log=console.log,_warn=console.warn,_error=console.error;
+function _debugOn(){try{return localStorage.getItem('policylens_debug')==='1'||sessionStorage.getItem('policylens_debug')==='1'}catch(_){return false}}
+function _scrub(v){if(typeof v!=='string')return v;return v
+  .replace(/[A-Z][0-9]{7}[A-Z]/gi,'[NRIC]')
+  .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi,'[email]')
+  .replace(/AIza[0-9A-Za-z_-]+/g,'AIza...[redacted]')
+  .replace(/sk-ant-[0-9A-Za-z_-]+/g,'sk-ant...[redacted]')}
+function _args(a){return Array.prototype.map.call(a,_scrub)}
+console.log=function(){if(_debugOn())_log.apply(console,_args(arguments))};
+console.warn=function(){var m=arguments[0]||'';if(typeof m==='string'&&(m.includes('gotrue-js')||m.includes('lock:')||m.includes('not released within')||m.includes('this.lock')))return;if(_debugOn())_warn.apply(console,_args(arguments))};
+console.error=function(){var m=arguments[0]||'';if(typeof m==='string'&&m.includes('deoptimised'))return;_error.apply(console,_args(arguments))};
+window.PolicyLensDebug=function(on){try{localStorage.setItem('policylens_debug',on?'1':'0')}catch(_){};return !!on};
 })();
 </script>
-<link rel="manifest" href="data:application/json,%7B%22name%22%3A%22PolicyLens%22%2C%22short_name%22%3A%22PolicyLens%22%2C%22start_url%22%3A%22.%22%2C%22display%22%3A%22standalone%22%2C%22orientation%22%3A%22any%22%2C%22background_color%22%3A%22%230b0f1a%22%2C%22theme_color%22%3A%22%23d4a96a%22%7D">
+<link rel="manifest" href="manifest.json">
 <meta name="theme-color" content="#0b0f1a">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
@@ -481,23 +490,30 @@ function authGrant(){
 }
 
 // ── Sync API keys from Supabase user_settings → IndexedDB ──
+async function shouldSyncApiKeysToCloud(){
+  try {
+    const rec = await dbGet('settings','syncApiKeysToCloud').catch(()=>null);
+    return rec?.value === true;
+  } catch(_) { return false; }
+}
 async function syncKeysFromSupabase(){
   try {
     const s=getSB();if(!s||!_user) return;
+    const syncApiKeys = await shouldSyncApiKeysToCloud();
     const {data,error}=await s.from('user_settings').select('gemini_api_key,anthropic_api_key,advisor_name,advisor_company').eq('user_id',_user.id).maybeSingle();
     if(error||!data) return;
     const uid=_user.id;
-    if(data.gemini_api_key){
+    if(syncApiKeys && data.gemini_api_key){
       await dbPut('settings',{key:'geminiKey_'+uid,value:data.gemini_api_key});
       await dbPut('settings',{key:'geminiKey',value:data.gemini_api_key});
     }
-    if(data.anthropic_api_key){
+    if(syncApiKeys && data.anthropic_api_key){
       await dbPut('settings',{key:'anthropicKey_'+uid,value:data.anthropic_api_key});
       await dbPut('settings',{key:'anthropicKey',value:data.anthropic_api_key});
     }
     if(data.advisor_name) await dbPut('settings',{key:'advisorName',value:data.advisor_name});
     if(data.advisor_company) await dbPut('settings',{key:'advisorCompany',value:data.advisor_company});
-    console.log('[Auth] API keys + advisor info synced from Supabase');
+    console.log('[Auth] Advisor info synced from Supabase' + (syncApiKeys ? ' with API keys' : ''));
     // Notify React to reload keys
     window.dispatchEvent(new Event('policylens-keys-synced'));
   } catch(e){console.warn('[Auth] Key sync error:',e);}
@@ -507,6 +523,7 @@ async function syncKeysFromSupabase(){
 async function saveKeyToSupabase(keyType, value){
   try {
     const s=getSB();if(!s||!_user) return;
+    if((keyType==='gemini'||keyType==='anthropic') && !(await shouldSyncApiKeysToCloud())) return;
     const colMap = {gemini:'gemini_api_key', anthropic:'anthropic_api_key', advisorName:'advisor_name', advisorCompany:'advisor_company'};
     const col = colMap[keyType];
     if(!col) return;
@@ -538,32 +555,51 @@ async function completeOnboarding(){
 }
 
 // ── Admin ──
-async function openAdmin(){document.getElementById('admin-panel').style.display='flex';await loadUsers();}
+function requireAdminAction(label){
+  if(!_isAdmin){
+    authMsg((label||'Admin action')+' is restricted to approved admins.','error');
+    return false;
+  }
+  return true;
+}
+function escapeHTML(v){
+  return String(v==null?'':v).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];});
+}
+async function openAdmin(){if(!requireAdminAction('User management'))return;document.getElementById('admin-panel').style.display='flex';await loadUsers();}
 function closeAdmin(){document.getElementById('admin-panel').style.display='none';}
 async function loadUsers(){
+  if(!requireAdminAction('User management'))return;
   var r=await sb().from('profiles').select('*').order('created_at',{ascending:false});
-  if(r.error){document.getElementById('admin-list').innerHTML='<p style="color:var(--red2)">Error: '+r.error.message+'</p>';return;}
+  if(r.error){document.getElementById('admin-list').innerHTML='<p style="color:var(--red2)">Error: '+escapeHTML(r.error.message)+'</p>';return;}
   var u=r.data||[],h='<table><thead><tr><th>Name</th><th>Email</th><th>Status</th><th>Role</th><th>Joined</th><th>Action</th></tr></thead><tbody>';
   u.forEach(function(x){
     var ok=x.approved,col=ok?'var(--green2)':'var(--orange)',bg=ok?'rgba(16,185,129,.1)':'rgba(245,158,11,.1)';
     var d=x.created_at?new Date(x.created_at).toLocaleDateString('en-SG',{day:'numeric',month:'short',year:'numeric'}):'—';
-    var uid=x.id;
+    var uid=encodeURIComponent(String(x.id||''));
     var uemail=x.email||'';
     var uname=x.full_name||'';
     var btn;
     if(ok){
-      btn='<button onclick="adminAct(&quot;'+uid+'&quot;,false,&quot;'+uemail+'&quot;,&quot;'+uname+'&quot;)" style="background:rgba(239,68,68,.15);color:var(--red2);border:none;border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer">Revoke</button>';
+      btn='<button onclick="adminAct(decodeURIComponent(&quot;'+uid+'&quot;),false)" style="background:rgba(239,68,68,.15);color:var(--red2);border:none;border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer">Revoke</button>';
     } else {
-      btn='<button onclick="adminAct(&quot;'+uid+'&quot;,true,&quot;'+uemail+'&quot;,&quot;'+uname+'&quot;)" style="background:rgba(16,185,129,.15);color:var(--green2);border:none;border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer">Approve</button>';
+      btn='<button onclick="adminAct(decodeURIComponent(&quot;'+uid+'&quot;),true)" style="background:rgba(16,185,129,.15);color:var(--green2);border:none;border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer">Approve</button>';
     }
-    h+='<tr><td style="font-weight:500">'+(x.full_name||'—')+'</td><td style="font-size:12px">'+(x.email||'—')+'</td>'
+    h+='<tr><td style="font-weight:500">'+escapeHTML(x.full_name||'—')+'</td><td style="font-size:12px">'+escapeHTML(x.email||'—')+'</td>'
       +'<td><span class="badge" style="background:'+bg+';color:'+col+'">'+(ok?'Approved':'Pending')+'</span></td>'
-      +'<td style="font-size:11px">'+(x.role||'user')+'</td><td style="font-size:11px;color:var(--text3)">'+d+'</td><td>'+btn+'</td></tr>';
+      +'<td style="font-size:11px">'+escapeHTML(x.role||'user')+'</td><td style="font-size:11px;color:var(--text3)">'+escapeHTML(d)+'</td><td>'+btn+'</td></tr>';
   });
   h+='</tbody></table><div style="font-size:11px;color:var(--text3);margin-top:12px">'+u.length+' users · '+u.filter(function(x){return x.approved}).length+' approved</div>';
   document.getElementById('admin-list').innerHTML=h;
 }
 async function adminAct(id,approve,email,name){
+  if(!requireAdminAction('User approval'))return;
+  if(!email || !name){
+    try{
+      const info=await sb().from('profiles').select('email,full_name').eq('id',id).maybeSingle();
+      email=email||info.data?.email;
+      name=name||info.data?.full_name;
+    }catch(_){}
+  }
   await sb().from('profiles').update({approved:approve}).eq('id',id);
   await loadUsers();
   if(approve && email) {
@@ -622,11 +658,134 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2d.1';
-const APP_VERSION_DATE = '2026-04-17';
-const APP_VERSION_NAME = 'XLSX local parse + column-map cache';
+const APP_VERSION = 'v2.3.0-rc2d.6';
+const APP_VERSION_DATE = '2026-04-26';
+const APP_VERSION_NAME = 'Document AI first-pass parsing';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2d.6',
+    date: '2026-04-26',
+    name: 'Document AI first-pass parsing',
+    sections: [
+      {
+        heading: 'AI scan',
+        items: [
+          'Added optional Google Document AI Form Parser as the first parsing layer for PDF/image scans via a secure proxy endpoint.',
+          'Extraction now falls through Document AI text/layout -> Gemini 2.5 Flash structured extraction -> Claude fallback, while keeping the old Gemini/Claude raw-file path when Document AI is not configured or fails.',
+          'Settings now includes a Document AI proxy URL field and connection test so the private Google service-account key stays server-side.'
+        ]
+      },
+      {
+        heading: 'Security',
+        items: [
+          'Added repository ignore rules for service-account JSON files, .env files, and local Codex/Claude working artifacts before deployment.'
+        ]
+      }
+    ]
+  },
+  {
+    version: 'v2.3.0-rc2d.5',
+    date: '2026-04-26',
+    name: 'Durable cross-device sync',
+    sections: [
+      {
+        heading: 'Sync',
+        items: [
+          'Google Drive writes now queue in a durable local outbox before upload, so pending edits survive refreshes, reconnects, and brief offline windows.',
+          'Drive files now carry device metadata, deleted-policy tombstones, and scan-session summaries so devices can merge more safely and show where updates came from.',
+          'Added force pull / force push controls plus lightweight realtime sync pings that nudge other signed-in devices to refresh sooner than the polling fallback.'
+        ]
+      },
+      {
+        heading: 'AI scan',
+        items: [
+          'Accepted scan imports now record a compact scan session for the client, including policy count, source filenames, pipeline version, and the device that accepted the batch.'
+        ]
+      }
+    ]
+  },
+  {
+    version: 'v2.3.0-rc2d.4',
+    date: '2026-04-26',
+    name: 'Sequential AI scan correlation',
+    sections: [
+      {
+        heading: 'AI scan',
+        items: [
+          'Manual Extract All now uses the batched scanner path again, so adjacent images are sent to the AI together instead of one file per job.',
+          'Image batches now include upload-order and filename sequence context, helping the AI treat adjacent photos such as IMG_1011 and IMG_1012 as pages of the same document when appropriate.',
+          'Partial-page dedupe now merges weak continuation pages into the nearest compatible preceding policy instead of leaving rider/value/fund pages as orphan policies.',
+          'Batch extraction cache keys are now order-sensitive because photo order affects multi-page correlation.'
+        ]
+      },
+      {
+        heading: 'Sync',
+        items: [
+          'Bulk import now triggers a Drive write after the accept flow, reducing the window where newly scanned policies are local-only.'
+        ]
+      }
+    ]
+  },
+  {
+    version: 'v2.3.0-rc2d.3',
+    date: '2026-04-26',
+    name: 'Live Drive directory sync',
+    sections: [
+      {
+        heading: 'Drive sync',
+        items: [
+          'Open devices now scan the Drive folder tree every 30 seconds, so clients created on another device appear without reload or manual discovery.',
+          'Drive directory sync auto-adds newly found clients to local IndexedDB, pulls their profile/policies immediately, and refreshes known clients whose Drive autosave revision changed.',
+          'Drive folder name/tier reconciliation now emits a live Clients-tab refresh even when the client JSON content did not change.',
+          'Manual Sync now checks the full Drive client directory before refreshing the active client, so it catches new, updated, and deleted clients in one click.',
+          'Switching clients now flushes any pending debounced Drive write for the previous client before changing active client, preventing quick-switch edits from staying local-only.',
+          'Client creation now emits the same clients-changed event as deletion/discovery, keeping the Clients tab live on the creating device too.'
+        ]
+      },
+      {
+        heading: 'Clients tab',
+        items: [
+          'Client-card premium totals now use annualizedPremium() instead of a stale/nonexistent premium field.',
+          'Profile-derived policy age updates now reload only the active client policies instead of briefly loading every client into React state.'
+        ]
+      }
+    ]
+  },
+  {
+    version: 'v2.3.0-rc2d.2',
+    date: '2026-04-25',
+    name: 'CPF cohort sums + client hardening',
+    sections: [
+      {
+        heading: 'CPF planning',
+        items: [
+          'CPF LIFE and retirement projections now use the client\'s age-55 cohort FRS/BRS/ERS instead of pinning every client to the 2026 FRS of $220,400.',
+          'Clients aged 55+ now label the CPF input as RA Balance and project from their locked age-55 cohort amount.'
+        ]
+      },
+      {
+        heading: 'Calculations',
+        items: [
+          'Dashboard/share/PDF premium aggregations now use annualizedPremium() instead of duplicating monthly x12 logic.'
+        ]
+      },
+      {
+        heading: 'Security and privacy',
+        items: [
+          'Admin user-management output now escapes profile data before rendering and re-checks admin state before sensitive client-side actions.',
+          'AI API key cloud sync is now opt-in; saving keys defaults to local-only storage unless the new Settings checkbox is enabled.',
+          'Production console logging is quiet by default and error output redacts emails, NRIC-like IDs, and common AI key formats.'
+        ]
+      },
+      {
+        heading: 'PWA',
+        items: [
+          'Manifest is now loaded from manifest.json instead of an inline data URL so install metadata stays in one maintained file.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2d.1',
     date: '2026-04-17',
@@ -2662,9 +2821,12 @@ function getISPRiderGeneration(dateStr) {
 
 // ═══ CPF LIFE INFRASTRUCTURE (CPF Board 2025/2026) ═══
 const CPF_CONSTANTS = {
+  CURRENT_YEAR: 2026,
   // 2025 cohort amounts — updated annually ~3.5%
   BRS_2025: 106500, FRS_2025: 213000, ERS_2025: 426000,
   BRS_2026: 110200, FRS_2026: 220400, ERS_2026: 440800,
+  BRS_2027: 114100, FRS_2027: 228200, ERS_2027: 456400,
+  RETIREMENT_SUM_GROWTH: 0.035,
   // Interest rates
   OA_RATE: 0.025, SA_RATE: 0.04, RA_RATE: 0.04, MA_RATE: 0.04,
   // Extra interest: <55 → +1% on first $60k (max $20k from OA); ≥55 → +2% on first $30k + +1% on next $30k
@@ -2721,11 +2883,96 @@ function getCPFAllocRate(age) {
   return CPF_ALLOCATION_RATES.find(r => age <= r.maxAge) || CPF_ALLOCATION_RATES[CPF_ALLOCATION_RATES.length-1];
 }
 
+const CPF_FRS_BY_55_YEAR = {
+  1995: 40000,
+  1996: 45000,
+  1997: 50000,
+  1998: 55000,
+  1999: 60000,
+  2000: 65000,
+  2001: 70000,
+  2002: 75000,
+  2003: 80000,
+  2004: 84500,
+  2005: 90000,
+  2006: 94600,
+  2007: 99600,
+  2008: 106000,
+  2009: 117000,
+  2010: 123000,
+  2011: 131000,
+  2012: 139000,
+  2013: 148000,
+  2014: 155000,
+  2015: 161000,
+  2016: 161000,
+  2017: 166000,
+  2018: 171000,
+  2019: 176000,
+  2020: 181000,
+  2021: 186000,
+  2022: 192000,
+  2023: 198800,
+  2024: 205800,
+  2025: 213000,
+  2026: 220400,
+  2027: 228200,
+};
+
+const CPF_RETIREMENT_SUMS_BY_55_YEAR = {
+  2015: { BRS: 80500, FRS: 161000, ERS: 241500 },
+  2016: { BRS: 80500, FRS: 161000, ERS: 241500 },
+  2017: { BRS: 83000, FRS: 166000, ERS: 249000 },
+  2018: { BRS: 85500, FRS: 171000, ERS: 256500 },
+  2019: { BRS: 88000, FRS: 176000, ERS: 264000 },
+  2020: { BRS: 90500, FRS: 181000, ERS: 271500 },
+  2021: { BRS: 93000, FRS: 186000, ERS: 279000 },
+  2022: { BRS: 96000, FRS: 192000, ERS: 288000 },
+  2023: { BRS: 99400, FRS: 198800, ERS: 298200 },
+  2024: { BRS: 102900, FRS: 205800, ERS: 308700 },
+  2025: { BRS: 106500, FRS: 213000, ERS: 426000 },
+  2026: { BRS: 110200, FRS: 220400, ERS: 440800 },
+  2027: { BRS: 114100, FRS: 228200, ERS: 456400 },
+};
+function getCPFYearTurning55(age, asOfYear=CPF_CONSTANTS.CURRENT_YEAR) {
+  const a = parseFloat(age);
+  if(!isFinite(a) || a <= 0) return asOfYear;
+  return Math.round(asOfYear + (55 - a));
+}
+function deriveCPFRetirementSumsFromFRS(year, frs) {
+  const y = Math.round(parseFloat(year) || CPF_CONSTANTS.CURRENT_YEAR);
+  const brs = Math.round((frs / 2) / 100) * 100;
+  const ersMultiplier = y >= 2025 ? 2 : 1.5;
+  return { BRS: brs, FRS: frs, ERS: Math.round((frs * ersMultiplier) / 100) * 100 };
+}
+function getCPFRetirementSumsForYear(year) {
+  const y = Math.round(parseFloat(year) || CPF_CONSTANTS.CURRENT_YEAR);
+  if(CPF_RETIREMENT_SUMS_BY_55_YEAR[y]) return CPF_RETIREMENT_SUMS_BY_55_YEAR[y];
+  if(CPF_FRS_BY_55_YEAR[y]) return deriveCPFRetirementSumsFromFRS(y, CPF_FRS_BY_55_YEAR[y]);
+  const knownYears = Object.keys(CPF_FRS_BY_55_YEAR).map(Number).sort((a,b)=>a-b);
+  const minYear = knownYears[0], maxYear = knownYears[knownYears.length-1];
+  if(y < minYear) return deriveCPFRetirementSumsFromFRS(minYear, CPF_FRS_BY_55_YEAR[minYear]);
+  const last = CPF_RETIREMENT_SUMS_BY_55_YEAR[maxYear] || deriveCPFRetirementSumsFromFRS(maxYear, CPF_FRS_BY_55_YEAR[maxYear]);
+  const projectedBRS = Math.round((last.BRS * Math.pow(1 + CPF_CONSTANTS.RETIREMENT_SUM_GROWTH, y - maxYear)) / 100) * 100;
+  const projectedFRS = projectedBRS * 2;
+  return { BRS: projectedBRS, FRS: projectedFRS, ERS: projectedFRS * 2 };
+}
+function getCPFSchemeAmountForAge(scheme='FRS', age, asOfYear=CPF_CONSTANTS.CURRENT_YEAR) {
+  return getCPFSchemeAmount(scheme, getCPFYearTurning55(age, asOfYear));
+}
+
 // Project CPF balances from current age to payout start age
 // Inputs: currentAge, monthlySalary, oaBal, saBal, maBal, payoutStartAge (65-70)
 function projectCPFToRetirement(currentAge, monthlySalary, oaBal, saBal, maBal, payoutStartAge=65) {
   let oa = oaBal || 0, sa = saBal || 0, ma = maBal || 0, ra = 0;
   const BHS = CPF_CONSTANTS.BRS_2026 > 0 ? 79000 : 75500; // 2026 BHS
+  const cohort55Year = getCPFYearTurning55(currentAge);
+  const frsAt55 = getCPFSchemeAmount('FRS', cohort55Year);
+  if(currentAge >= 55) {
+    // For clients already 55+, the "SA" input represents their current RA balance.
+    ra = Math.max(0, sa);
+    sa = 0;
+  }
 
   for(let age = currentAge; age < payoutStartAge; age++) {
     // Annual CPF contribution (capped at OW ceiling)
@@ -2742,9 +2989,9 @@ function projectCPFToRetirement(currentAge, monthlySalary, oaBal, saBal, maBal, 
       oa += toOA;
       sa += toSA;
       ma = Math.min(ma + toMA, BHS); // MA capped at BHS
-    } else if(age === 55) {
+    } else if(age === 55 && currentAge < 55) {
       // At 55: SA closes, transfers to RA up to FRS. OA fills the rest up to FRS.
-      const frs = CPF_CONSTANTS.FRS_2026;
+      const frs = frsAt55;
       ra = Math.min(sa, frs);
       sa = 0;
       if(ra < frs) {
@@ -2764,7 +3011,7 @@ function projectCPFToRetirement(currentAge, monthlySalary, oaBal, saBal, maBal, 
       const toMA = annualContrib * allocRate.ma;
       const toRA = annualContrib * allocRate.sa; // 'sa/ra' column
       const toOA = annualContrib - toMA - toRA;
-      const frs = CPF_CONSTANTS.FRS_2026;
+      const frs = frsAt55;
       if(ra < frs) {
         ra += toRA + toOA; // All to RA up to FRS
         if(ra > frs) { oa += (ra - frs); ra = frs; }
@@ -2891,9 +3138,9 @@ function projectRAToAge(raAt55, targetAge, otherCpfAt55 = 0, payoutFromAge = nul
   return Math.round(ra);
 }
 
-function getCPFSchemeAmount(scheme='FRS', year=2026) {
-  const key = scheme + '_' + year;
-  return CPF_CONSTANTS[key] || CPF_CONSTANTS[scheme + '_2025'] || 213000;
+function getCPFSchemeAmount(scheme='FRS', year=CPF_CONSTANTS.CURRENT_YEAR) {
+  const sums = getCPFRetirementSumsForYear(year);
+  return sums[scheme] || sums.FRS || 213000;
 }
 
 // ═══ FX RATE HELPER ═══
@@ -3021,11 +3268,11 @@ async function pdfToImages(pdfDoc, maxPages=12) {
 // CLEAN even if the FC never actually reviewed anything. Bumping the version
 // forces a re-extraction next time those same files are uploaded, and the
 // one-time cleanup in App init purges the stale entries from IndexedDB.
-const EXTRACT_PIPELINE_VERSION = 'v14.5-2026-04-17-xlsx-structured';
+const EXTRACT_PIPELINE_VERSION = 'v14.7-2026-04-26-document-ai-first-pass';
 
 // ── v15: PROMPT VERSIONING ──
-const EXTRACT_PROMPT_VERSION = 'v14.1-2026-04-10-strict-fields';
-const OCR_PROMPT_VERSION = 'v15-2026-04-10';
+const EXTRACT_PROMPT_VERSION = 'v14.2-2026-04-26-sequential-images';
+const OCR_PROMPT_VERSION = 'v16-2026-04-26-document-ai';
 
 // ── v2.0.9: MODULE-SCOPE EXTRACT_PROMPT ──
 // The EXTRACT_PROMPT template literal (~443 lines of insurance extraction
@@ -4606,10 +4853,11 @@ async function hashFile(file) {
   return Array.from(new Uint8Array(digest)).map(b => b.toString(16).padStart(2,'0')).join('');
 }
 
-// Compute an order-independent cache key for a batch of files, stamped with pipeline version.
+// Compute an order-sensitive cache key for a batch of files, stamped with pipeline version.
+// Photo order is part of the extraction signal: adjacent images may be pages of
+// the same policy, so IMG_1011+IMG_1012 is not the same prompt as the reverse.
 async function batchCacheKey(files) {
   const hashes = await Promise.all(Array.from(files).map(hashFile));
-  hashes.sort();
   return EXTRACT_PIPELINE_VERSION + ':' + hashes.join('|');
 }
 
@@ -5803,6 +6051,200 @@ async function processFile(file) {
   return [{type:'document', source:{type:'base64', media_type:mime, data:b64}, _forceAnthropic:true}];
 }
 
+async function getDocumentAIEndpoint() {
+  try {
+    const uid = window._user?.id || '';
+    const rec = (await dbGet('settings','documentAiEndpoint_'+uid).catch(()=>null))
+      || (await dbGet('settings','documentAiEndpoint').catch(()=>null));
+    return String(rec?.value || '').trim().replace(/\/+$/, '');
+  } catch(_) {
+    return '';
+  }
+}
+
+async function getDocumentAIHeaders() {
+  const headers = {'Content-Type': 'application/json'};
+  try {
+    const s = (typeof getSB === 'function') ? getSB() : null;
+    const sessionResp = await s?.auth?.getSession?.();
+    const token = sessionResp?.data?.session?.access_token;
+    if (token) headers.Authorization = 'Bearer ' + token;
+  } catch(_) {}
+  return headers;
+}
+
+function isDocumentAIMimeSupported(mimeType) {
+  const mt = String(mimeType || '').toLowerCase();
+  return mt === 'application/pdf'
+    || mt === 'image/jpeg'
+    || mt === 'image/jpg'
+    || mt === 'image/png'
+    || mt === 'image/tiff'
+    || mt === 'image/tif'
+    || mt === 'image/gif'
+    || mt === 'image/bmp'
+    || mt === 'image/webp';
+}
+
+function selectDocumentAIMediaBlock(file, blocks) {
+  if (!file || !Array.isArray(blocks) || blocks.length === 0) return null;
+  const mediaBlocks = blocks.filter(b => (b.type === 'image' || b.type === 'document') && !b._forceAnthropic && b.source?.data);
+  if (mediaBlocks.length !== 1) return null;
+  const block = mediaBlocks[0];
+  const mimeType = block.source.media_type || file.type || (block.type === 'document' ? 'application/pdf' : 'application/octet-stream');
+  if (!isDocumentAIMimeSupported(mimeType)) return null;
+  return {mimeType, content: block.source.data};
+}
+
+function buildDocumentAITextBlock(file, data) {
+  const stats = [];
+  if (data.pageCount != null) stats.push(data.pageCount + ' page' + (data.pageCount === 1 ? '' : 's'));
+  if (data.formFieldCount) stats.push(data.formFieldCount + ' form field' + (data.formFieldCount === 1 ? '' : 's'));
+  if (data.tableCount) stats.push(data.tableCount + ' table' + (data.tableCount === 1 ? '' : 's'));
+  if (data.entityCount) stats.push(data.entityCount + ' entit' + (data.entityCount === 1 ? 'y' : 'ies'));
+  const lines = [
+    '[PolicyLens first-pass parser: Google Document AI Form Parser]',
+    'Source file: ' + cleanUploadFileName(file),
+    stats.length ? 'Detected: ' + stats.join(', ') : '',
+    '',
+    'Use the OCR text, form fields, and tables below as the source document content. Preserve policy numbers and amounts exactly as written. If data is missing from this text, do not invent it.',
+    '',
+    String(data.text || '').trim(),
+  ].filter(Boolean);
+  return {
+    type: 'text',
+    text: lines.join('\n'),
+    _documentAI: true,
+    _documentAIStats: {
+      pageCount: data.pageCount || 0,
+      formFieldCount: data.formFieldCount || 0,
+      tableCount: data.tableCount || 0,
+      entityCount: data.entityCount || 0,
+    },
+  };
+}
+
+async function tryDocumentAIFirstPass(file, blocks, opts = {}) {
+  const endpoint = opts.endpoint != null ? opts.endpoint : await getDocumentAIEndpoint();
+  if (!endpoint) return null;
+  const media = selectDocumentAIMediaBlock(file, blocks);
+  if (!media) return null;
+  try {
+    console.log('[DocumentAI] First-pass parse for', cleanUploadFileName(file), media.mimeType);
+    const resp = await fetchWithTimeout(endpoint, {
+      method: 'POST',
+      headers: await getDocumentAIHeaders(),
+      body: JSON.stringify({
+        fileName: cleanUploadFileName(file),
+        mimeType: media.mimeType,
+        content: media.content,
+      }),
+    }, 120000);
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok || data.ok === false) {
+      throw new Error(data.error || ('HTTP ' + resp.status + ' ' + resp.statusText));
+    }
+    const textLen = String(data.text || '').trim().length;
+    if (textLen < 40) throw new Error('Document AI returned too little text (' + textLen + ' chars)');
+    console.log('[DocumentAI] Parsed', cleanUploadFileName(file), '->', textLen, 'chars,', data.pageCount || 0, 'pages');
+    return [buildDocumentAITextBlock(file, data)];
+  } catch (err) {
+    console.warn('[DocumentAI] First-pass failed for', cleanUploadFileName(file) + ':', err.message);
+    return null;
+  }
+}
+
+async function processFileWithDocumentAI(file, opts = {}) {
+  const blocks = opts.blocks || await processFile(file);
+  if (opts.documentAI === false) return blocks;
+  const docAiBlocks = await tryDocumentAIFirstPass(file, blocks, opts);
+  return docAiBlocks || blocks;
+}
+
+function isImageLikeFile(file) {
+  const type = (file?.type || '').toLowerCase();
+  const name = (file?.name || '').toLowerCase();
+  return type.startsWith('image/') || /\.(jpe?g|png|webp|heic|heif|gif|bmp)$/i.test(name);
+}
+
+function cleanUploadFileName(file) {
+  return (file?.name || 'unnamed-file').toString().replace(/[\r\n]+/g, ' ').slice(0, 120);
+}
+
+function parseUploadSequenceToken(file) {
+  const raw = cleanUploadFileName(file).replace(/\.[^.]+$/, '');
+  const match = raw.match(/^(.*?)(\d{2,})(?:[^\d]*)$/);
+  if (!match) return null;
+  return {
+    prefix: (match[1] || '').toLowerCase().replace(/[^a-z0-9]+/g, ''),
+    number: parseInt(match[2], 10),
+    width: match[2].length,
+  };
+}
+
+function sameUploadSequence(a, b) {
+  if (!a || !b) return false;
+  if (a.prefix !== b.prefix) return false;
+  return Math.abs(a.number - b.number) === 1;
+}
+
+function buildUploadSequenceMeta(files) {
+  const arr = Array.from(files || []);
+  const parsed = arr.map(parseUploadSequenceToken);
+  const map = new Map();
+  arr.forEach((file, i) => {
+    const prev = i > 0 ? arr[i - 1] : null;
+    const next = i < arr.length - 1 ? arr[i + 1] : null;
+    const meta = {
+      uploadIndex: i + 1,
+      uploadTotal: arr.length,
+      fileName: cleanUploadFileName(file),
+      prevFileName: prev ? cleanUploadFileName(prev) : '',
+      nextFileName: next ? cleanUploadFileName(next) : '',
+      sequence: parsed[i],
+      prevIsAdjacentNumber: sameUploadSequence(parsed[i], parsed[i - 1]),
+      nextIsAdjacentNumber: sameUploadSequence(parsed[i], parsed[i + 1]),
+      isImage: isImageLikeFile(file),
+    };
+    map.set(file, meta);
+  });
+  return map;
+}
+
+function buildUploadSequenceOverview(files, sequenceMeta) {
+  const arr = Array.from(files || []);
+  const imageFiles = arr.filter(isImageLikeFile);
+  if (imageFiles.length < 2) return '';
+  const meta = sequenceMeta || buildUploadSequenceMeta(arr);
+  const lines = [];
+  lines.push('UPLOAD SEQUENCE CONTEXT - use this as page-order metadata, not as policy data.');
+  lines.push('The following image parts appear in this exact upload order:');
+  for (const file of arr) {
+    if (!isImageLikeFile(file)) continue;
+    const m = meta.get(file) || {};
+    const hints = [];
+    if (m.sequence) hints.push('filename number ' + m.sequence.number);
+    if (m.prevFileName) hints.push('previous ' + m.prevFileName + (m.prevIsAdjacentNumber ? ' (adjacent filename number)' : ''));
+    if (m.nextFileName) hints.push('next ' + m.nextFileName + (m.nextIsAdjacentNumber ? ' (adjacent filename number)' : ''));
+    lines.push('- Image ' + m.uploadIndex + ' of ' + m.uploadTotal + ': ' + (m.fileName || cleanUploadFileName(file)) + (hints.length ? ' [' + hints.join('; ') + ']' : ''));
+  }
+  lines.push('If an image lacks a clear new policy identity and is adjacent in this list (especially adjacent filename numbers like IMG_1011 then IMG_1012), treat it as a continuation candidate of the nearest previous compatible policy.');
+  lines.push('Do not use filename numbers as policy numbers. Only split into a new policy when the page clearly has its own policy number, distinct insurer/product header, or standalone row/instrument.');
+  return lines.join('\n');
+}
+
+function buildJobUploadSequenceOverview(job, file) {
+  if (!job || !file || !isImageLikeFile(file) || (job.uploadTotal || 0) < 2) return '';
+  const lines = [];
+  lines.push('UPLOAD SEQUENCE CONTEXT - this file is one image from a larger upload.');
+  lines.push('Current image: ' + (job.uploadIndex || '?') + ' of ' + job.uploadTotal + ': ' + (job.fileName || cleanUploadFileName(file)));
+  if (job.uploadPrevFileName) lines.push('Previous upload image: ' + job.uploadPrevFileName + (job.uploadPrevIsAdjacentNumber ? ' (adjacent filename number)' : ''));
+  if (job.uploadNextFileName) lines.push('Next upload image: ' + job.uploadNextFileName + (job.uploadNextIsAdjacentNumber ? ' (adjacent filename number)' : ''));
+  lines.push('If this image lacks a clear standalone policy identity, mark it as a partial/continuation page rather than inventing a new policy. The final import will merge compatible partials.');
+  lines.push('Do not use filename numbers as policy numbers.');
+  return lines.join('\n');
+}
+
 // ═══════════════════════════════════════════════════════════════
 // v15 STAGE 6: TWO-TIER OCR ROUTING
 // ═══════════════════════════════════════════════════════════════
@@ -5831,7 +6273,11 @@ async function performOCR(job, file) {
   const ck = ((await dbGet('settings','anthropicKey_'+uid).catch(()=>null))?.value || (await dbGet('settings','anthropicKey').catch(()=>null))?.value || '').trim();
   if (!gk && !ck) throw new Error('No API keys configured — add a Gemini or Anthropic key in Settings');
 
-  const contentBlocks = await processFile(file);
+  const rawFileBlocks = await processFile(file);
+  const uploadContext = buildJobUploadSequenceOverview(job, file);
+  const rawContentBlocks = uploadContext
+    ? [{type:'text', text: uploadContext}, ...rawFileBlocks]
+    : rawFileBlocks;
   // v2.0.8: restrict the text-layer fast path to PDFs only. The original
   // 7612adb "Pre-v14.4 baseline" commit introduced this guard to skip the
   // Gemini OCR call on text-native PDFs — but the type check was missing,
@@ -5845,14 +6291,19 @@ async function performOCR(job, file) {
   // Gemini → Claude tiers below, which is the documented architecture.
   const fileName = (file.name || '').toLowerCase();
   const isPDF = file.type === 'application/pdf' || fileName.endsWith('.pdf');
-  const hasTextLayer = isPDF && contentBlocks.some(b => b.type === 'text' && (b.text||'').length > 200);
+  const hasTextLayer = isPDF && rawContentBlocks.some(b => b.type === 'text' && (b.text||'').length > 200);
   if (hasTextLayer) {
-    const text = contentBlocks.filter(b => b.type === 'text').map(b => b.text).join('\n');
+    const text = rawContentBlocks.filter(b => b.type === 'text').map(b => b.text).join('\n');
     console.log('[OCR] Text-layer fast path for', job.fileName, '(', text.length, 'chars)');
-    return { text, confidence: 0.9, model: 'text-layer', inputTokens: 0, outputTokens: 0, contentBlocks };
+    return { text, confidence: 0.9, model: 'text-layer', inputTokens: 0, outputTokens: 0, contentBlocks: rawContentBlocks };
   }
 
   const idemKey = job.fileHash + ':ocr:' + OCR_PROMPT_VERSION;
+  const fileBlocks = await processFileWithDocumentAI(file, {blocks: rawFileBlocks});
+  const contentBlocks = uploadContext
+    ? [{type:'text', text: uploadContext}, ...fileBlocks]
+    : fileBlocks;
+  const usedDocumentAI = contentBlocks.some(b => b._documentAI);
 
   // Tier 1: Gemini Flash
   if (gk) {
@@ -5866,7 +6317,7 @@ async function performOCR(job, file) {
       const conf = ocrConfidence(parsed);
       console.log('[OCR] Tier 1 confidence:', conf.toFixed(2), 'for', job.fileName);
       if (conf >= 0.7) {
-        return { text: normalized, confidence: conf, model: 'gemini-2.5-flash', inputTokens: 0, outputTokens: 0, contentBlocks };
+        return { text: normalized, confidence: conf, model: usedDocumentAI ? 'document-ai+gemini-2.5-flash' : 'gemini-2.5-flash', inputTokens: 0, outputTokens: 0, contentBlocks };
       }
       console.log('[OCR] Tier 1 confidence too low (', conf.toFixed(2), ') — escalating');
     } catch (t1Err) {
@@ -5885,7 +6336,7 @@ async function performOCR(job, file) {
       let parsed; try { parsed = JSON.parse(normalized); } catch(_) { parsed = repairJSON(normalized); }
       const conf = ocrConfidence(parsed);
       console.log('[OCR] Tier 2 confidence:', conf.toFixed(2), 'for', job.fileName);
-      return { text: normalized, confidence: conf, model: 'claude-haiku-4-5-20251001', inputTokens: 0, outputTokens: 0, contentBlocks };
+      return { text: normalized, confidence: conf, model: usedDocumentAI ? 'document-ai+claude-haiku-4-5' : 'claude-haiku-4-5-20251001', inputTokens: 0, outputTokens: 0, contentBlocks };
     } catch (t2Err) {
       console.warn('[OCR] Tier 2 failed:', t2Err.message);
       throw t2Err;
@@ -6165,7 +6616,7 @@ async function processJob(job) {
         if (!file && !job.ocrText) throw new Error('No file or OCR text for extraction');
         const contentBlocks = job.ocrText
           ? [{type:'text', text: job.ocrText}]
-          : await processFile(file);
+          : await processFileWithDocumentAI(file);
         console.log('[Queue] Extract stage for', job.fileName);
         // v14.1: Inject correction memory few-shot
         const correctionSuffix = await buildCorrectionFewShot();
@@ -6248,10 +6699,22 @@ async function startExtraction(files) {
   if (!files || files.length === 0) return;
   console.log('[Queue] Starting extraction for', files.length, 'files');
   _sessionCost.startTime = _sessionCost.startTime || Date.now();
+  const fileList = Array.from(files);
+  const sequenceMeta = buildUploadSequenceMeta(fileList);
   const jobs = [];
-  for (const file of Array.from(files)) {
+  for (const file of fileList) {
     try {
       const job = await ingestFile(file);
+      const meta = sequenceMeta.get(file);
+      if (meta) {
+        job.uploadIndex = meta.uploadIndex;
+        job.uploadTotal = meta.uploadTotal;
+        job.uploadPrevFileName = meta.prevFileName || '';
+        job.uploadNextFileName = meta.nextFileName || '';
+        job.uploadPrevIsAdjacentNumber = !!meta.prevIsAdjacentNumber;
+        job.uploadNextIsAdjacentNumber = !!meta.nextIsAdjacentNumber;
+        await PolicyDB.putJob(job);
+      }
       _tickerFileMap.set(job.id, file);
       jobs.push(job);
     } catch (err) {
@@ -9152,7 +9615,7 @@ function isLikelyFundName(name) {
 // MODULE: INDEXEDDB — Database layer + batch operations
 // ═══════════════════════════════════════════════════════════════
 
-const DB_NAME='PolicyLensV4';const DB_VER=10;
+const DB_NAME='PolicyLensV4';const DB_VER=11;
 const openDB=()=>new Promise((res,rej)=>{
   const r=indexedDB.open(DB_NAME,DB_VER);
   r.onupgradeneeded=e=>{
@@ -9208,6 +9671,17 @@ const openDB=()=>new Promise((res,rej)=>{
     // v2.3.0-rc2d.1: Column map cache for XLSX extraction
     if(!db.objectStoreNames.contains('column_map_cache')){
       db.createObjectStore('column_map_cache',{keyPath:'signature'});
+    }
+    // v2.3.0-rc2d.5: Durable Drive outbox + scan-session sync metadata
+    if(!db.objectStoreNames.contains('sync_outbox')){
+      const so=db.createObjectStore('sync_outbox',{keyPath:'id'});
+      so.createIndex('byClientId','clientId',{unique:false});
+      so.createIndex('byStatus','status',{unique:false});
+    }
+    if(!db.objectStoreNames.contains('scan_sessions')){
+      const ss=db.createObjectStore('scan_sessions',{keyPath:'id'});
+      ss.createIndex('byClientId','clientId',{unique:false});
+      ss.createIndex('byCreatedAt','createdAt',{unique:false});
     }
   };
   r.onblocked=()=>{console.warn('[IDB] Blocked by another tab — close other PolicyLens tabs');try{toast('Close other PolicyLens tabs to complete the update','warning',8000)}catch(_){}};
@@ -9370,6 +9844,19 @@ const PolicyDB = {
   getDriveState: (clientId) => dbGet('drive_state', clientId).catch(() => null),
   saveDriveState: (state) => dbPut('drive_state', { ...state, clientId: state.clientId }),
   getAllDriveStates: () => dbGetAll('drive_state'),
+  // v2.3.0-rc2d.5: Durable sync outbox
+  getSyncOutbox: (id) => dbGet('sync_outbox', id).catch(() => null),
+  saveSyncOutbox: (entry) => dbPut('sync_outbox', entry),
+  deleteSyncOutbox: (id) => dbDel('sync_outbox', id),
+  getAllSyncOutbox: () => dbGetAll('sync_outbox').catch(() => []),
+  // v2.3.0-rc2d.5: Scan-session metadata
+  saveScanSession: (entry) => dbPut('scan_sessions', entry),
+  getAllScanSessions: () => dbGetAll('scan_sessions').catch(() => []),
+  getScanSessionsByClient: async (clientId) => {
+    const all = await dbGetAll('scan_sessions').catch(() => []);
+    return (all || []).filter(s => s.clientId === clientId)
+      .sort((a,b) => String(b.createdAt || '').localeCompare(String(a.createdAt || '')));
+  },
   // ── v2.3.0-rc2c.1: Checkpoint summary-index helpers ──
   saveCheckpointSummary: (summary) => dbPut('checkpoints', summary),
   getCheckpointsByClient: async (clientId) => {
@@ -9725,6 +10212,14 @@ function buildDriveClientPayload(clientId, clientProfile, policies, metadata) {
     const { _fieldVersions, ...rest } = obj;
     return rest;
   };
+  const now = new Date().toISOString();
+  const syncMeta = {
+    deviceId: getPolicyLensDeviceId(),
+    deviceName: getPolicyLensDeviceName(),
+    userEmail: getPolicyLensUserEmail(),
+    updatedAt: now,
+    ...(metadata?.syncMeta || {})
+  };
   return {
     schemaVersion: DRIVE_SCHEMA_VERSION,
     clientId,
@@ -9733,7 +10228,12 @@ function buildDriveClientPayload(clientId, clientProfile, policies, metadata) {
     // v2.3.0-rc2c.5p: tier + lastReviewedAt now sourced from caller (was hardcoded null)
     tier: metadata?.tier ?? null,
     lastReviewedAt: metadata?.lastReviewedAt ?? null,
-    updatedAt: new Date().toISOString(),
+    updatedAt: now,
+    updatedByDevice: syncMeta.deviceName,
+    updatedByUser: syncMeta.userEmail || null,
+    syncMeta,
+    deletedPolicyIds: Array.isArray(metadata?.deletedPolicyIds) ? metadata.deletedPolicyIds.slice(-500) : [],
+    scanSessions: Array.isArray(metadata?.scanSessions) ? metadata.scanSessions.slice(0, 50) : [],
   };
 }
 
@@ -9746,7 +10246,16 @@ function parseDriveClientFile(data) {
     console.info('[Drive] Upgraded file from schema v1 → v2');
   }
   // v2.3.0-rc2c.5p: also return tier + lastReviewedAt (default null for old files)
-  return { clientProfile: cp, policies, tier: data.tier ?? null, lastReviewedAt: data.lastReviewedAt ?? null };
+  return {
+    clientProfile: cp,
+    policies,
+    tier: data.tier ?? null,
+    lastReviewedAt: data.lastReviewedAt ?? null,
+    syncMeta: data.syncMeta || null,
+    deletedPolicyIds: Array.isArray(data.deletedPolicyIds) ? data.deletedPolicyIds : [],
+    scanSessions: Array.isArray(data.scanSessions) ? data.scanSessions : [],
+    updatedAt: data.updatedAt || null
+  };
 }
 
 // ── Drive conflict error (thrown by updateClientFile on headRevisionId mismatch) ──
@@ -9779,16 +10288,423 @@ function _notifySyncStatus() {
   window.dispatchEvent(new Event('policylens-sync-status-change'));
 }
 
+const POLICYLENS_DEVICE_ID_KEY = 'policylens_device_id';
+const POLICYLENS_DEVICE_NAME_KEY = 'policylens_device_name';
+const DRIVE_SYNC_OUTBOX_PREFIX = 'drive-client:';
+let _policyLensSyncBroadcast = null;
+
+function getPolicyLensDeviceId() {
+  try {
+    let id = localStorage.getItem(POLICYLENS_DEVICE_ID_KEY);
+    if (!id) {
+      id = (crypto && crypto.randomUUID) ? crypto.randomUUID() : ('dev_' + Date.now() + '_' + Math.random().toString(36).slice(2, 10));
+      localStorage.setItem(POLICYLENS_DEVICE_ID_KEY, id);
+    }
+    return id;
+  } catch(_) {
+    return 'dev_session_' + Math.random().toString(36).slice(2, 10);
+  }
+}
+
+function getPolicyLensDeviceName() {
+  try {
+    const saved = localStorage.getItem(POLICYLENS_DEVICE_NAME_KEY);
+    if (saved) return saved;
+    const ua = navigator.userAgent || '';
+    let base = 'Device';
+    if (/iPad/i.test(ua)) base = 'iPad';
+    else if (/iPhone/i.test(ua)) base = 'iPhone';
+    else if (/Android/i.test(ua)) base = /Mobile/i.test(ua) ? 'Android phone' : 'Android tablet';
+    else if (/Windows/i.test(ua)) base = 'Windows laptop';
+    else if (/Macintosh|Mac OS/i.test(ua)) base = 'Mac';
+    const name = base + ' ' + getPolicyLensDeviceId().slice(0, 4).toUpperCase();
+    localStorage.setItem(POLICYLENS_DEVICE_NAME_KEY, name);
+    return name;
+  } catch(_) {
+    return 'This device';
+  }
+}
+
+function getPolicyLensUserEmail() {
+  try {
+    return window._user?.email || window._user?.user_metadata?.email || driveLSGet(DRIVE_LS.userEmail) || '';
+  } catch(_) {
+    return '';
+  }
+}
+
+function syncOutboxId(clientId) {
+  return DRIVE_SYNC_OUTBOX_PREFIX + clientId;
+}
+
+function getLocalSyncBroadcast() {
+  if (typeof BroadcastChannel === 'undefined') return null;
+  if (!_policyLensSyncBroadcast) {
+    try { _policyLensSyncBroadcast = new BroadcastChannel('policylens-drive-sync'); }
+    catch(_) { _policyLensSyncBroadcast = null; }
+  }
+  return _policyLensSyncBroadcast;
+}
+
+function emitLocalDriveSyncPing(payload) {
+  const detail = { ...(payload || {}), emittedAt: new Date().toISOString() };
+  try { window.dispatchEvent(new CustomEvent('policylens-drive-sync-ping', { detail })); } catch(_) {}
+  try { getLocalSyncBroadcast()?.postMessage(detail); } catch(_) {}
+}
+
+function subscribeLocalDriveSyncPings(handler) {
+  const onEvent = (e) => handler(e.detail || {});
+  window.addEventListener('policylens-drive-sync-ping', onEvent);
+  const bc = getLocalSyncBroadcast();
+  const onMessage = (e) => handler(e.data || {});
+  try { if (bc) bc.addEventListener('message', onMessage); } catch(_) {}
+  return () => {
+    window.removeEventListener('policylens-drive-sync-ping', onEvent);
+    try { if (bc) bc.removeEventListener('message', onMessage); } catch(_) {}
+  };
+}
+
+async function broadcastDriveSyncPing(clientId, extra) {
+  const payload = {
+    clientId,
+    deviceId: getPolicyLensDeviceId(),
+    deviceName: getPolicyLensDeviceName(),
+    userEmail: getPolicyLensUserEmail(),
+    at: new Date().toISOString(),
+    ...(extra || {})
+  };
+  emitLocalDriveSyncPing(payload);
+  try {
+    const s = getSB();
+    const uid = window._user?.id || null;
+    if (!s || !uid || typeof s.channel !== 'function') return false;
+    const channelName = 'policylens-drive-sync-send-' + uid + '-' + Date.now();
+    const channel = s.channel(channelName, { config: { broadcast: { self: false } } });
+    await new Promise((resolve) => {
+      let done = false;
+      const finish = (ok) => {
+        if (done) return;
+        done = true;
+        try { s.removeChannel(channel); } catch(_) {}
+        resolve(ok);
+      };
+      const timer = setTimeout(() => finish(false), 4000);
+      channel.subscribe(async (status) => {
+        if (status !== 'SUBSCRIBED') return;
+        clearTimeout(timer);
+        try {
+          await channel.send({ type: 'broadcast', event: 'drive_client_updated', payload });
+          finish(true);
+        } catch(_) {
+          finish(false);
+        }
+      });
+    });
+    return true;
+  } catch(_) {
+    return false;
+  }
+}
+
+async function getDeletedPolicyIds(clientId) {
+  if (!clientId) return [];
+  const list = await PolicyDB.getSetting('deletedPolicyIds_' + clientId).catch(() => []);
+  return Array.isArray(list) ? list : [];
+}
+
+async function recordDeletedPolicyId(clientId, policyId) {
+  if (!clientId || !policyId) return;
+  const list = await getDeletedPolicyIds(clientId);
+  const next = Array.from(new Set([...list, policyId])).slice(-500);
+  await PolicyDB.saveSetting('deletedPolicyIds_' + clientId, next).catch(() => {});
+}
+
+async function clearDeletedPolicyId(clientId, policyId) {
+  if (!clientId || !policyId) return;
+  const list = await getDeletedPolicyIds(clientId);
+  if (!list.includes(policyId)) return;
+  await PolicyDB.saveSetting('deletedPolicyIds_' + clientId, list.filter(id => id !== policyId)).catch(() => {});
+}
+
+function stampPolicySyncMeta(policy, reason) {
+  return {
+    ...(policy || {}),
+    _syncUpdatedAt: new Date().toISOString(),
+    _syncDeviceId: getPolicyLensDeviceId(),
+    _syncDeviceName: getPolicyLensDeviceName(),
+    _syncUserEmail: getPolicyLensUserEmail(),
+    _syncReason: reason || 'edit'
+  };
+}
+
+function stampProfileSyncMeta(profile, reason) {
+  return {
+    ...(profile || {}),
+    _syncUpdatedAt: new Date().toISOString(),
+    _syncDeviceId: getPolicyLensDeviceId(),
+    _syncDeviceName: getPolicyLensDeviceName(),
+    _syncUserEmail: getPolicyLensUserEmail(),
+    _syncReason: reason || 'profile-edit'
+  };
+}
+
+async function markDriveSyncPending(clientId, reason, extra) {
+  if (!clientId) return null;
+  if (isDriveLocalOnly()) return null;
+  const id = syncOutboxId(clientId);
+  const now = new Date().toISOString();
+  const existing = await PolicyDB.getSyncOutbox(id).catch(() => null);
+  const entry = {
+    ...(existing || {}),
+    id,
+    type: 'drive-client',
+    clientId,
+    status: 'pending',
+    reason: reason || existing?.reason || 'edit',
+    attempts: existing?.attempts || 0,
+    firstQueuedAt: existing?.firstQueuedAt || now,
+    updatedAt: now,
+    lastError: null,
+    deviceId: getPolicyLensDeviceId(),
+    deviceName: getPolicyLensDeviceName(),
+    ...(extra || {})
+  };
+  await PolicyDB.saveSyncOutbox(entry).catch(() => {});
+  const ds = await PolicyDB.getDriveState(clientId).catch(() => null);
+  if (ds) {
+    await PolicyDB.saveDriveState({
+      ...ds,
+      pendingWrite: true,
+      pendingSince: ds.pendingSince || entry.firstQueuedAt,
+      pendingReason: entry.reason,
+      pendingError: null
+    }).catch(() => {});
+  }
+  _notifySyncStatus();
+  return entry;
+}
+
+async function clearDriveSyncPending(clientId, patch) {
+  if (!clientId) return;
+  await PolicyDB.deleteSyncOutbox(syncOutboxId(clientId)).catch(() => {});
+  const ds = await PolicyDB.getDriveState(clientId).catch(() => null);
+  if (ds) {
+    await PolicyDB.saveDriveState({
+      ...ds,
+      ...(patch || {}),
+      pendingWrite: false,
+      pendingSince: null,
+      pendingReason: null,
+      pendingError: null,
+      lastSyncDeviceId: getPolicyLensDeviceId(),
+      lastSyncDeviceName: getPolicyLensDeviceName(),
+      lastSyncUserEmail: getPolicyLensUserEmail()
+    }).catch(() => {});
+  }
+  _notifySyncStatus();
+}
+
+async function failDriveSyncPending(clientId, err, reason) {
+  if (!clientId) return;
+  const id = syncOutboxId(clientId);
+  const now = new Date().toISOString();
+  const existing = await PolicyDB.getSyncOutbox(id).catch(() => null);
+  const message = err?.message || String(err || 'Sync failed');
+  await PolicyDB.saveSyncOutbox({
+    ...(existing || {}),
+    id,
+    type: 'drive-client',
+    clientId,
+    status: 'failed',
+    reason: reason || existing?.reason || 'edit',
+    attempts: (existing?.attempts || 0) + 1,
+    firstQueuedAt: existing?.firstQueuedAt || now,
+    updatedAt: now,
+    lastError: message,
+    deviceId: getPolicyLensDeviceId(),
+    deviceName: getPolicyLensDeviceName()
+  }).catch(() => {});
+  const ds = await PolicyDB.getDriveState(clientId).catch(() => null);
+  if (ds) {
+    await PolicyDB.saveDriveState({
+      ...ds,
+      pendingWrite: true,
+      pendingSince: ds.pendingSince || existing?.firstQueuedAt || now,
+      pendingReason: reason || existing?.reason || 'edit',
+      pendingError: message
+    }).catch(() => {});
+  }
+  _notifySyncStatus();
+}
+
+async function buildDriveSyncMetadata(ds, extra) {
+  const clientId = ds?.clientId;
+  const [scanSessions, deletedPolicyIds] = await Promise.all([
+    clientId ? PolicyDB.getScanSessionsByClient(clientId).catch(() => []) : Promise.resolve([]),
+    clientId ? getDeletedPolicyIds(clientId).catch(() => []) : Promise.resolve([])
+  ]);
+  return {
+    tier: ds?.tier ?? null,
+    lastReviewedAt: ds?.lastReviewedAt ?? null,
+    scanSessions: (scanSessions || []).slice(0, 50),
+    deletedPolicyIds,
+    ...(extra || {})
+  };
+}
+
+function syncTimeMs(value) {
+  if (!value) return 0;
+  if (typeof value === 'number') return value;
+  const t = new Date(value).getTime();
+  return Number.isFinite(t) ? t : 0;
+}
+
+function policySyncTime(policy) {
+  return Math.max(
+    syncTimeMs(policy?._syncUpdatedAt),
+    syncTimeMs(policy?.updatedAt),
+    syncTimeMs(policy?.updated_at),
+    syncTimeMs(policy?.lastEditedAt)
+  );
+}
+
+function isEmptySyncValue(v) {
+  return v == null || v === '' || (Array.isArray(v) && v.length === 0);
+}
+
+function mergePolicyForDrive(local, remote) {
+  const localT = policySyncTime(local);
+  const remoteT = policySyncTime(remote);
+  const primary = remoteT > localT ? remote : local;
+  const secondary = primary === local ? remote : local;
+  const merged = { ...(secondary || {}), ...(primary || {}) };
+  for (const [k, v] of Object.entries(secondary || {})) {
+    if (isEmptySyncValue(merged[k]) && !isEmptySyncValue(v)) merged[k] = v;
+  }
+  return merged;
+}
+
+function mergeProfileForDrive(local, remote) {
+  const localT = syncTimeMs(local?._syncUpdatedAt);
+  const remoteT = syncTimeMs(remote?._syncUpdatedAt);
+  const primary = remoteT > localT ? remote : local;
+  const secondary = primary === local ? remote : local;
+  const merged = { ...(secondary || {}), ...(primary || {}) };
+  for (const [k, v] of Object.entries(secondary || {})) {
+    if (isEmptySyncValue(merged[k]) && !isEmptySyncValue(v)) merged[k] = v;
+  }
+  return merged;
+}
+
+function dedupeScanSessionsForDrive(a, b) {
+  const map = new Map();
+  for (const s of [...(a || []), ...(b || [])]) {
+    if (!s) continue;
+    map.set(s.id || (s.createdAt + ':' + s.clientId), s);
+  }
+  return Array.from(map.values())
+    .sort((x,y) => String(y.createdAt || '').localeCompare(String(x.createdAt || '')))
+    .slice(0, 50);
+}
+
+function mergeDrivePayloadsForConflict(localPayload, remoteRaw, clientId) {
+  const remote = parseDriveClientFile(remoteRaw || {});
+  const localDeleted = new Set(localPayload.deletedPolicyIds || []);
+  const remoteDeleted = new Set(remote.deletedPolicyIds || []);
+  const deletedPolicyIds = Array.from(new Set([...localDeleted, ...remoteDeleted])).slice(-500);
+  const localById = new Map((localPayload.policies || []).filter(p => p && p.id).map(p => [p.id, p]));
+  const remoteById = new Map((remote.policies || []).filter(p => p && p.id).map(p => [p.id, p]));
+  const ids = new Set([...localById.keys(), ...remoteById.keys()]);
+  const policies = [];
+  let conflicts = 0;
+  for (const id of ids) {
+    const local = localById.get(id);
+    const remotePolicy = remoteById.get(id);
+    if (localDeleted.has(id) && !local) continue;
+    if (remoteDeleted.has(id) && !remotePolicy && !local) continue;
+    if (local && remotePolicy) {
+      if (JSON.stringify(local) !== JSON.stringify(remotePolicy)) conflicts++;
+      policies.push({ ...mergePolicyForDrive(local, remotePolicy), clientId });
+    } else if (local) {
+      policies.push({ ...local, clientId });
+    } else if (!localDeleted.has(id)) {
+      policies.push({ ...remotePolicy, clientId });
+    }
+  }
+  return {
+    payload: {
+      ...localPayload,
+      clientProfile: mergeProfileForDrive(localPayload.clientProfile, remote.clientProfile),
+      policies,
+      tier: localPayload.tier ?? remote.tier ?? null,
+      lastReviewedAt: localPayload.lastReviewedAt ?? remote.lastReviewedAt ?? null,
+      deletedPolicyIds,
+      scanSessions: dedupeScanSessionsForDrive(localPayload.scanSessions, remote.scanSessions),
+    },
+    conflicts,
+    remoteOnly: [...remoteById.keys()].filter(id => !localById.has(id) && !localDeleted.has(id)).length
+  };
+}
+
+async function writeDrivePayloadToLocal(clientId, parsed, headRevisionId, existingDs) {
+  const driveProfile = parsed.clientProfile || {};
+  const drivePolicies = parsed.policies || [];
+  if (driveProfile) await dbPut('settings', { key: 'clientProfile_' + clientId, value: driveProfile });
+  if (driveProfile?.name != null) await dbPut('settings', { key: 'clientName_' + clientId, value: driveProfile.name || '' }).catch(() => {});
+  const oldPols = await dbGetAll('policies');
+  for (const old of oldPols.filter(p => p.clientId === clientId)) {
+    if (old.id) await dbDel('policies', old.id);
+  }
+  for (const pol of drivePolicies) {
+    await dbPut('policies', { ...pol, clientId });
+  }
+  for (const session of (parsed.scanSessions || [])) {
+    if (session?.id) await PolicyDB.saveScanSession({ ...session, clientId }).catch(() => {});
+  }
+  if (Array.isArray(parsed.deletedPolicyIds)) {
+    await PolicyDB.saveSetting('deletedPolicyIds_' + clientId, parsed.deletedPolicyIds.slice(-500)).catch(() => {});
+  }
+  const ds = existingDs || await PolicyDB.getDriveState(clientId).catch(() => null);
+  const updatedDs = ds ? {
+    ...ds,
+    headRevisionId: headRevisionId || ds.headRevisionId,
+    lastSyncedAt: new Date().toISOString(),
+    tier: parsed.tier ?? ds.tier,
+    lastReviewedAt: parsed.lastReviewedAt ?? ds.lastReviewedAt,
+    clientName: driveProfile?.name ?? ds.clientName,
+    pendingWrite: false,
+    pendingError: null,
+    lastSyncDeviceId: parsed.syncMeta?.deviceId || ds.lastSyncDeviceId || null,
+    lastSyncDeviceName: parsed.syncMeta?.deviceName || ds.lastSyncDeviceName || null,
+    lastSyncUserEmail: parsed.syncMeta?.userEmail || ds.lastSyncUserEmail || null,
+  } : null;
+  if (updatedDs) await PolicyDB.saveDriveState(updatedDs);
+  await PolicyDB.deleteSyncOutbox(syncOutboxId(clientId)).catch(() => {});
+  return { pulled: true, clientProfile: driveProfile, policies: drivePolicies, driveState: updatedDs, syncMeta: parsed.syncMeta || null };
+}
+
 // ── Shared Drive write core (used by debounced dual-write + manual "Sync now") ──
 // ds: drive_state row, clientProfile/policies: current React state.
 // opts.showToast: true for user-initiated sync, false for background dual-write.
 // Returns true on success, false on failure. Caller must set/clear _driveSyncInFlight.
 async function _performDriveSync(ds, clientProfile, policies, opts) {
   try {
-    // v2.3.0-rc2c.5p: Include tier + lastReviewedAt from drive_state so they sync to Drive file
-    const payload = buildDriveClientPayload(ds.clientId, clientProfile, policies, { tier: ds.tier, lastReviewedAt: ds.lastReviewedAt });
+    const metadata = await buildDriveSyncMetadata(ds);
+    const payload = buildDriveClientPayload(ds.clientId, clientProfile, policies, metadata);
     const newHead = await driveClient.updateClientFile(ds.fileId, payload, ds.headRevisionId);
-    await PolicyDB.saveDriveState({ ...ds, headRevisionId: newHead, lastSyncedAt: new Date().toISOString(), pendingWrite: false });
+    const syncedAt = new Date().toISOString();
+    await PolicyDB.saveDriveState({
+      ...ds,
+      headRevisionId: newHead,
+      lastSyncedAt: syncedAt,
+      pendingWrite: false,
+      pendingError: null,
+      lastSyncDeviceId: getPolicyLensDeviceId(),
+      lastSyncDeviceName: getPolicyLensDeviceName(),
+      lastSyncUserEmail: getPolicyLensUserEmail()
+    });
+    await clearDriveSyncPending(ds.clientId, { headRevisionId: newHead, lastSyncedAt: syncedAt });
+    broadcastDriveSyncPing(ds.clientId, { headRevisionId: newHead, reason: opts?.reason || 'drive-write' }).catch(() => {});
     _driveSyncJustSaved = true;
     _notifySyncStatus();
     setTimeout(() => { _driveSyncJustSaved = false; _notifySyncStatus(); }, 1500);
@@ -9797,31 +10713,100 @@ async function _performDriveSync(ds, clientProfile, policies, opts) {
   } catch (err) {
     if (err instanceof DriveConflictError) {
       // v2.3.0-rc2c.5r: Auto-retry with fresh headRevisionId (last-write-wins).
-      console.log('[Drive] Conflict detected — auto-retrying with fresh headRevisionId');
+      console.log('[Drive] Conflict detected - merging remote-only changes before retry');
       try {
-        const meta = await driveClient.getFileMetadata(ds.fileId);
+        const { meta, content } = await driveClient.getFile(ds.fileId);
+        const remoteData = JSON.parse(content);
         const states = await PolicyDB.getAllDriveStates();
         const freshDs = states.find(s => s.clientId === ds.clientId) || ds;
-        const retryPayload = buildDriveClientPayload(freshDs.clientId, clientProfile, policies, { tier: freshDs.tier, lastReviewedAt: freshDs.lastReviewedAt });
+        const metadata = await buildDriveSyncMetadata(freshDs);
+        const localPayload = buildDriveClientPayload(freshDs.clientId, clientProfile, policies, metadata);
+        const merged = mergeDrivePayloadsForConflict(localPayload, remoteData, freshDs.clientId);
+        const retryPayload = buildDriveClientPayload(freshDs.clientId, merged.payload.clientProfile, merged.payload.policies, {
+          tier: merged.payload.tier,
+          lastReviewedAt: merged.payload.lastReviewedAt,
+          deletedPolicyIds: merged.payload.deletedPolicyIds,
+          scanSessions: merged.payload.scanSessions
+        });
         const newHead = await driveClient.updateClientFile(freshDs.fileId, retryPayload, meta.headRevisionId);
-        await PolicyDB.saveDriveState({ ...freshDs, headRevisionId: newHead, lastSyncedAt: new Date().toISOString(), pendingWrite: false });
+        const syncedAt = new Date().toISOString();
+        const parsedMerged = parseDriveClientFile(retryPayload);
+        const localResult = await writeDrivePayloadToLocal(freshDs.clientId, parsedMerged, newHead, {
+          ...freshDs,
+          lastSyncedAt: syncedAt,
+          pendingWrite: false
+        });
+        await clearDriveSyncPending(freshDs.clientId, { headRevisionId: newHead, lastSyncedAt: syncedAt });
+        try { window.dispatchEvent(new CustomEvent('policylens-drive-merged-local', { detail: { clientId: freshDs.clientId, result: localResult } })); } catch(_) {}
+        broadcastDriveSyncPing(freshDs.clientId, { headRevisionId: newHead, reason: 'conflict-merge', conflicts: merged.conflicts, remoteOnly: merged.remoteOnly }).catch(() => {});
         _driveSyncJustSaved = true;
         _notifySyncStatus();
         setTimeout(() => { _driveSyncJustSaved = false; _notifySyncStatus(); }, 1500);
         if (opts?.showToast) { try { toast('Synced to Drive', 'success', 2000); } catch(_){} }
-        console.log('[Drive] ✓ Auto-retry succeeded');
+        if (merged.conflicts > 0 || merged.remoteOnly > 0) {
+          try { toast('Drive conflict resolved: merged ' + merged.remoteOnly + ' remote-only polic' + (merged.remoteOnly===1?'y':'ies') + (merged.conflicts ? ' and reviewed ' + merged.conflicts + ' overlapping update' + (merged.conflicts===1?'':'s') : ''), 'info', 4500); } catch(_) {}
+        }
+        console.log('[Drive] Auto-merge retry succeeded');
         return true;
       } catch (retryErr) {
         console.warn('[Drive] Auto-retry failed:', retryErr.message || retryErr);
+        await failDriveSyncPending(ds.clientId, retryErr, opts?.reason || 'conflict-retry');
         if (opts?.showToast) { try { toast('Sync failed — will retry on next edit', 'warning', 3500); } catch(_){} }
         return false;
       }
     } else {
+      await failDriveSyncPending(ds.clientId, err, opts?.reason || 'drive-write');
       if (opts?.showToast) { try { toast('Sync failed: ' + (err.message || err), 'error', 4000); } catch(_){} }
       else { console.warn('[Drive] Sync failed (non-blocking):', err.message || err); }
       return false;
     }
   }
+}
+
+// v2.3.0-rc2d.5: Drive sync worker + durable outbox flush
+async function driveSyncClientById(clientId, opts) {
+  if (!clientId) return false;
+  if (isDriveLocalOnly() || getDriveStatus() !== 'connected') return false;
+  if (_driveSyncInFlight && !opts?.force) return false;
+  const ds = await PolicyDB.getDriveState(clientId).catch(() => null);
+  if (!ds || !ds.fileId) return false;
+  _driveSyncInFlight = true;
+  _notifySyncStatus();
+  try {
+    let freshProfile = {};
+    let freshPolicies = [];
+    try {
+      const profileRec = await dbGet('settings', 'clientProfile_' + clientId);
+      if (profileRec?.value) freshProfile = profileRec.value;
+      else {
+        const legacyProfile = await dbGet('settings', 'clientProfile').catch(() => null);
+        freshProfile = legacyProfile?.value || { name: ds.clientName || '' };
+      }
+    } catch(_) {}
+    try {
+      const allPols = await dbGetAll('policies');
+      freshPolicies = allPols.filter(p => p.clientId === clientId);
+    } catch(_) {}
+    return await _performDriveSync(ds, freshProfile, freshPolicies, opts || {});
+  } finally {
+    _driveSyncInFlight = false;
+    _notifySyncStatus();
+  }
+}
+
+async function flushDriveSyncOutbox(opts) {
+  if (isDriveLocalOnly() || getDriveStatus() !== 'connected') return 0;
+  const all = await PolicyDB.getAllSyncOutbox().catch(() => []);
+  const targetClientId = opts?.clientId || null;
+  const pending = (all || [])
+    .filter(e => e && e.type === 'drive-client' && (!targetClientId || e.clientId === targetClientId) && (e.status === 'pending' || e.status === 'failed'))
+    .sort((a,b) => String(a.updatedAt || '').localeCompare(String(b.updatedAt || '')));
+  let flushed = 0;
+  for (const entry of pending) {
+    const ok = await driveSyncClientById(entry.clientId, { showToast: false, reason: opts?.reason || 'outbox-flush', force: opts?.force });
+    if (ok) flushed++;
+  }
+  return flushed;
 }
 
 // ── Shared viewport breakpoint (items 1 + 4) ──
@@ -10229,12 +11214,15 @@ let _driveHasFolderStructure = false;
 // Shared by: on-load refresh, on-switch refresh, focus-refresh.
 // Returns {pulled, clientProfile, policies, driveState} on success, false on skip/no-op.
 // Does NOT update React state — caller does (function is module-scope).
-async function refreshClientFromDrive(clientId) {
+async function refreshClientFromDrive(clientId, opts) {
   if (getDriveStatus() !== 'connected' || isDriveLocalOnly()) return false;
   if (!clientId) return false;
+  const force = !!opts?.force;
   // v2.3.0-rc2c.5m: CRITICAL — skip refresh when a local write is pending.
   // Local is newer than Drive. Without this, poll/focus/switch overwrite local edits.
-  if (_driveSyncTimer !== null || _driveSyncInFlight) return false;
+  if (!force && (_driveSyncTimer !== null || _driveSyncInFlight)) return false;
+  const pendingOutbox = await PolicyDB.getSyncOutbox(syncOutboxId(clientId)).catch(() => null);
+  if (!force && pendingOutbox && (pendingOutbox.status === 'pending' || pendingOutbox.status === 'failed')) return false;
   let ds;
   try {
     const states = await PolicyDB.getAllDriveStates();
@@ -10242,7 +11230,7 @@ async function refreshClientFromDrive(clientId) {
   } catch(_) { return false; }
   if (!ds || !ds.fileId) return false;
   const now = Date.now();
-  if (now - (_lastRefreshTimes.get(clientId) || 0) < 5000) return false;
+  if (!force && now - (_lastRefreshTimes.get(clientId) || 0) < 5000) return false;
   _lastRefreshTimes.set(clientId, now);
   try {
     const meta = await driveClient.getFileMetadata(ds.fileId);
@@ -10268,27 +11256,10 @@ async function refreshClientFromDrive(clientId) {
     console.log('[DriveRefresh] Stale data for', ds.clientName || clientId, '— pulling');
     const { meta: fullMeta, content } = await driveClient.getFile(ds.fileId);
     const fileData = JSON.parse(content);
-    const { clientProfile: driveProfile, policies: drivePolicies, tier: driveTier, lastReviewedAt: driveLastReviewed } = parseDriveClientFile(fileData);
-    if (driveProfile) await dbPut('settings', { key: 'clientProfile_' + clientId, value: driveProfile });
-    const oldPols = await dbGetAll('policies');
-    for (const old of oldPols.filter(p => p.clientId === clientId)) {
-      if (old.id) await dbDel('policies', old.id);
-    }
-    for (const pol of (drivePolicies || [])) {
-      pol.clientId = clientId;
-      await dbPut('policies', pol);
-    }
-    // v2.3.0-rc2c.5p: sync tier + lastReviewedAt from file (fallback to existing ds values)
-    const updatedDs = {
-      ...ds,
-      headRevisionId: fullMeta.headRevisionId || meta.headRevisionId,
-      lastSyncedAt: new Date().toISOString(),
-      tier: driveTier ?? ds.tier,
-      lastReviewedAt: driveLastReviewed ?? ds.lastReviewedAt,
-    };
-    await PolicyDB.saveDriveState(updatedDs);
-    console.log('[DriveRefresh] Pulled', (drivePolicies || []).length, 'policies for', ds.clientName || clientId);
-    return { pulled: true, clientProfile: driveProfile, policies: drivePolicies || [], driveState: updatedDs };
+    const parsed = parseDriveClientFile(fileData);
+    const result = await writeDrivePayloadToLocal(clientId, parsed, fullMeta.headRevisionId || meta.headRevisionId, ds);
+    console.log('[DriveRefresh] Pulled', (result.policies || []).length, 'policies for', ds.clientName || clientId);
+    return result;
   } catch (err) {
     console.warn('[DriveRefresh] Failed for', ds.clientName || clientId, ':', err.message);
     return false;
@@ -10298,11 +11269,12 @@ async function refreshClientFromDrive(clientId) {
 async function discoverDriveClients() {
   if (getDriveStatus() !== 'connected' || isDriveLocalOnly()) {
     console.log('[Discovery] Skipped — Drive not connected');
-    return { found: [], skippedExisting: 0, errors: 0, driveClientIds: new Set(), hasFolderStructure: false };
+    return { found: [], changedExisting: [], reconciledExisting: 0, skippedExisting: 0, errors: 0, driveClientIds: new Set(), hasFolderStructure: false };
   }
   const found = [];
+  const changedExisting = [];
   const driveClientIds = new Set();
-  let skippedExisting = 0, errors = 0;
+  let skippedExisting = 0, reconciledExisting = 0, errors = 0;
   let hasFolderStructure = false;
   try {
     // v2.3.0-rc2c.4b: Folder tree traversal (appProperties search is eventually consistent, misses new files)
@@ -10337,12 +11309,23 @@ async function discoverDriveClients() {
             driveClientIds.add(clientId); // v2.3.0-rc2c.4c: track ALL Drive clientIds (before dedup) for orphan purge
             if (existingClientIds.has(clientId) || existingFileIds.has(autosave.id)) {
               // v2.3.0-rc2c.4d+4f: Reconcile name + tier from Drive folder structure
-              const localState = existingStates.find(s => s.clientId === clientId);
+              const localState = existingStates.find(s => s.clientId === clientId) || existingStates.find(s => s.fileId === autosave.id);
               if (localState) {
                 const driveName = cf.name || '';
                 const driveTier = tier.name === 'PolicyLens' ? UNASSIGNED_TIER : (tier.name || UNASSIGNED_TIER);
                 const nameChanged = driveName && localState.clientName !== driveName;
                 const tierChanged = localState.tier !== driveTier;
+                const fileChanged = autosave.headRevisionId && localState.headRevisionId !== autosave.headRevisionId;
+                if (fileChanged) {
+                  changedExisting.push({
+                    clientId, fileId: autosave.id,
+                    folderId: cf.id, tierFolderId: tier.id,
+                    tier: driveTier, clientName: driveName || localState.clientName || '(unnamed)',
+                    localHeadRevisionId: localState.headRevisionId || null,
+                    headRevisionId: autosave.headRevisionId || null,
+                    modifiedTime: autosave.modifiedTime || null,
+                  });
+                }
                 if (nameChanged || tierChanged) {
                   if (nameChanged) console.log('[Discovery] Name reconcile:', localState.clientName, '→', driveName);
                   if (tierChanged) console.log('[Discovery] Tier reconcile:', localState.tier, '→', driveTier);
@@ -10352,6 +11335,7 @@ async function discoverDriveClients() {
                     if (tierChanged) updated.tier = driveTier;
                     await PolicyDB.saveDriveState(updated);
                     if (nameChanged) await dbPut('settings', { key: 'clientName_' + clientId, value: driveName });
+                    reconciledExisting++;
                   } catch(_) {}
                 }
               }
@@ -10375,9 +11359,33 @@ async function discoverDriveClients() {
         }
       } catch (e) { console.warn('[Discovery] Tier folder error:', tier.name, e.message); errors++; }
     }
-    console.log('[Discovery]', found.length, 'new,', skippedExisting, 'already known,', errors, 'errors');
+    console.log('[Discovery]', found.length, 'new,', skippedExisting, 'already known,', changedExisting.length, 'changed,', errors, 'errors');
   } catch (err) { console.warn('[Discovery] Failed:', err.message); errors++; }
-  return { found, skippedExisting, errors, driveClientIds, hasFolderStructure };
+  return { found, changedExisting, reconciledExisting, skippedExisting, errors, driveClientIds, hasFolderStructure };
+}
+
+async function addDriveClientToLocal(f) {
+  // Save pointer first so the client appears locally even if content pull is delayed.
+  await PolicyDB.saveDriveState({
+    clientId: f.clientId, fileId: f.fileId, folderId: f.folderId, tierFolderId: f.tierFolderId,
+    tier: f.tier || UNASSIGNED_TIER, clientName: f.clientName === '(unnamed)' ? '' : f.clientName,
+    headRevisionId: f.headRevisionId, lastSyncedAt: f.modifiedTime || new Date().toISOString(), pendingWrite: false,
+  });
+  if (f.clientName && f.clientName !== '(unnamed)') {
+    try { await dbPut('settings', { key: 'clientName_' + f.clientId, value: f.clientName }); } catch(_) {}
+  }
+  try {
+    const { meta, content } = await driveClient.getFile(f.fileId);
+    const fileData = JSON.parse(content);
+    const parsed = parseDriveClientFile(fileData);
+    const ds = await PolicyDB.getDriveState(f.clientId);
+    const result = await writeDrivePayloadToLocal(f.clientId, parsed, meta?.headRevisionId || f.headRevisionId || ds?.headRevisionId, ds);
+    console.log('[Discovery] Auto-added', f.clientName || f.clientId, 'with', (result.policies || []).length, 'policies');
+    return { added: true, policies: (result.policies || []).length };
+  } catch (pullErr) {
+    console.warn('[Discovery] Data pull failed for', f.clientName || f.clientId, pullErr.message);
+    return { added: true, partial: true, policies: 0 };
+  }
 }
 
 // v2.3.0-rc2c.4c: Remove local drive_state entries that no longer exist in Drive.
@@ -11934,6 +12942,41 @@ function App() {
     return () => window.removeEventListener('policylens-discovery-found', h);
   }, []);
 
+  const applyDriveDirectorySync = async (result, opts={}) => {
+    if (!result) return { added:0, refreshed:0, reconciled:0, purged:0, cleaned:0, errors:0 };
+    let added = 0, refreshed = 0, errors = result.errors || 0;
+    const reconciled = result.reconciledExisting || 0;
+    for (const f of (result.found || [])) {
+      try { await addDriveClientToLocal(f); added++; }
+      catch(e) { errors++; console.warn('[DirectorySync] Add failed for', f.clientName || f.clientId, e.message); }
+    }
+    const purged = await purgeOrphanClients(result.driveClientIds);
+    const cleaned = result.hasFolderStructure ? await cleanupUnattachedPolicies() : 0;
+    for (const ch of (result.changedExisting || [])) {
+      if (_driveSyncInFlight || _driveSyncTimer !== null) break;
+      try {
+        _lastRefreshTimes.delete(ch.clientId);
+        const pulled = await refreshClientFromDrive(ch.clientId);
+        if (pulled && pulled.pulled) {
+          refreshed++;
+          if (ch.clientId === activeClientIdRef.current) applyDriveRefresh(pulled, ch.clientId);
+        }
+      } catch(e) { errors++; console.warn('[DirectorySync] Refresh failed for', ch.clientName || ch.clientId, e.message); }
+    }
+    if (added || refreshed || reconciled || purged || cleaned) {
+      try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
+      if (!opts.silent) {
+        const parts = [];
+        if (added) parts.push('added '+added);
+        if (refreshed) parts.push('updated '+refreshed);
+        if (reconciled) parts.push('reconciled '+reconciled);
+        if (purged) parts.push('removed '+purged);
+        try { toast('Drive sync: '+parts.join(', '), 'success', 3000); } catch(_) {}
+      }
+    }
+    return { added, refreshed, reconciled, purged, cleaned, errors };
+  };
+
   // v2.3.0-rc2c.4: Post-connect discovery — fires once per session after Drive connects.
   // Covers OAuth return (Drive connects after init) + manual reconnect from Settings.
   useEffect(() => {
@@ -11950,9 +12993,8 @@ function App() {
         const result = await discoverDriveClients();
         _discoveryCompletedThisSession = true;
         _driveHasFolderStructure = result.hasFolderStructure;
-        if (result.found.length > 0) setFoundInDrive({ found: result.found });
-        await purgeOrphanClients(result.driveClientIds);
-        if (result.hasFolderStructure) await cleanupUnattachedPolicies();
+        const summary = await applyDriveDirectorySync(result, { silent:true });
+        if (summary.added || summary.refreshed || summary.reconciled || summary.purged) console.log('[Discovery] Post-connect directory sync:', summary);
       } catch (e) { console.warn('[Discovery] Post-connect scan failed:', e.message); }
     };
     runDiscoveryAndPurge();
@@ -12050,6 +13092,35 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeClientId, loading]);
 
+  // Live Drive directory sync: active-client polling is not enough because new
+  // clients live as new Drive folders/files. Scan the folder tree every 30s so
+  // clients created on laptop appear on phone without reload/manual discovery.
+  const _directorySyncRunningRef = useRef(false);
+  useEffect(() => {
+    if (loading) return;
+    const run = async (reason) => {
+      if (getDriveStatus() !== 'connected' || isDriveLocalOnly()) return;
+      if (_driveSyncInFlight || _driveSyncTimer !== null) return;
+      if (_directorySyncRunningRef.current) return;
+      _directorySyncRunningRef.current = true;
+      try {
+        const result = await discoverDriveClients();
+        _discoveryCompletedThisSession = true;
+        _driveHasFolderStructure = result.hasFolderStructure;
+        const summary = await applyDriveDirectorySync(result, { silent:true });
+        if (summary.added || summary.refreshed || summary.reconciled || summary.purged) {
+          console.log('[DirectorySync]', reason, summary);
+        }
+      } catch(e) { console.warn('[DirectorySync] Failed:', e.message); }
+      finally { _directorySyncRunningRef.current = false; }
+    };
+    const id = setInterval(() => run('interval'), 30000);
+    const onFocus = () => run('focus');
+    window.addEventListener('focus', onFocus);
+    return () => { clearInterval(id); window.removeEventListener('focus', onFocus); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loading]);
+
   // v2.3.0-rc2c.5s: Immediate refresh on tab visibility change (backgrounded tabs throttle setInterval)
   useEffect(() => {
     if (loading) return;
@@ -12073,11 +13144,20 @@ function App() {
   // v2.3.0-rc2c.5s: Manual sync trigger from Settings → Drive card
   useEffect(() => {
     const h = async () => {
-      if (!activeClientId) { try { toast('No active client', 'warning', 2000); } catch(_) {} return; }
       try {
         try { toast('Checking Drive\u2026', 'info', 1500); } catch(_) {}
+        if (getDriveStatus() === 'connected' && !isDriveLocalOnly()) {
+          const flushed = await flushDriveSyncOutbox({ reason: 'manual-sync', force: true });
+          if (flushed) { try { toast('Uploaded ' + flushed + ' pending client update' + (flushed===1?'':'s'), 'success', 2500); } catch(_) {} }
+          const directory = await discoverDriveClients();
+          const summary = await applyDriveDirectorySync(directory, { silent:true });
+          if (summary.added || summary.refreshed || summary.reconciled || summary.purged) {
+            try { toast('Drive sync: added '+summary.added+', updated '+summary.refreshed+', reconciled '+summary.reconciled+', removed '+summary.purged, 'success', 3000); } catch(_) {}
+          }
+        }
+        if (!activeClientId) { try { toast('No active client', 'warning', 2000); } catch(_) {} return; }
         _lastRefreshTimes.delete(activeClientId);
-        const result = await refreshClientFromDrive(activeClientId);
+        const result = await refreshClientFromDrive(activeClientId, { force: true, reason: 'manual-sync' });
         if (result && result.pulled) { applyDriveRefresh(result, activeClientId); try { toast('\u2713 Pulled latest from Drive', 'success', 2500); } catch(_) {} }
         else if (result && result.trashed) { try { toast('Client was deleted on another device', 'warning', 4000); } catch(_) {} }
         else { try { toast('Already up to date', 'info', 2000); } catch(_) {} }
@@ -12088,6 +13168,99 @@ function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeClientId]);
 
+  // v2.3.0-rc2d.5: Flush durable Drive outbox on load, reconnect, and client switch.
+  useEffect(() => {
+    if (loading) return;
+    const run = () => {
+      if (getDriveStatus() !== 'connected' || isDriveLocalOnly()) return;
+      flushDriveSyncOutbox({ reason: 'auto-outbox-flush' }).catch(e => console.warn('[Drive] Outbox flush failed:', e?.message || e));
+    };
+    run();
+    const unsub = onDriveStatusChange(run);
+    window.addEventListener('online', run);
+    return () => { unsub(); window.removeEventListener('online', run); };
+  }, [loading, activeClientId]);
+
+  // v2.3.0-rc2d.5: Force pull / push controls from Settings.
+  useEffect(() => {
+    const forcePull = async () => {
+      const cid = activeClientIdRef.current;
+      if (!cid) { try { toast('No active client', 'warning', 2000); } catch(_) {} return; }
+      _lastRefreshTimes.delete(cid);
+      const result = await refreshClientFromDrive(cid, { force: true, reason: 'force-pull' });
+      if (result && result.pulled) { applyDriveRefresh(result, cid); try { toast('Pulled latest Drive version', 'success', 2500); } catch(_) {} }
+      else if (result && result.trashed) { try { toast('Client was deleted on another device', 'warning', 4000); } catch(_) {} }
+      else { try { toast('Already up to date', 'info', 2000); } catch(_) {} }
+    };
+    const forcePush = async () => {
+      const cid = activeClientIdRef.current;
+      if (!cid) { try { toast('No active client', 'warning', 2000); } catch(_) {} return; }
+      await markDriveSyncPending(cid, 'force-push');
+      const ok = await driveSyncClientById(cid, { showToast: true, reason: 'force-push', force: true });
+      if (!ok) { try { toast('Force push failed - pending write kept for retry', 'warning', 3500); } catch(_) {} }
+    };
+    window.addEventListener('policylens-force-drive-pull', forcePull);
+    window.addEventListener('policylens-force-drive-push', forcePush);
+    return () => {
+      window.removeEventListener('policylens-force-drive-pull', forcePull);
+      window.removeEventListener('policylens-force-drive-push', forcePush);
+    };
+  }, []);
+
+  // v2.3.0-rc2d.5: Realtime Drive nudge bus (Supabase broadcast + local tab channel).
+  useEffect(() => {
+    if (loading) return;
+    const ownDeviceId = getPolicyLensDeviceId();
+    let busy = false;
+    const handlePing = async (payload) => {
+      const detail = payload?.payload || payload || {};
+      if (!detail.clientId || detail.deviceId === ownDeviceId) return;
+      if (getDriveStatus() !== 'connected' || isDriveLocalOnly()) return;
+      if (busy) return;
+      busy = true;
+      try {
+        const activeCid = activeClientIdRef.current;
+        if (detail.clientId === activeCid) {
+          _lastRefreshTimes.delete(activeCid);
+          const result = await refreshClientFromDrive(activeCid, { force: true, reason: 'realtime-ping' });
+          if (result && result.pulled) {
+            applyDriveRefresh(result, activeCid);
+            try { toast('Updates from ' + (detail.deviceName || 'another device'), 'info', 2500); } catch(_) {}
+          }
+        } else {
+          try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
+        }
+      } catch(e) {
+        console.warn('[DriveRealtime] Ping refresh failed:', e?.message || e);
+      } finally {
+        busy = false;
+      }
+    };
+    const localCleanup = subscribeLocalDriveSyncPings(handlePing);
+    const s = getSB();
+    const uid = window._user?.id || null;
+    let channel = null;
+    if (s && uid && typeof s.channel === 'function') {
+      channel = s.channel('policylens-drive-sync-' + uid)
+        .on('broadcast', { event: 'drive_client_updated' }, handlePing)
+        .subscribe((status) => console.log('[DriveRealtime] Channel status:', status));
+    }
+    return () => {
+      localCleanup();
+      try { if (channel) s.removeChannel(channel); } catch(_) {}
+    };
+  }, [loading]);
+
+  // v2.3.0-rc2d.5: Apply local IDB updates produced by conflict auto-merge.
+  useEffect(() => {
+    const h = (e) => {
+      const cid = e.detail?.clientId;
+      if (cid && cid === activeClientIdRef.current) applyDriveRefresh(e.detail?.result, cid);
+    };
+    window.addEventListener('policylens-drive-merged-local', h);
+    return () => window.removeEventListener('policylens-drive-merged-local', h);
+  }, []);
+
   // v2.3.0-rc2c.5p: External trigger for Drive write (from tier changes, Mark Reviewed)
   // v2.3.0-rc2c.5t: Read activeClientIdRef.current, NOT closure activeClientId.
   // Closure can capture stale null during init race; ref is always current.
@@ -12095,8 +13268,9 @@ function App() {
     const h = (e) => {
       const cid = e.detail?.clientId;
       const activeCid = activeClientIdRef.current;
-      if (cid !== activeCid) { console.log('[Drive] trigger-drive-write skipped — clientId', cid, 'not active (active:', activeCid + ')'); return; }
-      _driveSyncDebounced(() => _driveSyncCurrentClient(), 500);
+      const targetCid = cid || activeCid;
+      if (!targetCid) return;
+      scheduleDriveWriteForClient(targetCid, e.detail?.reason || 'external-trigger', 500);
     };
     window.addEventListener('policylens-trigger-drive-write', h);
     return () => window.removeEventListener('policylens-trigger-drive-write', h);
@@ -12135,7 +13309,7 @@ function App() {
         if (!ds) return;
         setDriveState(prev => {
           if (!prev) return ds;
-          if (prev.tier !== ds.tier || prev.lastReviewedAt !== ds.lastReviewedAt || prev.clientName !== ds.clientName || prev.headRevisionId !== ds.headRevisionId) return ds;
+          if (prev.tier !== ds.tier || prev.lastReviewedAt !== ds.lastReviewedAt || prev.clientName !== ds.clientName || prev.headRevisionId !== ds.headRevisionId || prev.pendingWrite !== ds.pendingWrite || prev.pendingError !== ds.pendingError || prev.lastSyncDeviceName !== ds.lastSyncDeviceName) return ds;
           return prev;
         });
       } catch(_) {}
@@ -12392,9 +13566,14 @@ function App() {
     // Removing this causes cross-client sync contamination (pending
     // timer fires against new active client's file with previous
     // client's state). Do not remove.
+    const hadPendingDriveWrite = _driveSyncTimer !== null;
     clearTimeout(_driveSyncTimer);
     _driveSyncTimer = null;
     _notifySyncStatus();
+    if (hadPendingDriveWrite && getDriveStatus() === 'connected' && !isDriveLocalOnly()) {
+      try { await _driveSyncCurrentClient({ force: true, reason: 'switch-flush' }); }
+      catch(e) { console.warn('[Drive] Pending write flush before client switch failed:', e.message || e); }
+    }
     setActiveClientId(clientId);
     activeClientIdRef.current = clientId;
     try { localStorage.setItem('policylens_active_client_id', clientId); } catch(_) {}
@@ -12581,13 +13760,8 @@ function App() {
           const result = await discoverDriveClients();
           _discoveryCompletedThisSession = true;
           _driveHasFolderStructure = result.hasFolderStructure;
-          if (result.found.length > 0) {
-            setFoundInDrive({ found: result.found });
-          }
-          // v2.3.0-rc2c.4c: Purge orphan local clients (deleted from Drive elsewhere)
-          const purged = await purgeOrphanClients(result.driveClientIds);
-          if (result.hasFolderStructure) await cleanupUnattachedPolicies();
-          if (purged > 0) refreshedStates = await PolicyDB.getAllDriveStates().catch(() => []);
+          const summary = await applyDriveDirectorySync(result, { silent:true });
+          if (summary.added > 0 || summary.refreshed > 0 || summary.reconciled > 0 || summary.purged > 0) refreshedStates = await PolicyDB.getAllDriveStates().catch(() => []);
         } catch (e) { console.warn('[Init] Discovery failed (non-blocking):', e.message); }
       }
       if (refreshedStates.length > 0) {
@@ -13243,33 +14417,17 @@ function App() {
   // Called (debounced 1s) after every saveProfile / savePolicy IDB write.
   // No-ops silently when current client has no drive_state row.
   // v2.2.0-beta: delegates to _performDriveSync shared helper.
-  const _driveSyncCurrentClient = async () => {
+  const _driveSyncCurrentClient = async (opts) => {
     if (isDriveLocalOnly()) return;
     if (getDriveStatus() !== 'connected') return;
     const cid = activeClientIdRef.current || activeClientId;
-    let states;
-    try { states = await PolicyDB.getAllDriveStates(); } catch (_) { return; }
-    if (!states || states.length === 0) return;
-    const ds = states.find(s => s.clientId === cid);
-    if (!ds) return;
-    _driveSyncInFlight = true;
-    _notifySyncStatus();
-    try {
-      let freshProfile = clientProfile;
-      let freshPolicies = policies;
-      try {
-        const profileRec = await dbGet('settings', 'clientProfile_' + cid);
-        if (profileRec?.value) freshProfile = profileRec.value;
-      } catch(_) {}
-      try {
-        const allPols = await dbGetAll('policies');
-        freshPolicies = allPols.filter(p => p.clientId === cid);
-      } catch(_) {}
-      await _performDriveSync(ds, freshProfile, freshPolicies, { showToast: false });
-    } finally {
-      _driveSyncInFlight = false;
-      _notifySyncStatus();
-    }
+    return driveSyncClientById(cid, { showToast: false, reason: opts?.reason || 'autosave', force: opts?.force });
+  };
+
+  const scheduleDriveWriteForClient = (clientId, reason, delay) => {
+    if (!clientId) return;
+    markDriveSyncPending(clientId, reason).catch(() => {});
+    _driveSyncDebounced(() => flushDriveSyncOutbox({ reason: reason || 'autosave' }), delay || 1000);
   };
 
   const savePolicy = async (incomingP) => {
@@ -13294,8 +14452,9 @@ function App() {
       console.warn('[savePolicy] No active client — policy not saved:', p.id);
       return;
     }
-    const enriched = {...p, _fieldVersions: newVersions, clientId: activeClientId || p.clientId};
+    const enriched = stampPolicySyncMeta({...p, _fieldVersions: newVersions, clientId: activeClientId || p.clientId}, 'policy-save');
     await dbPut('policies', enriched);
+    clearDeletedPolicyId(enriched.clientId, enriched.id).catch(() => {});
     setPolicies(prev => {const idx=prev.findIndex(x=>x.id===enriched.id);if(idx>=0){const n=[...prev];n[idx]=enriched;return n}return[...prev,enriched]});
     // Push to cloud (fire-and-forget — don't block save flow).
     // Cloud helper strips _fieldVersions before sending.
@@ -13303,16 +14462,19 @@ function App() {
     lastSelfPushRef.current = Date.now();
     sbPolicyPush(enriched, newVersions).catch(() => {});
     // v2.2.0-alpha: Dual-write to Drive (debounced, fire-and-forget)
-    _driveSyncDebounced(() => _driveSyncCurrentClient(), 1000);
+    scheduleDriveWriteForClient(enriched.clientId, 'policy-save', 1000);
   };
   const deletePolicy = async (id) => {
+    const existing = policies.find(x => x.id === id) || await dbGet('policies', id).catch(() => null);
+    const deletedClientId = existing?.clientId || activeClientId;
+    await recordDeletedPolicyId(deletedClientId, id);
     await dbDel('policies', id);
     setPolicies(prev => prev.filter(x=>x.id!==id));
     // Cloud soft-delete (fire-and-forget)
     lastSelfPushRef.current = Date.now();
     sbPolicyDelete(id).catch(() => {});
     // v2.3.0-rc2c.5o: Sync deletion to Drive (was missing — deleted policies persisted in Drive)
-    _driveSyncDebounced(() => _driveSyncCurrentClient(), 1000);
+    scheduleDriveWriteForClient(deletedClientId, 'policy-delete', 1000);
   };
 
   // Repo operations — Supabase primary, local fallback
@@ -13354,7 +14516,7 @@ function App() {
     // ── CLOUD SYNC: bump field versions, push fire-and-forget ──
     const oldVersions = clientProfile?._fieldVersions || {};
     const newVersions = bumpFieldVersions(profileWithoutTier, clientProfile, oldVersions);
-    const enriched = {...profileWithoutTier, _fieldVersions: newVersions};
+    const enriched = stampProfileSyncMeta({...profileWithoutTier, _fieldVersions: newVersions}, 'profile-save');
     setClientProfile(enriched);
     setClientName(enriched.name||'');
     // v2.2.0-rc1: Per-client profile keys
@@ -13378,7 +14540,7 @@ function App() {
     lastSelfPushRef.current = Date.now();
     sbProfilePush(enriched, newVersions).catch(() => {});
     // v2.2.0-alpha: Dual-write to Drive (debounced, fire-and-forget)
-    _driveSyncDebounced(() => _driveSyncCurrentClient(), 1000);
+    scheduleDriveWriteForClient(activeClientId, 'profile-save', 1000);
     // ── GLOBAL SYNC: Recalculate ageAtEntry for all policies ──
     // Triggers whenever the profile has ANY age source (real DOB
     // OR current age + asOf timestamp). Uses getProfileEffectiveDob
@@ -13399,7 +14561,7 @@ function App() {
         const needsUpdate = !pol.ageAtEntry || !pol.premStartAge || 
           (pol.inceptionDate && Math.abs(parseInt(pol.ageAtEntry||0)-entryAge) > 1);
         if(needsUpdate) {
-          const upd = {...pol, ageAtEntry:String(entryAge), premStartAge:String(entryAge)};
+          const upd = stampPolicySyncMeta({...pol, ageAtEntry:String(entryAge), premStartAge:String(entryAge)}, 'profile-age-sync');
           if(parseInt(pol.premTerm)>0 && !pol.premEndAge) upd.premEndAge = String(entryAge+parseInt(pol.premTerm));
           else if(parseInt(pol.premTerm)>0) upd.premEndAge = String(entryAge+parseInt(pol.premTerm));
           await dbPut('policies',upd);
@@ -13411,7 +14573,8 @@ function App() {
         console.log('[Sync] Updated ageAtEntry for '+updated+' policies from '+(source==='dob'?'DOB':'current age'));
         // Reload policies
         const all = await dbGetAll('policies');
-        setPolicies(all);
+        setPolicies(activeClientId ? all.filter(pol => pol.clientId === activeClientId) : all);
+        scheduleDriveWriteForClient(activeClientId, 'profile-age-sync', 1000);
       }
     }
   };
@@ -13513,14 +14676,10 @@ function App() {
           try {
             const { meta, content } = await driveClient.getFile(f.fileId);
             const fileData = JSON.parse(content);
-            const { clientProfile: driveProfile, policies: drivePolicies } = parseDriveClientFile(fileData);
-            if (driveProfile) await dbPut('settings', { key: 'clientProfile_' + f.clientId, value: driveProfile });
-            for (const pol of (drivePolicies || [])) { pol.clientId = f.clientId; await dbPut('policies', pol); }
-            if (meta?.headRevisionId) {
-              const ds = await PolicyDB.getDriveState(f.clientId);
-              if (ds) await PolicyDB.saveDriveState({ ...ds, headRevisionId: meta.headRevisionId, lastSyncedAt: new Date().toISOString() });
-            }
-            console.log('[Discovery] Pulled', (drivePolicies || []).length, 'policies for', f.clientName);
+            const parsed = parseDriveClientFile(fileData);
+            const ds = await PolicyDB.getDriveState(f.clientId);
+            const result = await writeDrivePayloadToLocal(f.clientId, parsed, meta?.headRevisionId, ds);
+            console.log('[Discovery] Pulled', (result.policies || []).length, 'policies for', f.clientName);
           } catch (pullErr) {
             console.warn('[Discovery] Data pull failed for', f.clientName, pullErr.message);
             try { toast('Could not load policies for ' + f.clientName + ' — will retry when you open this client', 'warning', 5000); } catch(_) {}
@@ -15039,18 +16198,30 @@ function SyncStatusPill({ driveState }) {
   // v2.3.0-rc2c.5o: Show minimal sync feedback on mobile (was: return null hiding all indication)
   if (isMobile) {
     if (!driveState || getDriveStatus() !== 'connected' || isDriveLocalOnly()) return null;
-    const saving = _driveSyncInFlight || _driveSyncTimer !== null;
+    const saving = _driveSyncInFlight || _driveSyncTimer !== null || driveState.pendingWrite;
+    if (driveState.pendingError) {
+      return React.createElement('span', {
+        title: driveState.pendingError,
+        style: {fontSize:9,color:'var(--red)',whiteSpace:'nowrap',flexShrink:0,padding:'0 4px'}
+      }, 'Sync queued');
+    }
     if (!saving && !_driveSyncJustSaved) return null;
     return React.createElement('span', {
       style: {fontSize:9,color:saving?'var(--gold)':'var(--teal)',whiteSpace:'nowrap',flexShrink:0,padding:'0 4px'}
-    }, saving ? 'Saving\u2026' : '\u2713');
+    }, saving ? 'Queued\u2026' : '\u2713');
   }
   if (!driveState || getDriveStatus() !== 'connected' || isDriveLocalOnly()) return null;
-  const isSaving = _driveSyncInFlight || _driveSyncTimer !== null;
+  const isSaving = _driveSyncInFlight || _driveSyncTimer !== null || driveState.pendingWrite;
+  if (driveState.pendingError) {
+    return React.createElement('span', {
+      title: driveState.pendingError,
+      style: {fontSize:10,color:'var(--red)',padding:'2px 8px',background:'var(--red-dim)',borderRadius:10,border:'1px solid rgba(239,83,80,.25)',whiteSpace:'nowrap',flexShrink:0}
+    }, 'Sync queued');
+  }
   if (isSaving) {
     return React.createElement('span', {
       style: {fontSize:10,color:'var(--gold)',padding:'2px 8px',background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)',whiteSpace:'nowrap',flexShrink:0,animation:'pulse 1.5s ease-in-out infinite'}
-    }, 'Saving\u2026');
+    }, _driveSyncInFlight ? 'Saving\u2026' : 'Queued\u2026');
   }
   const ts = driveState.lastSyncedAt;
   if (!ts) return null;
@@ -15062,6 +16233,9 @@ function SyncStatusPill({ driveState }) {
   else if (sec < 3600) label = 'Saved ' + Math.floor(sec/60) + 'm ago';
   else if (sec < 86400) label = 'Saved ' + Math.floor(sec/3600) + 'h ago';
   else { const d = new Date(ts); label = 'Saved at ' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0'); }
+  if (driveState.lastSyncDeviceName && driveState.lastSyncDeviceName !== getPolicyLensDeviceName()) {
+    label += ' from ' + driveState.lastSyncDeviceName;
+  }
   return React.createElement('span', {
     style: {fontSize:10,color:'var(--text3)',padding:'2px 8px',background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)',whiteSpace:'nowrap',flexShrink:0}
   }, label);
@@ -15336,9 +16510,11 @@ function ClientsTab() {
         {filtered.map(ds => {
           const isActive = ds.clientId === activeClientId;
           const clientPols = allPolicies.filter(p => p.clientId === ds.clientId);
-          const totalPrem = clientPols.reduce((sum, p) => sum + (parseFloat(p.premium) || 0), 0);
+          const totalPrem = clientPols.reduce((sum, p) => sum + annualizedPremium(p), 0);
           const tierLabel = ds.tier || UNASSIGNED_TIER;
           const ts = tierStyle(tierLabel, tierDefinitions);
+          const syncLabel = ds.pendingError ? 'sync queued' : ds.pendingWrite ? 'sync pending' : ds.lastSyncDeviceName ? ('synced from ' + ds.lastSyncDeviceName) : null;
+          const syncColor = ds.pendingError ? 'var(--red)' : ds.pendingWrite ? 'var(--gold)' : 'var(--text3)';
           return (
             <div key={ds.clientId} onClick={() => { switchClient(ds.clientId); setTab('profile'); }}
               style={{background:isActive?'rgba(212,169,106,.06)':'var(--bg2)',border:isActive?'1px solid rgba(212,169,106,.4)':'1px solid var(--border)',borderRadius:10,padding:'12px 14px',cursor:'pointer',transition:'border-color .15s'}}>
@@ -15380,6 +16556,7 @@ function ClientsTab() {
               </div>
               <div style={{fontSize:11,color:'var(--text3)',marginTop:4}}>
                 {totalPrem > 0 ? '$' + Math.round(totalPrem).toLocaleString() + '/yr' : 'No premiums'} · {clientPols.length} {clientPols.length===1?'policy':'policies'} · {ds.lastReviewedAt ? 'reviewed ' + fmtRelativeTime(ds.lastReviewedAt) : 'never reviewed'}
+                {syncLabel && <span style={{color:syncColor}}> · {syncLabel}</span>}
               </div>
             </div>
           );
@@ -15448,6 +16625,7 @@ function NewClientModal({ allStates, allPolicies, onClose, initialName, onCreate
       await dbPut('settings', { key: 'clientName_' + clientId, value: trimName });
       await switchClient(clientId);
       setTab('profile');
+      try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
       if (typeof onCreated === 'function') await onCreated(clientId);
       onClose();
       try { toast('Created client: ' + trimName, 'success'); } catch(_) {}
@@ -19095,7 +20273,7 @@ function ProfileTab() {
     try {
       const content = [];
       for(const file of Array.from(files).slice(0,6)){
-        const blocks = await processFile(file);
+        const blocks = await processFileWithDocumentAI(file);
         content.push(...blocks);
       }
       content.push({type:'text',text:'Extract client profile information from these documents/images.'});
@@ -19403,11 +20581,12 @@ function ProfileTab() {
                 <div className="field"><label>CPF LIFE Scheme</label>
                   <select value={p.cpfScheme||'FRS'} onChange={e=>set('cpfScheme',e.target.value)}>
                     <option value="none">No CPF LIFE</option>
-                    <option value="BRS">Basic (BRS) — ${Math.round(getCPFSchemeAmount('BRS') * Math.pow(1.035, Math.max(0,55-(age||35)))).toLocaleString()}</option>
-                    <option value="FRS">Full (FRS) — ${Math.round(getCPFSchemeAmount('FRS') * Math.pow(1.035, Math.max(0,55-(age||35)))).toLocaleString()}</option>
-                    <option value="ERS">Enhanced (ERS) — ${Math.round(getCPFSchemeAmount('ERS') * Math.pow(1.035, Math.max(0,55-(age||35)))).toLocaleString()}</option>
+                    <option value="BRS">Basic (BRS) — ${getCPFSchemeAmountForAge('BRS', age||35).toLocaleString()}</option>
+                    <option value="FRS">Full (FRS) — ${getCPFSchemeAmountForAge('FRS', age||35).toLocaleString()}</option>
+                    <option value="ERS">Enhanced (ERS) — ${getCPFSchemeAmountForAge('ERS', age||35).toLocaleString()}</option>
                   </select>
-                  {age && age < 55 && <div style={{fontSize:9,color:'var(--text3)'}}>Projected at 55 (3.5%/yr × {55-age}yr from today's value)</div>}
+                  {age && age < 55 && <div style={{fontSize:9,color:'var(--text3)'}}>Projected age-55 cohort ({getCPFYearTurning55(age)})</div>}
+                  {age && age >= 55 && <div style={{fontSize:9,color:'var(--text3)'}}>Uses locked age-55 cohort ({getCPFYearTurning55(age)})</div>}
                 </div>
                 <div className="field"><label>CPF LIFE Plan</label>
                   <select value={p.cpfPlan||'standard'} onChange={e=>set('cpfPlan',e.target.value)}>
@@ -19431,9 +20610,8 @@ function ProfileTab() {
               {p.cpfScheme && p.cpfScheme !== 'none' && (() => {
                 const startAge = parseInt(p.cpfStartAge)||65;
                 const clientAge = getProfileAge(p) ?? 35;
-                const yearsTo55 = Math.max(0, 55 - clientAge);
-                const schemeBase = getCPFSchemeAmount(p.cpfScheme);
-                const projectedScheme = Math.round(schemeBase * Math.pow(1.035, yearsTo55));
+                const cohortYear = getCPFYearTurning55(clientAge);
+                const projectedScheme = getCPFSchemeAmountForAge(p.cpfScheme, clientAge);
                 const totalRA55 = projectedScheme + (parseFloat(p.cpfTopUp)||0);
                 // RA at age 65 = compound from 55 to 65 (fixed baseline for all columns)
                 const raAt65 = projectRAToAge(totalRA55, 65);
@@ -19443,14 +20621,14 @@ function ProfileTab() {
                   <div style={{marginTop:6}}>
                     {clientAge && clientAge < 55 && (
                       <div style={{padding:'6px 10px',background:'rgba(91,168,160,.06)',borderRadius:6,marginBottom:6,fontSize:10}}>
-                        <strong>Age {clientAge}</strong> → turns 55 in {2026 + yearsTo55} · Projected {p.cpfScheme}: <strong>${projectedScheme.toLocaleString()}</strong> at 55 (today's ${schemeBase.toLocaleString()} + 3.5%/yr × {yearsTo55}yr)
+                        <strong>Age {clientAge}</strong> → turns 55 in {cohortYear} · Projected {p.cpfScheme}: <strong>${projectedScheme.toLocaleString()}</strong> at 55
                         {parseFloat(p.cpfTopUp)>0 && <span> · +${parseInt(p.cpfTopUp).toLocaleString()} top-up</span>}
                         <span style={{color:'var(--green2)',marginLeft:6}}>→ RA at 65: <strong>${raAt65.toLocaleString()}</strong></span>
                       </div>
                     )}
                     {clientAge >= 55 && (
                       <div style={{padding:'6px 10px',background:'rgba(91,168,160,.06)',borderRadius:6,marginBottom:6,fontSize:10}}>
-                        <strong>Age {clientAge}</strong> (55+) · {p.cpfScheme}: ${schemeBase.toLocaleString()}
+                        <strong>Age {clientAge}</strong> (55+) · locked {p.cpfScheme} cohort {cohortYear}: ${projectedScheme.toLocaleString()}
                         {parseFloat(p.cpfTopUp)>0 && <span> · +${parseInt(p.cpfTopUp).toLocaleString()} top-up</span>}
                         <span style={{color:'var(--green2)',marginLeft:6}}>→ RA at 65: <strong>${raAt65.toLocaleString()}</strong></span>
                       </div>
@@ -19503,7 +20681,7 @@ function ProfileTab() {
               </div>
               <div className="grid-3" style={{marginBottom:6}}>
                 <div className="field"><label>OA Balance ($)</label><input type="number" value={p.cpfOA||''} onChange={e=>set('cpfOA',e.target.value)} placeholder="0" /><div style={{fontSize:9,color:'var(--text3)'}}>Ordinary Account @ 2.5%</div></div>
-                <div className="field"><label>SA Balance ($)</label><input type="number" value={p.cpfSA||''} onChange={e=>set('cpfSA',e.target.value)} placeholder="0" /><div style={{fontSize:9,color:'var(--text3)'}}>Special Account @ 4.0%</div></div>
+                <div className="field"><label>{(age||0)>=55?'RA Balance ($)':'SA Balance ($)'}</label><input type="number" value={p.cpfSA||''} onChange={e=>set('cpfSA',e.target.value)} placeholder="0" /><div style={{fontSize:9,color:'var(--text3)'}}>{(age||0)>=55?'Retirement Account @ 4.0%':'Special Account @ 4.0%'}</div></div>
                 <div className="field"><label>MA Balance ($)</label><input type="number" value={p.cpfMA||''} onChange={e=>set('cpfMA',e.target.value)} placeholder="0" /><div style={{fontSize:9,color:'var(--text3)'}}>MediSave @ 4.0% · BHS $79k</div></div>
               </div>
               <div className="grid-3" style={{marginBottom:6}}>
@@ -19732,12 +20910,12 @@ const RetirementLiteDashboard = memo(function RetirementLiteDashboard({data,age,
   const generateShareView = () => {
     const clientName = p.name || 'Client';
     const retRow = cvTimeline.find(r => r.age === retAge);
-    const totalPrem = policies.filter(pol=>pol.category!=='cash_investments'&&!pol.premSingle&&pol.premiumStructure!=='Single Premium'&&pol.premFrequency!=='single'&&pol.status!=='matured').reduce((s,pol)=>s+(pol.premFrequency==='monthly'?(parseFloat(pol.annualPremium)||0)*12:(parseFloat(pol.annualPremium)||0)),0);
+    const totalPrem = policies.filter(pol=>pol.category!=='cash_investments'&&!pol.premSingle&&pol.premiumStructure!=='Single Premium'&&pol.premFrequency!=='single'&&pol.status!=='matured').reduce((s,pol)=>s+annualizedPremium(pol),0);
     const totalSinglePrem = policies.filter(pol=>pol.category!=='cash_investments'&&(pol.premSingle||pol.premiumStructure==='Single Premium'||pol.premFrequency==='single')&&pol.status!=='matured').reduce((s,pol)=>s+(parseFloat(pol.annualPremium)||0),0);
     // Premium by mode
     const premByMode = {cash:0, srs:0, cpfoa:0, medisave:0};
     policies.filter(pol=>pol.category!=='cash_investments'&&pol.status!=='matured'&&!pol.premSingle&&pol.premiumStructure!=='Single Premium'&&pol.premFrequency!=='single').forEach(pol => {
-      const prem = pol.premFrequency==='monthly'?(parseFloat(pol.annualPremium)||0)*12:(parseFloat(pol.annualPremium)||0);
+      const prem = annualizedPremium(pol);
       const method = (pol.paymentMethod||'').toLowerCase();
       if(method.includes('medisave')) premByMode.medisave += prem;
       else if(method.includes('srs')) premByMode.srs += prem;
@@ -20828,10 +22006,8 @@ function Dashboard() {
           const proj = projectCPFToRetirement(age||35, parseFloat(p.cpfMonthlySalary)||0, parseFloat(p.cpfOA)||0, parseFloat(p.cpfSA)||0, parseFloat(p.cpfMA)||0, 65);
           raAt65 = proj.ra;
         } else {
-          // Scheme mode — project scheme amount growing 3.5%/yr to age 55, then compound to 65
-          const schemeBase = getCPFSchemeAmount(cpfScheme);
-          const yearsTo55 = Math.max(0, 55 - (age||35));
-          const projectedScheme = Math.round(schemeBase * Math.pow(1.035, yearsTo55)) + (parseFloat(p.cpfTopUp)||0);
+          // Scheme mode: use the client's own age-55 cohort amount, not the current-year FRS for everyone.
+          const projectedScheme = getCPFSchemeAmountForAge(cpfScheme, age||35) + (parseFloat(p.cpfTopUp)||0);
           // Pass OA+MA balances to projectRAToAge so it models pooled extra
           // interest correctly (Bug #10). Falls back to RA-only when unknown.
           const otherCpf = (parseFloat(p.cpfOA)||0) + (parseFloat(p.cpfMA)||0);
@@ -20917,7 +22093,7 @@ function Dashboard() {
             if(pol.premFrequency==='unknown') return; // Skip unconfirmed
             const sa=parseInt(pol.premStartAge)||parseInt(pol.ageAtEntry)||age;
             const pt=pol.premSingle?1:(pol.premWholeLife?Math.max(65-sa,30):(parseInt(pol.premTerm)||(parseInt(pol.premEndAge)>0?parseInt(pol.premEndAge)-sa:25)));
-            const annPrem=pol.premFrequency==='monthly'?(parseFloat(pol.annualPremium)||0)*12:(parseFloat(pol.annualPremium)||0);
+            const annPrem=annualizedPremium(pol);
             if(!annPrem) return;
             const yrsInForce=Math.max(0, Math.min(r.age-sa, pt));
             cumPrem += pol.premSingle ? annPrem : annPrem * yrsInForce;
@@ -21413,12 +22589,12 @@ function Dashboard() {
               <div style={{background:'var(--bg3)',borderRadius:8,padding:'8px 10px',textAlign:'center'}}>
                 <div style={{fontSize:8,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.3px'}}>Total Premiums</div>
                 <div style={{fontSize:16,fontWeight:700,color:'var(--red)'}}>
-                  {fmt((() => {let t=0;policies.forEach(pol=>{if(pol.status==='matured'||pol.category==='cash_investments'||pol.category==='other_assets')return;const pt=pol.premSingle?1:(pol.premWholeLife?Math.max(65-(parseInt(pol.premStartAge)||parseInt(pol.ageAtEntry)||35),30):(parseInt(pol.premTerm)||(parseInt(pol.premEndAge)>0?parseInt(pol.premEndAge)-(parseInt(pol.premStartAge)||35):25)));const ann=pol.premFrequency==='monthly'?(parseFloat(pol.annualPremium)||0)*12:(parseFloat(pol.annualPremium)||0);t+=pol.premSingle?ann:ann*pt;});return t;})())}
+                  {fmt((() => {let t=0;policies.forEach(pol=>{if(pol.status==='matured'||pol.category==='cash_investments'||pol.category==='other_assets')return;const pt=pol.premSingle?1:(pol.premWholeLife?Math.max(65-(parseInt(pol.premStartAge)||parseInt(pol.ageAtEntry)||35),30):(parseInt(pol.premTerm)||(parseInt(pol.premEndAge)>0?parseInt(pol.premEndAge)-(parseInt(pol.premStartAge)||35):25)));const ann=annualizedPremium(pol);t+=pol.premSingle?ann:ann*pt;});return t;})())}
                 </div>
               </div>
               <div style={{gridColumn:'1/-1',background:'var(--bg3)',borderRadius:8,padding:'6px 10px',textAlign:'center'}}>
                 {(() => {
-                  let totalPaid=0;policies.forEach(pol=>{if(pol.status==='matured'||pol.category==='cash_investments'||pol.category==='other_assets')return;const pt=pol.premSingle?1:(pol.premWholeLife?Math.max(65-(parseInt(pol.premStartAge)||parseInt(pol.ageAtEntry)||35),30):(parseInt(pol.premTerm)||(parseInt(pol.premEndAge)>0?parseInt(pol.premEndAge)-(parseInt(pol.premStartAge)||35):25)));const ann=pol.premFrequency==='monthly'?(parseFloat(pol.annualPremium)||0)*12:(parseFloat(pol.annualPremium)||0);totalPaid+=pol.premSingle?ann:ann*pt;});
+                  let totalPaid=0;policies.forEach(pol=>{if(pol.status==='matured'||pol.category==='cash_investments'||pol.category==='other_assets')return;const pt=pol.premSingle?1:(pol.premWholeLife?Math.max(65-(parseInt(pol.premStartAge)||parseInt(pol.ageAtEntry)||35),30):(parseInt(pol.premTerm)||(parseInt(pol.premEndAge)>0?parseInt(pol.premEndAge)-(parseInt(pol.premStartAge)||35):25)));const ann=annualizedPremium(pol);totalPaid+=pol.premSingle?ann:ann*pt;});
                   const net = retRow.totalCV - totalPaid;
                   return <div style={{display:'flex',justifyContent:'center',alignItems:'baseline',gap:6}}><span style={{fontSize:8,color:'var(--text3)',textTransform:'uppercase'}}>Net Gain/(Loss)</span><span style={{fontSize:16,fontWeight:700,color:net>=0?'var(--green2)':'var(--red)'}}>{net>=0?'+':''}{fmt(net)}</span></div>;
                 })()}
@@ -24759,6 +25935,13 @@ Signals that two pages belong to the SAME policy:
   • Shared reference/client ID across pages
   • Obvious continuity: one page shows a premium table header, the next shows its values
 
+UPLOAD SEQUENCE CONTEXT:
+The app may provide a text block named "UPLOAD SEQUENCE CONTEXT" before the image parts. Treat that block as page-order metadata. Adjacent upload order and adjacent camera filenames (for example IMG_1011 followed by IMG_1012) are a weak but important signal that the images may be consecutive pages from the same physical document.
+
+If an adjacent image has no policy number, no clear product header, and mostly shows riders, values, funds, premiums, charges, page continuations, or tables, merge those details into the nearest previous compatible policy. Do NOT create a standalone policy just because the filename differs.
+
+Never treat filename numbers as policy numbers. Only split adjacent images into separate policies when the page clearly starts a different policy, has a different policy number, or shows a distinct insurer/product/instrument row.
+
 When you detect multi-page continuity, produce ONE policy object combining all of the fields you found across the pages. Do NOT create two entries and let the app dedupe — the app merge is a safety net, not the primary path.
 
 Example 1 — same policy across two pages:
@@ -25341,6 +26524,11 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
     // Separate instruction-tail text blocks (usually last block) from content blocks.
     // We'll re-append the last instruction block to each split half.
     const contentOnly = contentBlocks.slice();
+    let sequenceHead = null;
+    const firstBlock = contentOnly[0];
+    if(firstBlock && firstBlock.type === 'text' && /^UPLOAD SEQUENCE CONTEXT\b/.test(firstBlock.text || '')) {
+      sequenceHead = contentOnly.shift();
+    }
     let instructionTail = null;
     // Heuristic: if the last block is text and contains "Extract ALL" or "return", treat as instruction tail.
     const lastBlock = contentOnly[contentOnly.length-1];
@@ -25354,6 +26542,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
       const firstHalf = contentOnly.slice(0, mid);
       const secondHalf = contentOnly.slice(mid);
       console.log('[Extract]', label, 'truncated → splitting', contentOnly.length, 'blocks into', firstHalf.length, '+', secondHalf.length);
+      if(sequenceHead) { firstHalf.unshift(sequenceHead); secondHalf.unshift(sequenceHead); }
       if(instructionTail) { firstHalf.push(instructionTail); secondHalf.push(instructionTail); }
       const [a, b] = await Promise.all([
         runExtractionWithRecovery(firstHalf, depth+1, label+'/L'),
@@ -25383,6 +26572,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
       console.log('[Extract]', label, 'truncated single-text → splitting at char', splitAt, 'of', fullText.length, '→', firstText.length, '+', secondText.length);
       const firstBlocks = [{type:'text', text:'[PART 1 OF 2]\n\n'+firstText}];
       const secondBlocks = [{type:'text', text:'[PART 2 OF 2]\n\n'+secondText}];
+      if(sequenceHead) { firstBlocks.unshift(sequenceHead); secondBlocks.unshift(sequenceHead); }
       if(instructionTail) { firstBlocks.push(instructionTail); secondBlocks.push(instructionTail); }
       const [a, b] = await Promise.all([
         runExtractionWithRecovery(firstBlocks, depth+1, label+'/T1'),
@@ -25499,7 +26689,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
     const merged = { ...base };
     for (const [k, nextVal] of Object.entries(next)) {
       if (k === 'id' || k === '_idx') continue; // never overwrite local IDs
-      if (k === '_mergeConflicts' || k === '_mergedFrom' || k === '_mergedFromPartial') continue; // handled separately
+      if (k === '_mergeConflicts' || k === '_mergedFrom' || k === '_mergedFromPartial' || k === '_mergedFromSequentialPartial') continue; // handled separately
       if (k === '_selected' || k === '_batch' || k === '_dupOf' || k === '_matchesExisting') continue; // UI state
       if (k === 'isPartialPage') continue; // handled by smartMerge wrapper, not field merge
       if (k === 'riders') {
@@ -25698,9 +26888,112 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
       if (!mergedInto) finalOut.push(p);
     }
 
-    const removed = before - finalOut.length;
-    if (removed > 0) console.log('[Dedupe] Merged '+removed+' duplicates ('+before+' → '+finalOut.length+')');
-    return finalOut;
+    // Sequential partial fallback: if the model still emits a weak
+    // continuation page as its own object, merge it into the nearest
+    // compatible preceding policy. This catches pages that only show
+    // riders, values, fund tables, premiums, or charges and have no
+    // usable policy number/product identity of their own.
+    const weakNamePatterns = [
+      /^$/,
+      /^policy$/,
+      /^policy\s*(page|details?|schedule|summary|statement|values?)$/,
+      /^(page|schedule|summary|statement|values?|premium|premiums|charges?|benefits?|riders?)$/,
+      /^(fund|funds|fund allocation|fund allocations|investment allocation|investment allocations)$/,
+      /^investment[- ]linked policy$/,
+      /^life insurance policy$/,
+      /^whole life plan$/,
+      /^term life (plan|insurance)$/,
+      /^insurance plan$/,
+      /^ilp$/,
+      /^annuity plan$/,
+      /^endowment plan$/,
+    ];
+    const isWeakContinuationName = (name) => {
+      const n = (name || '').toString().toLowerCase().replace(/[^a-z0-9\s-]/g, ' ').replace(/\s+/g, ' ').trim();
+      return weakNamePatterns.some(rx => rx.test(n));
+    };
+    const hasContinuationPayload = (p) => {
+      if (!p || typeof p !== 'object') return false;
+      if (Array.isArray(p.riders) && p.riders.length > 0) return true;
+      if (Array.isArray(p.fundAllocations) && p.fundAllocations.length > 0) return true;
+      const numericFields = ['sumAssured','premiumAmount','annualPremium','cashValue','retMaturitySum','annuityPayout','annuityMonthly','fdPrincipal','riderPremium','surrenderPeriod'];
+      if (numericFields.some(k => parseFloat(p[k]) > 0)) return true;
+      if (Array.isArray(p.highlights) && p.highlights.length > 0) return true;
+      const notes = (p.notes || p.userRemarks || '').toString().trim();
+      return notes.length >= 20;
+    };
+    const isWeakContinuation = (p) => {
+      if (!p || typeof p !== 'object') return false;
+      const polNum = normalizePolicyKey(p.policyNumber);
+      if (polNum && polNum.length >= 4) return false;
+      const name = p.productName || p.policyName || '';
+      if (p.isPartialPage) return true;
+      return hasContinuationPayload(p) && isWeakContinuationName(name);
+    };
+    const canMergeSequentialPartial = (base, partial) => {
+      if (!base || !partial) return false;
+      if (!policyNumsCompatible(base.policyNumber, partial.policyNumber)) return false;
+      if (!catsCompatible(base.category, partial.category)) return false;
+      const baseIns = normalizeProductKey(base.insurer);
+      const partIns = normalizeProductKey(partial.insurer);
+      if (baseIns && partIns && baseIns !== partIns) return false;
+      const partNameRaw = partial.productName || partial.policyName || '';
+      if (!isWeakContinuationName(partNameRaw)) {
+        const baseName = normalizeProductForDedup(base.productName || base.policyName || '');
+        const partName = normalizeProductForDedup(partNameRaw);
+        if (baseName && partName && !(baseName.includes(partName) || partName.includes(baseName))) {
+          if (Math.abs(baseName.length - partName.length) > 3 || levenshtein(baseName, partName) > 2) return false;
+        }
+      }
+      return hasContinuationPayload(partial);
+    };
+    const prepareSequentialPartial = (partial) => {
+      const cleaned = {...partial, isPartialPage: true};
+      const weakName = cleaned.productName || cleaned.policyName || '';
+      if (isWeakContinuationName(weakName)) {
+        delete cleaned.productName;
+        delete cleaned.policyName;
+      }
+      return cleaned;
+    };
+    const sequenceOut = [];
+    const pendingWeak = [];
+    let lastStrongIndex = -1;
+    for (const p of finalOut) {
+      if (isWeakContinuation(p) && lastStrongIndex >= 0 && canMergeSequentialPartial(sequenceOut[lastStrongIndex], p)) {
+        const merged = smartMerge(sequenceOut[lastStrongIndex], prepareSequentialPartial(p));
+        merged._mergedFromSequentialPartial = true;
+        sequenceOut[lastStrongIndex] = merged;
+        console.log('[Dedupe] Sequential partial merge:', p.insurer || '', p.productName || p.policyName || '(unnamed)', 'into', merged.productName || merged.policyName || '(previous policy)');
+        continue;
+      }
+      if (isWeakContinuation(p)) {
+        pendingWeak.push(p);
+        continue;
+      }
+      let strongPolicy = p;
+      if (pendingWeak.length > 0) {
+        const stillPending = [];
+        for (const weak of pendingWeak) {
+          if (canMergeSequentialPartial(strongPolicy, weak)) {
+            strongPolicy = smartMerge(strongPolicy, prepareSequentialPartial(weak));
+            strongPolicy._mergedFromSequentialPartial = true;
+            console.log('[Dedupe] Sequential partial merge:', weak.insurer || '', weak.productName || weak.policyName || '(unnamed)', 'into', strongPolicy.productName || strongPolicy.policyName || '(next policy)');
+          } else {
+            stillPending.push(weak);
+          }
+        }
+        if (stillPending.length > 0) sequenceOut.push(...stillPending);
+        pendingWeak.length = 0;
+      }
+      sequenceOut.push(strongPolicy);
+      lastStrongIndex = sequenceOut.length - 1;
+    }
+    if (pendingWeak.length > 0) sequenceOut.push(...pendingWeak);
+
+    const removed = before - sequenceOut.length;
+    if (removed > 0) console.log('[Dedupe] Merged '+removed+' duplicates ('+before+' → '+sequenceOut.length+')');
+    return sequenceOut;
   };
 
   // Single-batch extraction (returns processed array)
@@ -25763,8 +27056,11 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
     if (arr == null) {
       // ── NORMAL PATH ──
       const content = [];
+      const sequenceMeta = buildUploadSequenceMeta(batchFiles);
+      const sequenceOverview = buildUploadSequenceOverview(batchFiles, sequenceMeta);
+      if (sequenceOverview) content.push({type:'text', text: sequenceOverview});
       for(const file of batchFiles){
-        const blocks = await processFile(file);
+        const blocks = await processFileWithDocumentAI(file);
         content.push(...blocks);
       }
       // ── EXPECTED POLICY COUNT (for reconciliation) ──
@@ -25796,7 +27092,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
         console.log('[PriorInjection] No repo matches in source text (length='+sourceText.length+', repo size='+repo.length+')');
       }
 
-      content.push({type:'text',text:'Extract ALL insurance policies AND financial instruments from these documents. CRITICAL RULES:\n1. Multiple photos may show DIFFERENT PAGES of the SAME policy — correlate them by policy number, insurer+product name, or context clues. Merge information from multiple pages into ONE policy entry.\n2. Multiple photos may also show DIFFERENT policies — extract each as a separate entry.\n3. NEVER skip or merge genuinely different policies. Two policies from the same insurer with different product names = 2 entries.\n4. If the same fund (e.g. "Allianz Global High Payout") appears under DIFFERENT accounts (CPFIS-OA vs Cash), these are SEPARATE entries — differentiate by appending the account type in policyName.\n5. Look across ALL images for related data — page 1 might have the policy name while page 3 has the premium details.\n6. If REPOSITORY PRIOR KNOWLEDGE is provided above, treat those products\' canonical category/subType as authoritative — do not reclassify them based on document appearance.\nReturn ONLY valid JSON array or object.'});
+      content.push({type:'text',text:'Extract ALL insurance policies AND financial instruments from these documents. CRITICAL RULES:\n1. Multiple photos may show DIFFERENT PAGES of the SAME policy — correlate them by policy number, insurer+product name, filename/upload order, or context clues. Merge information from multiple pages into ONE policy entry.\n2. Adjacent upload images with sequential filenames (e.g. IMG_1011 then IMG_1012) are likely consecutive pages. If the later page lacks a clear new policy identity, merge it into the nearest previous compatible policy instead of creating a standalone policy.\n3. Multiple photos may also show DIFFERENT policies — extract each as a separate entry when a distinct policy number/product/instrument is visible.\n4. NEVER skip or merge genuinely different policies. Two policies from the same insurer with different product names = 2 entries.\n5. If the same fund (e.g. "Allianz Global High Payout") appears under DIFFERENT accounts (CPFIS-OA vs Cash), these are SEPARATE entries — differentiate by appending the account type in policyName.\n6. Look across ALL images for related data — page 1 might have the policy name while page 3 has the premium details.\n7. If REPOSITORY PRIOR KNOWLEDGE is provided above, treat those products\' canonical category/subType as authoritative — do not reclassify them based on document appearance.\nReturn ONLY valid JSON array or object.'});
 
       // ── RUN EXTRACTION WITH SELF-HEALING TRUNCATION RECOVERY ──
       arr = await runExtractionWithRecovery(content, 0, 'batch');
@@ -26451,8 +27747,11 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
                   bgModeReason: bgDiag?.reason || null,
                 });
                 const content = [];
+                const sequenceMeta = buildUploadSequenceMeta(batches[b]);
+                const sequenceOverview = buildUploadSequenceOverview(batches[b], sequenceMeta);
+                if (sequenceOverview) content.push({type:'text', text: sequenceOverview});
                 for (const file of batches[b]) {
-                  const blocks = await processFile(file);
+                  const blocks = await processFileWithDocumentAI(file);
                   content.push(...blocks);
                 }
                 // Repo priors (same as extractBatch's normal path)
@@ -26463,7 +27762,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
                   if (priorBlock) content.push({type:'text', text: priorBlock});
                 }
                 // Instruction tail (same as extractBatch)
-                content.push({type:'text',text:'Extract ALL insurance policies AND financial instruments from these documents. CRITICAL RULES:\n1. Multiple photos may show DIFFERENT PAGES of the SAME policy — correlate them by policy number, insurer+product name, or context clues. Merge information from multiple pages into ONE policy entry.\n2. Multiple photos may also show DIFFERENT policies — extract each as a separate entry.\n3. NEVER skip or merge genuinely different policies. Two policies from the same insurer with different product names = 2 entries.\n4. If the same fund (e.g. "Allianz Global High Payout") appears under DIFFERENT accounts (CPFIS-OA vs Cash), these are SEPARATE entries — differentiate by appending the account type in policyName.\n5. Look across ALL images for related data — page 1 might have the policy name while page 3 has the premium details.\n6. If REPOSITORY PRIOR KNOWLEDGE is provided above, treat those products\' canonical category/subType as authoritative — do not reclassify them based on document appearance.\nReturn ONLY valid JSON array or object.'});
+                content.push({type:'text',text:'Extract ALL insurance policies AND financial instruments from these documents. CRITICAL RULES:\n1. Multiple photos may show DIFFERENT PAGES of the SAME policy — correlate them by policy number, insurer+product name, filename/upload order, or context clues. Merge information from multiple pages into ONE policy entry.\n2. Adjacent upload images with sequential filenames (e.g. IMG_1011 then IMG_1012) are likely consecutive pages. If the later page lacks a clear new policy identity, merge it into the nearest previous compatible policy instead of creating a standalone policy.\n3. Multiple photos may also show DIFFERENT policies — extract each as a separate entry when a distinct policy number/product/instrument is visible.\n4. NEVER skip or merge genuinely different policies. Two policies from the same insurer with different product names = 2 entries.\n5. If the same fund (e.g. "Allianz Global High Payout") appears under DIFFERENT accounts (CPFIS-OA vs Cash), these are SEPARATE entries — differentiate by appending the account type in policyName.\n6. Look across ALL images for related data — page 1 might have the policy name while page 3 has the premium details.\n7. If REPOSITORY PRIOR KNOWLEDGE is provided above, treat those products\' canonical category/subType as authoritative — do not reclassify them based on document appearance.\nReturn ONLY valid JSON array or object.'});
                 // Build Gemini POST body
                 const parts = [];
                 for (const block of content) {
@@ -27635,6 +28934,8 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
               <div style={{fontSize:12,fontWeight:600,color:'var(--gold)'}}>✨ AI Extraction</div>
               {/* ── v15: CANCEL BUTTON — stops ticker + marks jobs cancelled ── */}
               <button onClick={() => {
+                try { extractAbortRef.current?.abort(); } catch(_) {}
+                try { _extractAbortController?.abort(); } catch(_) {}
                 stopTicker(true);
                 toast('🛑 Extraction cancelled','info',3000);
               }} style={{
@@ -27873,12 +29174,9 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
               <button
                 className="btn-primary btn-sm"
                 onClick={() => {
-                  // v15: Use the job queue ticker instead of the old progressive path
                   const queued = staged.filter(s => s._status === 'queued' || s._status == null);
                   if (queued.length > 0) {
-                    startExtraction(queued.map(s => s.file));
-                    // Mark staged entries with job IDs (async — stagePhotos also does this)
-                    setStaged(prev => prev.map(s => (s._status === 'queued' || s._status == null) ? {...s, _status: 'queued'} : s));
+                    triggerProgressiveExtract('manual-button');
                   }
                 }}
                 disabled={scanning && queuedCount === 0}
@@ -28274,6 +29572,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
       }} onAccept={async(selected) => {
         let count = 0;
         let mergedCount = 0;
+        const acceptedPolicyIds = [];
         // ── DEDUPE AT SAVE TIME (2026-04-09 fix) ──
         // Previously every selected policy got a fresh genId() and
         // was saved as a new entry, even when findExistingMatch had
@@ -28295,7 +29594,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
           const clean = {...p};
           delete clean._selected; delete clean._expanded; delete clean._batch;
           delete clean._dupOf; delete clean._matchesExisting; delete clean._repoMatch;
-          delete clean._mergeConflicts; delete clean._mergedFromPartial;
+          delete clean._mergeConflicts; delete clean._mergedFromPartial; delete clean._mergedFromSequentialPartial;
           delete clean._recovered; delete clean._knownPolicyMatch;
           delete clean._extractConfidence; delete clean._extractConfidenceReasons;
           delete clean._mergeIntoExisting;
@@ -28336,7 +29635,32 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
           if(result.premStartAge && result.premTerm && !result.premEndAge) result.premEndAge = String(parseInt(result.premStartAge)+parseInt(result.premTerm));
           if(result.ageAtEntry && !result.premStartAge) result.premStartAge = result.ageAtEntry;
           await savePolicy(result);
+          if (result.id) acceptedPolicyIds.push(result.id);
           count++;
+        }
+        if (activeClientId && count > 0) {
+          try {
+            const sourceFiles = (staged || []).map(s => s?.file?.name || s?.name).filter(Boolean);
+            await PolicyDB.saveScanSession({
+              id: 'scan_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
+              clientId: activeClientId,
+              createdAt: new Date().toISOString(),
+              deviceId: getPolicyLensDeviceId(),
+              deviceName: getPolicyLensDeviceName(),
+              userEmail: getPolicyLensUserEmail(),
+              policyCount: count,
+              mergedCount,
+              policyIds: acceptedPolicyIds,
+              fileNames: sourceFiles,
+              pipelineVersion: EXTRACT_PIPELINE_VERSION,
+              promptVersion: EXTRACT_PROMPT_VERSION
+            });
+          } catch(e) { console.warn('[ScanSession] Save failed:', e?.message || e); }
+        }
+        if (activeClientId) {
+          try {
+            window.dispatchEvent(new CustomEvent('policylens-trigger-drive-write', { detail: { clientId: activeClientId, reason: 'scan-import' } }));
+          } catch(_) {}
         }
         // Progressive session ends on accept — same reset as onClose
         sessionBulkRef.current = [];
@@ -28802,8 +30126,12 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
     setFormScanning(true);
     try {
       const content = [];
-      for(const file of Array.from(files).slice(0,8)){
-        const blocks = await processFile(file);
+      const formFiles = Array.from(files).slice(0,8);
+      const sequenceMeta = buildUploadSequenceMeta(formFiles);
+      const sequenceOverview = buildUploadSequenceOverview(formFiles, sequenceMeta);
+      if (sequenceOverview) content.push({type:'text', text: sequenceOverview});
+      for(const file of formFiles){
+        const blocks = await processFileWithDocumentAI(file);
         content.push(...blocks);
       }
       const formExtractPrompt = 'Extract insurance policy details. Return a JSON object with ALL fields: insurer, productName, policyNumber, category (protection/savings/health/investment/retirement/maternity), subType, currency, sumAssured (number), premiumAmount (number — the premium AS PAID at its stated frequency. "$1,000/mth" → premiumAmount=1000 premFrequency="monthly". "$12,000/yr" → premiumAmount=12000 premFrequency="annual". Do NOT convert between periods), premFrequency (annual/monthly/single/unknown — must match the period of premiumAmount. If unclear, use unknown), premiumStructure, paymentMethod, policyOwner, lifeInsured, gender, dob, ageAtEntry, smoker, nationality, occupation, inceptionDate, maturityDate, status, premStartAge, premTerm, premEndAge. Riders: riders (array) — CAPTURE-FIRST: for EVERY benefit listed, set riderName to EXACT name from document, THEN classify type from death/tpd/ci/eci/di/accidental/acc_medical/acc_tcm/acc_dismember/premium_waiver/other. If unsure, use type:"other". NEVER duplicate types for different benefits — use riderName to distinguish. Each: {type, riderName (ALWAYS filled), sa:number, premium:0 if bundled, expiryAge, bundled:boolean, multiClaim, totalClaimPct}. SA: saMultiplier, multiplierEndAge. ISP: ispClass, hasRider, riderList, riderPremium, ispDeductible, ispCoinsurance. ILP: ilpGrowth, ilpDivYield, ilpMgmtFee, fundAllocations (array of {fundName:string, allocation:number}). FUND RULES: extract real fund holdings confidently — names like "AIA India Balanced Fund", "Manulife Global Multi Asset Fund", "PRULink US Dividend Wealth Fund". DO NOT extract product descriptions or sentences (e.g. NEVER extract "AIA Platinum Wealth Venture ILP is a limited premium investment-linked insurance policy" as a fund). Fund names are 2-10 words, contain no verbs, no "policy"/"premium"/"insurance"/"ILP" tokens, and are typically <80 chars. If no specific funds are named, return fundAllocations:[]. NEVER substitute geographic tokens (India ≠ Asia ≠ Elite). Cash: cashValue, cvGrowthRate, surrenderPeriod. Notes: notes (FC review headline). EXTRACTION CONFIDENCE: ALSO include an optional _confidence array listing ONLY fields you are NOT highly confident about (default = confident). Each entry: {field, level (low|medium), reason}. Flag premiumAmount when ambiguous, policyNumber when OCR partial, premFrequency when not stated, etc. Do NOT flag fields stated verbatim. Empty array [] or omit entirely when all fields are clean. Return ONLY valid JSON starting with { ending with }.';
@@ -31405,7 +32733,7 @@ function Repository() {
     try {
       const content = [];
       for(const file of Array.from(files).slice(0,8)) {
-        const blocks = await processFile(file);
+        const blocks = await processFileWithDocumentAI(file);
         content.push(...blocks);
       }
       content.push({type:'text',text:'Extract ALL insurance product information from these documents. For EACH product, return a JSON object in an array with: insurer, productName, productCode, category (protection/savings/health/investment/retirement/maternity), subType, currency, notes (comprehensive product summary including: charges, features, bonus structure, riders that attach, key terms). This is for a product REPOSITORY — extract product-level data, NOT client-specific data. Return a JSON array of products.'});
@@ -32050,7 +33378,7 @@ function ReportTab() {
       // ═══ DATA AGGREGATION ═══
       const activePolicies = policies.filter(pol => pol.status!=='matured'&&pol.status!=='surrendered'&&pol.status!=='lapsed'&&pol.category!=='cash_investments'&&pol.category!=='other_assets');
       const activeNonSingle = activePolicies.filter(pol => !pol.premSingle&&pol.premiumStructure!=='Single Premium'&&pol.premFrequency!=='single');
-      const totalAnnualPrem = activeNonSingle.reduce((s,pol)=>s+(pol.premFrequency==='monthly'?(parseFloat(pol.annualPremium)||0)*12:(parseFloat(pol.annualPremium)||0)),0);
+      const totalAnnualPrem = activeNonSingle.reduce((s,pol)=>s+annualizedPremium(pol),0);
       const totalSinglePrem = activePolicies.filter(pol=>pol.premSingle||pol.premiumStructure==='Single Premium'||pol.premFrequency==='single').reduce((s,pol)=>s+(parseFloat(pol.annualPremium)||0),0);
       const totalCoverage = policies.filter(pol=>pol.status!=='matured'&&pol.status!=='surrendered').reduce((s,pol)=>s+(parseFloat(pol.sumAssured)||0),0);
 
@@ -32125,7 +33453,7 @@ function ReportTab() {
           const sAge = parseInt(pol.premStartAge)||parseInt(pol.ageAtEntry)||age;
           const eAge = parseInt(pol.premEndAge) || (parseInt(pol.premTerm)?sAge+parseInt(pol.premTerm):sAge+25);
           if(curAge >= sAge && curAge < eAge) {
-            yearPrem += pol.premFrequency==='monthly'?(parseFloat(pol.annualPremium)||0)*12:(parseFloat(pol.annualPremium)||0);
+            yearPrem += annualizedPremium(pol);
           }
         });
         cashflowValues.push(Math.round(yearPrem));
@@ -32983,13 +34311,13 @@ function ReportTab() {
 
       // Coverage score badge
       const activePols2 = policies.filter(p=>p.status!=='matured'&&p.status!=='surrendered'&&p.status!=='lapsed'&&p.category!=='cash_investments'&&p.category!=='other_assets');
-      const totalPrem = activePols2.filter(p=>!p.premSingle&&p.premiumStructure!=='Single Premium'&&p.premFrequency!=='single').reduce((s,p)=>s+(p.premFrequency==='monthly'?(parseFloat(p.annualPremium)||0)*12:(parseFloat(p.annualPremium)||0)),0);
+      const totalPrem = activePols2.filter(p=>!p.premSingle&&p.premiumStructure!=='Single Premium'&&p.premFrequency!=='single').reduce((s,p)=>s+annualizedPremium(p),0);
       const totalSinglePrem2 = activePols2.filter(p=>p.premSingle||p.premiumStructure==='Single Premium'||p.premFrequency==='single').reduce((s,p)=>s+(parseFloat(p.annualPremium)||0),0);
       const totalCover = policies.filter(p=>p.status!=='matured'&&p.status!=='surrendered').reduce((s,p)=>s+(parseFloat(p.sumAssured)||0),0);
       // Premium breakdown by mode for PDF
       const premiumBreakdown = {totalAnnual:totalPrem,totalSingle:totalSinglePrem2,modes:{cash:{annual:0},medisave:{annual:0},srs:{annual:0},cpfoa:{annual:0},cpfsa:{annual:0}}};
       activePols2.filter(p=>!p.premSingle&&p.premiumStructure!=='Single Premium'&&p.premFrequency!=='single').forEach(p=>{
-        const prem=p.premFrequency==='monthly'?(parseFloat(p.annualPremium)||0)*12:(parseFloat(p.annualPremium)||0);
+        const prem=annualizedPremium(p);
         const m=(p.paymentMethod||'').toLowerCase();
         if(m.includes('medisave'))premiumBreakdown.modes.medisave.annual+=prem;
         else if(m.includes('srs'))premiumBreakdown.modes.srs.annual+=prem;
@@ -33485,9 +34813,8 @@ function CorrectionMemoryDiagnostics() {
     PolicyDB.getAllCorrections().then(all => setCount(all ? all.length : 0)).catch(() => setCount(0));
   }, []);
   const handleClear = async () => {
-    const pw = prompt('Enter admin password to clear correction memory:');
-    if (!pw) return;
-    if (pw !== 'policylens') { toast('Incorrect password', 'error'); return; }
+    if (!window._isAdmin) { toast('Admin only', 'error'); return; }
+    if (!confirm('Clear correction memory?')) return;
     setClearing(true);
     try {
       await PolicyDB.clearCorrections();
@@ -33666,6 +34993,22 @@ function ExtractDiagnostics() {
       if(c4.annualPremium !== 200000) throw new Error('Case 4 failed: single premium was touched');
       addResult('Premium desync guard', 'pass', '4/4 cases: unwinds $12k/mth→$1k/mth, preserves $600/mth, $50k/yr, $200k single', 0);
     } catch(e) { addResult('Premium desync guard', 'fail', e.message, 0); }
+
+    // Test 7: CPF cohort retirement sums
+    setRunningTest('Testing CPF cohort sums');
+    try {
+      const checks = [
+        {label:'age 54 turns 55 in 2027', got:getCPFSchemeAmountForAge('FRS', 54, 2026), want:228200},
+        {label:'age 55 turns 55 in 2026', got:getCPFSchemeAmountForAge('FRS', 55, 2026), want:220400},
+        {label:'age 60 turns 55 in 2021', got:getCPFSchemeAmountForAge('FRS', 60, 2026), want:186000},
+        {label:'age 70 turns 55 in 2011', got:getCPFSchemeAmountForAge('FRS', 70, 2026), want:131000}
+      ];
+      const failed = checks.filter(c => c.got !== c.want);
+      if(failed.length) throw new Error(failed.map(c => c.label+': expected '+c.want+', got '+c.got).join('; '));
+      const raCarryForward = projectCPFToRetirement(55, 0, 0, 100000, 0, 65);
+      if(raCarryForward.ra <= 100000) throw new Error('Age-55 RA balance did not carry forward with interest: '+raCarryForward.ra);
+      addResult('CPF cohort sums', 'pass', 'FRS varies by age-55 cohort: 2027, 2026, 2021, and 2011 cases OK; age-55 RA carries forward', 0);
+    } catch(e) { addResult('CPF cohort sums', 'fail', e.message, 0); }
 
     // ── Test 7: Content hashing ──
     setRunningTest('Testing file hashing for cache keys');
@@ -34012,6 +35355,14 @@ function DriveConnectionCard() {
     catch(err) { setStatusMsg({kind:'error',text:(err.kind?err:{...mapDriveError(err)}).message}); setBusy(false); }
   };
   const handleManualSync = () => { try { window.dispatchEvent(new Event('policylens-manual-sync')); } catch(_) {} };
+  const handleForcePull = () => {
+    if (!confirm('Pull latest Drive version for the active client?\n\nThis can overwrite unsynced local edits on this device.')) return;
+    try { window.dispatchEvent(new Event('policylens-force-drive-pull')); } catch(_) {}
+  };
+  const handleForcePush = () => {
+    if (!confirm("Push this device's active client to Drive now?\n\nIf another device edited the same client, PolicyLens will merge remote-only policies before saving.")) return;
+    try { window.dispatchEvent(new Event('policylens-force-drive-push')); } catch(_) {}
+  };
   const handleDiscover = async () => {
     if (discoverBusy) return; setDiscoverBusy(true);
     try {
@@ -34045,10 +35396,16 @@ function DriveConnectionCard() {
         <div style={{fontSize:11,padding:'4px 10px',borderRadius:6,background:statusPill.bg,color:statusPill.color,border:'1px solid '+statusPill.border}}>{statusPill.text}</div>
         {toggleOn && folderId && <a href={'https://drive.google.com/drive/folders/'+folderId} target="_blank" rel="noopener noreferrer" style={{fontSize:11,color:'var(--gold)',textDecoration:'none'}}>Open folder in Drive \u2192</a>}
         {toggleOn && status==='connected' && grantedRel && <span style={{fontSize:10,color:'var(--text3)'}}>Signed in {grantedRel}</span>}
+        {toggleOn && status==='connected' && <span style={{fontSize:10,color:'var(--text3)'}}>This device: {getPolicyLensDeviceName()}</span>}
       </div>
       {statusMsg && <div style={{fontSize:11,color:msgColor,marginBottom:10}}>{statusMsg.text}</div>}
       {toggleOn && status==='reconnect-needed' && <div style={{marginBottom:10}}><button className="btn-primary btn-sm" onClick={handleReconnect} disabled={busy} style={{background:'var(--gold)',color:'var(--bg)'}}>{busy?'Reconnecting\u2026':'Reconnect'}</button></div>}
-      {toggleOn && status==='connected' && <div style={{display:'flex',gap:8,flexWrap:'wrap'}}><button className="btn-secondary btn-sm" onClick={handleManualSync}>🔄 Sync now</button><button className="btn-secondary btn-sm" onClick={handleDiscover} disabled={discoverBusy}>{discoverBusy?'Scanning\u2026':'🔍 Find clients in Drive'}</button></div>}
+      {toggleOn && status==='connected' && <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+        <button className="btn-secondary btn-sm" onClick={handleManualSync}>🔄 Sync now</button>
+        <button className="btn-secondary btn-sm" onClick={handleForcePull}>Pull latest</button>
+        <button className="btn-secondary btn-sm" onClick={handleForcePush}>Push this device</button>
+        <button className="btn-secondary btn-sm" onClick={handleDiscover} disabled={discoverBusy}>{discoverBusy?'Scanning\u2026':'🔍 Find clients in Drive'}</button>
+      </div>}
     </div>
   );
 }
@@ -34249,8 +35606,8 @@ function TelemetryDiagnostics() {
   };
 
   const clearTelemetry = async () => {
-    const pw = prompt('Enter admin password to clear telemetry:');
-    if (pw !== 'bprawn0011') { toast('Wrong password','error'); return; }
+    if (!window._isAdmin) { toast('Admin only','error'); return; }
+    if (!confirm('Clear local pipeline telemetry?')) return;
     try { await PolicyDB.clearTelemetry(); setRows([]); toast('Telemetry cleared','success'); } catch(e) { toast('Clear failed: '+e.message,'error'); }
   };
 
@@ -34570,6 +35927,8 @@ function Settings() {
   const {apiKey,saveApiKey,clientName,saveClientName,policies,savePolicy,deletePolicy,houseDefaults,saveHouseDefaults,tierDefinitions,saveTierDefinitions,setShowChangelog,isAdmin} = useContext(AppCtx);
   const [geminiKey, setGeminiKey] = useState('');
   const [anthropicKey, setAnthropicKey] = useState('');
+  const [documentAiEndpoint, setDocumentAiEndpoint] = useState('');
+  const [syncApiKeysToCloud, setSyncApiKeysToCloud] = useState(false);
   const [name, setName] = useState(clientName);
   const loadRef = useRef(null);
 
@@ -34583,8 +35942,12 @@ function Settings() {
       const uid = window._user?.id || '';
       const gk = await dbGet('settings','geminiKey_'+uid).catch(()=>null) || await dbGet('settings','geminiKey').catch(()=>null);
       const ck = await dbGet('settings','anthropicKey_'+uid).catch(()=>null) || await dbGet('settings','anthropicKey').catch(()=>null);
+      const de = await dbGet('settings','documentAiEndpoint_'+uid).catch(()=>null) || await dbGet('settings','documentAiEndpoint').catch(()=>null);
       if(gk?.value) setGeminiKey(gk.value);
       if(ck?.value) setAnthropicKey(ck.value);
+      if(de?.value) setDocumentAiEndpoint(de.value);
+      const syncKeys = await dbGet('settings','syncApiKeysToCloud').catch(()=>null);
+      setSyncApiKeysToCloud(syncKeys?.value === true);
       // Load advisor details
       const an = await dbGet('settings','advisorName').catch(()=>null);
       const ac = await dbGet('settings','advisorCompany').catch(()=>null);
@@ -34689,8 +36052,7 @@ function Settings() {
           <h3 style={{fontSize:14,fontWeight:600,marginBottom:4}}>Admin Tools</h3>
           <p style={{fontSize:11,color:'var(--text3)',marginBottom:8}}>Portfolio save/load/reset is on the Dashboard. Repository reset is admin-only.</p>
           <button className="btn-danger btn-sm" onClick={async()=>{
-            const pw = prompt('Enter admin password to reset repository:');
-            if(pw !== 'bprawn0011'){toast('Incorrect password','error');return;}
+            if(!window._isAdmin){toast('Admin only','error');return;}
             if(!confirm('This removes ALL repository entries and re-seeds with verified products. Proceed?')) return;
             const s = getSB();
             if(s) {
@@ -34713,6 +36075,10 @@ function Settings() {
       <div className="card" style={{marginBottom:16}}>
         <h3 style={{fontSize:14,fontWeight:600,marginBottom:4}}>AI Document Extraction</h3>
         <p style={{fontSize:11,color:'var(--text3)',marginBottom:12}}>Dual AI: Gemini reads documents (free) → Claude extracts structured data (smart). Gemini-only if no Anthropic key.</p>
+        <label style={{display:'flex',alignItems:'center',gap:8,fontSize:11,color:'var(--text2)',marginBottom:10,textTransform:'none',letterSpacing:0}}>
+          <input type="checkbox" checked={syncApiKeysToCloud} onChange={async e=>{const v=e.target.checked;setSyncApiKeysToCloud(v);await dbPut('settings',{key:'syncApiKeysToCloud',value:v});toast(v?'API key cloud sync enabled':'API keys will stay local on this device','info');}} style={{accentColor:'var(--gold)'}} />
+          <span>Sync AI keys to Supabase for this account <span style={{color:'var(--text3)'}}>(off keeps keys local to this device)</span></span>
+        </label>
 
         {/* Gemini Key */}
         <div style={{padding:10,background:'var(--bg3)',borderRadius:8,marginBottom:10,border:'1px solid var(--border)'}}>
@@ -34726,7 +36092,7 @@ function Settings() {
           <div style={{display:'flex',gap:6}}>
             <button className="btn-primary btn-sm" onClick={async()=>{
               const k=geminiKey.trim(); if(!k||!k.startsWith('AIza')){toast('Gemini keys start with AIza…','warning');return;}
-              const uid=window._user?.id||''; await dbPut('settings',{key:'geminiKey_'+uid,value:k}); await dbPut('settings',{key:'geminiKey',value:k}); if(window.saveKeyToSupabase) await saveKeyToSupabase('gemini',k); toast('Gemini key saved & synced','success');
+              const uid=window._user?.id||''; await dbPut('settings',{key:'geminiKey_'+uid,value:k}); await dbPut('settings',{key:'geminiKey',value:k}); if(syncApiKeysToCloud&&window.saveKeyToSupabase) await saveKeyToSupabase('gemini',k); toast(syncApiKeysToCloud?'Gemini key saved & synced':'Gemini key saved locally','success');
             }}>Save</button>
             <button className="btn-secondary btn-sm" onClick={async()=>{
               const k=((await dbGet('settings','geminiKey').catch(()=>null))?.value||'').trim();
@@ -34751,7 +36117,7 @@ function Settings() {
             <button className="btn-primary btn-sm" onClick={async()=>{
               const k=anthropicKey.trim(); if(!k||!k.startsWith('sk-ant-')){toast('Anthropic keys start with sk-ant-…','warning');return;}
               if(k.length<50){toast('Key too short — full keys are ~130 chars','warning',4500);return;}
-              const uid2=window._user?.id||''; await dbPut('settings',{key:'anthropicKey_'+uid2,value:k}); await dbPut('settings',{key:'anthropicKey',value:k}); if(window.saveKeyToSupabase) await saveKeyToSupabase('anthropic',k); toast('Anthropic key saved & synced ('+k.length+' chars)','success');
+              const uid2=window._user?.id||''; await dbPut('settings',{key:'anthropicKey_'+uid2,value:k}); await dbPut('settings',{key:'anthropicKey',value:k}); if(syncApiKeysToCloud&&window.saveKeyToSupabase) await saveKeyToSupabase('anthropic',k); toast(syncApiKeysToCloud?'Anthropic key saved & synced ('+k.length+' chars)':'Anthropic key saved locally ('+k.length+' chars)','success');
             }}>Save</button>
             <button className="btn-secondary btn-sm" onClick={async()=>{
               const k=((await dbGet('settings','anthropicKey').catch(()=>null))?.value||'').trim();
@@ -34763,10 +36129,52 @@ function Settings() {
           <p style={{fontSize:10,color:'var(--text3)',marginTop:4}}>Get key: <a href="https://console.anthropic.com/settings/keys" target="_blank" style={{color:'#d97706'}}>console.anthropic.com</a> → Create Key → copy FULL key (~130 chars). ~$0.003/scan.</p>
         </div>
 
+        {/* Google Document AI Proxy */}
+        <div style={{padding:10,background:'var(--bg3)',borderRadius:8,border:'1px solid var(--border)',marginTop:10}}>
+          <div className="field" style={{marginBottom:6}}>
+            <label style={{color:'#34a853',fontWeight:600}}>Google Document AI Proxy <span style={{fontWeight:400,color:'var(--text3)'}}>(optional first-pass OCR/layout)</span></label>
+            <div style={{display:'flex',gap:6,alignItems:'center'}}>
+              <input type="url" value={documentAiEndpoint} onChange={e=>setDocumentAiEndpoint(e.target.value)} placeholder="https://policylens-document-ai.yourname.workers.dev" style={{flex:1,fontFamily:'monospace',fontSize:11}} autoComplete="off" spellCheck="false" />
+              {documentAiEndpoint && <span style={{fontSize:10,color:'var(--text3)',flexShrink:0}}>{documentAiEndpoint.length}ch</span>}
+            </div>
+          </div>
+          <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+            <button className="btn-primary btn-sm" onClick={async()=>{
+              const url=documentAiEndpoint.trim().replace(/\/+$/,'');
+              if(url && !/^https:\/\/.+/i.test(url)){toast('Use the HTTPS Worker URL for Document AI','warning');return;}
+              const uid3=window._user?.id||'';
+              await dbPut('settings',{key:'documentAiEndpoint_'+uid3,value:url});
+              await dbPut('settings',{key:'documentAiEndpoint',value:url});
+              setDocumentAiEndpoint(url);
+              toast(url?'Document AI proxy saved':'Document AI proxy cleared','success');
+            }}>Save</button>
+            <button className="btn-secondary btn-sm" onClick={async()=>{
+              const url=(documentAiEndpoint||'').trim().replace(/\/+$/,'');
+              if(!url){toast('Paste your Document AI Worker URL first','warning');return;}
+              try{
+                const r=await fetchWithTimeout(url,{method:'GET'},15000);
+                const d=await r.json().catch(()=>({}));
+                if(!r.ok||d.ok===false) throw new Error(d.error||('HTTP '+r.status));
+                toast(d.configured?'Document AI proxy connected':'Proxy reachable but missing Worker env/secrets','info',4500);
+              }catch(e){toast('Document AI proxy test failed: '+e.message,'error',5000);}
+            }}>Test</button>
+            {documentAiEndpoint && <button className="btn-secondary btn-sm" onClick={async()=>{
+              const uid4=window._user?.id||'';
+              await dbPut('settings',{key:'documentAiEndpoint_'+uid4,value:''});
+              await dbPut('settings',{key:'documentAiEndpoint',value:''});
+              setDocumentAiEndpoint('');
+              toast('Document AI proxy cleared','info');
+            }}>Clear</button>}
+          </div>
+          <p style={{fontSize:10,color:'var(--text3)',marginTop:4}}>Private service-account JSON stays in the Worker, never in this browser app. Supported path: Document AI Form Parser -> Gemini structured extraction -> Claude fallback.</p>
+        </div>
+
         {/* Pipeline status */}
         <div style={{marginTop:10,padding:8,background:'var(--bg2)',borderRadius:6,fontSize:11}}>
           <strong>Pipeline: </strong>
-          {geminiKey && anthropicKey && anthropicKey.length>50 ? <span style={{color:'var(--green2)'}}>✅ Dual AI — Gemini reads → Claude extracts (best quality)</span>
+          {documentAiEndpoint && geminiKey && anthropicKey && anthropicKey.length>50 ? <span style={{color:'var(--green2)'}}>Document AI -> Gemini -> Claude fallback</span>
+           : documentAiEndpoint && geminiKey ? <span style={{color:'var(--green2)'}}>Document AI -> Gemini, Claude fallback unavailable</span>
+           : geminiKey && anthropicKey && anthropicKey.length>50 ? <span style={{color:'var(--green2)'}}>✅ Dual AI — Gemini reads → Claude extracts (best quality)</span>
            : geminiKey ? <span style={{color:'#4285f4'}}>🔵 Gemini-only mode (good, free)</span>
            : <span style={{color:'var(--red)'}}>⚠️ No keys — AI scanning disabled</span>}
         </div>
@@ -34817,7 +36225,7 @@ function Settings() {
       {/* ═══ EXTRACTION DIAGNOSTICS ═══ */}
       <div className="card" style={{marginBottom:16}}>
         <h3 style={{fontSize:14,fontWeight:600,marginBottom:4}}>🔬 Extraction Diagnostics</h3>
-        <p style={{fontSize:11,color:'var(--text3)',marginBottom:10}}>Run a smoke test on the full extraction pipeline: API keys, schema integrity, JSON repair, cache I/O, premium desync guard, file hashing, and live API round-trips to Gemini and Claude. Finishes with an end-to-end structured extraction on a synthetic policy. Use this whenever extractions start behaving strangely — it tells you which layer is broken in 10 seconds.</p>
+        <p style={{fontSize:11,color:'var(--text3)',marginBottom:10}}>Run a smoke test on the full extraction pipeline: API keys, schema integrity, JSON repair, cache I/O, premium desync guard, CPF cohort sums, file hashing, and live API round-trips to Gemini and Claude. Finishes with an end-to-end structured extraction on a synthetic policy. Use this whenever extractions start behaving strangely — it tells you which layer is broken in 10 seconds.</p>
         <ExtractDiagnostics />
       </div>
 
