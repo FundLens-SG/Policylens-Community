@@ -658,12 +658,27 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2d.10';
+const APP_VERSION = 'v2.3.0-rc2d.11';
 const APP_VERSION_DATE = '2026-04-26';
-const APP_VERSION_NAME = 'Scan import client binding fix';
+const APP_VERSION_NAME = 'Family scan sorting guardrails';
 const DEFAULT_DOCUMENT_AI_PROXY_URL = 'https://policylens-document-ai.chungakwanc.workers.dev';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2d.11',
+    date: '2026-04-26',
+    name: 'Family scan sorting guardrails',
+    sections: [
+      {
+        heading: 'AI scanning',
+        items: [
+          'Same-product family scans now keep policies separate when policy owner or life insured names clearly differ, even if the policy number is missing.',
+          'Owner-routing prompts now also use life insured names when the printed policy owner is missing or too weak to trust.',
+          'Foreground extraction messaging now explains that the background worker is not shipped in this release instead of implying a GitHub Pages registration bug.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2d.10',
     date: '2026-04-26',
@@ -3333,10 +3348,10 @@ async function pdfToImages(pdfDoc, maxPages=12) {
 // CLEAN even if the FC never actually reviewed anything. Bumping the version
 // forces a re-extraction next time those same files are uploaded, and the
 // one-time cleanup in App init purges the stale entries from IndexedDB.
-const EXTRACT_PIPELINE_VERSION = 'v14.9-2026-04-26-family-owner-routing';
+const EXTRACT_PIPELINE_VERSION = 'v15.0-2026-04-26-family-scan-sorting';
 
 // ── v15: PROMPT VERSIONING ──
-const EXTRACT_PROMPT_VERSION = 'v14.3-2026-04-26-family-owner-routing';
+const EXTRACT_PROMPT_VERSION = 'v14.4-2026-04-26-family-scan-sorting';
 const OCR_PROMPT_VERSION = 'v17-2026-04-26-document-ai-default-proxy';
 
 // ── v2.0.9: MODULE-SCOPE EXTRACT_PROMPT ──
@@ -4573,18 +4588,23 @@ function collectDetectedClients(policies, currentProfile, allDriveStates) {
   const isWeakOwnerName = (name) => {
     const n = normalizeName(name);
     if (!n || n.length < 3) return true;
-    if (/^(policy owner|owner|policyholder|life insured|life assured|insured|applicant|proposer|payor|payer|self|same as|n\/a|na|nil|unknown)$/.test(n)) return true;
+    if (/^(policy owner|owner|policyholder|life insured|life assured|insured|applicant|proposer|payor|payer|self|same as|not applicable|n\/a|na|nil|unknown|null)$/.test(n)) return true;
     return false;
   };
   policies.forEach((p,idx) => {
     const ownerName = (p.policyOwner||'').trim();
-    if (!ownerName || isWeakOwnerName(ownerName)) return;
-    if (currentName && fuzzyNameMatch(ownerName, currentName)) return;
-    const key = normalizeName(ownerName);
+    const lifeInsuredName = (p.lifeInsured||'').trim();
+    const ownerStrong = ownerName && !isWeakOwnerName(ownerName);
+    const lifeInsuredStrong = lifeInsuredName && !isWeakOwnerName(lifeInsuredName);
+    const detectedName = ownerStrong ? ownerName : (lifeInsuredStrong ? lifeInsuredName : '');
+    if (!detectedName) return;
+    if (currentName && fuzzyNameMatch(detectedName, currentName)) return;
+    const sourceField = ownerStrong ? 'policyOwner' : 'lifeInsured';
+    const key = normalizeName(detectedName);
     if (!detected.has(key)) {
       const candidates = (allDriveStates||[]).filter(ds => ds.clientName);
-      const existingMatches = candidates.filter(ds => fuzzyNameMatch(ownerName, ds.clientName)).slice(0, 5);
-      detected.set(key, {displayName:ownerName, policyIndices:[], suggestedMatch:existingMatches[0]||null, existingMatches, samplePolicies:[]});
+      const existingMatches = candidates.filter(ds => fuzzyNameMatch(detectedName, ds.clientName)).slice(0, 5);
+      detected.set(key, {displayName:detectedName, sourceField, policyIndices:[], suggestedMatch:existingMatches[0]||null, existingMatches, samplePolicies:[]});
     }
     const entry = detected.get(key);
     entry.policyIndices.push(idx);
@@ -4592,7 +4612,8 @@ function collectDetectedClients(policies, currentProfile, allDriveStates) {
       entry.samplePolicies.push({
         insurer: p.insurer || '',
         productName: p.productName || p.policyName || p.subType || '',
-        policyNumber: p.policyNumber || ''
+        policyNumber: p.policyNumber || '',
+        lifeInsured: p.lifeInsured || ''
       });
     }
   });
@@ -18051,7 +18072,7 @@ async function swExtractDiagnostic() {
     }
     report.registration.hasController = !!navigator.serviceWorker.controller;
     if (!report.registration.registered) {
-      report.reason = 'Service Worker not registered — PolicyLens only registers SW on github.io domains';
+      report.reason = 'Background extraction worker is not installed in this release; extraction runs in the foreground. Keep PolicyLens open until it finishes.';
       return report;
     }
     if (!report.registration.active) {
@@ -26387,6 +26408,12 @@ Signals that two pages belong to the SAME policy:
   • Shared reference/client ID across pages
   • Obvious continuity: one page shows a premium table header, the next shows its values
 
+Family scan boundary rules:
+  • Different policyOwner or different lifeInsured names are a strong signal for DIFFERENT policies, even when insurer and productName are identical.
+  • If three family members bought the same product, produce three separate policy objects unless the same printed policyNumber clearly proves the pages belong together.
+  • Missing policy numbers are common in photos. Do NOT collapse same-product entries across different people just because the product title matches.
+  • A dependant rider/page belongs to the parent policy only when the page is explicitly a dependant section of that policy; otherwise preserve the printed owner/life insured boundary.
+
 UPLOAD SEQUENCE CONTEXT:
 The app may provide a text block named "UPLOAD SEQUENCE CONTEXT" before the image parts. Treat that block as page-order metadata. Adjacent upload order and adjacent camera filenames (for example IMG_1011 followed by IMG_1012) are a weak but important signal that the images may be consecutive pages from the same physical document.
 
@@ -26415,7 +26442,7 @@ Example 4 — legitimately different policies with similar names:
   Image 2: "AIA Secure Term Plus-20 Year" policyNumber L539663189
   → Produce TWO entries. Different policy numbers AND different term lengths mean these are distinct policies.
 
-Rule of thumb: if two pages could plausibly be from the same physical document (same header, same client, overlapping identifiers), MERGE THEM. If in doubt, merging is preferred over duplicating — the FC can split them later if needed.
+Rule of thumb: if two pages could plausibly be from the same physical document (same header, same client, overlapping identifiers), MERGE THEM. If the printed person differs, keep them separate unless a shared policy number or explicit dependant section proves they belong together.
 
 ═══ PARTIAL PAGE SIGNALING ═══
 
@@ -27099,6 +27126,34 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
     return n;
   };
 
+  // Family scans often include the same insurer/product for different
+  // household members. Product fingerprints are therefore only safe to
+  // merge when explicit person fields do not conflict.
+  const isWeakPersonName = (name) => {
+    const n = normalizeName(name);
+    if (!n || n.length < 3) return true;
+    if (/^(policy owner|owner|policyholder|life insured|life assured|insured|applicant|proposer|payor|payer|self|same as|not applicable|n\/a|na|nil|unknown|null)$/i.test(n)) return true;
+    if (/^\d+$/.test(n)) return true;
+    return false;
+  };
+  const meaningfulPersonName = (name) => {
+    if (isWeakPersonName(name)) return '';
+    return normalizeName(name);
+  };
+  const personNamesDiffer = (left, right) => {
+    const a = meaningfulPersonName(left);
+    const b = meaningfulPersonName(right);
+    return !!(a && b && !fuzzyNameMatch(a, b));
+  };
+  const hasDifferentExplicitPeople = (a, b) => {
+    if (!a || !b) return false;
+    if (personNamesDiffer(a.policyOwner, b.policyOwner)) return true;
+    if (personNamesDiffer(a.lifeInsured, b.lifeInsured)) return true;
+    return false;
+  };
+  const personFingerprintForDedup = (p) =>
+    meaningfulPersonName(p?.policyOwner) || meaningfulPersonName(p?.lifeInsured) || '';
+
   // ── MERGE TWO POLICIES ──
   // Combines fields from `next` into `base`, preferring base's non-empty
   // values and filling in missing ones from next. When both sides have
@@ -27266,10 +27321,18 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
         continue;
       }
       const fp = ins + '|' + name;
-      if (byFp.has(fp)) {
-        byFp.set(fp, smartMerge(byFp.get(fp), p));
+      let compatibleFpKey = null;
+      for (const [key, existing] of byFp.entries()) {
+        if (!key.startsWith(fp + '|person:')) continue;
+        if (hasDifferentExplicitPeople(existing, p)) continue;
+        compatibleFpKey = key;
+        break;
+      }
+      if (compatibleFpKey) {
+        byFp.set(compatibleFpKey, smartMerge(byFp.get(compatibleFpKey), p));
       } else {
-        byFp.set(fp, p);
+        const personKey = personFingerprintForDedup(p) || ('unknown-' + byFp.size);
+        byFp.set(fp + '|person:' + personKey, p);
       }
     }
     const out = [...byPolNum.values(), ...byFp.values(), ...unmatched];
@@ -27309,6 +27372,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
         if (normalizeProductKey(q.insurer) !== pIns) continue;
         if (!policyNumsCompatible(p.policyNumber, q.policyNumber)) continue;
         if (!catsCompatible(p.category, q.category)) continue;
+        if (hasDifferentExplicitPeople(q, p)) continue;
         const qName = normalizeProductKey(q.productName || q.policyName);
         if (!qName || qName.length < 6) continue;
         const qNameDedup = normalizeProductForDedup(q.productName || q.policyName);
@@ -27384,6 +27448,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
     };
     const canMergeSequentialPartial = (base, partial) => {
       if (!base || !partial) return false;
+      if (hasDifferentExplicitPeople(base, partial)) return false;
       if (!policyNumsCompatible(base.policyNumber, partial.policyNumber)) return false;
       if (!catsCompatible(base.category, partial.category)) return false;
       const baseIns = normalizeProductKey(base.insurer);
@@ -27544,7 +27609,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
         console.log('[PriorInjection] No repo matches in source text (length='+sourceText.length+', repo size='+repo.length+')');
       }
 
-      content.push({type:'text',text:'Extract ALL insurance policies AND financial instruments from these documents. CRITICAL RULES:\n1. Multiple photos may show DIFFERENT PAGES of the SAME policy — correlate them by policy number, insurer+product name, filename/upload order, or context clues. Merge information from multiple pages into ONE policy entry.\n2. Adjacent upload images with sequential filenames (e.g. IMG_1011 then IMG_1012) are likely consecutive pages. If the later page lacks a clear new policy identity, merge it into the nearest previous compatible policy instead of creating a standalone policy.\n3. Multiple photos may also show DIFFERENT policies — extract each as a separate entry when a distinct policy number/product/instrument is visible.\n4. NEVER skip or merge genuinely different policies. Two policies from the same insurer with different product names = 2 entries.\n5. If the same fund (e.g. "Allianz Global High Payout") appears under DIFFERENT accounts (CPFIS-OA vs Cash), these are SEPARATE entries — differentiate by appending the account type in policyName.\n6. Look across ALL images for related data — page 1 might have the policy name while page 3 has the premium details.\n7. If REPOSITORY PRIOR KNOWLEDGE is provided above, treat those products\' canonical category/subType as authoritative — do not reclassify them based on document appearance.\nReturn ONLY valid JSON array or object.'});
+      content.push({type:'text',text:'Extract ALL insurance policies AND financial instruments from these documents. CRITICAL RULES:\n1. Multiple photos may show DIFFERENT PAGES of the SAME policy — correlate them by policy number, insurer+product name, filename/upload order, or context clues. Merge information from multiple pages into ONE policy entry.\n2. Adjacent upload images with sequential filenames (e.g. IMG_1011 then IMG_1012) are likely consecutive pages. If the later page lacks a clear new policy identity, merge it into the nearest previous compatible policy instead of creating a standalone policy.\n3. Multiple photos may also show DIFFERENT policies — extract each as a separate entry when a distinct policy number/product/instrument is visible.\n4. NEVER skip or merge genuinely different policies. Two policies from the same insurer with different product names = 2 entries. Same insurer/product but different policy owner or life insured = separate entries unless the same printed policy number clearly proves they are one policy.\n5. If the same fund (e.g. "Allianz Global High Payout") appears under DIFFERENT accounts (CPFIS-OA vs Cash), these are SEPARATE entries — differentiate by appending the account type in policyName.\n6. Look across ALL images for related data — page 1 might have the policy name while page 3 has the premium details.\n7. If REPOSITORY PRIOR KNOWLEDGE is provided above, treat those products\' canonical category/subType as authoritative — do not reclassify them based on document appearance.\nReturn ONLY valid JSON array or object.'});
 
       // ── RUN EXTRACTION WITH SELF-HEALING TRUNCATION RECOVERY ──
       arr = await runExtractionWithRecovery(content, 0, 'batch');
@@ -28214,7 +28279,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
                   if (priorBlock) content.push({type:'text', text: priorBlock});
                 }
                 // Instruction tail (same as extractBatch)
-                content.push({type:'text',text:'Extract ALL insurance policies AND financial instruments from these documents. CRITICAL RULES:\n1. Multiple photos may show DIFFERENT PAGES of the SAME policy — correlate them by policy number, insurer+product name, filename/upload order, or context clues. Merge information from multiple pages into ONE policy entry.\n2. Adjacent upload images with sequential filenames (e.g. IMG_1011 then IMG_1012) are likely consecutive pages. If the later page lacks a clear new policy identity, merge it into the nearest previous compatible policy instead of creating a standalone policy.\n3. Multiple photos may also show DIFFERENT policies — extract each as a separate entry when a distinct policy number/product/instrument is visible.\n4. NEVER skip or merge genuinely different policies. Two policies from the same insurer with different product names = 2 entries.\n5. If the same fund (e.g. "Allianz Global High Payout") appears under DIFFERENT accounts (CPFIS-OA vs Cash), these are SEPARATE entries — differentiate by appending the account type in policyName.\n6. Look across ALL images for related data — page 1 might have the policy name while page 3 has the premium details.\n7. If REPOSITORY PRIOR KNOWLEDGE is provided above, treat those products\' canonical category/subType as authoritative — do not reclassify them based on document appearance.\nReturn ONLY valid JSON array or object.'});
+                content.push({type:'text',text:'Extract ALL insurance policies AND financial instruments from these documents. CRITICAL RULES:\n1. Multiple photos may show DIFFERENT PAGES of the SAME policy — correlate them by policy number, insurer+product name, filename/upload order, or context clues. Merge information from multiple pages into ONE policy entry.\n2. Adjacent upload images with sequential filenames (e.g. IMG_1011 then IMG_1012) are likely consecutive pages. If the later page lacks a clear new policy identity, merge it into the nearest previous compatible policy instead of creating a standalone policy.\n3. Multiple photos may also show DIFFERENT policies — extract each as a separate entry when a distinct policy number/product/instrument is visible.\n4. NEVER skip or merge genuinely different policies. Two policies from the same insurer with different product names = 2 entries. Same insurer/product but different policy owner or life insured = separate entries unless the same printed policy number clearly proves they are one policy.\n5. If the same fund (e.g. "Allianz Global High Payout") appears under DIFFERENT accounts (CPFIS-OA vs Cash), these are SEPARATE entries — differentiate by appending the account type in policyName.\n6. Look across ALL images for related data — page 1 might have the policy name while page 3 has the premium details.\n7. If REPOSITORY PRIOR KNOWLEDGE is provided above, treat those products\' canonical category/subType as authoritative — do not reclassify them based on document appearance.\nReturn ONLY valid JSON array or object.'});
                 // Build Gemini POST body
                 const parts = [];
                 for (const block of content) {
@@ -28962,12 +29027,14 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
         if (itemIns && itemName && itemName.length >= 4) {
           const exact = policies.find(p =>
             normalizeProductKey(p.insurer) === itemIns &&
-            normalizeProductKey(p.productName || p.policyName) === itemName
+            normalizeProductKey(p.productName || p.policyName) === itemName &&
+            !hasDifferentExplicitPeople(p, item)
           );
           if (exact) return { match: exact, reason: 'fingerprint-exact' };
           const substr = policies.find(p => {
             const pIns = normalizeProductKey(p.insurer);
             if (pIns !== itemIns) return false;
+            if (hasDifferentExplicitPeople(p, item)) return false;
             const pName = normalizeProductKey(p.productName || p.policyName);
             if (pName.length < 4) return false;
             return pName.includes(itemName) || itemName.includes(pName);
@@ -28981,6 +29048,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
           const soft = policies.find(p => {
             if (normalizeProductKey(p.insurer) !== itemIns) return false;
             if (p.category !== itemCat) return false;
+            if (hasDifferentExplicitPeople(p, item)) return false;
             const pSA = parseFloat(p.sumAssured) || 0;
             return pSA > 0 && Math.abs(pSA - itemSA) / Math.max(pSA, itemSA) < 0.15;
           });
