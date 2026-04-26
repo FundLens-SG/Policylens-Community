@@ -36,7 +36,7 @@ window.PolicyLensDebug=function(on){try{localStorage.setItem('policylens_debug',
 // long multi-batch scans can continue when the browser backgrounds
 // the page. The worker is registered only on HTTPS/localhost.
 // ═══════════════════════════════════════════════════════════════
-const POLICYLENS_SW_VERSION = 'v2.3.0-rc2d.13';
+const POLICYLENS_SW_VERSION = 'v2.3.0-rc2d.14';
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', async () => {
     const canRegister = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
@@ -664,9 +664,9 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2d.13';
+const APP_VERSION = 'v2.3.0-rc2d.14';
 const APP_VERSION_DATE = '2026-04-26';
-const APP_VERSION_NAME = 'Family scan routing completion';
+const APP_VERSION_NAME = 'Family routing board and payout sync';
 const DEFAULT_DOCUMENT_AI_PROXY_URL = 'https://policylens-document-ai.chungakwanc.workers.dev';
 
 const CHANGELOG = [
@@ -2572,6 +2572,78 @@ function annualizedPremium(pol) {
   return raw;
 }
 
+function moneyNumber(value) {
+  if(value == null || value === '') return 0;
+  if(typeof value === 'number') return isFinite(value) ? value : 0;
+  const cleaned = String(value).replace(/[^0-9.\-]/g, '');
+  if(!cleaned || cleaned === '-' || cleaned === '.') return 0;
+  const n = parseFloat(cleaned);
+  return isFinite(n) ? n : 0;
+}
+
+function cleanMoneyString(value, decimals = 2) {
+  const n = moneyNumber(value);
+  if(!n) return '';
+  const rounded = Math.round(n * Math.pow(10, decimals)) / Math.pow(10, decimals);
+  return decimals > 0 && Math.abs(rounded - Math.round(rounded)) > 0.001
+    ? String(rounded)
+    : String(Math.round(rounded));
+}
+
+function getPolicyAnnualPayout(pol) {
+  if(!pol) return 0;
+  const annual = moneyNumber(pol.annuityPayout);
+  const monthly = moneyNumber(pol.annuityMonthly || pol.monthlyBenefit);
+  const annualFromMonthly = monthly > 0 ? monthly * 12 : 0;
+  const guaranteed = moneyNumber(pol.annuityGuaranteedPayout || pol.guaranteedAnnualPayout || pol.guaranteedPayout);
+  const nonguaranteed = moneyNumber(pol.annuityNonGuaranteedPayout || pol.nonGuaranteedAnnualPayout || pol.nonGuaranteedPayout || pol.cashBonusAnnual);
+  const combinedIllustrated = guaranteed + nonguaranteed;
+  return Math.max(annual, annualFromMonthly, combinedIllustrated);
+}
+
+function getPolicyMonthlyPayout(pol) {
+  if(!pol) return 0;
+  const monthly = moneyNumber(pol.annuityMonthly || pol.monthlyBenefit);
+  const annual = getPolicyAnnualPayout(pol);
+  if(pol.annuityPayoutMode === 'monthly' && monthly > 0) return monthly;
+  return annual > 0 ? annual / 12 : monthly;
+}
+
+function syncAnnuityPayoutPair(policy, changedField) {
+  const next = {...(policy || {})};
+  const annual = moneyNumber(next.annuityPayout);
+  const monthly = moneyNumber(next.annuityMonthly);
+  if(changedField === 'annuityMonthly') {
+    next.annuityPayoutMode = 'monthly';
+    next.annuityPayout = monthly > 0 ? cleanMoneyString(monthly * 12) : '';
+    next.annuityGuaranteedPayout = '';
+    next.annuityNonGuaranteedPayout = '';
+    return next;
+  }
+  if(changedField === 'annuityPayout') {
+    next.annuityPayoutMode = 'annual';
+    next.annuityMonthly = annual > 0 ? cleanMoneyString(annual / 12) : '';
+    next.annuityGuaranteedPayout = '';
+    next.annuityNonGuaranteedPayout = '';
+    return next;
+  }
+  if(changedField === 'annuityPayoutMode') {
+    if(next.annuityPayoutMode === 'monthly') {
+      next.annuityPayout = monthly > 0 ? cleanMoneyString(monthly * 12) : next.annuityPayout;
+    } else {
+      next.annuityMonthly = annual > 0 ? cleanMoneyString(annual / 12) : next.annuityMonthly;
+    }
+    return next;
+  }
+  const strongestAnnual = getPolicyAnnualPayout(next);
+  if(strongestAnnual > 0) {
+    next.annuityPayout = cleanMoneyString(strongestAnnual);
+    next.annuityMonthly = cleanMoneyString(strongestAnnual / 12);
+    if(!next.annuityPayoutMode) next.annuityPayoutMode = annual >= monthly * 12 ? 'annual' : 'monthly';
+  }
+  return next;
+}
+
 // Realistic SG par Whole Life cash-value trajectory as a multiple of
 // cumulative premiums paid. Models acquisition-cost recovery: years 1-2
 // retain almost nothing, breakeven around year 10-12, then bonuses
@@ -2784,8 +2856,8 @@ function projectPolicyAtAge(pol, targetAge, clientCurrentAge) {
   else if(cat === 'retirement') {
     const annuityStart = parseInt(pol.annuityStartAge) || 65;
     const annuityEnd = parseInt(pol.annuityEndAge) || 99;
-    const monthly = parseFloat(pol.annuityMonthly) || 0;
-    const annualPayout = parseFloat(pol.annuityPayout) || monthly * 12;
+    const monthly = getPolicyMonthlyPayout(pol);
+    const annualPayout = getPolicyAnnualPayout(pol);
 
     // Income phase: passive income from this plan
     if(targetAge >= annuityStart && targetAge <= annuityEnd && annualPayout > 0) {
@@ -3711,7 +3783,7 @@ const DERIVE_RULES = [
       const cat = (policy.category || '').toLowerCase();
       if (cat !== 'retirement') return null;
       // Skip if payout already present
-      const existingPayout = parseFloat(policy.annuityMonthly) || parseFloat(policy.annuityPayout);
+      const existingPayout = getPolicyAnnualPayout(policy);
       if (existingPayout > 0) return null;
       // Need cash value + start/end ages
       const pv = parseFloat(policy.cashValue) || 0;
@@ -3744,8 +3816,8 @@ const DERIVE_RULES = [
       if (cat !== 'savings' && cat !== 'protection') return null;
       const sub = (policy.subType || '').toLowerCase();
       if (sub.includes('income') || sub.includes('annuit') || sub.includes('retirement')) return null; // already classified
-      const monthly = parseFloat(policy.annuityMonthly) || 0;
-      const annual = parseFloat(policy.annuityPayout) || 0;
+      const monthly = getPolicyMonthlyPayout(policy);
+      const annual = getPolicyAnnualPayout(policy);
       if (monthly <= 0 && annual <= 0) return null;
       const startAge = parseInt(policy.annuityStartAge) || 0;
       const endAge = parseInt(policy.annuityEndAge) || 0;
@@ -4016,8 +4088,8 @@ const VALIDATE_RULES = [
   {
     name: 'validate_monthly_times_12_equals_annual',
     run: (policy) => {
-      const annual = parseFloat(policy.annuityPayout) || 0;
-      const monthly = parseFloat(policy.annuityMonthly) || 0;
+      const annual = getPolicyAnnualPayout(policy);
+      const monthly = moneyNumber(policy.annuityMonthly);
       if (!annual || !monthly) return null;
       const diff = Math.abs(annual - monthly * 12) / Math.max(annual, 1);
       if (diff > 0.02) {
@@ -4126,7 +4198,7 @@ const VALIDATE_RULES = [
       if (cat !== 'retirement' && cat !== 'savings') return null;
       const sa = parseFloat(policy.sumAssured) || 0;
       if (sa <= 0 || sa >= 10000) return null;
-      const monthly = parseFloat(policy.annuityMonthly) || parseFloat(policy.annuityPayout) || 0;
+      const monthly = getPolicyMonthlyPayout(policy);
       if (monthly <= 0) return null;
       const diff = Math.abs(sa - monthly) / Math.max(sa, monthly);
       if (diff > 0.05) return null;
@@ -4227,7 +4299,7 @@ function computeProjectedCashValue(policy, atYear) {
   const yearsPaidUp = Math.max(0, yearsFromStart - premTerm);
   cv = cv * Math.pow(1 + r, yearsPaidUp);
   // Payout phase deduction (if applicable and not reinvesting)
-  const monthlyPayout = parseFloat(policy.annuityMonthly) || 0;
+  const monthlyPayout = getPolicyMonthlyPayout(policy);
   const payoutStartAge = parseInt(policy.annuityStartAge) || 0;
   const entryAge = parseInt(policy.ageAtEntry) || 0;
   if (monthlyPayout > 0 && payoutStartAge > 0 && entryAge > 0) {
@@ -4645,7 +4717,17 @@ function collectDetectedClients(policies, currentProfile, allDriveStates) {
     if (!detected.has(key)) {
       const candidates = (allDriveStates||[]).filter(ds => ds.clientName);
       const existingMatches = candidates.filter(ds => fuzzyNameMatch(detectedName, ds.clientName)).slice(0, 5);
-      detected.set(key, {displayName:detectedName, sourceField, policyIndices:[], suggestedMatch:existingMatches[0]||null, existingMatches, samplePolicies:[]});
+      detected.set(key, {
+        displayName:detectedName,
+        sourceField,
+        ownerStrong:!!ownerStrong,
+        lifeInsuredStrong:!!lifeInsuredStrong,
+        needsOwnerQuestion: sourceField === 'lifeInsured',
+        policyIndices:[],
+        suggestedMatch:existingMatches[0]||null,
+        existingMatches,
+        samplePolicies:[]
+      });
     }
     const entry = detected.get(key);
     entry.policyIndices.push(idx);
@@ -4654,6 +4736,7 @@ function collectDetectedClients(policies, currentProfile, allDriveStates) {
         insurer: p.insurer || '',
         productName: p.productName || p.policyName || p.subType || '',
         policyNumber: p.policyNumber || '',
+        policyOwner: p.policyOwner || '',
         lifeInsured: p.lifeInsured || ''
       });
     }
@@ -14833,6 +14916,7 @@ function App() {
         try { toast('🔀 Merged 1 duplicate policy','info',3500); } catch(e){}
       }
     }
+    p = syncAnnuityPayoutPair(p);
     const oldData = policies.find(x => x.id === p.id);
     const oldVersions = oldData?._fieldVersions || {};
     const newVersions = bumpFieldVersions(p, oldData, oldVersions);
@@ -14876,7 +14960,7 @@ function App() {
     if (!targetClientId) return savePolicy(incomingP);
     const allPols = await dbGetAll('policies').catch(() => []);
     const targetPols = allPols.filter(p => p.clientId === targetClientId);
-    let p = {...incomingP, clientId: targetClientId};
+    let p = syncAnnuityPayoutPair({...incomingP, clientId: targetClientId});
     delete p._ownerRoute; delete p._ownerRoutedFrom;
     if (!p.id) p.id = genId();
 
@@ -15784,7 +15868,7 @@ function PresentMode() {
     // Annuity / income payout starting
     const payoutStart = parseInt(pol.payoutStartAge);
     if(payoutStart && payoutStart > clientAge && payoutStart - clientAge <= 20) {
-      const monthly = parseFloat(pol.annuityMonthly) || parseFloat(pol.monthlyBenefit) || 0;
+      const monthly = getPolicyMonthlyPayout(pol);
       policyEvents.push({
         year: nowYear + (payoutStart - clientAge),
         age: payoutStart,
@@ -17195,7 +17279,7 @@ function ClientsTab() {
 }
 
 // ── v2.2.0-rc1: New Client modal ──
-function NewClientModal({ allStates, allPolicies, onClose, initialName, onCreated, onExistingSelected, stayOnCurrent }) {
+function NewClientModal({ allStates, allPolicies, onClose, initialName, initialFamilyGroup, onCreated, onExistingSelected, stayOnCurrent }) {
   const { switchClient, setTab } = useContext(AppCtx);
   const [name, setName] = useState(initialName || '');
   const [matches, setMatches] = useState([]);
@@ -17237,13 +17321,13 @@ function NewClientModal({ allStates, allPolicies, onClose, initialName, onCreate
       const rootFolderId = await driveClient.ensureFolder();
       const tierFolderId = await driveClient.ensureTierFolder(UNASSIGNED_TIER);
       const clientFolderId = await driveClient.ensureClientFolder(tierFolderId, trimName);
-      const profile = {name:trimName,nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[]};
+      const profile = {name:trimName,nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[],familyGroup:initialFamilyGroup||''};
       const payload = buildDriveClientPayload(clientId, profile, []);
       const { fileId, headRevisionId } = await driveClient.createClientFile(clientFolderId, payload);
       await PolicyDB.saveDriveState({
         clientId, fileId, folderId: clientFolderId, tierFolderId,
         headRevisionId, lastSyncedAt: new Date().toISOString(), pendingWrite: false,
-        clientName: trimName, tier: UNASSIGNED_TIER, lastReviewedAt: null,
+        clientName: trimName, tier: UNASSIGNED_TIER, familyGroup:initialFamilyGroup||'', lastReviewedAt: null,
       });
       await dbPut('settings', { key: 'clientProfile_' + clientId, value: profile });
       await dbPut('settings', { key: 'clientName_' + clientId, value: trimName });
@@ -17642,8 +17726,11 @@ const POLICY_EXTRACTION_SCHEMA = {
         }
       },
       // ── Retirement / annuity / income plans ──
-      annuityPayout: { type: 'NUMBER', nullable: true, description: 'Annual income payout amount' },
-      annuityMonthly: { type: 'NUMBER', nullable: true, description: 'Monthly income payout amount' },
+      annuityPayout: { type: 'NUMBER', nullable: true, description: 'Annual income payout amount. For retirement/income illustrations, use total annual income: guaranteed payout plus non-guaranteed/cash bonus/dividend payout. Prefer the highest illustrated total annual payout shown, not the lowest guaranteed-only row.' },
+      annuityMonthly: { type: 'NUMBER', nullable: true, description: 'Monthly income payout amount. If only annual total payout is known, this should be annual / 12.' },
+      annuityPayoutMode: { type: 'STRING', nullable: true, description: 'Whether the visible payout figure was stated as annual, monthly, or unknown.' },
+      annuityGuaranteedPayout: { type: 'NUMBER', nullable: true, description: 'Annual guaranteed payout component only, when visible.' },
+      annuityNonGuaranteedPayout: { type: 'NUMBER', nullable: true, description: 'Annual non-guaranteed payout/cash bonus/dividend component only, when visible.' },
       annuityStartAge: { type: 'INTEGER', nullable: true, description: 'Age income payouts begin' },
       annuityEndAge: { type: 'INTEGER', nullable: true, description: 'Age income payouts end (if finite term)' },
       retMaturitySum: { type: 'NUMBER', nullable: true, description: 'Maturity/terminal value' },
@@ -19158,7 +19245,7 @@ function validateExtractedPolicy(p) {
 
   // ── R7: Annuity/Retirement should have payout details ──
   if (sub.includes('annuity') || sub.includes('retirement') || cat === 'retirement') {
-    const payout = parseFloat(p.annuityPayout) || parseFloat(p.annuityMonthly);
+    const payout = getPolicyAnnualPayout(p);
     if (!payout) {
       flag('annuityPayout', 'medium', 'Retirement/Annuity plan missing payout amount');
     }
@@ -20402,64 +20489,109 @@ function NameDetectionReviewModal({ open, detected, currentClientName, onClose, 
 
 function PolicyOwnerRoutingModal({ open, detected, currentClientName, allDriveStates, onClose, onConfirm }) {
   const [routes, setRoutes] = useState({});
+  const [familyGroupName, setFamilyGroupName] = useState('');
   const [busy, setBusy] = useState(false);
   useEffect(() => {
     if (!open || !detected) return;
     const init = {};
     for (const [key, info] of detected.entries()) {
-      init[key] = info.suggestedMatch ? 'existing:' + info.suggestedMatch.clientId : 'new';
+      init[key] = info.sourceField === 'lifeInsured'
+        ? 'current'
+        : (info.suggestedMatch ? 'existing:' + info.suggestedMatch.clientId : 'new');
     }
+    const base = (currentClientName || '').trim();
+    setFamilyGroupName(base ? base + ' Family' : 'Family Review');
     setRoutes(init);
-  }, [open, detected]);
+  }, [open, detected, currentClientName]);
   if (!open || !detected || detected.size === 0) return null;
   const modalBg = {position:'fixed',inset:0,zIndex:10001,background:'rgba(0,0,0,.7)',display:'flex',alignItems:'center',justifyContent:'center',padding:16};
-  const modalBox = {background:'#1a2332',borderRadius:16,border:'1px solid rgba(201,169,110,.2)',maxWidth:620,width:'100%',padding:24,boxShadow:'0 20px 60px rgba(0,0,0,.5)',maxHeight:'84vh',overflowY:'auto'};
+  const modalBox = {background:'#1a2332',borderRadius:16,border:'1px solid rgba(201,169,110,.2)',maxWidth:760,width:'100%',padding:24,boxShadow:'0 20px 60px rgba(0,0,0,.5)',maxHeight:'88vh',overflowY:'auto'};
   const allClients = (allDriveStates || []).filter(ds => ds?.clientId && ds.clientName);
+  const entries = Array.from(detected.entries());
+  const routedSummary = entries.reduce((acc, [key, info]) => {
+    const route = routes[key] || 'current';
+    const label = route === 'current' ? (currentClientName || 'Current client') : route === 'new' ? info.displayName : (allClients.find(ds => ds.clientId === route.slice(9))?.clientName || 'Existing client');
+    acc[label] = (acc[label] || 0) + info.policyIndices.length;
+    return acc;
+  }, {});
   return (
     <div onClick={e => { if (e.target === e.currentTarget && !busy) onClose(); }} style={modalBg}>
       <div style={modalBox}>
-        <h2 style={{fontSize:16,fontWeight:700,color:'#e8e8e8',margin:'0 0 4px'}}>Policy owner mismatch</h2>
-        <p style={{fontSize:11,color:'var(--text3)',marginBottom:16,lineHeight:1.5}}>
-          Found {detected.size} policy owner{detected.size>1?'s':''} that do not match <strong style={{color:'var(--text2)'}}>{currentClientName || 'the active client'}</strong>. Choose where these extracted policies should go.
+        <h2 style={{fontSize:16,fontWeight:700,color:'#e8e8e8',margin:'0 0 4px'}}>Family policy routing</h2>
+        <p style={{fontSize:11,color:'var(--text3)',marginBottom:14,lineHeight:1.5}}>
+          PolicyLens found {detected.size} name group{detected.size>1?'s':''} that may belong to another owner or dependant. Confirm the owner before import so the Clients, Policies and Reports tabs stay aligned.
         </p>
-        {Array.from(detected.entries()).map(([key, info]) => {
+        <div style={{display:'grid',gridTemplateColumns:'minmax(180px,1fr) minmax(220px,1.4fr)',gap:10,marginBottom:14}}>
+          <div className="field" style={{margin:0}}>
+            <label>Family name</label>
+            <input value={familyGroupName} onChange={e=>setFamilyGroupName(e.target.value)}
+              placeholder="e.g. Tan Family Review"
+              style={{width:'100%',padding:'8px 10px',background:'var(--bg2)',border:'1px solid var(--border2)',borderRadius:6,color:'var(--text)',fontSize:12,boxSizing:'border-box'}} />
+          </div>
+          <div style={{padding:'9px 10px',background:'rgba(91,168,160,.06)',border:'1px solid rgba(91,168,160,.18)',borderRadius:8}}>
+            <div style={{fontSize:10,fontWeight:700,color:'var(--teal)',textTransform:'uppercase',letterSpacing:'.4px',marginBottom:4}}>Routing tree</div>
+            <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
+              {Object.entries(routedSummary).map(([name,count]) => (
+                <span key={name} style={{fontSize:10,padding:'3px 8px',borderRadius:5,background:'var(--bg2)',border:'1px solid var(--border)',color:'var(--text2)'}}>
+                  {name}: {count}
+                </span>
+              ))}
+            </div>
+          </div>
+        </div>
+        {entries.map(([key, info]) => {
           const suggestedIds = new Set((info.existingMatches || []).map(ds => ds.clientId));
           const orderedClients = [
             ...(info.existingMatches || []),
             ...allClients.filter(ds => !suggestedIds.has(ds.clientId)).sort((a,b) => String(a.clientName || '').localeCompare(String(b.clientName || '')))
           ];
-          const route = routes[key] || (info.suggestedMatch ? 'existing:' + info.suggestedMatch.clientId : 'new');
+          const route = routes[key] || (info.sourceField === 'lifeInsured' ? 'current' : (info.suggestedMatch ? 'existing:' + info.suggestedMatch.clientId : 'new'));
           const selectedExisting = route.startsWith('existing:') ? orderedClients.find(ds => ds.clientId === route.slice(9)) : null;
           return (
-            <div key={key} style={{padding:'12px 14px',background:'var(--bg3)',border:'1px solid var(--border)',borderRadius:8,marginBottom:10}}>
+            <div key={key} style={{padding:'12px 14px',background:'var(--bg3)',border:'1px solid '+(info.needsOwnerQuestion?'rgba(212,169,106,.35)':'var(--border)'),borderRadius:8,marginBottom:10}}>
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,marginBottom:8}}>
-                <div style={{fontWeight:700,fontSize:13,color:'var(--text)',minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{info.displayName}</div>
+                <div style={{minWidth:0}}>
+                  <div style={{fontWeight:700,fontSize:13,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{info.displayName}</div>
+                  <div style={{fontSize:9,color:info.sourceField==='lifeInsured'?'var(--gold)':'var(--text3)',marginTop:2}}>
+                    Detected from {info.sourceField === 'lifeInsured' ? 'Life Assured only - owner needs confirmation' : 'Policy Owner'}
+                  </div>
+                </div>
                 <div style={{fontSize:10,color:'var(--text3)',flexShrink:0}}>{info.policyIndices.length} polic{info.policyIndices.length>1?'ies':'y'}</div>
               </div>
+              {info.needsOwnerQuestion && (
+                <div style={{fontSize:10,lineHeight:1.4,color:'var(--gold)',background:'rgba(212,169,106,.08)',borderLeft:'3px solid var(--gold)',borderRadius:5,padding:'7px 9px',marginBottom:8}}>
+                  Question: the document names <strong>{info.displayName}</strong> as life assured, but does not clearly prove they are the policy owner. Keep under the current client if this is a dependant policy; create or choose a client only if this person is truly the owner.
+                </div>
+              )}
               {info.samplePolicies?.length > 0 && (
-                <div style={{fontSize:10,color:'var(--text3)',marginBottom:8,lineHeight:1.4}}>
+                <div style={{fontSize:10,color:'var(--text3)',marginBottom:8,lineHeight:1.45}}>
                   {info.samplePolicies.map((p,i) => (
-                    <div key={i} style={{whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>
-                      {(p.productName || 'Policy')}{p.insurer ? ' - ' + p.insurer : ''}{p.policyNumber ? ' - ' + p.policyNumber : ''}
+                    <div key={i} style={{padding:'4px 6px',borderRadius:5,background:'rgba(255,255,255,.025)',marginBottom:3}}>
+                      <div style={{whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis',color:'var(--text2)'}}>
+                        {(p.productName || 'Policy')}{p.insurer ? ' - ' + p.insurer : ''}{p.policyNumber ? ' - ' + p.policyNumber : ''}
+                      </div>
+                      <div style={{fontSize:9,color:'var(--text3)'}}>
+                        Owner: {p.policyOwner || 'not stated'} | Life assured: {p.lifeInsured || 'not stated'}
+                      </div>
                     </div>
                   ))}
                 </div>
               )}
               <select value={route} onChange={e => setRoutes(r => ({...r,[key]:e.target.value}))}
                 style={{width:'100%',padding:'8px 10px',background:'var(--bg2)',border:'1px solid var(--border2)',borderRadius:6,color:'var(--text)',fontSize:11,outline:'none'}}>
-                <option value="current">Keep on current client (family policy / false positive)</option>
+                <option value="current">Current client owns it; {info.displayName} is life assured/dependant</option>
                 {orderedClients.length > 0 && <option disabled>-------- Existing clients --------</option>}
                 {orderedClients.map(ds => (
                   <option key={ds.clientId} value={'existing:' + ds.clientId}>
                     {suggestedIds.has(ds.clientId) ? 'Suggested: ' : ''}{ds.clientName}
                   </option>
                 ))}
-                <option value="new">Create new client: {info.displayName}</option>
+                <option value="new">Create new owner/client: {info.displayName}</option>
               </select>
               <div style={{fontSize:10,color:'var(--text3)',marginTop:6,fontStyle:'italic'}}>
-                {route === 'current' && 'Attach to ' + (currentClientName || 'the current client') + ' and keep the extracted owner name.'}
-                {route.startsWith('existing:') && 'Add these policies to ' + (selectedExisting?.clientName || 'the selected existing client') + '.'}
-                {route === 'new' && 'Create "' + info.displayName + '" and add these policies there.'}
+                {route === 'current' && 'Attach to ' + (currentClientName || 'the current client') + '; PolicyLens will keep ' + info.displayName + ' as life assured when owner was ambiguous.'}
+                {route.startsWith('existing:') && 'Add these policies to ' + (selectedExisting?.clientName || 'the selected existing client') + ' and tag the same family group.'}
+                {route === 'new' && 'Create "' + info.displayName + '" as a client and tag the same family group.'}
               </div>
             </div>
           );
@@ -20469,9 +20601,9 @@ function PolicyOwnerRoutingModal({ open, detected, currentClientName, allDriveSt
             style={{background:'transparent',color:'var(--text3)',border:'1px solid var(--border2)',borderRadius:6,padding:'8px 14px',fontSize:11,cursor:busy?'not-allowed':'pointer'}}>
             Review all on current client
           </button>
-          <button onClick={async () => { if (busy) return; setBusy(true); try { await onConfirm(routes); } finally { setBusy(false); } }} disabled={busy}
+          <button onClick={async () => { if (busy) return; setBusy(true); try { await onConfirm({routes, familyGroupName}); } finally { setBusy(false); } }} disabled={busy}
             style={{background:'var(--gold)',color:'#0b0f1a',border:'none',borderRadius:6,padding:'8px 16px',fontSize:11,fontWeight:700,cursor:busy?'wait':'pointer'}}>
-            {busy ? 'Routing...' : 'Apply routing ->'}
+            {busy ? 'Routing...' : 'Apply family routing ->'}
           </button>
         </div>
       </div>
@@ -22136,7 +22268,7 @@ function ReviewSession({onClose}) {
   // Exclude policies the user has manually flagged as not part of the retirement plan
   // (e.g. a Whole Life kept for legacy reasons, an investment earmarked for a child).
   const retPolicies = active.filter(pol=>pol.category==='retirement' && !pol.excludeFromRetirement);
-  const retIncome = retPolicies.reduce((s,pol)=>s+(parseFloat(pol.annuityMonthly)||parseFloat(pol.monthlyBenefit)||0),0);
+  const retIncome = retPolicies.reduce((s,pol)=>s+getPolicyMonthlyPayout(pol),0);
 
   const steps = [
     {title:'Coverage Gaps',icon:'🛡',color:'#5b8fd9'},
@@ -22279,7 +22411,7 @@ function ReviewSession({onClose}) {
               {retPolicies.map(pol => (
                 <div key={pol.id} style={{padding:'6px 8px',borderBottom:'1px solid var(--border)',fontSize:11,display:'flex',justifyContent:'space-between'}}>
                   <span>{pol.productName} <span style={{color:'var(--text3)',fontSize:9}}>{pol.insurer}</span></span>
-                  <span style={{color:'var(--green2)',fontWeight:600}}>{fmt(parseFloat(pol.annuityMonthly)||parseFloat(pol.monthlyBenefit)||0)}/m</span>
+                  <span style={{color:'var(--green2)',fontWeight:600}}>{fmt(getPolicyMonthlyPayout(pol))}/m</span>
                 </div>
               ))}
             </div>)}
@@ -22584,7 +22716,7 @@ function Dashboard() {
         if(pol.category==='retirement') {
           const payoutStart = parseInt(pol.annuityStartAge)||65;
           const payoutEnd = parseInt(pol.annuityEndAge)||85;
-          const annPayout = parseFloat(pol.annuityPayout)||(parseFloat(pol.annuityMonthly)||parseFloat(pol.monthlyBenefit)||0)*12;
+          const annPayout = getPolicyAnnualPayout(pol);
           const r = (parseFloat(pol.retAccumYield)||3.5)/100;
           // Anchor at user CV when available — same logic as savings (Bug #15).
           const userCV = parseFloat(pol.cashValue) || 0;
@@ -24494,6 +24626,9 @@ const FIELD_LABELS = {
   // Retirement / annuity
   annuityPayout: 'Annual Payout',
   annuityMonthly: 'Monthly Payout',
+  annuityPayoutMode: 'Payout Mode',
+  annuityGuaranteedPayout: 'Guaranteed Annual Payout',
+  annuityNonGuaranteedPayout: 'Non-Guaranteed Annual Payout',
   annuityStartAge: 'Payout Start Age',
   annuityEndAge: 'Payout End Age',
   retMaturitySum: 'Maturity Sum',
@@ -24574,8 +24709,7 @@ function passesConfidenceGate(policy) {
     (parseFloat(policy.premiumAmount) > 0) ||
     (parseFloat(policy.cashValue) > 0) ||
     (parseFloat(policy.fdPrincipal) > 0) ||
-    (parseFloat(policy.annuityPayout) > 0) ||
-    (parseFloat(policy.annuityMonthly) > 0) ||
+    (getPolicyAnnualPayout(policy) > 0) ||
     ((policy.policyNumber || '').trim().length >= 4)
   );
   if (!hasFinancial) {
@@ -24707,7 +24841,7 @@ const QV_NUMERIC_FIELDS = new Set([
   'annualPremium','sumAssured','ageAtEntry','premStartAge','premTerm','premEndAge',
   'ispDeductible','ispCoinsurance','ispCoInsCap','riderPremium',
   'cashValue','cvGrowthRate','ilpGrowth','ilpDivYield','ilpMgmtFee','ilpBidOfferSpread',
-  'annuityPayout','annuityMonthly','annuityStartAge','annuityEndAge','retMaturitySum',
+  'annuityPayout','annuityMonthly','annuityGuaranteedPayout','annuityNonGuaranteedPayout','annuityStartAge','annuityEndAge','retMaturitySum',
   'fdPrincipal','fdYieldPct','fdTenureMonths','finLoan','finRate','finTenure',
   'endYield','endGuaranteedCV','endNonGuarBonus','saMultiplier','multiplierEndAge',
   'surrenderPeriod','loanRate','solvedPremium','assumedReturnPct','minInitialPremium','minLiquidity','elpPremium',
@@ -24726,6 +24860,7 @@ const QV_SELECT_OPTIONS = {
   nationality: ['SC','PR','Foreigner','unknown'],
   status: ['inforce','lapsed','paid-up','surrendered','matured'],
   premFrequency: ['annual','monthly','single','unknown'],
+  annuityPayoutMode: ['annual','monthly','unknown'],
   premiumStructure: ['Single Premium','Regular Premium','Limited Pay','Flexible Premium','unknown'],
   paymentMethod: ['Cash','MediSave','SRS','MediSave+Cash','CPF OA','CPF SA','unknown'],
   ispClass: ['A','B1','B2+','Private','unknown'],
@@ -24862,7 +24997,10 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
   // touch so we can preserve the audit trail through to the saved policy.
   const updateField = (idx, field, value) => setItems(prev => prev.map(it => {
     if(it._idx !== idx) return it;
-    const next = {...it, [field]: value};
+    let next = {...it, [field]: value};
+    if (['annuityMonthly','annuityPayout','annuityPayoutMode','annuityGuaranteedPayout','annuityNonGuaranteedPayout'].includes(field)) {
+      next = syncAnnuityPayoutPair(next, field);
+    }
     // v14.1: Track original AI value for correction memory
     if (!next._originalValues) next._originalValues = {};
     if (!(field in (it._originalValues || {}))) {
@@ -25117,6 +25255,17 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
   const totalCount = items.length;
   const needsReviewCount = items.filter(it => getVerifiableFields(it).length > 0 && !it._extractVerifiedAt).length;
   const verifiedCount = items.filter(it => it._extractVerifiedAt || (getVerifiableFields(it).length === 0 && it._extractConfidence !== undefined)).length;
+  const ownerLabelForItem = (it) => {
+    const weak = /^(unknown|null|n\/a|na|nil|same as|self|policy owner|owner|life insured|life assured)$/i;
+    const owner = String(it?.policyOwner || '').trim();
+    const life = String(it?.lifeInsured || '').trim();
+    if(owner && !weak.test(owner)) return 'Policy owner: ' + owner;
+    if(life && !weak.test(life)) return 'Life assured: ' + life + ' (owner unclear)';
+    return '';
+  };
+  const ownerKeyForItem = (it) => ownerLabelForItem(it).replace(/^Policy owner:\s*/i, '').replace(/^Life assured:\s*/i, '').replace(/\s*\(owner unclear\)\s*$/i, '');
+  const ownerKeysInView = [...new Set(filtered.map(it => normalizeName(ownerKeyForItem(it))).filter(Boolean))];
+  const showOwnerLabels = ownerKeysInView.length > 1;
 
   return (
     <div className="modal-overlay" onClick={e=>{if(e.target===e.currentTarget)onClose()}}>
@@ -25251,6 +25400,7 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
             //     fall back to full so the FC can fix everything in one place)
             const hasMinimumHeader = !!(item.productName || item.insurer);
             const useCompact = viewMode === 'quick' && !item._expanded && !item._dupOf && hasMinimumHeader;
+            const ownerLabel = ownerLabelForItem(item);
 
             if(useCompact) {
               const verifiable = getVerifiableFields(item);
@@ -25327,6 +25477,11 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
                   border:'1px solid '+(allClean ? 'rgba(91,168,160,.25)' : item._selected ? 'var(--border2)' : 'var(--border)'),
                   opacity: item._selected ? 1 : .4
                 }}>
+                  {showOwnerLabels && ownerLabel && (
+                    <div style={{fontSize:10,fontWeight:700,color:'var(--gold)',background:'rgba(212,169,106,.08)',border:'1px solid rgba(212,169,106,.18)',borderRadius:6,padding:'5px 8px',marginBottom:8}}>
+                      {ownerLabel}
+                    </div>
+                  )}
                   {/* ── HEADER ROW (always visible) ── */}
                   <div style={{display:'flex',gap:8,alignItems:'flex-start'}}>
                     <input type="checkbox" checked={item._selected} onChange={()=>toggleSelect(item._idx)}
@@ -25540,6 +25695,11 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
             // ── FULL CARD (legacy / Full Review mode / expanded compact) ──
             return (
             <div key={item._idx} style={{background:item._selected?'var(--bg3)':'var(--bg)',borderRadius:8,padding:10,marginBottom:6,border:'1px solid '+(item._dupOf?'var(--gold3)':item._selected?'var(--border2)':'var(--border)'),opacity:item._selected?1:.4,minWidth:0,maxWidth:'100%',overflow:'hidden'}}>
+              {showOwnerLabels && ownerLabel && (
+                <div style={{fontSize:10,fontWeight:700,color:'var(--gold)',background:'rgba(212,169,106,.08)',border:'1px solid rgba(212,169,106,.18)',borderRadius:6,padding:'5px 8px',marginBottom:8}}>
+                  {ownerLabel}
+                </div>
+              )}
               {/* Collapse-back button when an expanded card is shown in Quick mode */}
               {viewMode === 'quick' && item._expanded && (
                 <div style={{marginBottom:6,paddingBottom:6,borderBottom:'1px solid var(--border)'}}>
@@ -25904,8 +26064,41 @@ function Policies() {
       PolicyDB.getAllDriveStates().catch(()=>[]),
       dbGetAll('policies').catch(()=>[])
     ]);
-    setNewClientData({allStates:st, allPolicies:pl, initialName:next.displayName, routePolicies:next.policies || []});
+    setNewClientData({allStates:st, allPolicies:pl, initialName:next.displayName, initialFamilyGroup:next.familyGroupName || '', routePolicies:next.policies || []});
     setNewClientModalOpen(true);
+  };
+
+  const applyFamilyGroupToClient = async (targetClientId, rawFamilyGroup) => {
+    const familyGroup = String(rawFamilyGroup || '').trim();
+    if (!targetClientId || !familyGroup) return;
+    const profileKey = 'clientProfile_' + targetClientId;
+    const existingProfile = await dbGet('settings', profileKey).catch(() => null);
+    const profile = { ...(existingProfile?.value || {}), familyGroup };
+    await dbPut('settings', { key: profileKey, value: profile }).catch(() => {});
+    const ds = await PolicyDB.getDriveState(targetClientId).catch(() => null);
+    if (ds) await PolicyDB.saveDriveState({ ...ds, familyGroup, clientName: ds.clientName || profile.name || '' }).catch(() => {});
+    if (targetClientId === activeClientId) {
+      await saveProfile({ ...(clientProfile || {}), familyGroup }).catch(() => {});
+    } else {
+      try { window.dispatchEvent(new CustomEvent('policylens-trigger-drive-write', { detail: { clientId: targetClientId, reason: 'family-group-route' } })); } catch(_) {}
+      try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
+    }
+  };
+
+  const buildOwnerRoutedPolicy = (policy, assignment, targetClientName, routeName) => {
+    const info = assignment?.info || {};
+    const currentOwner = clientProfile?.name || clientName || targetClientName || '';
+    const ownerName = targetClientName || currentOwner || info.displayName || policy.policyOwner || '';
+    const out = { ...policy, _ownerRoute:routeName, _ownerRoutedFrom:currentOwner };
+    const weakOwner = !out.policyOwner || /^(unknown|null|n\/a|na|nil|same as|self|policy owner|owner|life insured|life assured)$/i.test(String(out.policyOwner).trim());
+    if (info.sourceField === 'lifeInsured') {
+      out.lifeInsured = out.lifeInsured || info.displayName || '';
+      out.policyOwner = ownerName;
+      out._ownerRouteQuestion = routeName === 'current' ? 'life-assured-under-current-client' : 'life-assured-promoted-to-owner';
+    } else if (weakOwner || routeName === 'current') {
+      out.policyOwner = ownerName;
+    }
+    return out;
   };
 
   const maybeOpenPolicyOwnerRouting = async (incomingPolicies) => {
@@ -26512,7 +26705,8 @@ or sometimes a strategy name with a fund-house prefix.
 5. Return all funds even if their value is 0 — they may be historical positions.
 6. The sum of allocation % across active funds (value > 0) should equal 100%. If it doesn't, flag the discrepancy in extractionNotes.
 
-RETIREMENT/ANNUITY/INCOME PLANS: annuityPayout (annual payout amount, number), annuityMonthly (monthly payout, number), annuityStartAge (number), annuityEndAge (number), retMaturitySum (maturity/terminal value at end)
+RETIREMENT/ANNUITY/INCOME PLANS: annuityPayout (annual TOTAL payout amount, number), annuityMonthly (monthly payout, number), annuityPayoutMode ("annual" or "monthly" or "unknown"), annuityGuaranteedPayout (annual guaranteed component, number), annuityNonGuaranteedPayout (annual non-guaranteed/cash bonus/dividend component, number), annuityStartAge (number), annuityEndAge (number), retMaturitySum (maturity/terminal value at end).
+IMPORTANT PAYOUT RULE: for income tables/illustrations, annuityPayout must be the highest total illustrated annual income shown = guaranteed cash benefit + non-guaranteed cash bonus/dividend/illustrated return. Do NOT use the lowest guaranteed-only amount when a higher guaranteed + non-guaranteed total is shown. Example: guaranteed cash benefit 550 + non-guaranteed bonus 750 = annuityPayout 1300 and annuityMonthly 108.33.
 
 PREMIUM FINANCING: financed (boolean), finLoan (loan amount, number), finRate (interest rate %, number — use midpoint of range), finTenure (loan tenure years, number)
 
@@ -27751,7 +27945,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
       if (!p || typeof p !== 'object') return false;
       if (Array.isArray(p.riders) && p.riders.length > 0) return true;
       if (Array.isArray(p.fundAllocations) && p.fundAllocations.length > 0) return true;
-      const numericFields = ['sumAssured','premiumAmount','annualPremium','cashValue','retMaturitySum','annuityPayout','annuityMonthly','fdPrincipal','riderPremium','surrenderPeriod'];
+      const numericFields = ['sumAssured','premiumAmount','annualPremium','cashValue','retMaturitySum','annuityPayout','annuityMonthly','annuityGuaranteedPayout','annuityNonGuaranteedPayout','fdPrincipal','riderPremium','surrenderPeriod'];
       if (numericFields.some(k => parseFloat(p[k]) > 0)) return true;
       if (Array.isArray(p.highlights) && p.highlights.length > 0) return true;
       const notes = (p.notes || p.userRemarks || '').toString().trim();
@@ -29077,8 +29271,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
         }
 
         // ── SYNC: annuityPayout ↔ annuityMonthly ──
-        if(result.annuityPayout && !result.annuityMonthly) result.annuityMonthly = String(Math.round(parseFloat(result.annuityPayout) / 12));
-        if(result.annuityMonthly && !result.annuityPayout) result.annuityPayout = String(Math.round(parseFloat(result.annuityMonthly) * 12));
+        Object.assign(result, syncAnnuityPayoutPair(result));
 
         // ── AUTO-FILL premTerm from product name ──
         if(!result.premTerm && result.productName) {
@@ -30338,11 +30531,13 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
         currentClientName={clientProfile?.name||clientName}
         allDriveStates={pendingNameDetection.allDriveStates}
         onClose={() => { setBulkExtracted(pendingNameDetection.policies); setPendingNameDetection(null); }}
-        onConfirm={async (routes) => {
+        onConfirm={async (payload) => {
+          const routes = payload?.routes || payload || {};
+          const familyGroupName = String(payload?.familyGroupName || '').trim();
           const {policies:allPols, detected} = pendingNameDetection;
           const policyAssignments = new Map();
           for (const [key, info] of detected.entries()) {
-            for (const idx of info.policyIndices) policyAssignments.set(idx, {key, info, route: routes[key] || (info.suggestedMatch ? 'existing:' + info.suggestedMatch.clientId : 'new')});
+            for (const idx of info.policyIndices) policyAssignments.set(idx, {key, info, route: routes[key] || (info.sourceField === 'lifeInsured' ? 'current' : (info.suggestedMatch ? 'existing:' + info.suggestedMatch.clientId : 'new'))});
           }
           const forCurrent = [];
           const forExisting = new Map();
@@ -30350,25 +30545,27 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
           allPols.forEach((p,idx) => {
             const assignment = policyAssignments.get(idx);
             const route = assignment?.route;
-            if (!route||route==='current') { forCurrent.push({...p, _ownerRoute:'current'}); return; }
+            if (!route||route==='current') { forCurrent.push(buildOwnerRoutedPolicy(p, assignment, clientProfile?.name||clientName||'', 'current')); return; }
             if (route.startsWith('existing:')) {
               const clientId = route.slice(9);
               const ds = (pendingNameDetection.allDriveStates||[]).find(x => x.clientId === clientId);
               if (!forExisting.has(clientId)) forExisting.set(clientId,{clientId,clientName:ds?.clientName||'existing client',policies:[]});
-              forExisting.get(clientId).policies.push({...p, _ownerRoute:'existing', _ownerRoutedFrom:clientProfile?.name||clientName||''});
+              forExisting.get(clientId).policies.push(buildOwnerRoutedPolicy(p, assignment, ds?.clientName||'existing client', 'existing'));
               return;
             }
             if (route==='new') {
               const key = assignment?.key;
               const info = assignment?.info;
               if (!key || !info) return;
-              if (!forNew.has(key)) forNew.set(key,{displayName:info.displayName,policies:[]});
-              forNew.get(key).policies.push({...p, _ownerRoute:'new', _ownerRoutedFrom:clientProfile?.name||clientName||''});
+              if (!forNew.has(key)) forNew.set(key,{displayName:info.displayName,policies:[],familyGroupName});
+              forNew.get(key).policies.push(buildOwnerRoutedPolicy(p, assignment, info.displayName, 'new'));
             }
           });
           setPendingNameDetection(null);
           let existingSaved = 0;
+          if (forCurrent.length > 0 && familyGroupName) await applyFamilyGroupToClient(activeClientId, familyGroupName);
           for (const bucket of forExisting.values()) {
+            if (familyGroupName) await applyFamilyGroupToClient(bucket.clientId, familyGroupName);
             for (const p of bucket.policies) {
               await savePolicyForClient(bucket.clientId, {...p, id:genId(), clientId:bucket.clientId}, {reason:'owner-route-existing'});
               existingSaved++;
@@ -30393,6 +30590,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
       />}
       {newClientModalOpen && <NewClientModal allStates={newClientData.allStates} allPolicies={newClientData.allPolicies}
         initialName={newClientData.initialName}
+        initialFamilyGroup={newClientData.initialFamilyGroup}
         onCreated={async (clientId) => {
           const pols = newClientData.routePolicies || [];
           if (pols && pols.length) {
@@ -30414,6 +30612,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
         }}
         onExistingSelected={async (clientId, ds) => {
           const pols = newClientData.routePolicies || [];
+          if (newClientData.initialFamilyGroup) await applyFamilyGroupToClient(clientId, newClientData.initialFamilyGroup);
           if (pols && pols.length) {
             for (const p of pols) await savePolicyForClient(clientId, {...p, id:genId(), clientId}, {reason:'owner-route-existing'});
             try{toast('\u2713 '+pols.length+' polic'+(pols.length>1?'ies':'y')+' added to '+(ds?.clientName||'existing client'),'success',4000);}catch(_){}
@@ -30711,7 +30910,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
     dualInsured:false, guaranteedIssuance:false, conversionRights:false,
     // Retirement
     monthlyBenefit:'', fundingSource:'',
-    annuityMonthly:'', annuityPayout:'', annuityStartAge:'65', annuityEndAge:'85',
+    annuityMonthly:'', annuityPayout:'', annuityPayoutMode:'annual', annuityGuaranteedPayout:'', annuityNonGuaranteedPayout:'', annuityStartAge:'65', annuityEndAge:'85',
     retAccumYield:'', retPayoutMode:'payout', retDeathBenefit:'cv', retMaturitySum:'', financed:false, finLoan:'', finRate:'', finTenure:'',
     // Categorisation flags — let user mark a policy as NOT counting towards retirement
     // (e.g. a Whole Life that's pure protection, not part of the retirement plan, or
@@ -30745,6 +30944,8 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
     if(init.premStartAge && !init.ageAtEntry) init.ageAtEntry = init.premStartAge;
     // ── AUTO-CALC premEndAge from premStartAge + premTerm on load ──
     if(init.premStartAge && init.premTerm && !init.premEndAge) init.premEndAge = String(parseInt(init.premStartAge)+parseInt(init.premTerm));
+    Object.assign(init, syncAnnuityPayoutPair(init));
+    if(!init.annuityPayoutMode) init.annuityPayoutMode = 'annual';
     return init;
   });
 
@@ -30796,6 +30997,9 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
     if(k==='premSingle' && v) { nf.premiumStructure = 'Single Premium'; nf.premFrequency = 'single'; }
     if(k==='premSingle' && !v && nf.premiumStructure==='Single Premium') { nf.premiumStructure = 'Regular Premium'; if(nf.premFrequency==='single') nf.premFrequency = 'annual'; }
     if(k==='premiumStructure') { nf.premSingle = (v === 'Single Premium'); if(v==='Single Premium') nf.premFrequency = 'single'; }
+    if(['annuityMonthly','annuityPayout','annuityPayoutMode','annuityGuaranteedPayout','annuityNonGuaranteedPayout'].includes(k)) {
+      Object.assign(nf, syncAnnuityPayoutPair(nf, k));
+    }
     // Auto-calc premium end age
     // Bidirectional premium sync
     if(!nf.premWholeLife && !nf.premSingle) {
@@ -31326,7 +31530,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
               // Inclusive of both endpoints — payouts at age payoutStart, payoutStart+1, ..., payoutEnd
               // Matches the Income Progress panel below and CK's mental model: "54 to 99 = 46 payments"
               const payoutYrs = Math.max(0, payoutEnd - payoutStart + 1);
-              const annPayout = parseFloat(form.annuityPayout) || (parseFloat(form.annuityMonthly)||0)*12;
+              const annPayout = getPolicyAnnualPayout(form);
               const matSum = parseFloat(form.retMaturitySum)||0;
               const totalPayouts = annPayout * payoutYrs;
               const totalReturns = totalPayouts + matSum;
@@ -31416,15 +31620,27 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
 
                 {/* Payout Row */}
                 <div className="resp-2col" style={{gap:8,marginBottom:8}}>
-                  <div className="grid-2" style={{gap:6}}>
+                  <div className="grid-3" style={{gap:6}}>
                     <div className="field">
                       <label style={{display:'flex',alignItems:'center',gap:4}}>Monthly Payout ($)
                         {form._derived && form._derived.annuityMonthly && <DerivedFieldBadge derivedMeta={form._derived.annuityMonthly} fieldLabel="Monthly Payout" />}
                       </label>
-                      <input type="number" value={form.annuityMonthly||''} onChange={e=>{set('annuityMonthly',e.target.value);set('annuityPayout',String((parseFloat(e.target.value)||0)*12));}} style={{fontWeight:600}} />
+                      <input type="number" value={form.annuityMonthly||''} onChange={e=>set('annuityMonthly',e.target.value)} style={{fontWeight:600}} />
                       {form._derived && form._derived.annuityMonthly && <DerivedCaption derivedMeta={form._derived.annuityMonthly} />}
                     </div>
-                    <div className="field"><label>Annual Payout</label><input disabled value={annPayout ? '$'+Math.round(annPayout).toLocaleString()+'/yr' : '—'} style={{background:'var(--bg2)',fontWeight:600,color:'var(--gold)'}} /></div>
+                    <div className="field">
+                      <label>Annual Payout ($)</label>
+                      <input type="number" value={form.annuityPayout||''} onChange={e=>set('annuityPayout',e.target.value)} style={{fontWeight:600,color:'var(--gold)'}} />
+                      {annPayout > 0 && <div style={{fontSize:9,color:'var(--text3)',marginTop:1}}>Synced monthly: ${Math.round(getPolicyMonthlyPayout(form)).toLocaleString()}/mth</div>}
+                    </div>
+                    <div className="field">
+                      <label>Payout Mode</label>
+                      <select value={form.annuityPayoutMode||'annual'} onChange={e=>set('annuityPayoutMode',e.target.value)}>
+                        <option value="annual">Annual amount</option>
+                        <option value="monthly">Monthly amount</option>
+                        <option value="unknown">Unknown</option>
+                      </select>
+                    </div>
                   </div>
                   <div className="grid-2" style={{gap:6}}>
                     <div className="field"><label>Starts Age</label><input type="number" value={form.annuityStartAge||65} onChange={e=>set('annuityStartAge',e.target.value)} /></div>
@@ -31433,7 +31649,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                 </div>
 
                 {/* ── Estimate payout from yield button ── */}
-                {!parseFloat(form.annuityMonthly) && parseFloat(form.cashValue) > 0 && parseInt(form.annuityStartAge) > 0 && parseInt(form.annuityEndAge) > parseInt(form.annuityStartAge) && (
+                {!getPolicyAnnualPayout(form) && parseFloat(form.cashValue) > 0 && parseInt(form.annuityStartAge) > 0 && parseInt(form.annuityEndAge) > parseInt(form.annuityStartAge) && (
                   <div style={{marginBottom:8,padding:'6px 10px',background:'rgba(201,169,110,.06)',borderRadius:6,display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
                     <button type="button" onClick={() => {
                       const pv = parseFloat(form.cashValue) || 0;
@@ -31444,7 +31660,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                       const result = estimateAnnuityPayout({ presentValue: pv, yieldPct: yld, startAge: sa, endAge: ea, currentAge: ca });
                       if (result && result.monthly > 0) {
                         setForm(f => {
-                          const nf = {...f, annuityMonthly: String(result.monthly), annuityPayout: String(result.annual)};
+                          const nf = syncAnnuityPayoutPair({...f, annuityMonthly: String(result.monthly), annuityPayout: String(result.annual), annuityPayoutMode:'monthly'}, 'annuityMonthly');
                           if (!nf._derived) nf._derived = {};
                           nf._derived.annuityMonthly = {
                             rule: 'annuity_yield_solve', source: 'derived', confidence: 0.7,
@@ -31530,8 +31746,8 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
                   <div className="field"><label>Interest Rate % p.a.</label><input type="number" step="0.1" value={form.finRate||''} onChange={e=>set('finRate',e.target.value)} /><div style={{fontSize:10,color:'var(--red)'}}>Int-only: ${Math.round((parseFloat(form.finLoan)||0)*(parseFloat(form.finRate)||0)/100).toLocaleString()}/yr</div></div>
                   <div className="field"><label>Loan Tenure (yrs)</label><input type="number" value={form.finTenure||''} onChange={e=>set('finTenure',e.target.value)} /></div>
                 </div>
-                <div style={{textAlign:'right',marginTop:6,fontSize:13,fontWeight:700,color:((parseFloat(form.annuityPayout)||0)-Math.round((parseFloat(form.finLoan)||0)*(parseFloat(form.finRate)||0)/100))>=0?'var(--green2)':'var(--red)'}}>
-                  Net Cashflow: ${((parseFloat(form.annuityPayout)||0)-Math.round((parseFloat(form.finLoan)||0)*(parseFloat(form.finRate)||0)/100)).toLocaleString()}/yr (Payout − Interest)
+                <div style={{textAlign:'right',marginTop:6,fontSize:13,fontWeight:700,color:(getPolicyAnnualPayout(form)-Math.round((parseFloat(form.finLoan)||0)*(parseFloat(form.finRate)||0)/100))>=0?'var(--green2)':'var(--red)'}}>
+                  Net Cashflow: ${(getPolicyAnnualPayout(form)-Math.round((parseFloat(form.finLoan)||0)*(parseFloat(form.finRate)||0)/100)).toLocaleString()}/yr (Payout − Interest)
                 </div>
               </div>
             )}
@@ -31790,8 +32006,8 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
         {isRetirement && (
           <div style={{marginTop:8,padding:14,background:'var(--bg3)',borderRadius:10,border:'1px solid rgba(212,169,106,.3)'}}>
             {(() => {
-              const totalAnnual = parseFloat(form.annuityPayout) || (parseFloat(form.annuityMonthly)||0) * 12;
-              const monthly = parseFloat(form.annuityMonthly) || (totalAnnual / 12);
+              const totalAnnual = getPolicyAnnualPayout(form);
+              const monthly = getPolicyMonthlyPayout(form);
               const guarPct = parseFloat(form.retGuarPct);
               const guarAnnual = isFinite(guarPct) && guarPct >= 0 ? totalAnnual * guarPct / 100 : null;
               const nonGuarAnnual = guarAnnual != null ? totalAnnual - guarAnnual : null;
@@ -32823,7 +33039,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
             </div>
             {form.subType==='Property' && (
               <div className="grid-3" style={{marginBottom:8}}>
-                <div className="field"><label>Monthly Rental ($)</label><input type="number" value={form.annuityMonthly||''} onChange={e=>{set('annuityMonthly',e.target.value);set('annuityPayout',String((parseFloat(e.target.value)||0)*12));}} placeholder="0 if owner-occupied" /></div>
+                <div className="field"><label>Monthly Rental ($)</label><input type="number" value={form.annuityMonthly||''} onChange={e=>set('annuityMonthly',e.target.value)} placeholder="0 if owner-occupied" /></div>
                 <div className="field"><label>Outstanding Loan ($)</label><input type="number" value={form.finLoan||''} onChange={e=>set('finLoan',e.target.value)} placeholder="0" /></div>
                 <div className="field"><label>Loan Rate (% p.a.)</label><input type="number" step="0.1" value={form.finRate||''} onChange={e=>set('finRate',e.target.value)} placeholder="e.g. 3.5" /></div>
               </div>
@@ -35502,7 +35718,7 @@ function ReportTab() {
           if(pol.cashValue) metrics.push(['Cash Value',fmt(parseFloat(pol.cashValue))]);
           if(pol.paymentMethod) metrics.push(['Payment',pol.paymentMethod]);
           if(pol.category==='retirement') {
-            if(parseFloat(pol.annuityMonthly)||parseFloat(pol.monthlyBenefit)) metrics.push(['Payout',fmt(parseFloat(pol.annuityMonthly)||parseFloat(pol.monthlyBenefit)||0)+'/mth']);
+            if(getPolicyMonthlyPayout(pol)) metrics.push(['Payout',fmt(getPolicyMonthlyPayout(pol))+'/mth']);
             if(pol.annuityStartAge) metrics.push(['Payout Age',(pol.annuityStartAge||'?')+(pol.annuityEndAge?' → '+pol.annuityEndAge:'')]);
           }
           if(pol.category==='savings') { if(pol.endYield) metrics.push(['Yield',pol.endYield+'%']); if(pol.endPolicyTerm) metrics.push(['Maturity Age',String((parseInt(pol.premStartAge)||30)+parseInt(pol.endPolicyTerm))]); }
@@ -35570,7 +35786,7 @@ function ReportTab() {
         }
         if(pol.category==='retirement'){
           const ps=parseInt(pol.annuityStartAge)||65;const pe=parseInt(pol.annuityEndAge)||85;
-          const ap=parseFloat(pol.annuityPayout)||(parseFloat(pol.annuityMonthly)||parseFloat(pol.monthlyBenefit)||0)*12;
+          const ap=getPolicyAnnualPayout(pol);
           if(retAge>=ps&&retAge<=pe)retIncome+=ap;
           const paid=Math.min(pt,yif+1);
           retCV+=Math.round(pol.premSingle?prem*Math.pow(1+r,yif):(r>0?prem*(Math.pow(1+r,paid)-1)/r*Math.pow(1+r,Math.max(0,yif-paid)):prem*paid));
