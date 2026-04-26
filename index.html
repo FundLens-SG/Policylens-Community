@@ -30,31 +30,37 @@ window.PolicyLensDebug=function(on){try{localStorage.setItem('policylens_debug',
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <script>
 // ═══════════════════════════════════════════════════════════════
-// v2.1.0e: LEGACY SERVICE WORKER CLEANUP (one-time)
+// v2.3.0-rc2d.12: SERVICE WORKER REGISTRATION
 // ───────────────────────────────────────────────────────────────
-// PolicyLens no longer uses a service worker. This routine runs
-// once per session to unregister any SW left over from v2.1.0b–d,
-// then reloads so the browser releases the old SW's cached assets.
-// Guarded by sessionStorage so it never loops.
+// PolicyLens uses a lightweight Service Worker extraction relay so
+// long multi-batch scans can continue when the browser backgrounds
+// the page. The worker is registered only on HTTPS/localhost.
 // ═══════════════════════════════════════════════════════════════
+const POLICYLENS_SW_VERSION = 'v2.3.0-rc2d.12';
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', async () => {
-    if (sessionStorage.getItem('policylens_sw_cleaned') === '1') return;
+    const canRegister = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+    if (!canRegister) return;
     try {
-      const regs = await navigator.serviceWorker.getRegistrations();
-      if (regs.length === 0) {
-        sessionStorage.setItem('policylens_sw_cleaned', '1');
-        return; // nothing to clean
-      }
-      for (const reg of regs) {
-        await reg.unregister();
-      }
-      console.log('[SW] Unregistered legacy service worker (v2.1.0e cleanup)');
-      sessionStorage.setItem('policylens_sw_cleaned', '1');
-      window.location.reload();
+      const reg = await navigator.serviceWorker.register('./sw.js', { scope: './' });
+      const promoteWaiting = (worker) => {
+        try { worker && worker.postMessage({ type: 'SKIP_WAITING', version: POLICYLENS_SW_VERSION }); } catch(_) {}
+      };
+      if (reg.waiting) promoteWaiting(reg.waiting);
+      reg.addEventListener('updatefound', () => {
+        const worker = reg.installing;
+        if (!worker) return;
+        worker.addEventListener('statechange', () => {
+          if (worker.state === 'installed' && navigator.serviceWorker.controller) promoteWaiting(worker);
+        });
+      });
+      navigator.serviceWorker.addEventListener('controllerchange', () => {
+        try { window.dispatchEvent(new Event('policylens-service-worker-ready')); } catch(_) {}
+      });
+      try { window.dispatchEvent(new Event('policylens-service-worker-ready')); } catch(_) {}
+      console.log('[SW] Registered PolicyLens worker', reg.scope);
     } catch (e) {
-      console.warn('[SW] Legacy cleanup failed:', e);
-      sessionStorage.setItem('policylens_sw_cleaned', '1'); // don't retry
+      console.warn('[SW] Registration failed:', e);
     }
   });
 }
@@ -658,12 +664,33 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2d.11';
+const APP_VERSION = 'v2.3.0-rc2d.12';
 const APP_VERSION_DATE = '2026-04-26';
-const APP_VERSION_NAME = 'Family scan sorting guardrails';
+const APP_VERSION_NAME = 'Background extraction and family groups';
 const DEFAULT_DOCUMENT_AI_PROXY_URL = 'https://policylens-document-ai.chungakwanc.workers.dev';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2d.12',
+    date: '2026-04-26',
+    name: 'Background extraction and family groups',
+    sections: [
+      {
+        heading: 'AI scanning',
+        items: [
+          'PolicyLens now registers a service-worker extraction relay so multi-batch scans can continue when the tab is backgrounded.',
+          'Gemini extraction can route through the worker without using Chrome Background Fetch, avoiding the old stall/loop behavior from download-style background jobs.'
+        ]
+      },
+      {
+        heading: 'Clients',
+        items: [
+          'Clients tab now includes a Family view that groups related clients by editable family labels for family-review workflows.',
+          'Family labels sync through the existing client profile/Drive flow and fall back to surname-based grouping when no label is set.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2d.11',
     date: '2026-04-26',
@@ -6221,6 +6248,44 @@ function buildDocumentAITextBlock(file, data) {
   };
 }
 
+async function swFetchJSONRelay(url, options = {}, timeoutMs = 120000) {
+  if (!(await swExtractIsAvailable())) throw new Error('Service Worker relay unavailable');
+  const reg = await navigator.serviceWorker.ready;
+  if (!reg || !reg.active) throw new Error('No active SW');
+  const sessionId = 'json_' + Date.now() + '_' + Math.random().toString(36).slice(2, 8);
+  const resultPromise = new Promise((resolve, reject) => {
+    const timeoutId = setTimeout(() => {
+      navigator.serviceWorker.removeEventListener('message', handler);
+      reject(new Error('SW JSON fetch timed out after ' + Math.round(timeoutMs / 1000) + 's'));
+    }, timeoutMs);
+    function handler(e) {
+      const d = e.data || {};
+      if (d.sessionId !== sessionId) return;
+      if (d.type === 'FETCH_JSON_DONE') {
+        clearTimeout(timeoutId);
+        navigator.serviceWorker.removeEventListener('message', handler);
+        resolve(d.result);
+      } else if (d.type === 'FETCH_JSON_ERROR') {
+        clearTimeout(timeoutId);
+        navigator.serviceWorker.removeEventListener('message', handler);
+        reject(new Error(d.error || 'SW JSON fetch failed'));
+      }
+    }
+    navigator.serviceWorker.addEventListener('message', handler);
+  });
+  reg.active.postMessage({
+    type: 'FETCH_JSON_RUN',
+    sessionId,
+    request: {
+      url,
+      method: options.method || 'POST',
+      headers: options.headers || { 'Content-Type': 'application/json' },
+      body: options.body,
+    },
+  });
+  return resultPromise;
+}
+
 async function tryDocumentAIFirstPass(file, blocks, opts = {}) {
   const endpoint = opts.endpoint != null ? opts.endpoint : await getDocumentAIEndpoint();
   if (!endpoint) return null;
@@ -6228,7 +6293,7 @@ async function tryDocumentAIFirstPass(file, blocks, opts = {}) {
   if (!media) return null;
   try {
     console.log('[DocumentAI] First-pass parse for', cleanUploadFileName(file), media.mimeType);
-    const resp = await fetchWithTimeout(endpoint, {
+    const requestOptions = {
       method: 'POST',
       headers: await getDocumentAIHeaders(),
       body: JSON.stringify({
@@ -6236,10 +6301,26 @@ async function tryDocumentAIFirstPass(file, blocks, opts = {}) {
         mimeType: media.mimeType,
         content: media.content,
       }),
-    }, 120000);
-    const data = await resp.json().catch(() => ({}));
-    if (!resp.ok || data.ok === false) {
-      throw new Error(data.error || ('HTTP ' + resp.status + ' ' + resp.statusText));
+    };
+    let data;
+    let ok;
+    let status;
+    let statusText;
+    try {
+      const relayed = await swFetchJSONRelay(endpoint, requestOptions, 120000);
+      data = relayed?.json || {};
+      ok = !!relayed?.ok;
+      status = relayed?.status || 0;
+      statusText = relayed?.statusText || '';
+    } catch (relayErr) {
+      const resp = await fetchWithTimeout(endpoint, requestOptions, 120000);
+      data = await resp.json().catch(() => ({}));
+      ok = resp.ok;
+      status = resp.status;
+      statusText = resp.statusText;
+    }
+    if (!ok || data.ok === false) {
+      throw new Error(data.error || ('HTTP ' + status + ' ' + statusText));
     }
     const textLen = String(data.text || '').trim().length;
     if (textLen < 40) throw new Error('Document AI returned too little text (' + textLen + ' chars)');
@@ -16799,17 +16880,28 @@ function RepositoryTab() {
 
 // ── v2.2.0-rc1: Clients tab ──
 function ClientsTab() {
-  const { switchClient, setTab, activeClientId, policies: activePolicies, tierDefinitions, driveState, setDriveState, clientName, clientProfile, destroyClient } = useContext(AppCtx);
+  const { switchClient, setTab, activeClientId, policies: activePolicies, tierDefinitions, driveState, setDriveState, clientName, clientProfile, saveProfile, destroyClient } = useContext(AppCtx);
   const isMobile = useViewportIsMobile();
   const [filter, setFilter] = useState('all');
   const [allStates, setAllStates] = useState([]);
   const [allPolicies, setAllPolicies] = useState([]);
+  const [profilesByClient, setProfilesByClient] = useState({});
+  const [familyMode, setFamilyMode] = useState(() => { try { return localStorage.getItem('policylens_clients_family_mode') === 'family' ? 'family' : 'list'; } catch(_) { return 'list'; } });
+  const [familyDrafts, setFamilyDrafts] = useState({});
   const [showNewClient, setShowNewClient] = useState(false);
   const [clientsGuardOpen, setClientsGuardOpen] = useState(false);
   useEffect(() => {
     const load = async () => {
-      setAllStates(await PolicyDB.getAllDriveStates().catch(() => []));
-      setAllPolicies(await dbGetAll('policies').catch(() => []));
+      const states = await PolicyDB.getAllDriveStates().catch(() => []);
+      const pols = await dbGetAll('policies').catch(() => []);
+      const profiles = {};
+      await Promise.all(states.map(async (ds) => {
+        const rec = await dbGet('settings', 'clientProfile_' + ds.clientId).catch(() => null);
+        if (rec?.value) profiles[ds.clientId] = rec.value;
+      }));
+      setAllStates(states);
+      setAllPolicies(pols);
+      setProfilesByClient(profiles);
     };
     load();
     const h = () => load();
@@ -16835,6 +16927,125 @@ function ClientsTab() {
   }] : []);
   const filtered = filter === 'all' ? visibleStates : visibleStates.filter(ds => (ds.tier || UNASSIGNED_TIER) === filter);
   const chips = [{id:'all',label:'All'}, ...tierDefinitions.map(t => ({id:t, label:t}))];
+  const getProfileForClient = (ds) => profilesByClient[ds.clientId] || (ds.clientId === activeClientId ? clientProfile : null) || {};
+  const inferFamilyGroupName = (name) => {
+    const cleaned = String(name || '').trim().replace(/\s+/g, ' ');
+    if (!cleaned) return 'Ungrouped';
+    const tokens = cleaned.split(' ').filter(Boolean);
+    if (tokens.length >= 2 && tokens[0].length <= 16) return tokens[0].toUpperCase() + ' Family';
+    return cleaned + ' Family';
+  };
+  const familyGroupFor = (ds) => {
+    const profile = getProfileForClient(ds);
+    const explicit = String(profile.familyGroup || ds.familyGroup || '').trim();
+    return explicit || inferFamilyGroupName(profile.name || ds.clientName);
+  };
+  const saveFamilyGroupForClient = async (ds, rawValue) => {
+    const value = String(rawValue || '').trim();
+    const currentProfile = getProfileForClient(ds);
+    const nextProfile = { ...currentProfile, name: currentProfile.name || ds.clientName || '', familyGroup: value };
+    setProfilesByClient(prev => ({ ...prev, [ds.clientId]: nextProfile }));
+    setFamilyDrafts(prev => ({ ...prev, [ds.clientId]: value }));
+    if (ds.clientId === activeClientId && typeof saveProfile === 'function') {
+      await saveProfile(nextProfile);
+    } else {
+      await dbPut('settings', { key: 'clientProfile_' + ds.clientId, value: nextProfile });
+      if (nextProfile.name) await dbPut('settings', { key: 'clientName_' + ds.clientId, value: nextProfile.name }).catch(() => {});
+    }
+    try {
+      const existing = await PolicyDB.getDriveState(ds.clientId);
+      if (existing) {
+        const nextState = { ...existing, familyGroup: value };
+        await PolicyDB.saveDriveState(nextState);
+        setAllStates(prev => prev.map(s => s.clientId === ds.clientId ? nextState : s));
+        if (ds.clientId === activeClientId && driveState) setDriveState({ ...driveState, familyGroup: value });
+      }
+    } catch(_) {}
+    try { window.dispatchEvent(new CustomEvent('policylens-trigger-drive-write', { detail: { clientId: ds.clientId, reason: 'family-group' } })); } catch(_) {}
+    try { toast(value ? 'Family group saved: ' + value : 'Family group cleared', 'success', 1800); } catch(_) {}
+  };
+  const clientStatsFor = (ds) => {
+    const clientPols = allPolicies.filter(p => p.clientId === ds.clientId);
+    const totalPrem = clientPols.reduce((sum, p) => sum + annualizedPremium(p), 0);
+    return { clientPols, totalPrem };
+  };
+  const familyGroups = (() => {
+    const map = new Map();
+    filtered.forEach(ds => {
+      const key = familyGroupFor(ds);
+      if (!map.has(key)) map.set(key, { name: key, clients: [], totalPrem: 0, policyCount: 0 });
+      const g = map.get(key);
+      const stats = clientStatsFor(ds);
+      g.clients.push(ds);
+      g.totalPrem += stats.totalPrem;
+      g.policyCount += stats.clientPols.length;
+    });
+    return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
+  })();
+  const renderClientCard = (ds, compactFamily=false) => {
+    const isActive = ds.clientId === activeClientId;
+    const { clientPols, totalPrem } = clientStatsFor(ds);
+    const tierLabel = ds.tier || UNASSIGNED_TIER;
+    const syncLabel = ds.pendingError ? 'sync queued' : ds.pendingWrite ? 'sync pending' : ds.lastSyncDeviceName ? ('synced from ' + ds.lastSyncDeviceName) : null;
+    const syncColor = ds.pendingError ? 'var(--red)' : ds.pendingWrite ? 'var(--gold)' : 'var(--text3)';
+    const familyValue = familyDrafts[ds.clientId] ?? String(getProfileForClient(ds).familyGroup || ds.familyGroup || '');
+    const inferredFamily = inferFamilyGroupName(getProfileForClient(ds).name || ds.clientName);
+    return (
+      <div key={ds.clientId} onClick={() => { switchClient(ds.clientId); setTab('profile'); }}
+        style={{background:isActive?'rgba(212,169,106,.06)':'var(--bg2)',border:isActive?'1px solid rgba(212,169,106,.4)':'1px solid var(--border)',borderRadius:10,padding:compactFamily?'10px 12px':'12px 14px',cursor:'pointer',transition:'border-color .15s'}}>
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
+          <span style={{fontSize:14,fontWeight:600,color:'var(--text)',flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{ds.clientName || 'Untitled'}</span>
+          <div style={{display:'flex',alignItems:'center',gap:6,flexShrink:0}}>
+            <TierPicker
+              currentTier={tierLabel}
+              tierDefinitions={tierDefinitions}
+              size="sm"
+              onTierChange={async (newTier) => {
+                try {
+                  await handleTierChange(ds.clientId, newTier, tierLabel, (cid, nt) => {
+                    setAllStates(prev => prev.map(s => s.clientId === cid ? {...s, tier: nt} : s));
+                    if (cid === activeClientId && driveState) {
+                      setDriveState({...driveState, tier: nt});
+                    }
+                  });
+                } catch(_) {}
+                try { window.dispatchEvent(new CustomEvent('policylens-trigger-drive-write', { detail: { clientId: ds.clientId } })); } catch(_) {}
+              }}
+            />
+            <button onClick={async (e) => {
+              e.stopPropagation();
+              const cname = ds.clientName || 'this client';
+              if (!confirm('Destroy ' + cname + '?\n\nDrive folder will be moved to Trash (30-day recovery window).')) return;
+              if (!confirm('Are you sure? This cannot be undone from PolicyLens.')) return;
+              if (ds.clientId !== activeClientId) await switchClient(ds.clientId);
+              try { await destroyClient(); toast('Client destroyed', 'success'); } catch(err) { toast('Error: ' + err.message, 'error'); }
+            }}
+              title={'Delete ' + (ds.clientName || 'client')}
+              style={{background:'transparent',color:'var(--text3)',border:'none',width:24,height:24,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:14,opacity:0.5,flexShrink:0}}
+              onMouseEnter={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.color = 'var(--red)'; }}
+              onMouseLeave={e => { e.currentTarget.style.opacity = '0.5'; e.currentTarget.style.color = 'var(--text3)'; }}>
+              x
+            </button>
+          </div>
+        </div>
+        <div style={{fontSize:11,color:'var(--text3)',marginTop:4}}>
+          {totalPrem > 0 ? '$' + Math.round(totalPrem).toLocaleString() + '/yr' : 'No premiums'} · {clientPols.length} {clientPols.length===1?'policy':'policies'} · {ds.lastReviewedAt ? 'reviewed ' + fmtRelativeTime(ds.lastReviewedAt) : 'never reviewed'}
+          {syncLabel && <span style={{color:syncColor}}> · {syncLabel}</span>}
+        </div>
+        <div onClick={e => e.stopPropagation()} style={{display:'flex',alignItems:'center',gap:8,marginTop:8}}>
+          <span style={{fontSize:10,color:'var(--text3)',fontWeight:600,whiteSpace:'nowrap'}}>Family</span>
+          <input
+            value={familyValue}
+            placeholder={inferredFamily}
+            onChange={e => setFamilyDrafts(prev => ({ ...prev, [ds.clientId]: e.target.value }))}
+            onBlur={e => saveFamilyGroupForClient(ds, e.target.value).catch(err => { try { toast('Family group save failed: ' + (err.message || err), 'error'); } catch(_) {} })}
+            onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+            style={{flex:1,minWidth:0,padding:'5px 8px',fontSize:11,borderRadius:6,background:'var(--bg)',border:'1px solid var(--border2)',color:'var(--text2)'}}
+          />
+        </div>
+      </div>
+    );
+  };
   return (
     <div className="fade-in">
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:12}}>
@@ -16850,11 +17061,21 @@ function ClientsTab() {
             );
           })}
         </div>
-        <button onClick={() => activeClientId ? setClientsGuardOpen(true) : setShowNewClient(true)}
-          title="New Client"
-          style={{background:'rgba(212,169,106,.15)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.4)',borderRadius:isMobile?'50%':8,width:isMobile?32:'auto',height:isMobile?32:'auto',padding:isMobile?0:'6px 14px',fontSize:isMobile?18:11,fontWeight:600,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,lineHeight:1}}>
-          {isMobile ? '+' : '+ New Client'}
-        </button>
+        <div style={{display:'flex',alignItems:'center',gap:8,flexShrink:0}}>
+          <div style={{display:'flex',padding:2,background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:8}}>
+            {['list','family'].map(mode => (
+              <button key={mode} onClick={() => { setFamilyMode(mode); try { localStorage.setItem('policylens_clients_family_mode', mode); } catch(_) {} }}
+                style={{padding:isMobile?'4px 7px':'4px 10px',fontSize:10,fontWeight:familyMode===mode?700:500,borderRadius:6,border:'none',background:familyMode===mode?'rgba(212,169,106,.18)':'transparent',color:familyMode===mode?'var(--gold)':'var(--text3)',cursor:'pointer'}}>
+                {mode === 'list' ? 'List' : 'Family'}
+              </button>
+            ))}
+          </div>
+          <button onClick={() => activeClientId ? setClientsGuardOpen(true) : setShowNewClient(true)}
+            title="New Client"
+            style={{background:'rgba(212,169,106,.15)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.4)',borderRadius:isMobile?'50%':8,width:isMobile?32:'auto',height:isMobile?32:'auto',padding:isMobile?0:'6px 14px',fontSize:isMobile?18:11,fontWeight:600,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0,lineHeight:1}}>
+            {isMobile ? '+' : '+ New Client'}
+          </button>
+        </div>
       </div>
       {filtered.length === 0 && visibleStates.length === 0 && (
         <div style={{textAlign:'center',padding:'60px 20px',color:'var(--text3)'}}>
@@ -16869,7 +17090,33 @@ function ClientsTab() {
       {filtered.length === 0 && visibleStates.length > 0 && (
         <div style={{textAlign:'center',padding:'40px 20px',color:'var(--text3)',fontSize:13}}>No clients match this filter.</div>
       )}
-      <div style={{display:'grid',gap:8}}>
+      {familyMode === 'family' && (
+        <div style={{display:'grid',gap:10}}>
+          {familyGroups.map(group => (
+            <div key={group.name} style={{background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:12,padding:12}}>
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8,marginBottom:10}}>
+                <div style={{minWidth:0}}>
+                  <div style={{fontSize:14,fontWeight:800,color:'var(--gold)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{group.name}</div>
+                  <div style={{fontSize:10,color:'var(--text3)',marginTop:2}}>
+                    {group.clients.length} {group.clients.length===1?'client':'clients'} · {group.policyCount} {group.policyCount===1?'policy':'policies'} · {group.totalPrem > 0 ? '$' + Math.round(group.totalPrem).toLocaleString() + '/yr' : 'No premiums'}
+                  </div>
+                </div>
+                <button onClick={() => {
+                  const first = group.clients[0];
+                  if (first) { switchClient(first.clientId); setTab('dashboard'); }
+                }}
+                  style={{padding:'5px 10px',fontSize:10,fontWeight:700,borderRadius:6,background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',flexShrink:0}}>
+                  Open review
+                </button>
+              </div>
+              <div style={{display:'grid',gap:8}}>
+                {group.clients.map(ds => renderClientCard(ds, true))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={{display:familyMode === 'list' ? 'grid' : 'none',gap:8}}>
         {filtered.map(ds => {
           const isActive = ds.clientId === activeClientId;
           const clientPols = allPolicies.filter(p => p.clientId === ds.clientId);
@@ -18000,11 +18247,17 @@ async function swExtractIsAvailable() {
   // Hard gates
   if (isIOS()) { _swSupportCache = false; return false; }
   if (!('serviceWorker' in navigator)) { _swSupportCache = false; return false; }
-  if (!('BackgroundFetchManager' in window)) { _swSupportCache = false; return false; }
-  // Must have an active SW controller
+  const canRegister = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+  if (!canRegister) { _swSupportCache = false; return false; }
   try {
-    const reg = await navigator.serviceWorker.ready;
-    if (!reg || !reg.active) { _swSupportCache = false; return false; }
+    const existing = await navigator.serviceWorker.getRegistration();
+    if (!existing) { _swSupportCache = false; return false; }
+    const reg = await Promise.race([
+      navigator.serviceWorker.ready,
+      new Promise(resolve => setTimeout(() => resolve(existing), 3000)),
+    ]);
+    const activeWorker = reg?.active || existing.active || existing.waiting || existing.installing;
+    if (!activeWorker) { _swSupportCache = false; return false; }
     // Ask the SW directly — it might have its own feature gates.
     // 3s budget (was 1500ms) because a stopped SW can take 1-2s to
     // wake on slower devices, and we want this check to succeed
@@ -18016,9 +18269,9 @@ async function swExtractIsAvailable() {
         clearTimeout(timeoutId);
         resolve(e.data);
       };
-      reg.active.postMessage({ type: 'CHECK_SUPPORT' }, [channel.port2]);
+      activeWorker.postMessage({ type: 'CHECK_SUPPORT' }, [channel.port2]);
     });
-    _swSupportCache = !!(result && result.bgFetch);
+    _swSupportCache = !!(result && (result.bgFetch || result.relayFetch || result.plainFetch));
     console.log('[SW Bridge] Support check:', _swSupportCache, result);
     return _swSupportCache;
   } catch (e) {
@@ -18050,15 +18303,16 @@ async function swExtractDiagnostic() {
     reason: null,
   };
   if (report.platform.isIOS) {
-    report.reason = 'iOS: Background Fetch is not supported in any iOS browser (Apple forces WebKit)';
+    report.reason = 'iOS does not reliably keep Service Worker extraction alive after the browser is backgrounded';
     return report;
   }
   if (!report.apis.serviceWorker) {
     report.reason = 'This browser does not support Service Workers';
     return report;
   }
-  if (!report.apis.backgroundFetch) {
-    report.reason = 'This browser does not support the Background Fetch API (need Chrome/Edge/Opera ≥71)';
+  const canRegister = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+  if (!canRegister) {
+    report.reason = 'Service Workers require HTTPS or localhost. Open the GitHub Pages version for background extraction.';
     return report;
   }
   try {
@@ -18072,7 +18326,7 @@ async function swExtractDiagnostic() {
     }
     report.registration.hasController = !!navigator.serviceWorker.controller;
     if (!report.registration.registered) {
-      report.reason = 'Background extraction worker is not installed in this release; extraction runs in the foreground. Keep PolicyLens open until it finishes.';
+      report.reason = 'Background extraction worker is not installed yet. Hard-refresh PolicyLens once, then try again.';
       return report;
     }
     if (!report.registration.active) {
@@ -18086,7 +18340,16 @@ async function swExtractDiagnostic() {
   // Try CHECK_SUPPORT message with a 3s budget
   try {
     const started = Date.now();
-    const reg = await navigator.serviceWorker.ready;
+    const existing = await navigator.serviceWorker.getRegistration();
+    const reg = await Promise.race([
+      navigator.serviceWorker.ready,
+      new Promise(resolve => setTimeout(() => resolve(existing), 3000)),
+    ]);
+    const activeWorker = reg?.active || existing?.active || existing?.waiting || existing?.installing;
+    if (!activeWorker) {
+      report.reason = 'Service Worker exists but no active worker is available yet. Reload PolicyLens once.';
+      return report;
+    }
     report.checkSupport.asked = true;
     const response = await new Promise((resolve) => {
       const channel = new MessageChannel();
@@ -18095,7 +18358,7 @@ async function swExtractDiagnostic() {
         clearTimeout(timeoutId);
         resolve(e.data);
       };
-      reg.active.postMessage({ type: 'CHECK_SUPPORT' }, [channel.port2]);
+      activeWorker.postMessage({ type: 'CHECK_SUPPORT' }, [channel.port2]);
     });
     report.checkSupport.tookMs = Date.now() - started;
     if (response && response.__timeout) {
@@ -18104,12 +18367,14 @@ async function swExtractDiagnostic() {
     }
     report.checkSupport.responded = true;
     report.checkSupport.response = response;
-    if (!response || !response.bgFetch) {
-      report.reason = 'Service Worker responded but reports Background Fetch is unavailable: ' + JSON.stringify(response);
+    if (!response || !(response.bgFetch || response.relayFetch || response.plainFetch)) {
+      report.reason = 'Service Worker responded but reports extraction relay unavailable: ' + JSON.stringify(response);
       return report;
     }
     report.overall = true;
-    report.reason = 'All gates passed — background extraction is available';
+    report.reason = response.bgFetch
+      ? 'All gates passed - background extraction is available'
+      : 'Service Worker relay active - extraction can continue when the tab is backgrounded';
   } catch (e) {
     report.reason = 'CHECK_SUPPORT message failed: ' + e.message;
   }
@@ -18120,10 +18385,10 @@ async function swExtractDiagnostic() {
 // and the Settings diagnostic button to pick up a freshly activated SW
 // without reloading the page.
 function swExtractResetCache() {
-  // v2.1.0e: no-op — SW removed, cache stays false permanently
+  _swSupportCache = null;
 }
 
-// Send a request to the SW for background-fetch-powered extraction.
+// Send a request to the SW for background extraction relay.
 // Returns the raw Gemini response text (same shape as direct call).
 // Throws on any failure; caller must catch and fall back.
 //
@@ -18590,14 +18855,14 @@ async function geminiStructuredExtract(geminiKey, systemPrompt, contentBlocks, m
   // before this path was added — the regression timeline matches the
   // introduction of background extraction exactly. Gated off; direct
   // fetch (with the beefed-up retry loop below) is the fast path now.
-  // Re-enable only if we find a way to thread API calls through the
-  // SW without Background Fetch — e.g. a plain waitUntil() + fetch
-  // wrapped in a MessageChannel.
-  const USE_SW_SINGLE_EXTRACT = false;
+  // v2.3.0-rc2d.12: this now uses a plain Service Worker fetch relay
+  // instead of Chrome Background Fetch, so it can survive tab backgrounding
+  // without the old download-style queue stalls.
+  const USE_SW_SINGLE_EXTRACT = true;
   if (USE_SW_SINGLE_EXTRACT) {
     try {
       if (await swExtractIsAvailable()) {
-        console.log('[Gemini Structured] Routing via SW background fetch ('+MODEL_FALLBACK_CHAIN[0]+')');
+        console.log('[Gemini Structured] Routing via SW extraction relay ('+MODEL_FALLBACK_CHAIN[0]+')');
         const rawViaSW = await swExtractRelay(makeModelUrl(MODEL_FALLBACK_CHAIN[0]), bodyObj);
         if (rawViaSW && rawViaSW.length >= 2) {
           console.log('[Gemini Structured] SW path returned:', rawViaSW.length, 'chars');
@@ -28192,8 +28457,8 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
     let completedBatches = 0;
 
     // ── BACKGROUND MODE DIAGNOSTIC ──
-    // v2.1.0e: SW removed — bgDiag will report overall:false and
-    // extraction always uses the in-page foreground path.
+    // Checks whether the Service Worker extraction relay is active for
+    // this origin/browser before the long scan starts.
     try { bgDiag = await swExtractDiagnostic(); }
     catch (e) { console.warn('[Extract] Diagnostic failed:', e); }
     console.log('[Extract] Background mode:', bgDiag?.overall ? 'ACTIVE' : 'foreground-only', '—', bgDiag?.reason || 'unknown');
@@ -28207,9 +28472,9 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
       bgModeReason: bgDiag?.reason || null,
     });
 
-    // ── PRE-COMPUTE VIA SW MULTI (Fix #1) ──
-    // When multiple batches AND Background Fetch is available, dispatch
-    // ALL batch requests to the SW upfront. The SW processes them as a
+    // ── PRE-COMPUTE VIA SW MULTI ──
+    // When multiple batches and the Service Worker relay is available,
+    // dispatch ALL batch requests to the SW upfront. The SW processes them as a
     // sequential chain; each batch's result flows back via broadcasts
     // which populate per-batch resolver promises. The normal batch loop
     // below awaits those promises instead of making its own network
@@ -28221,20 +28486,10 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
     // to the normal per-batch path without regression. Single-batch
     // extractions skip this phase entirely and use the existing SW
     // single-dispatch path via swExtractRelay.
-    // ── FEATURE FLAG: SW MULTI PRE-FETCH (DISABLED 2026-04-09) ──
-    // The SW multi pre-fetch path was causing severe slowdowns and a
-    // "looping back to batch 1" symptom on mobile. Root cause: it runs
-    // a full pre-processing pass (processFile + base64 encoding) on
-    // EVERY batch upfront before the main loop starts, which on a 43-
-    // photo / 5-batch upload takes 30-60s showing "Preparing batch N..."
-    // progress. When the SW then stalls or times out per-batch (5 min),
-    // the main loop falls through to the normal in-page Gemini path and
-    // effectively re-extracts everything a second time. The old version
-    // of PolicyLens used only the sequential per-batch loop and worked
-    // fine — this path is additive complexity that became net-negative.
-    // Gated off via feature flag so the dead code stays readable for
-    // future debugging; can be re-enabled by flipping the constant.
-    const USE_SW_MULTI_PREFETCH = false;
+    // v2.3.0-rc2d.12: this is back on, but now uses the plain relay in
+    // sw.js instead of Background Fetch, which avoids the earlier ghost
+    // fetch / batch restart behavior.
+    const USE_SW_MULTI_PREFETCH = true;
     let precomputedPromises = null;
     if (USE_SW_MULTI_PREFETCH && batches.length > 1) {
       try {
@@ -29474,8 +29729,8 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
             <div style={{fontSize:9,color:'var(--text3)',marginTop:4}}>You can review extracted policies below while remaining batches process</div>
           )}
           {/* ── BACKGROUND MODE STATUS BADGE ── */}
-          {/* Shows whether the extraction is running in SW Background
-              Fetch mode (safe to tab away) or foreground-only mode
+          {/* Shows whether the extraction is running in Service Worker
+              relay mode (safe to tab away) or foreground-only mode
               (must keep app open). Computed by swExtractDiagnostic()
               at the start of handleExtract and threaded through every
               setScanProgress call. On iOS this is always foreground. */}
