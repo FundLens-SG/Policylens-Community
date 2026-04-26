@@ -664,12 +664,35 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2d.14';
+const APP_VERSION = 'v2.3.0-rc2d.15';
 const APP_VERSION_DATE = '2026-04-26';
-const APP_VERSION_NAME = 'Family routing board and payout sync';
+const APP_VERSION_NAME = 'Advisor workbench, decision inbox, and restore tools';
 const DEFAULT_DOCUMENT_AI_PROXY_URL = 'https://policylens-document-ai.chungakwanc.workers.dev';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2d.15',
+    date: '2026-04-26',
+    name: 'Advisor workbench, decision inbox, and restore tools',
+    sections: [
+      {
+        heading: 'Workflow',
+        items: [
+          'Quick Verify now behaves like a decision inbox: only uncertain, conflicting, or owner-routing items stay in front unless trusted items are toggled back on.',
+          'Clients Family view now surfaces owner-routing questions and compact policy rows under each family group for review meetings.',
+          'Import/delete actions now create an undo snapshot so the active client can restore the last major change.'
+        ]
+      },
+      {
+        heading: 'Visual clarity',
+        items: [
+          'Header now separates Advisor Workbench from the client-facing Client View.',
+          'Sync status opens a recent activity panel with queued, saved, merge, retry, and restore events.',
+          'Dashboard now has an advisor review strip for sync, owner routing, import quality, and income policy checks.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2d.13',
     date: '2026-04-26',
@@ -10565,6 +10588,69 @@ function _notifySyncStatus() {
   window.dispatchEvent(new Event('policylens-sync-status-change'));
 }
 
+const POLICYLENS_ACTIVITY_LIMIT = 40;
+const POLICYLENS_UNDO_LIMIT = 8;
+function policyLensActivityKey(clientId) { return 'activityLog_' + clientId; }
+function policyLensUndoKey(clientId) { return 'undoSnapshots_' + clientId; }
+
+async function getActivityLog(clientId) {
+  if (!clientId) return [];
+  const list = await PolicyDB.getSetting(policyLensActivityKey(clientId)).catch(() => []);
+  return Array.isArray(list) ? list : [];
+}
+
+async function recordActivity(clientId, event) {
+  if (!clientId) return null;
+  const entry = {
+    id: 'act_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+    at: new Date().toISOString(),
+    deviceName: getPolicyLensDeviceName(),
+    deviceId: getPolicyLensDeviceId(),
+    userEmail: getPolicyLensUserEmail(),
+    level: 'info',
+    ...(event || {})
+  };
+  const prev = await getActivityLog(clientId);
+  const next = [entry, ...prev].slice(0, POLICYLENS_ACTIVITY_LIMIT);
+  await PolicyDB.saveSetting(policyLensActivityKey(clientId), next).catch(() => {});
+  try { window.dispatchEvent(new CustomEvent('policylens-activity-log-change', { detail: { clientId, entry } })); } catch(_) {}
+  return entry;
+}
+
+async function getUndoSnapshots(clientId) {
+  if (!clientId) return [];
+  const list = await PolicyDB.getSetting(policyLensUndoKey(clientId)).catch(() => []);
+  return Array.isArray(list) ? list : [];
+}
+
+async function recordUndoSnapshot(clientId, snapshot) {
+  if (!clientId || !snapshot) return null;
+  const entry = {
+    id: 'undo_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6),
+    createdAt: new Date().toISOString(),
+    deviceName: getPolicyLensDeviceName(),
+    label: snapshot.label || 'Last change',
+    type: snapshot.type || 'change',
+    restoreMode: snapshot.restoreMode || 'replace-client-policies',
+    ...(snapshot || {})
+  };
+  const prev = await getUndoSnapshots(clientId);
+  await PolicyDB.saveSetting(policyLensUndoKey(clientId), [entry, ...prev].slice(0, POLICYLENS_UNDO_LIMIT)).catch(() => {});
+  await recordActivity(clientId, { type: 'undo-ready', label: 'Undo ready: ' + entry.label, level: 'quiet' }).catch(() => {});
+  return entry;
+}
+
+async function consumeUndoSnapshot(clientId, snapshotId) {
+  if (!clientId) return null;
+  const list = await getUndoSnapshots(clientId);
+  if (!list.length) return null;
+  const idx = snapshotId ? list.findIndex(s => s.id === snapshotId) : 0;
+  if (idx < 0) return null;
+  const [snapshot] = list.splice(idx, 1);
+  await PolicyDB.saveSetting(policyLensUndoKey(clientId), list).catch(() => {});
+  return snapshot;
+}
+
 const POLICYLENS_DEVICE_ID_KEY = 'policylens_device_id';
 const POLICYLENS_DEVICE_NAME_KEY = 'policylens_device_name';
 const DRIVE_SYNC_OUTBOX_PREFIX = 'drive-client:';
@@ -10793,6 +10879,13 @@ async function markDriveSyncPending(clientId, reason, extra) {
     ...(extra || {})
   };
   await PolicyDB.saveSyncOutbox(entry).catch(() => {});
+  if (!existing || existing.status !== 'pending' || existing.reason !== entry.reason) {
+    recordActivity(clientId, {
+      type: 'sync-queued',
+      label: 'Queued sync: ' + (entry.reason || 'edit'),
+      level: 'queued'
+    }).catch(() => {});
+  }
   if (ds) {
     await PolicyDB.saveDriveState({
       ...ds,
@@ -10833,6 +10926,12 @@ async function failDriveSyncPending(clientId, err, reason) {
   const now = new Date().toISOString();
   const existing = await PolicyDB.getSyncOutbox(id).catch(() => null);
   const message = err?.message || String(err || 'Sync failed');
+  recordActivity(clientId, {
+    type: 'sync-failed',
+    label: 'Sync needs retry',
+    detail: message,
+    level: 'error'
+  }).catch(() => {});
   await PolicyDB.saveSyncOutbox({
     ...(existing || {}),
     id,
@@ -11031,6 +11130,12 @@ async function _performDriveSync(ds, clientProfile, policies, opts) {
       lastSyncUserEmail: getPolicyLensUserEmail()
     });
     await clearDriveSyncPending(ds.clientId, { headRevisionId: newHead, lastSyncedAt: syncedAt });
+    recordActivity(ds.clientId, {
+      type: 'sync-saved',
+      label: 'Synced to Drive',
+      detail: opts?.reason || 'drive-write',
+      level: 'success'
+    }).catch(() => {});
     broadcastDriveSyncPing(ds.clientId, { headRevisionId: newHead, reason: opts?.reason || 'drive-write' }).catch(() => {});
     _driveSyncJustSaved = true;
     _notifySyncStatus();
@@ -11064,6 +11169,12 @@ async function _performDriveSync(ds, clientProfile, policies, opts) {
           pendingWrite: false
         });
         await clearDriveSyncPending(freshDs.clientId, { headRevisionId: newHead, lastSyncedAt: syncedAt });
+        recordActivity(freshDs.clientId, {
+          type: 'sync-merged',
+          label: 'Synced after merge',
+          detail: (merged.remoteOnly || 0) + ' remote-only, ' + (merged.conflicts || 0) + ' overlaps',
+          level: 'success'
+        }).catch(() => {});
         try { window.dispatchEvent(new CustomEvent('policylens-drive-merged-local', { detail: { clientId: freshDs.clientId, result: localResult } })); } catch(_) {}
         broadcastDriveSyncPing(freshDs.clientId, { headRevisionId: newHead, reason: 'conflict-merge', conflicts: merged.conflicts, remoteOnly: merged.remoteOnly }).catch(() => {});
         _driveSyncJustSaved = true;
@@ -14944,6 +15055,20 @@ function App() {
   const deletePolicy = async (id) => {
     const existing = policies.find(x => x.id === id) || await dbGet('policies', id).catch(() => null);
     const deletedClientId = existing?.clientId || activeClientIdRef.current || activeClientId;
+    if (existing) {
+      await recordUndoSnapshot(deletedClientId, {
+        type: 'delete-policy',
+        label: 'Deleted ' + (existing.productName || existing.policyName || existing.insurer || 'policy'),
+        restoreMode: 'upsert-policy',
+        policy: existing
+      }).catch(() => {});
+      recordActivity(deletedClientId, {
+        type: 'policy-delete',
+        label: 'Deleted policy',
+        detail: existing.productName || existing.policyName || existing.policyNumber || '',
+        level: 'warning'
+      }).catch(() => {});
+    }
     await recordDeletedPolicyId(deletedClientId, id);
     await dbDel('policies', id);
     // Queue the Drive tombstone before React sees 0 policies; otherwise the
@@ -14953,6 +15078,53 @@ function App() {
     // Cloud soft-delete (fire-and-forget)
     lastSelfPushRef.current = Date.now();
     sbPolicyDelete(id).catch(() => {});
+  };
+
+  const restoreLastUndo = async () => {
+    const cid = activeClientIdRef.current || activeClientId;
+    if (!cid) { try { toast('No active client to restore', 'warning', 2500); } catch(_) {} return false; }
+    const snapshot = await consumeUndoSnapshot(cid).catch(() => null);
+    if (!snapshot) { try { toast('Nothing to undo for this client', 'info', 2500); } catch(_) {} return false; }
+    try {
+      if (snapshot.restoreMode === 'upsert-policy' && snapshot.policy) {
+        const restored = { ...snapshot.policy, clientId: cid };
+        await dbPut('policies', restored);
+        await clearDeletedPolicyId(cid, restored.id).catch(() => {});
+        setPolicies(prev => {
+          const idx = prev.findIndex(p => p.id === restored.id);
+          if (idx >= 0) { const next = [...prev]; next[idx] = restored; return next; }
+          return [...prev, restored];
+        });
+        lastSelfPushRef.current = Date.now();
+        sbPolicyPush(restored, restored._fieldVersions || {}).catch(() => {});
+      } else if (snapshot.restoreMode === 'replace-client-policies') {
+        const current = await dbGetAll('policies').catch(() => []);
+        for (const p of current.filter(p => p.clientId === cid)) {
+          if (p.id) await dbDel('policies', p.id);
+        }
+        const restoredPolicies = (snapshot.policiesBefore || []).map(p => ({ ...p, clientId: cid }));
+        for (const p of restoredPolicies) await dbPut('policies', p);
+        if (snapshot.profileBefore) {
+          await dbPut('settings', { key: 'clientProfile_' + cid, value: snapshot.profileBefore });
+          await dbPut('settings', { key: 'clientName_' + cid, value: snapshot.profileBefore.name || '' }).catch(() => {});
+          setClientProfile(snapshot.profileBefore);
+          setClientName(snapshot.profileBefore.name || '');
+        }
+        setPolicies(restoredPolicies);
+      }
+      await scheduleDriveWriteForClient(cid, 'undo-restore', 500);
+      await recordActivity(cid, {
+        type: 'undo-restored',
+        label: 'Restored: ' + (snapshot.label || 'last change'),
+        level: 'success'
+      }).catch(() => {});
+      try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
+      try { toast('Restored: ' + (snapshot.label || 'last change'), 'success', 3000); } catch(_) {}
+      return true;
+    } catch (err) {
+      try { toast('Restore failed: ' + (err?.message || err), 'error', 4500); } catch(_) {}
+      return false;
+    }
   };
 
   // Save a scanned/routed policy directly to a target client without switching the active workspace.
@@ -15243,7 +15415,7 @@ function App() {
     try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
   };
 
-  const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,savePolicyForClient,deletePolicy,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,tab,setTab,presentMode,setPresentMode,showChangelog,setShowChangelog,houseDefaults,saveHouseDefaults,tierDefinitions,saveTierDefinitions,runCloudSync:()=>runCloudSyncRef.current?.({force:true}),driveState,setDriveState,activeClientId,switchClient,destroyClient,isAdmin};
+  const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,savePolicyForClient,deletePolicy,restoreLastUndo,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,tab,setTab,presentMode,setPresentMode,showChangelog,setShowChangelog,houseDefaults,saveHouseDefaults,tierDefinitions,saveTierDefinitions,runCloudSync:()=>runCloudSyncRef.current?.({force:true}),driveState,setDriveState,activeClientId,switchClient,destroyClient,isAdmin};
 
   if(loading) {
     if (_isOAuthReturn) return <OAuthReturnLoader />;
@@ -16722,12 +16894,28 @@ function CostMeterChip() {
 function SyncStatusPill({ driveState }) {
   const isMobile = useViewportIsMobile();
   const [, force] = useState(0);
+  const [open, setOpen] = useState(false);
+  const [activity, setActivity] = useState([]);
   useEffect(() => {
     const h = () => force(n => n + 1);
     window.addEventListener('policylens-sync-status-change', h);
     const iv = setInterval(h, 10000);
     return () => { window.removeEventListener('policylens-sync-status-change', h); clearInterval(iv); };
   }, []);
+  useEffect(() => {
+    let live = true;
+    const clientId = driveState?.clientId;
+    const load = () => {
+      if (!clientId) { if (live) setActivity([]); return; }
+      getActivityLog(clientId).then(list => { if (live) setActivity(list || []); }).catch(() => { if (live) setActivity([]); });
+    };
+    load();
+    const h = (e) => {
+      if (!e.detail?.clientId || e.detail.clientId === clientId) load();
+    };
+    window.addEventListener('policylens-activity-log-change', h);
+    return () => { live = false; window.removeEventListener('policylens-activity-log-change', h); };
+  }, [driveState?.clientId]);
   // v2.3.0-rc2c.5o: Show minimal sync feedback on mobile (was: return null hiding all indication)
   if (isMobile) {
     if (!driveState || getDriveStatus() !== 'connected' || isDriveLocalOnly()) return null;
@@ -16736,42 +16924,87 @@ function SyncStatusPill({ driveState }) {
       return React.createElement('span', {
         title: driveState.pendingError,
         style: {fontSize:9,color:'var(--red)',whiteSpace:'nowrap',flexShrink:0,padding:'0 4px'}
-      }, 'Sync queued');
+      }, 'Sync error');
     }
     if (!saving && !_driveSyncJustSaved) return null;
     return React.createElement('span', {
       style: {fontSize:9,color:saving?'var(--gold)':'var(--teal)',whiteSpace:'nowrap',flexShrink:0,padding:'0 4px'}
-    }, saving ? 'Queued\u2026' : '\u2713');
+    }, saving ? (_driveSyncInFlight ? 'Uploading' : 'Queued') : 'Synced');
   }
   if (!driveState || getDriveStatus() !== 'connected' || isDriveLocalOnly()) return null;
   const isSaving = _driveSyncInFlight || _driveSyncTimer !== null || driveState.pendingWrite;
+  const ageLabel = (ts) => {
+    if (!ts) return '';
+    const diff = Date.now() - new Date(ts).getTime();
+    const sec = Math.max(0, Math.floor(diff / 1000));
+    if (sec < 10) return 'just now';
+    if (sec < 60) return sec + 's ago';
+    if (sec < 3600) return Math.floor(sec/60) + 'm ago';
+    if (sec < 86400) return Math.floor(sec/3600) + 'h ago';
+    const d = new Date(ts);
+    return String(d.getDate()).padStart(2,'0') + '/' + String(d.getMonth()+1).padStart(2,'0') + ' ' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0');
+  };
+  let label = '';
+  let color = 'var(--text3)';
+  let bg = 'var(--bg3)';
+  let border = 'var(--border)';
+  let title = 'Sync activity';
   if (driveState.pendingError) {
-    return React.createElement('span', {
-      title: driveState.pendingError,
-      style: {fontSize:10,color:'var(--red)',padding:'2px 8px',background:'var(--red-dim)',borderRadius:10,border:'1px solid rgba(239,83,80,.25)',whiteSpace:'nowrap',flexShrink:0}
-    }, 'Sync queued');
+    label = 'Sync retry needed';
+    color = 'var(--red)';
+    bg = 'var(--red-dim)';
+    border = 'rgba(239,83,80,.25)';
+    title = driveState.pendingError;
+  } else if (_driveSyncInFlight) {
+    label = 'Uploading to Drive';
+    color = 'var(--gold)';
+    title = 'Drive upload in progress';
+  } else if (_driveSyncTimer !== null || driveState.pendingWrite) {
+    label = 'Queued locally';
+    color = 'var(--gold)';
+    title = 'Changes are saved locally and queued for Drive';
+  } else if (driveState.lastSyncedAt) {
+    label = 'Synced ' + ageLabel(driveState.lastSyncedAt);
+    if (driveState.lastSyncDeviceName && driveState.lastSyncDeviceName !== getPolicyLensDeviceName()) {
+      label += ' from ' + driveState.lastSyncDeviceName;
+    }
+    color = _driveSyncJustSaved ? 'var(--teal)' : 'var(--text3)';
+    title = 'Last synced ' + new Date(driveState.lastSyncedAt).toLocaleString();
+  } else {
+    label = 'Drive ready';
+    title = 'Drive is connected';
   }
-  if (isSaving) {
-    return React.createElement('span', {
-      style: {fontSize:10,color:'var(--gold)',padding:'2px 8px',background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)',whiteSpace:'nowrap',flexShrink:0,animation:'pulse 1.5s ease-in-out infinite'}
-    }, _driveSyncInFlight ? 'Saving\u2026' : 'Queued\u2026');
-  }
-  const ts = driveState.lastSyncedAt;
-  if (!ts) return null;
-  const diff = Date.now() - new Date(ts).getTime();
-  const sec = Math.floor(diff / 1000);
-  let label;
-  if (sec < 10) label = 'Saved just now';
-  else if (sec < 60) label = 'Saved ' + sec + 's ago';
-  else if (sec < 3600) label = 'Saved ' + Math.floor(sec/60) + 'm ago';
-  else if (sec < 86400) label = 'Saved ' + Math.floor(sec/3600) + 'h ago';
-  else { const d = new Date(ts); label = 'Saved at ' + String(d.getHours()).padStart(2,'0') + ':' + String(d.getMinutes()).padStart(2,'0'); }
-  if (driveState.lastSyncDeviceName && driveState.lastSyncDeviceName !== getPolicyLensDeviceName()) {
-    label += ' from ' + driveState.lastSyncDeviceName;
-  }
-  return React.createElement('span', {
-    style: {fontSize:10,color:'var(--text3)',padding:'2px 8px',background:'var(--bg3)',borderRadius:10,border:'1px solid var(--border)',whiteSpace:'nowrap',flexShrink:0}
-  }, label);
+  return (
+    <span style={{position:'relative',display:'inline-flex',flexShrink:0}}>
+      <button onClick={(e)=>{e.stopPropagation();setOpen(o=>!o);}} title={title}
+        style={{fontSize:10,color,padding:'2px 8px',background:bg,borderRadius:10,border:'1px solid '+border,whiteSpace:'nowrap',cursor:'pointer',animation:isSaving?'pulse 1.5s ease-in-out infinite':'none'}}>
+        {label}
+      </button>
+      {open && (
+        <div onClick={e=>e.stopPropagation()} style={{position:'absolute',right:0,top:'calc(100% + 8px)',width:300,maxWidth:'80vw',zIndex:10001,background:'#172033',border:'1px solid var(--border2)',borderRadius:10,boxShadow:'0 16px 40px rgba(0,0,0,.35)',padding:10}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:8,marginBottom:8}}>
+            <div style={{fontSize:11,fontWeight:800,color:'var(--text2)'}}>Sync Activity</div>
+            <button onClick={()=>setOpen(false)} style={{background:'transparent',border:'none',color:'var(--text3)',fontSize:14,cursor:'pointer'}}>x</button>
+          </div>
+          {driveState.pendingError && <div style={{fontSize:10,color:'var(--red)',background:'rgba(239,83,80,.08)',border:'1px solid rgba(239,83,80,.2)',borderRadius:7,padding:7,marginBottom:8}}>{driveState.pendingError}</div>}
+          {(activity || []).slice(0, 7).length === 0 ? (
+            <div style={{fontSize:10,color:'var(--text3)',padding:'8px 2px'}}>No recent activity yet.</div>
+          ) : (activity || []).slice(0, 7).map(row => {
+            const c = row.level === 'error' ? 'var(--red)' : row.level === 'success' ? 'var(--teal)' : row.level === 'warning' || row.level === 'queued' ? 'var(--gold)' : 'var(--text3)';
+            return (
+              <div key={row.id} style={{display:'grid',gridTemplateColumns:'8px 1fr',gap:7,padding:'6px 0',borderTop:'1px solid var(--border)'}}>
+                <span style={{width:7,height:7,borderRadius:'50%',background:c,marginTop:4}}></span>
+                <div style={{minWidth:0}}>
+                  <div style={{fontSize:10,fontWeight:700,color:'var(--text2)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{row.label || row.type || 'Activity'}</div>
+                  <div style={{fontSize:9,color:'var(--text3)',marginTop:1}}>{ageLabel(row.at)}{row.deviceName ? ' · ' + row.deviceName : ''}{row.detail ? ' · ' + row.detail : ''}</div>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </span>
+  );
 }
 
 // ── v2.2.0-beta: Drive reconnect status bar ──
@@ -17067,6 +17300,58 @@ function ClientsTab() {
     const totalPrem = clientPols.reduce((sum, p) => sum + annualizedPremium(p), 0);
     return { clientPols, totalPrem };
   };
+  const weakPolicyName = /^(unknown|null|n\/a|na|nil|same as|self|policy owner|owner|life insured|life assured)$/i;
+  const policyOwnerDisplay = (p) => {
+    const owner = String(p?.policyOwner || '').trim();
+    const life = String(p?.lifeInsured || '').trim();
+    if (owner && !weakPolicyName.test(owner)) return owner;
+    if (life && !weakPolicyName.test(life)) return life + ' (owner?)';
+    return 'Owner unclear';
+  };
+  const policyMiniTitle = (p) => p.productName || p.policyName || p.subType || p.insurer || 'Untitled policy';
+  const compactMoney = (n) => {
+    n = Number(n) || 0;
+    if (!n) return '';
+    if (n >= 1000000) return '$' + (n / 1000000).toFixed(1) + 'M';
+    if (n >= 1000) return '$' + Math.round(n / 1000) + 'k';
+    return '$' + Math.round(n);
+  };
+  const groupPolicyQuestions = (group) => {
+    const expected = new Set();
+    group.clients.forEach(ds => {
+      const profile = getProfileForClient(ds);
+      normalizeName(profile.name || ds.clientName || '').split('|').filter(Boolean).forEach(v => expected.add(v));
+      (profile.dependants || []).forEach(d => normalizeName(d.name || '').split('|').filter(Boolean).forEach(v => expected.add(v)));
+    });
+    const questions = [];
+    group.clients.forEach(ds => {
+      const { clientPols } = clientStatsFor(ds);
+      clientPols.forEach(p => {
+        const owner = String(p?.policyOwner || '').trim();
+        const life = String(p?.lifeInsured || '').trim();
+        const ownerKey = normalizeName(owner);
+        const lifeKey = normalizeName(life);
+        const ownerWeak = !owner || weakPolicyName.test(owner);
+        const ownerOutsideGroup = ownerKey && expected.size > 0 && !expected.has(ownerKey);
+        if (ownerWeak || ownerOutsideGroup) {
+          questions.push({
+            clientName: ds.clientName || 'Client',
+            title: policyMiniTitle(p),
+            owner: ownerWeak ? 'Policy owner unclear' : owner,
+            life: life && !weakPolicyName.test(life) ? life : '',
+          });
+        } else if (lifeKey && ownerKey && lifeKey !== ownerKey && !expected.has(lifeKey)) {
+          questions.push({
+            clientName: ds.clientName || 'Client',
+            title: policyMiniTitle(p),
+            owner: owner,
+            life: life + ' needs routing check',
+          });
+        }
+      });
+    });
+    return questions.slice(0, 6);
+  };
   const familyGroups = (() => {
     const map = new Map();
     filtered.forEach(ds => {
@@ -17141,6 +17426,22 @@ function ClientsTab() {
             style={{flex:1,minWidth:0,padding:'5px 8px',fontSize:11,borderRadius:6,background:'var(--bg)',border:'1px solid var(--border2)',color:'var(--text2)'}}
           />
         </div>
+        {compactFamily && clientPols.length > 0 && (
+          <div style={{display:'grid',gap:5,marginTop:8}}>
+            {clientPols.slice(0, 3).map(pol => (
+              <div key={pol.id || pol.policyNumber || policyMiniTitle(pol)} style={{display:'grid',gridTemplateColumns:'minmax(0,1fr) auto',gap:8,alignItems:'center',padding:'6px 8px',borderRadius:7,background:'rgba(255,255,255,.025)',border:'1px solid rgba(255,255,255,.055)'}}>
+                <div style={{minWidth:0}}>
+                  <div style={{fontSize:10,fontWeight:700,color:'var(--text2)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{policyMiniTitle(pol)}</div>
+                  <div style={{fontSize:9,color:'var(--text3)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{pol.insurer || 'Insurer unclear'} · Owner: {policyOwnerDisplay(pol)}</div>
+                </div>
+                <div style={{fontSize:9,color:'var(--gold)',fontWeight:700,whiteSpace:'nowrap'}}>
+                  {compactMoney(annualizedPremium(pol)) || compactMoney(getPolicyAnnualPayout(pol)) || compactMoney(pol.sumAssured)}
+                </div>
+              </div>
+            ))}
+            {clientPols.length > 3 && <div style={{fontSize:9,color:'var(--text3)',paddingLeft:2}}>+{clientPols.length - 3} more policies</div>}
+          </div>
+        )}
       </div>
     );
   };
@@ -17190,6 +17491,19 @@ function ClientsTab() {
       )}
       {familyMode === 'family' && (
         <div style={{display:'grid',gap:10}}>
+          <div style={{background:'linear-gradient(135deg,rgba(91,168,160,.08),rgba(212,169,106,.05))',border:'1px solid rgba(91,168,160,.18)',borderRadius:12,padding:12}}>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,flexWrap:'wrap'}}>
+              <div>
+                <div style={{fontSize:13,fontWeight:800,color:'var(--teal)'}}>Family Review Workspace</div>
+                <div style={{fontSize:10,color:'var(--text3)',marginTop:2}}>
+                  {familyGroups.length} {familyGroups.length===1?'family group':'family groups'} · {filtered.length} {filtered.length===1?'client':'clients'} · {filtered.reduce((s, ds) => s + clientStatsFor(ds).clientPols.length, 0)} policies
+                </div>
+              </div>
+              <div style={{fontSize:10,color:'var(--text2)',maxWidth:420,lineHeight:1.45}}>
+                Group clients into a household, then use the owner questions to route policies before report review.
+              </div>
+            </div>
+          </div>
           {familyGroups.map(group => (
             <div key={group.name} style={{background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:12,padding:12}}>
               <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8,marginBottom:10}}>
@@ -17207,6 +17521,23 @@ function ClientsTab() {
                   Open review
                 </button>
               </div>
+              {(() => {
+                const questions = groupPolicyQuestions(group);
+                if (questions.length === 0) return null;
+                return (
+                  <div style={{background:'rgba(212,169,106,.06)',border:'1px solid rgba(212,169,106,.16)',borderRadius:9,padding:9,marginBottom:10}}>
+                    <div style={{fontSize:10,fontWeight:800,color:'var(--gold)',marginBottom:6}}>Owner questions to resolve</div>
+                    <div style={{display:'grid',gap:5}}>
+                      {questions.map((q, qi) => (
+                        <div key={qi} style={{display:'grid',gridTemplateColumns:isMobile?'1fr':'minmax(0,1fr) auto',gap:6,alignItems:'center',fontSize:10,color:'var(--text2)'}}>
+                          <span style={{minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{q.title} · {q.owner}{q.life ? ' · ' + q.life : ''}</span>
+                          <span style={{color:'var(--text3)',fontSize:9,whiteSpace:'nowrap'}}>Currently under {q.clientName}</span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })()}
               <div style={{display:'grid',gap:8}}>
                 {group.clients.map(ds => renderClientCard(ds, true))}
               </div>
@@ -17396,7 +17727,7 @@ function NewClientModal({ allStates, allPolicies, onClose, initialName, initialF
 }
 
 function Header() {
-  const {tab,setTab,policies,clientName,clientProfile,savePolicy,deletePolicy,saveProfile,setPresentMode,driveState,activeClientId,switchClient} = useContext(AppCtx);
+  const {tab,setTab,policies,clientName,clientProfile,savePolicy,deletePolicy,saveProfile,restoreLastUndo,setPresentMode,driveState,activeClientId,switchClient} = useContext(AppCtx);
   const isMobile = useViewportIsMobile();
   const [saveOpen, setSaveOpen] = useState(false);
   const [loadOpen, setLoadOpen] = useState(false);
@@ -17433,6 +17764,7 @@ function Header() {
         <div style={{display:'flex',alignItems:'center',gap:4,minWidth:0,flex:'1 1 auto',overflow:'hidden'}}>
           <LogoMark size={20} />
           <span style={{fontWeight:700,fontSize:14,letterSpacing:'-0.3px',color:'#d4a96a',flexShrink:0}}>PolicyLens</span>
+          {!isMobile && <span style={{fontSize:9,fontWeight:800,color:'var(--teal)',background:'rgba(91,168,160,.08)',border:'1px solid rgba(91,168,160,.18)',borderRadius:999,padding:'2px 7px',whiteSpace:'nowrap'}}>Advisor Workbench</span>}
           {clientName && <span style={{fontSize:10,color:'var(--text3)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',minWidth:0}}>— {clientName}</span>}
         </div>
         <div style={{display:'flex',alignItems:'center',gap:4,flexShrink:0}}>
@@ -17454,6 +17786,14 @@ function Header() {
             style={{background:'var(--bg3)',color:'var(--text2)',border:'1px solid var(--border2)',width:28,height:28,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:activeClientId?'pointer':'not-allowed',fontSize:13,flexShrink:0,opacity:activeClientId?1:.4}}>
             📂
           </button>
+          <button title="Undo last import/delete" onClick={async () => {
+            if (!activeClientId || typeof restoreLastUndo !== 'function') return;
+            if (!confirm('Restore the last import/delete change for this client?')) return;
+            await restoreLastUndo();
+          }} disabled={!activeClientId}
+            style={{background:'var(--bg3)',color:'var(--text2)',border:'1px solid var(--border2)',height:28,borderRadius:14,padding:'0 9px',display:'flex',alignItems:'center',justifyContent:'center',cursor:activeClientId?'pointer':'not-allowed',fontSize:10,fontWeight:800,flexShrink:0,opacity:activeClientId?1:.4}}>
+            Undo
+          </button>
           <CheckpointLoadModal open={loadOpen} onClose={() => setLoadOpen(false)} clientId={activeClientId}
             switchClient={switchClient} setTab={setTab} />
           <NewClientGuardModal open={newClientGuardOpen} onClose={() => setNewClientGuardOpen(false)}
@@ -17472,9 +17812,9 @@ function Header() {
           {/* v15 STAGE 10: SESSION COST METER */}
           <CostMeterChip />
           <button onClick={()=>setPresentMode(true)} disabled={policies.length===0}
-            title="Present mode — full-screen client view"
+            title="Client Presentation - full-screen read-only view"
             style={{background:policies.length===0?'var(--bg3)':'linear-gradient(135deg,#d4a96a,#b8935a)',color:policies.length===0?'var(--text3)':'#0b0f1a',border:'1px solid rgba(212,169,106,.3)',padding:isMobile?'0 8px':'0 10px',height:28,borderRadius:14,display:'flex',alignItems:'center',justifyContent:'center',cursor:policies.length===0?'not-allowed':'pointer',fontSize:11,fontWeight:700,flexShrink:0,opacity:policies.length===0?.4:1,gap:4}}>
-            <span style={{fontSize:13}}>▶</span>{!isMobile && ' Present'}
+            <span style={{fontSize:13}}>▶</span>{!isMobile && ' Client View'}
           </button>
         </div>
       </div>
@@ -22464,7 +22804,7 @@ function ReviewSession({onClose}) {
 // MODULE: UPLOAD_PORTAL — Client document collection link
 // ═══════════════════════════════════════════════════════════════
 function Dashboard() {
-  const {policies,setTab,apiKey,clientProfile,saveProfile,houseDefaults} = useContext(AppCtx);
+  const {policies,setTab,apiKey,clientProfile,saveProfile,houseDefaults,driveState} = useContext(AppCtx);
   const p = clientProfile || {};
   const age = getProfileAge(p) ?? 35;
   const retAge = getRetirementAge(p, houseDefaults.retirementAge); // v2.0.3
@@ -23026,6 +23366,25 @@ function Dashboard() {
   const premRatio = annualIncome > 0 ? Math.round(totalPremium.annual/annualIncome*100) : 0;
   const retRow = cvTimeline.find(r => r.age === retAge);
   const [showReview, setShowReview] = useState(false);
+  const advisorReview = useMemo(() => {
+    const active = policies.filter(pol => !['matured','surrendered','lapsed'].includes(pol.status));
+    const missingCore = policies.filter(pol => !(pol.productName || pol.policyName || pol.insurer) || !pol.category || (!pol.policyNumber && !pol.policyOwner && !pol.lifeInsured));
+    const ownerQuestions = policies.filter(pol => {
+      const owner = normalizeName(pol.policyOwner || '');
+      const life = normalizeName(pol.lifeInsured || '');
+      return life && (!owner || owner !== life);
+    });
+    const incomePolicies = policies.filter(pol => getPolicyAnnualPayout(pol) > 0 || pol.category === 'retirement');
+    const syncLabel = driveState?.pendingError ? 'Sync retry needed' : driveState?.pendingWrite ? 'Sync queued' : driveState?.lastSyncedAt ? ('Synced ' + fmtRelativeTime(driveState.lastSyncedAt)) : 'Drive ready';
+    return {
+      activeCount: active.length,
+      missingCoreCount: missingCore.length,
+      ownerQuestionCount: ownerQuestions.length,
+      incomePolicyCount: incomePolicies.length,
+      syncLabel,
+      syncTone: driveState?.pendingError ? 'var(--red)' : driveState?.pendingWrite ? 'var(--gold)' : 'var(--teal)',
+    };
+  }, [policies, driveState]);
 
   if(policies.length === 0) return (
     <div className="fade-in" style={{textAlign:'center',padding:'40px 16px'}}>
@@ -23128,6 +23487,22 @@ function Dashboard() {
       </div>
 
       {/* ═══ SUMMARY CARDS ═══ */}
+      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(140px,1fr))',gap:8,marginBottom:14}}>
+        {[
+          {label:'Advisor mode',value:'Workbench',note:'Edit and verify',tone:'var(--teal)'},
+          {label:'Sync status',value:advisorReview.syncLabel,note:'Last-write safety',tone:advisorReview.syncTone},
+          {label:'Owner routing',value:advisorReview.ownerQuestionCount ? advisorReview.ownerQuestionCount + ' to check' : 'Clear',note:'Policy owner vs life assured',tone:advisorReview.ownerQuestionCount ? 'var(--gold)' : 'var(--teal)'},
+          {label:'Import quality',value:advisorReview.missingCoreCount ? advisorReview.missingCoreCount + ' incomplete' : 'Ready',note:advisorReview.activeCount + ' active policies',tone:advisorReview.missingCoreCount ? 'var(--gold)' : 'var(--teal)'},
+          {label:'Income policies',value:String(advisorReview.incomePolicyCount),note:'Payout/yield synced',tone:'var(--gold)'},
+        ].map(tile => (
+          <div key={tile.label} style={{background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:10,padding:'10px 12px',minHeight:72}}>
+            <div style={{fontSize:9,color:'var(--text3)',fontWeight:800,textTransform:'uppercase',letterSpacing:'.5px'}}>{tile.label}</div>
+            <div style={{fontSize:13,color:tile.tone,fontWeight:800,marginTop:5,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{tile.value}</div>
+            <div style={{fontSize:9,color:'var(--text3)',marginTop:4,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{tile.note}</div>
+          </div>
+        ))}
+      </div>
+
       <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:14}}>
         <div className="card card-sm"><div style={{color:'var(--text3)',fontSize:9,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Active Policies</div><div style={{fontSize:22,fontWeight:700,marginTop:4}}>{policies.filter(p=>p.status!=='matured'&&p.status!=='surrendered'&&p.status!=='lapsed').length}</div><div style={{fontSize:10,color:'var(--text3)'}}>Total coverage: {totalCoverage>=1e6?'$'+(totalCoverage/1e6).toFixed(1)+'M':fmt(totalCoverage)}</div></div>
         <div className="card card-sm" style={{borderLeft:`4px solid ${scoreColor}`,background:overallScore<50?'rgba(239,83,80,.04)':overallScore<80?'rgba(212,169,106,.04)':'rgba(91,168,160,.04)'}}>
@@ -24896,6 +25271,7 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
       return stored === 'full' ? 'full' : 'quick';
     } catch(e) { return 'quick'; }
   });
+  const [showTrusted, setShowTrusted] = useState(false);
   const setViewModeAndPersist = (mode) => {
     setViewMode(mode);
     try { localStorage.setItem('policylens-bulkverify-viewmode', mode); } catch(e){}
@@ -25253,8 +25629,6 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
 
   // Compute counts for the header subtitle
   const totalCount = items.length;
-  const needsReviewCount = items.filter(it => getVerifiableFields(it).length > 0 && !it._extractVerifiedAt).length;
-  const verifiedCount = items.filter(it => it._extractVerifiedAt || (getVerifiableFields(it).length === 0 && it._extractConfidence !== undefined)).length;
   const ownerLabelForItem = (it) => {
     const weak = /^(unknown|null|n\/a|na|nil|same as|self|policy owner|owner|life insured|life assured)$/i;
     const owner = String(it?.policyOwner || '').trim();
@@ -25263,8 +25637,22 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
     if(life && !weak.test(life)) return 'Life assured: ' + life + ' (owner unclear)';
     return '';
   };
+  const policyOwnerDisplay = (it) => ownerLabelForItem(it).replace(/^Policy owner:\s*/i, '').replace(/^Life assured:\s*/i, '') || 'Owner unclear';
   const ownerKeyForItem = (it) => ownerLabelForItem(it).replace(/^Policy owner:\s*/i, '').replace(/^Life assured:\s*/i, '').replace(/\s*\(owner unclear\)\s*$/i, '');
-  const ownerKeysInView = [...new Set(filtered.map(it => normalizeName(ownerKeyForItem(it))).filter(Boolean))];
+  const needsDecisionForItem = (it) => {
+    const verifiable = getVerifiableFields(it);
+    const gate = passesConfidenceGate(it);
+    const ownerLabel = ownerLabelForItem(it);
+    const hasOwnerQuestion = /\(owner unclear\)/i.test(ownerLabel) || !!it._ownerRouteQuestion;
+    const hasReviewReasons = (it._gateReasons || []).length > 0 || (it._reviewReasons || []).length > 0 || (it._reviewActions || []).length > 0;
+    const hasMergeDecision = !!it._dupOf || !!it._knownPolicyMatch || !!it._mergeIntoExisting || (it._mergeConflicts || []).length > 0;
+    return (verifiable.length > 0 && !it._extractVerifiedAt) || !gate.pass || hasOwnerQuestion || hasReviewReasons || hasMergeDecision;
+  };
+  const needsReviewCount = items.filter(needsDecisionForItem).length;
+  const verifiedCount = items.filter(it => it._extractVerifiedAt || (getVerifiableFields(it).length === 0 && it._extractConfidence !== undefined)).length;
+  const visibleVerifyItems = viewMode === 'quick' && !showTrusted ? filtered.filter(needsDecisionForItem) : filtered;
+  const trustedHiddenCount = filtered.length - visibleVerifyItems.length;
+  const ownerKeysInView = [...new Set(visibleVerifyItems.map(it => normalizeName(ownerKeyForItem(it))).filter(Boolean))];
   const showOwnerLabels = ownerKeysInView.length > 1;
 
   return (
@@ -25351,6 +25739,27 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
           </div>
         )}
 
+        {viewMode === 'quick' && (
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(120px,1fr))',gap:8,margin:'0 0 10px'}}>
+            <div style={{background:'rgba(212,169,106,.07)',border:'1px solid rgba(212,169,106,.18)',borderRadius:9,padding:9}}>
+              <div style={{fontSize:9,color:'var(--text3)',fontWeight:800,textTransform:'uppercase',letterSpacing:'.5px'}}>Decisions</div>
+              <div style={{fontSize:18,color:needsReviewCount ? 'var(--gold)' : 'var(--teal)',fontWeight:800,marginTop:3}}>{needsReviewCount}</div>
+            </div>
+            <div style={{background:'rgba(91,168,160,.06)',border:'1px solid rgba(91,168,160,.16)',borderRadius:9,padding:9}}>
+              <div style={{fontSize:9,color:'var(--text3)',fontWeight:800,textTransform:'uppercase',letterSpacing:'.5px'}}>Trusted</div>
+              <div style={{fontSize:18,color:'var(--teal)',fontWeight:800,marginTop:3}}>{Math.max(0, totalCount - needsReviewCount)}</div>
+            </div>
+            <div style={{background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:9,padding:9}}>
+              <div style={{fontSize:9,color:'var(--text3)',fontWeight:800,textTransform:'uppercase',letterSpacing:'.5px'}}>Owners</div>
+              <div style={{fontSize:18,color:'var(--text2)',fontWeight:800,marginTop:3}}>{ownerKeysInView.length || 1}</div>
+            </div>
+            <label style={{display:'flex',alignItems:'center',gap:7,background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:9,padding:9,cursor:'pointer'}}>
+              <input type="checkbox" checked={showTrusted} onChange={e=>setShowTrusted(e.target.checked)} style={{accentColor:'var(--gold)'}} />
+              <span style={{fontSize:10,color:'var(--text2)',fontWeight:700}}>Show trusted{trustedHiddenCount > 0 ? ' (' + trustedHiddenCount + ')' : ''}</span>
+            </label>
+          </div>
+        )}
+
         <div style={{maxHeight:'65vh',overflowY:'auto',overflowX:'hidden'}}>
 
           {/* ── WHAT'S MISSING CHECKLIST ── */}
@@ -25392,7 +25801,13 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
           )}
 
           {/* ── MOBILE-FRIENDLY CARD GRID ── */}
-          {filtered.map((item,i) => {
+          {visibleVerifyItems.length === 0 && viewMode === 'quick' && (
+            <div style={{background:'rgba(91,168,160,.06)',border:'1px solid rgba(91,168,160,.16)',borderRadius:10,padding:14,marginBottom:10,textAlign:'center'}}>
+              <div style={{fontSize:13,fontWeight:800,color:'var(--teal)'}}>No decisions needed in this view</div>
+              <div style={{fontSize:10,color:'var(--text3)',marginTop:4}}>All visible extracted policies are trusted. Toggle "Show trusted" to inspect them before import.</div>
+            </div>
+          )}
+          {visibleVerifyItems.map((item,i) => {
             // Quick Verify uses the compact card UNLESS:
             //   • the FC has manually expanded this card (_expanded), OR
             //   • the card is a duplicate (always show full so the FC can compare), OR
@@ -25497,6 +25912,11 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
                         {item.subType || item.category || '?'} · {item.currency || 'SGD'} {(parseFloat(item.annualPremium)||0).toLocaleString()}{freqLabel}
                         {parseFloat(item.sumAssured) > 0 && ' · SA '+parseFloat(item.sumAssured).toLocaleString()}
                       </div>
+                      <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(118px,1fr))',gap:5,marginTop:7}}>
+                        <div style={{fontSize:9,color:'var(--text3)',background:'rgba(255,255,255,.025)',border:'1px solid rgba(255,255,255,.055)',borderRadius:5,padding:'4px 6px'}}>Owner <strong style={{color:'var(--text2)'}}>{policyOwnerDisplay(item)}</strong></div>
+                        <div style={{fontSize:9,color:'var(--text3)',background:'rgba(255,255,255,.025)',border:'1px solid rgba(255,255,255,.055)',borderRadius:5,padding:'4px 6px'}}>Policy <strong style={{color:'var(--text2)'}}>{item.policyNumber || '-'}</strong></div>
+                        {getPolicyAnnualPayout(item) > 0 && <div style={{fontSize:9,color:'var(--text3)',background:'rgba(255,255,255,.025)',border:'1px solid rgba(255,255,255,.055)',borderRadius:5,padding:'4px 6px'}}>Payout <strong style={{color:'var(--text2)'}}>${Math.round(getPolicyAnnualPayout(item)).toLocaleString()}/yr</strong></div>}
+                      </div>
                     </div>
                     <div style={{display:'flex',gap:4,alignItems:'center',flexShrink:0}}>
                       {item._gateScore != null && (
@@ -25505,8 +25925,8 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
                         </span>
                       )}
                       {allClean ? (
-                        <span style={{fontSize:9,fontWeight:700,color:'var(--green2)',padding:'2px 7px',borderRadius:4,background:'rgba(91,168,160,.1)',whiteSpace:'nowrap'}}>
-                          ✓ CLEAN
+                        <span style={{fontSize:9,fontWeight:700,color:'var(--teal)',padding:'2px 7px',borderRadius:4,background:'rgba(91,168,160,.08)',whiteSpace:'nowrap'}}>
+                          Trusted
                         </span>
                       ) : (
                         <span style={{fontSize:9,fontWeight:700,color:'var(--gold)',padding:'2px 7px',borderRadius:4,background:'rgba(212,169,106,.12)',whiteSpace:'nowrap'}}>
@@ -30660,6 +31080,25 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
           toast('No active client found. Reload PolicyLens, open the client, then import again.', 'error', 7000);
           return;
         }
+        if (selected && selected.length > 0) {
+          const [beforePolicies, beforeProfileRec] = await Promise.all([
+            dbGetAll('policies').catch(() => []),
+            dbGet('settings', 'clientProfile_' + importClientId).catch(() => null)
+          ]);
+          await recordUndoSnapshot(importClientId, {
+            type: 'scan-import',
+            label: 'Imported ' + selected.length + ' scanned polic' + (selected.length === 1 ? 'y' : 'ies'),
+            restoreMode: 'replace-client-policies',
+            policiesBefore: beforePolicies.filter(p => p.clientId === importClientId),
+            profileBefore: beforeProfileRec?.value || clientProfile || null
+          }).catch(() => {});
+          recordActivity(importClientId, {
+            type: 'scan-import-start',
+            label: 'Importing scanned policies',
+            detail: selected.length + ' extracted item' + (selected.length === 1 ? '' : 's'),
+            level: 'queued'
+          }).catch(() => {});
+        }
         try { holdLocalDriveWrite(importClientId, 'scan-import', 120000); } catch(_) {}
         // ── DEDUPE AT SAVE TIME (2026-04-09 fix) ──
         // Previously every selected policy got a fresh genId() and
@@ -30774,6 +31213,14 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
         if (newCount > 0) parts.push(newCount + ' new');
         if (mergedCount > 0) parts.push(mergedCount + ' merged into existing');
         toast('Imported ' + (parts.join(', ') || count + ' policies'), 'success');
+        if (count > 0) {
+          recordActivity(importClientId, {
+            type: 'scan-import-done',
+            label: 'Imported scanned policies',
+            detail: (parts.join(', ') || count + ' policies'),
+            level: 'success'
+          }).catch(() => {});
+        }
 
         // ── DEPENDANT CANDIDATE DETECTION ──
         // After policies are saved, scan the accepted batch for Life Insured
