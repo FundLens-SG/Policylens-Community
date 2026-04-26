@@ -36,7 +36,7 @@ window.PolicyLensDebug=function(on){try{localStorage.setItem('policylens_debug',
 // long multi-batch scans can continue when the browser backgrounds
 // the page. The worker is registered only on HTTPS/localhost.
 // ═══════════════════════════════════════════════════════════════
-const POLICYLENS_SW_VERSION = 'v2.3.0-rc2d.14';
+const POLICYLENS_SW_VERSION = 'v2.3.0-rc2d.16';
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', async () => {
     const canRegister = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
@@ -664,12 +664,33 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2d.15';
+const APP_VERSION = 'v2.3.0-rc2d.16';
 const APP_VERSION_DATE = '2026-04-26';
-const APP_VERSION_NAME = 'Advisor workbench, decision inbox, and restore tools';
+const APP_VERSION_NAME = 'Owner routing safety and client creation fixes';
 const DEFAULT_DOCUMENT_AI_PROXY_URL = 'https://policylens-document-ai.chungakwanc.workers.dev';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2d.16',
+    date: '2026-04-26',
+    name: 'Owner routing safety and client creation fixes',
+    sections: [
+      {
+        heading: 'Family routing',
+        items: [
+          'Creating a new owner/client from family scan routing now saves the client locally first and routes selected policies immediately before Drive upload runs in the background.',
+          'Pending local clients are protected from Drive orphan cleanup, preventing family scan imports from making clients or policies disappear while sync catches up.',
+          'Drive calls now reject invalid file ids before making requests, so bad files/null requests cannot trap the New Client button in a loading loop.'
+        ]
+      },
+      {
+        heading: 'Forms',
+        items: [
+          'Policy owner and life assured dropdowns now keep the active client and current scanned names selectable even when the profile is incomplete.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2d.15',
     date: '2026-04-26',
@@ -10567,6 +10588,16 @@ class DriveConflictError extends Error {
   }
 }
 
+function isValidDriveFileId(id) {
+  const s = String(id || '').trim();
+  return !!s && s !== 'null' && s !== 'undefined';
+}
+
+function requireDriveFileId(id, action) {
+  if (!isValidDriveFileId(id)) throw new Error('Drive file is not ready for ' + (action || 'this action'));
+  return String(id).trim();
+}
+
 // ── Drive sync debounce (module-scoped, not a React hook) ──
 let _driveSyncTimer = null;
 function _driveSyncDebounced(fn, ms) {
@@ -10846,17 +10877,8 @@ async function markDriveSyncPending(clientId, reason, extra) {
   if (!clientId) return null;
   if (isDriveLocalOnly()) return null;
   const ds = await PolicyDB.getDriveState(clientId).catch(() => null);
-  if (!ds || !ds.fileId) {
+  if (!ds) {
     await PolicyDB.deleteSyncOutbox(syncOutboxId(clientId)).catch(() => {});
-    if (ds && (ds.pendingWrite || ds.pendingError || ds.pendingSince || ds.pendingReason)) {
-      await PolicyDB.saveDriveState({
-        ...ds,
-        pendingWrite: false,
-        pendingSince: null,
-        pendingReason: null,
-        pendingError: null
-      }).catch(() => {});
-    }
     _notifySyncStatus();
     return null;
   }
@@ -10972,6 +10994,58 @@ async function buildDriveSyncMetadata(ds, extra) {
     deletedPolicyIds,
     ...(extra || {})
   };
+}
+
+async function ensureDriveFileForClient(clientId, opts) {
+  if (!clientId) return false;
+  if (isDriveLocalOnly() || getDriveStatus() !== 'connected') return false;
+  const existing = await PolicyDB.getDriveState(clientId).catch(() => null);
+  if (existing && isValidDriveFileId(existing.fileId)) return true;
+  const profileRec = await dbGet('settings', 'clientProfile_' + clientId).catch(() => null);
+  const profile = opts?.profile || profileRec?.value || { name: opts?.clientName || existing?.clientName || 'Untitled' };
+  const clientName = String(profile?.name || opts?.clientName || existing?.clientName || 'Untitled').trim() || 'Untitled';
+  const tier = opts?.tier || existing?.tier || UNASSIGNED_TIER;
+  const tierFolderId = await driveClient.ensureTierFolder(tier);
+  const clientFolderId = await driveClient.ensureClientFolder(tierFolderId, clientName);
+  const allPols = await dbGetAll('policies').catch(() => []);
+  const clientPolicies = allPols.filter(p => p.clientId === clientId);
+  const metadata = await buildDriveSyncMetadata({ ...(existing || {}), clientId, tier }, {
+    tier,
+    lastReviewedAt: existing?.lastReviewedAt ?? null
+  });
+  const payload = buildDriveClientPayload(clientId, profile, clientPolicies, metadata);
+  const { fileId, headRevisionId } = await driveClient.createClientFile(clientFolderId, payload);
+  if (!isValidDriveFileId(fileId)) throw new Error('Drive did not return a file id for ' + clientName);
+  const syncedAt = new Date().toISOString();
+  const nextState = {
+    ...(existing || {}),
+    clientId,
+    fileId,
+    folderId: clientFolderId,
+    tierFolderId,
+    headRevisionId,
+    lastSyncedAt: syncedAt,
+    pendingWrite: false,
+    pendingSince: null,
+    pendingReason: null,
+    pendingError: null,
+    clientName,
+    tier,
+    familyGroup: profile?.familyGroup || existing?.familyGroup || '',
+    lastReviewedAt: existing?.lastReviewedAt ?? null,
+    localOnly: false
+  };
+  await PolicyDB.saveDriveState(nextState);
+  await PolicyDB.deleteSyncOutbox(syncOutboxId(clientId)).catch(() => {});
+  recordActivity(clientId, {
+    type: 'sync-saved',
+    label: 'Created Drive client file',
+    detail: opts?.reason || 'new-client-create',
+    level: 'success'
+  }).catch(() => {});
+  try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
+  _notifySyncStatus();
+  return true;
 }
 
 function syncTimeMs(value) {
@@ -11115,6 +11189,7 @@ async function writeDrivePayloadToLocal(clientId, parsed, headRevisionId, existi
 // Returns true on success, false on failure. Caller must set/clear _driveSyncInFlight.
 async function _performDriveSync(ds, clientProfile, policies, opts) {
   try {
+    if (!isValidDriveFileId(ds?.fileId)) throw new Error('Drive file is not ready for sync');
     const metadata = await buildDriveSyncMetadata(ds);
     const payload = buildDriveClientPayload(ds.clientId, clientProfile, policies, metadata);
     const newHead = await driveClient.updateClientFile(ds.fileId, payload, ds.headRevisionId);
@@ -11206,8 +11281,21 @@ async function driveSyncClientById(clientId, opts) {
   if (!clientId) return false;
   if (isDriveLocalOnly() || getDriveStatus() !== 'connected') return false;
   if (_driveSyncInFlight && !opts?.force) return false;
-  const ds = await PolicyDB.getDriveState(clientId).catch(() => null);
-  if (!ds || !ds.fileId) return false;
+  let ds = await PolicyDB.getDriveState(clientId).catch(() => null);
+  if (!ds) return false;
+  if (!isValidDriveFileId(ds.fileId)) {
+    _driveSyncInFlight = true;
+    _notifySyncStatus();
+    try {
+      return await ensureDriveFileForClient(clientId, opts || {});
+    } catch (err) {
+      await failDriveSyncPending(clientId, err, opts?.reason || 'create-drive-file');
+      return false;
+    } finally {
+      _driveSyncInFlight = false;
+      _notifySyncStatus();
+    }
+  }
   _driveSyncInFlight = true;
   _notifySyncStatus();
   try {
@@ -11246,17 +11334,14 @@ async function flushDriveSyncOutbox(opts) {
   let flushed = 0;
   for (const entry of pending) {
     const ds = await PolicyDB.getDriveState(entry.clientId).catch(() => null);
-    if (!ds || !ds.fileId) {
+    if (!ds) {
       await PolicyDB.deleteSyncOutbox(entry.id || syncOutboxId(entry.clientId)).catch(() => {});
-      if (ds && (ds.pendingWrite || ds.pendingError || ds.pendingSince || ds.pendingReason)) {
-        await PolicyDB.saveDriveState({
-          ...ds,
-          pendingWrite: false,
-          pendingSince: null,
-          pendingReason: null,
-          pendingError: null
-        }).catch(() => {});
-      }
+      continue;
+    }
+    if (!isValidDriveFileId(ds.fileId)) {
+      const ready = await ensureDriveFileForClient(entry.clientId, { reason: opts?.reason || entry.reason || 'outbox-create-file' })
+        .catch(async (err) => { await failDriveSyncPending(entry.clientId, err, entry.reason || opts?.reason || 'outbox-create-file'); return false; });
+      if (ready) flushed++;
       continue;
     }
     const ok = await driveSyncClientById(entry.clientId, { showToast: false, reason: opts?.reason || 'outbox-flush', force: opts?.force });
@@ -11341,6 +11426,10 @@ async function _runV22Migration(states, setProgress) {
   for (let i = 0; i < states.length; i++) {
     const ds = states[i];
     if (ds.folderId) continue; // already migrated (idempotent)
+    if (!isValidDriveFileId(ds.fileId)) {
+      console.warn('[Migration] Skipping client with no Drive file yet:', ds.clientName || ds.clientId);
+      continue;
+    }
     setProgress({ current: i + 1, total: states.length });
     // 1. Determine client name
     let name = ds.clientName;
@@ -11685,7 +11774,7 @@ async function refreshClientFromDrive(clientId, opts) {
     const states = await PolicyDB.getAllDriveStates();
     ds = states.find(s => s.clientId === clientId);
   } catch(_) { return false; }
-  if (!ds || !ds.fileId) return false;
+  if (!ds || !isValidDriveFileId(ds.fileId)) return false;
   const now = Date.now();
   if (!force && now - (_lastRefreshTimes.get(clientId) || 0) < 5000) return false;
   _lastRefreshTimes.set(clientId, now);
@@ -11744,7 +11833,7 @@ async function discoverDriveClients() {
     console.log('[Discovery] Found', tierFolders.length, 'tier folder(s)');
     const existingStates = await PolicyDB.getAllDriveStates().catch(() => []);
     const existingClientIds = new Set(existingStates.map(s => s.clientId));
-    const existingFileIds = new Set(existingStates.map(s => s.fileId).filter(Boolean));
+    const existingFileIds = new Set(existingStates.map(s => s.fileId).filter(isValidDriveFileId));
     for (const tier of tierFolders) {
       try {
         const clientQ = encodeURIComponent("'" + tier.id + "' in parents and mimeType='application/vnd.google-apps.folder' and trashed=false");
@@ -11853,6 +11942,10 @@ async function purgeOrphanClients(driveClientIds) {
   const localStates = await PolicyDB.getAllDriveStates().catch(() => []);
   let purged = 0;
   for (const ds of localStates) {
+    if (!isValidDriveFileId(ds?.fileId) || ds?.pendingWrite || ds?.localOnly) {
+      console.log('[Reconcile] Keep local/pending client:', ds?.clientName || ds?.clientId);
+      continue;
+    }
     if (driveClientIds.has(ds.clientId)) continue;
     console.log('[Reconcile] Orphan client:', ds.clientName || ds.clientId, '— not in Drive, removing local data');
     try {
@@ -12277,13 +12370,15 @@ const driveClient = {
   async ensureFolder() {
     // 1. Try the cached ID first
     const cached = driveLSGet(DRIVE_LS.folderId);
-    if (cached) {
+    if (cached && isValidDriveFileId(cached)) {
       try {
         const meta = await driveClient.getFileMetadata(cached);
         if (meta && meta.mimeType === 'application/vnd.google-apps.folder' && !meta.trashed) {
           return cached;
         }
       } catch (_) { /* fall through to search */ }
+    } else if (cached) {
+      driveLSDel(DRIVE_LS.folderId);
     }
     // 2. Search by name in My Drive root
     const q = encodeURIComponent("name='" + DRIVE_FOLDER_NAME + "' and mimeType='application/vnd.google-apps.folder' and 'root' in parents and trashed=false");
@@ -12291,6 +12386,7 @@ const driveClient = {
     const searchData = await searchResp.json();
     if (searchData.files && searchData.files.length > 0) {
       const id = searchData.files[0].id;
+      if (!isValidDriveFileId(id)) throw new Error('Drive returned an invalid PolicyLens folder id');
       driveLSSet(DRIVE_LS.folderId, id);
       console.log('[Drive] Found existing folder:', id);
       return id;
@@ -12306,6 +12402,7 @@ const driveClient = {
       }),
     });
     const createData = await createResp.json();
+    if (!createResp.ok || !isValidDriveFileId(createData.id)) throw new Error('Drive folder create failed: ' + (createData?.error?.message || createResp.status));
     driveLSSet(DRIVE_LS.folderId, createData.id);
     console.log('[Drive] ✓ Created PolicyLens folder:', createData.id);
     return createData.id;
@@ -12328,6 +12425,7 @@ const driveClient = {
   // discoverable by listFiles() and identifiable without parsing content.
   // Returns {fileId, headRevisionId}.
   async createClientFile(folderId, clientData) {
+    folderId = requireDriveFileId(folderId, 'creating a client folder file');
     const metadata = {
       name: 'PolicyLens \u2014 ' + (clientData.clientProfile?.name || 'Untitled') + '.json',
       parents: [folderId],
@@ -12353,7 +12451,10 @@ const driveClient = {
       headers: { 'Content-Type': 'multipart/related; boundary=' + boundary },
       body: multipart,
     });
-    const result = await resp.json();
+    const result = await resp.json().catch(() => ({}));
+    if (!resp.ok || !isValidDriveFileId(result.id)) {
+      throw new Error('Drive client file create failed: ' + (result?.error?.message || resp.status || 'missing file id'));
+    }
     console.log('[Drive] \u2713 Created client file:', result.id, 'for', clientData.clientId);
     return { fileId: result.id, headRevisionId: result.headRevisionId };
   },
@@ -12364,6 +12465,7 @@ const driveClient = {
   // resolution — Batch 1 console.warns, Batch 2 shows modal).
   // On success, returns new headRevisionId.
   async updateClientFile(fileId, clientData, expectedHeadRevisionId) {
+    fileId = requireDriveFileId(fileId, 'sync');
     // 1. Pre-write conflict check
     const meta = await driveClient.getFileMetadata(fileId);
     if (meta.headRevisionId !== expectedHeadRevisionId) {
@@ -12386,7 +12488,8 @@ const driveClient = {
       headers: { 'Content-Type': 'multipart/related; boundary=' + boundary },
       body: multipart,
     });
-    const result = await resp.json();
+    const result = await resp.json().catch(() => ({}));
+    if (!resp.ok || !result.headRevisionId) throw new Error('Drive update failed: ' + (result?.error?.message || resp.status || 'missing revision'));
     console.log('[Drive] \u2713 Updated client file:', fileId);
     return result.headRevisionId;
   },
@@ -12401,6 +12504,7 @@ const driveClient = {
     const resp = await _driveFetch('https://www.googleapis.com/drive/v3/files?q=' + q + '&fields=files(id,name)');
     const data = await resp.json();
     if (data.files && data.files.length > 0) {
+      if (!isValidDriveFileId(data.files[0].id)) throw new Error('Drive returned an invalid tier folder id');
       _tierFolderCache[tierName] = data.files[0].id;
       return data.files[0].id;
     }
@@ -12409,6 +12513,7 @@ const driveClient = {
       body: JSON.stringify({ name: tierName, mimeType: 'application/vnd.google-apps.folder', parents: [rootId] }),
     });
     const created = await createResp.json();
+    if (!createResp.ok || !isValidDriveFileId(created.id)) throw new Error('Drive tier folder create failed: ' + (created?.error?.message || createResp.status));
     _tierFolderCache[tierName] = created.id;
     console.log('[Drive] ✓ Created tier folder:', tierName, created.id);
     return created.id;
@@ -12421,6 +12526,7 @@ const driveClient = {
     const resp = await _driveFetch('https://www.googleapis.com/drive/v3/files?q=' + q + '&fields=files(id,name)');
     const data = await resp.json();
     if (data.files && data.files.length > 0) {
+      if (!isValidDriveFileId(data.files[0].id)) throw new Error('Drive returned an invalid client folder id');
       _clientFolderCache[cacheKey] = data.files[0].id;
       return data.files[0].id;
     }
@@ -12429,6 +12535,7 @@ const driveClient = {
       body: JSON.stringify({ name: clientName, mimeType: 'application/vnd.google-apps.folder', parents: [tierFolderId] }),
     });
     const created = await createResp.json();
+    if (!createResp.ok || !isValidDriveFileId(created.id)) throw new Error('Drive client folder create failed: ' + (created?.error?.message || createResp.status));
     _clientFolderCache[cacheKey] = created.id;
     console.log('[Drive] ✓ Created client folder:', clientName, created.id);
     return created.id;
@@ -12473,6 +12580,9 @@ const driveClient = {
   },
 
   async moveFile(fileId, newParentFolderId, oldParentFolderId) {
+    fileId = requireDriveFileId(fileId, 'moving a Drive file');
+    newParentFolderId = requireDriveFileId(newParentFolderId, 'moving a Drive file');
+    oldParentFolderId = requireDriveFileId(oldParentFolderId, 'moving a Drive file');
     const resp = await _driveFetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(fileId) + '?addParents=' + newParentFolderId + '&removeParents=' + oldParentFolderId + '&fields=id,parents', { method: 'PATCH' });
     return await resp.json();
   },
@@ -12500,18 +12610,24 @@ const driveClient = {
   // Phase A only uses this for the pingDriveAPI health check; Phase B
   // will use it to fetch client_singleton.json on startup.
   async getFile(fileId) {
+    fileId = requireDriveFileId(fileId, 'reading Drive content');
     const metaResp = await _driveFetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(fileId) + '?fields=id,name,headRevisionId,modifiedTime,appProperties');
-    const meta = await metaResp.json();
+    const meta = await metaResp.json().catch(() => ({}));
+    if (!metaResp.ok) throw new Error('Drive metadata read failed: ' + (meta?.error?.message || metaResp.status));
     const contentResp = await _driveFetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(fileId) + '?alt=media');
     const content = await contentResp.text();
+    if (!contentResp.ok) throw new Error('Drive content read failed: ' + (content || contentResp.status));
     return { meta, content };
   },
 
   // ── getFileMetadata: metadata only (used for headRevisionId checks in Phase B) ──
   async getFileMetadata(fileId) {
+    fileId = requireDriveFileId(fileId, 'reading Drive metadata');
     // v2.3.0-rc2c.5s: cache-bust + no-cache header to prevent stale headRevisionId from HTTP cache
     const resp = await _driveFetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(fileId) + '?fields=id,name,headRevisionId,modifiedTime,mimeType,trashed,appProperties&_ts=' + Date.now(), { headers: { 'Cache-Control': 'no-cache' } });
-    return await resp.json();
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error('Drive metadata read failed: ' + (data?.error?.message || resp.status));
+    return data;
   },
 
   // ── pingDriveAPI: small no-op call to verify token still works ──
@@ -13477,7 +13593,7 @@ function App() {
           return;
         }
         const ds = await PolicyDB.getDriveState(activeClientId).catch(() => null);
-        if (!ds || !ds.fileId) return;
+        if (!ds || !isValidDriveFileId(ds.fileId)) return;
         if (ds.pendingWrite) {
           console.log('[AutoPull] Skipped - drive_state has pendingWrite for', activeClientId);
           return;
@@ -14095,7 +14211,7 @@ function App() {
       clientName: nextProfile.name || displayName || 'Untitled',
       tier: existingDs?.tier || UNASSIGNED_TIER,
       lastReviewedAt: existingDs?.lastReviewedAt || null,
-      localOnly: !existingDs?.fileId
+      localOnly: !isValidDriveFileId(existingDs?.fileId)
     };
     await PolicyDB.saveDriveState(nextDriveState).catch(() => {});
     await dbPut('settings', { key: 'clientProfile_' + clientId, value: nextProfile }).catch(() => {});
@@ -14143,7 +14259,7 @@ function App() {
       if (!cid) return;
       let ds;
       try { const states = await PolicyDB.getAllDriveStates(); ds = states.find(s => s.clientId === cid); } catch(_) { return; }
-      if (!ds) return;
+      if (!ds || !isValidDriveFileId(ds.fileId)) return;
       if (Date.now() - _driveLastFocusRefreshAt < 15000) return;
       _driveLastFocusRefreshAt = Date.now();
       try {
@@ -14343,17 +14459,8 @@ function App() {
         for (const entry of (outboxEntries || [])) {
           if (!entry || entry.type !== 'drive-client') continue;
           const ds = stateByClient.get(entry.clientId);
-          if (!ds || !ds.fileId) {
+          if (!ds) {
             await PolicyDB.deleteSyncOutbox(entry.id || syncOutboxId(entry.clientId)).catch(() => {});
-            if (ds && (ds.pendingWrite || ds.pendingError || ds.pendingSince || ds.pendingReason)) {
-              await PolicyDB.saveDriveState({
-                ...ds,
-                pendingWrite: false,
-                pendingSince: null,
-                pendingReason: null,
-                pendingError: null
-              }).catch(() => {});
-            }
             clearedOutbox++;
           }
         }
@@ -14425,7 +14532,7 @@ function App() {
       const hasData = policies.length > 0 || (clientProfile?.name && clientProfile.name.trim() !== '');
       if (!hasData) return;
       const states = await PolicyDB.getAllDriveStates().catch(() => []);
-      if (states && states.some(ds => ds?.fileId)) return;
+      if (states && states.some(ds => isValidDriveFileId(ds?.fileId))) return;
       setShowDriveMigration(true);
     };
     checkMigration();
@@ -15385,7 +15492,7 @@ function App() {
           added++;
         } else if (choice === 'delete') {
           if (f.folderId) { await driveClient.trashFolder(f.folderId); }
-          else if (f.fileId) { await _driveFetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(f.fileId), { method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify({trashed:true}) }); }
+          else if (isValidDriveFileId(f.fileId)) { await _driveFetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(f.fileId), { method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify({trashed:true}) }); }
           console.log('[Discovery] Trashed:', f.clientName, f.folderId || f.fileId);
           deleted++;
         }
@@ -15572,7 +15679,7 @@ function App() {
           try {
             const existingLocalId = activeClientIdRef.current || activeClientId;
             const existingLocalDs = existingLocalId ? await PolicyDB.getDriveState(existingLocalId).catch(() => null) : null;
-            const clientId = (existingLocalId && !existingLocalDs?.fileId) ? existingLocalId : crypto.randomUUID();
+            const clientId = (existingLocalId && !isValidDriveFileId(existingLocalDs?.fileId)) ? existingLocalId : crypto.randomUUID();
             const clientName_ = clientProfile?.name || 'Untitled';
             const payload = buildDriveClientPayload(clientId, clientProfile, policies);
             // v2.2.0-rc1: Use nested folder structure
@@ -17610,7 +17717,7 @@ function ClientsTab() {
 }
 
 // ── v2.2.0-rc1: New Client modal ──
-function NewClientModal({ allStates, allPolicies, onClose, initialName, initialFamilyGroup, onCreated, onExistingSelected, stayOnCurrent }) {
+function NewClientModal({ allStates, allPolicies, onClose, initialName, initialFamilyGroup, onCreated, onExistingSelected, stayOnCurrent, routePolicies }) {
   const { switchClient, setTab } = useContext(AppCtx);
   const [name, setName] = useState(initialName || '');
   const [matches, setMatches] = useState([]);
@@ -17622,7 +17729,7 @@ function NewClientModal({ allStates, allPolicies, onClose, initialName, initialF
       if (!name.trim()) { setMatches([]); return; }
       const q = name.toLowerCase().trim();
       const qTokens = _tokenSort(name);
-      const scored = allStates.map(ds => {
+      const scored = (allStates || []).map(ds => {
         const n = (ds.clientName || '').toLowerCase().trim();
         const lev = _levenshtein(q, n);
         const tokenMatch = _tokenSort(ds.clientName || '') === qTokens;
@@ -17649,27 +17756,42 @@ function NewClientModal({ allStates, allPolicies, onClose, initialName, initialF
     try {
       const clientId = crypto.randomUUID();
       const trimName = name.trim();
-      const rootFolderId = await driveClient.ensureFolder();
-      const tierFolderId = await driveClient.ensureTierFolder(UNASSIGNED_TIER);
-      const clientFolderId = await driveClient.ensureClientFolder(tierFolderId, trimName);
-      const profile = {name:trimName,nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[],familyGroup:initialFamilyGroup||''};
-      const payload = buildDriveClientPayload(clientId, profile, []);
-      const { fileId, headRevisionId } = await driveClient.createClientFile(clientFolderId, payload);
+      const familyGroup = initialFamilyGroup || '';
+      const now = new Date().toISOString();
+      const profile = stampProfileSyncMeta({name:trimName,nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[],familyGroup}, 'client-create');
       await PolicyDB.saveDriveState({
-        clientId, fileId, folderId: clientFolderId, tierFolderId,
-        headRevisionId, lastSyncedAt: new Date().toISOString(), pendingWrite: false,
-        clientName: trimName, tier: UNASSIGNED_TIER, familyGroup:initialFamilyGroup||'', lastReviewedAt: null,
+        clientId,
+        fileId: null,
+        folderId: null,
+        tierFolderId: null,
+        headRevisionId: null,
+        lastSyncedAt: null,
+        pendingWrite: true,
+        pendingSince: now,
+        pendingReason: 'new-client-create',
+        pendingError: null,
+        clientName: trimName,
+        tier: UNASSIGNED_TIER,
+        familyGroup,
+        lastReviewedAt: null,
+        localOnly: true,
       });
       await dbPut('settings', { key: 'clientProfile_' + clientId, value: profile });
       await dbPut('settings', { key: 'clientName_' + clientId, value: trimName });
+      if (typeof onCreated === 'function') await onCreated(clientId, profile);
+      await markDriveSyncPending(clientId, 'new-client-create').catch(() => {});
       if (!stayOnCurrent) {
         await switchClient(clientId);
         setTab('profile');
       }
       try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
-      if (typeof onCreated === 'function') await onCreated(clientId, profile);
       onClose({created:true, clientId});
-      try { toast('Created client: ' + trimName, 'success'); } catch(_) {}
+      try { toast('Created client: ' + trimName + ((routePolicies || []).length ? ' and routed ' + routePolicies.length + ' polic' + (routePolicies.length===1?'y':'ies') : ''), 'success'); } catch(_) {}
+      ensureDriveFileForClient(clientId, { clientName: trimName, profile, tier: UNASSIGNED_TIER, reason: 'new-client-create' })
+        .catch(async (err) => {
+          await failDriveSyncPending(clientId, err, 'new-client-create').catch(() => {});
+          try { toast('Client saved locally. Drive upload will retry.', 'warning', 3500); } catch(_) {}
+        });
     } catch (err) {
       try { toast('Failed: ' + (err.message || err), 'error'); } catch(_) {}
     } finally { setCreating(false); }
@@ -17712,6 +17834,18 @@ function NewClientModal({ allStates, allPolicies, onClose, initialName, initialF
                 </div>
               );
             })}
+          </div>
+        )}
+        {(routePolicies || []).length > 0 && (
+          <div style={{marginTop:12,padding:'10px 12px',background:'rgba(91,168,160,.06)',border:'1px solid rgba(91,168,160,.18)',borderRadius:8}}>
+            <div style={{fontSize:10,fontWeight:800,color:'var(--teal)',textTransform:'uppercase',letterSpacing:'.4px',marginBottom:6}}>Policies routed to this client now</div>
+            {(routePolicies || []).slice(0, 4).map((p, i) => (
+              <div key={p.id || p.policyNumber || i} style={{fontSize:11,color:'var(--text2)',padding:'4px 0',borderTop:i?'1px solid rgba(255,255,255,.05)':'none'}}>
+                <strong>{p.productName || p.policyName || p.subType || 'Policy'}</strong>
+                <span style={{color:'var(--text3)'}}> {p.insurer ? '- ' + p.insurer : ''}{p.policyNumber ? ' - ' + p.policyNumber : ''}</span>
+              </div>
+            ))}
+            {(routePolicies || []).length > 4 && <div style={{fontSize:10,color:'var(--text3)',marginTop:4}}>+ {(routePolicies || []).length - 4} more</div>}
           </div>
         )}
         <div style={{display:'flex',gap:8,marginTop:12,justifyContent:'flex-end'}}>
@@ -20848,12 +20982,31 @@ function PolicyOwnerRoutingModal({ open, detected, currentClientName, allDriveSt
   const modalBox = {background:'#1a2332',borderRadius:16,border:'1px solid rgba(201,169,110,.2)',maxWidth:760,width:'100%',padding:24,boxShadow:'0 20px 60px rgba(0,0,0,.5)',maxHeight:'88vh',overflowY:'auto'};
   const allClients = (allDriveStates || []).filter(ds => ds?.clientId && ds.clientName);
   const entries = Array.from(detected.entries());
-  const routedSummary = entries.reduce((acc, [key, info]) => {
-    const route = routes[key] || 'current';
-    const label = route === 'current' ? (currentClientName || 'Current client') : route === 'new' ? info.displayName : (allClients.find(ds => ds.clientId === route.slice(9))?.clientName || 'Existing client');
-    acc[label] = (acc[label] || 0) + info.policyIndices.length;
-    return acc;
-  }, {});
+  const routeLabelFor = (route, info) => (
+    route === 'current'
+      ? (currentClientName || 'Current client')
+      : route === 'new'
+        ? info.displayName
+        : (allClients.find(ds => ds.clientId === route.slice(9))?.clientName || 'Existing client')
+  );
+  const routeKindFor = (route) => (
+    route === 'new'
+      ? 'New owner/client'
+      : route?.startsWith('existing:')
+        ? 'Existing client'
+        : 'Current client'
+  );
+  const routedNodeMap = new Map();
+  entries.forEach(([key, info]) => {
+    const route = routes[key] || (info.sourceField === 'lifeInsured' ? 'current' : (info.suggestedMatch ? 'existing:' + info.suggestedMatch.clientId : 'new'));
+    const label = routeLabelFor(route, info);
+    const mapKey = route + ':' + label;
+    if (!routedNodeMap.has(mapKey)) routedNodeMap.set(mapKey, { label, kind: routeKindFor(route), count: 0, policies: [], route });
+    const node = routedNodeMap.get(mapKey);
+    node.count += info.policyIndices.length;
+    node.policies.push(...(info.samplePolicies || []));
+  });
+  const routedNodes = Array.from(routedNodeMap.values());
   return (
     <div onClick={e => { if (e.target === e.currentTarget && !busy) onClose(); }} style={modalBg}>
       <div style={modalBox}>
@@ -20868,14 +21021,30 @@ function PolicyOwnerRoutingModal({ open, detected, currentClientName, allDriveSt
               placeholder="e.g. Tan Family Review"
               style={{width:'100%',padding:'8px 10px',background:'var(--bg2)',border:'1px solid var(--border2)',borderRadius:6,color:'var(--text)',fontSize:12,boxSizing:'border-box'}} />
           </div>
-          <div style={{padding:'9px 10px',background:'rgba(91,168,160,.06)',border:'1px solid rgba(91,168,160,.18)',borderRadius:8}}>
-            <div style={{fontSize:10,fontWeight:700,color:'var(--teal)',textTransform:'uppercase',letterSpacing:'.4px',marginBottom:4}}>Routing tree</div>
-            <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
-              {Object.entries(routedSummary).map(([name,count]) => (
-                <span key={name} style={{fontSize:10,padding:'3px 8px',borderRadius:5,background:'var(--bg2)',border:'1px solid var(--border)',color:'var(--text2)'}}>
-                  {name}: {count}
-                </span>
-              ))}
+          <div style={{padding:'10px 12px',background:'rgba(91,168,160,.06)',border:'1px solid rgba(91,168,160,.18)',borderRadius:8}}>
+            <div style={{fontSize:10,fontWeight:700,color:'var(--teal)',textTransform:'uppercase',letterSpacing:'.4px',marginBottom:8}}>Live family tree</div>
+            <div style={{display:'flex',flexDirection:'column',alignItems:'center'}}>
+              <div style={{maxWidth:'100%',padding:'6px 12px',borderRadius:8,background:'rgba(212,169,106,.12)',border:'1px solid rgba(212,169,106,.35)',color:'var(--gold)',fontSize:12,fontWeight:800,whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>
+                {familyGroupName || 'Family Review'}
+              </div>
+              <div style={{width:1,height:14,background:'rgba(91,168,160,.45)'}} />
+              <div style={{width:'100%',borderTop:'1px solid rgba(91,168,160,.28)',paddingTop:12,display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(145px,1fr))',gap:10}}>
+                {routedNodes.map(node => (
+                  <div key={node.route + node.label} style={{position:'relative',padding:'10px',background:'var(--bg2)',border:'1px solid '+(node.route==='new'?'rgba(212,169,106,.4)':'rgba(91,168,160,.22)'),borderRadius:8,minWidth:0}}>
+                    <div style={{position:'absolute',top:-13,left:'50%',height:13,width:1,background:'rgba(91,168,160,.35)'}} />
+                    <div style={{fontSize:11,fontWeight:800,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{node.label}</div>
+                    <div style={{fontSize:9,color:'var(--text3)',marginTop:2}}>{node.kind} - {node.count} polic{node.count===1?'y':'ies'}</div>
+                    <div style={{marginTop:6,display:'grid',gap:4}}>
+                      {(node.policies || []).slice(0,2).map((p,i) => (
+                        <div key={(p.id || p.policyNumber || node.label) + i} style={{fontSize:9,color:'var(--text2)',padding:'3px 5px',borderRadius:5,background:'rgba(255,255,255,.035)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>
+                          {p.productName || p.policyName || p.subType || 'Policy'}
+                        </div>
+                      ))}
+                      {node.count > 2 && <div style={{fontSize:9,color:'var(--gold)'}}>+ {node.count - 2} more</div>}
+                    </div>
+                  </div>
+                ))}
+              </div>
             </div>
           </div>
         </div>
@@ -31011,6 +31180,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
       {newClientModalOpen && <NewClientModal allStates={newClientData.allStates} allPolicies={newClientData.allPolicies}
         initialName={newClientData.initialName}
         initialFamilyGroup={newClientData.initialFamilyGroup}
+        routePolicies={newClientData.routePolicies || []}
         onCreated={async (clientId) => {
           const pols = newClientData.routePolicies || [];
           if (pols && pols.length) {
@@ -31306,14 +31476,39 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
   const formUploadRef = useRef(null);
 
   // Build life insured dropdown from profile
-  const {clientProfile:_cp, saveProfile:_sp} = useContext(AppCtx);
+  const {clientProfile:_cp, clientName:_clientName, saveProfile:_sp} = useContext(AppCtx);
+  const [clientPickerNames, setClientPickerNames] = useState([]);
+  useEffect(() => {
+    let cancelled = false;
+    const loadClientPickerNames = async () => {
+      const states = await PolicyDB.getAllDriveStates().catch(() => []);
+      if (cancelled) return;
+      setClientPickerNames(states.map(ds => ds?.clientName).filter(Boolean));
+    };
+    loadClientPickerNames();
+    window.addEventListener('policylens-clients-changed', loadClientPickerNames);
+    return () => {
+      cancelled = true;
+      window.removeEventListener('policylens-clients-changed', loadClientPickerNames);
+    };
+  }, []);
   const clientAge = useMemo(() => getProfileAge(_cp) ?? 35, [_cp]);
   const profileNames = useMemo(() => {
     const names = [];
-    if(_cp?.name) names.push(_cp.name);
-    (_cp?.dependants||[]).forEach(d=>{if(d.name)names.push(d.name + (d.relationship?' ('+d.relationship+')':''))});
+    const seen = new Set();
+    const add = (value) => {
+      const clean = String(value || '').trim();
+      if (!clean || clean === '__other') return;
+      const key = clean.toLowerCase().replace(/\s+/g, ' ');
+      if (seen.has(key)) return;
+      seen.add(key);
+      names.push(clean);
+    };
+    add(_cp?.name);
+    add(_clientName);
+    (_cp?.dependants||[]).forEach(d=>add(d.name));
     return names;
-  }, [_cp]);
+  }, [_cp, _clientName]);
 
   const DEFAULT_RIDERS = {
     'Term Life':       [{type:'death',riderName:'Death & Terminal Illness',sa:'',premium:'',expiryAge:'65',bundled:true}],
@@ -31395,6 +31590,26 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
     if(!init.annuityPayoutMode) init.annuityPayoutMode = 'annual';
     return init;
   });
+
+  const identityNames = useMemo(() => {
+    const names = [];
+    const seen = new Set();
+    const add = (value) => {
+      const clean = String(value || '').trim();
+      if (!clean || clean === '__other') return;
+      const key = clean.toLowerCase().replace(/\s+/g, ' ');
+      if (seen.has(key)) return;
+      seen.add(key);
+      names.push(clean);
+    };
+    profileNames.forEach(add);
+    clientPickerNames.forEach(add);
+    add(form.policyOwner);
+    add(form.policyOwnerOther);
+    add(form.lifeInsured);
+    add(form.lifeInsuredOther);
+    return names;
+  }, [profileNames, clientPickerNames, form.policyOwner, form.policyOwnerOther, form.lifeInsured, form.lifeInsuredOther]);
 
   const set = (k,v) => setForm(f=>{
     const nf={...f,[k]:v};
@@ -31798,7 +32013,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
           <div className="field"><label>Policy Owner</label>
             <select value={form.policyOwner||''} onChange={e=>set('policyOwner',e.target.value)}>
               <option value="">— Select from profile —</option>
-              {profileNames.map(n=><option key={n} value={n}>{n}</option>)}
+              {identityNames.map(n=><option key={n} value={n}>{n}</option>)}
               <option value="__other">Other (type below)</option>
             </select>
             {form.policyOwner==='__other' && <input value={form.policyOwnerOther||''} onChange={e=>set('policyOwnerOther',e.target.value)} placeholder="Owner name" style={{marginTop:4}} />}
@@ -31806,7 +32021,7 @@ function PolicyFormModal({policy,onSave,onClose,repo,onSaveRepo,onDraftChange,on
           <div className="field"><label>Life Assured</label>
             <select value={form.lifeInsured||''} onChange={e=>set('lifeInsured',e.target.value)}>
               <option value="">— Select from profile —</option>
-              {profileNames.map(n=><option key={n} value={n}>{n}</option>)}
+              {identityNames.map(n=><option key={n} value={n}>{n}</option>)}
               <option value="__other">Other (type below)</option>
             </select>
             {form.lifeInsured==='__other' && <input value={form.lifeInsuredOther||''} onChange={e=>set('lifeInsuredOther',e.target.value)} placeholder="Name" style={{marginTop:4}} />}
