@@ -56,7 +56,13 @@ Document AI API User
 
 ## 3. Connect PolicyLens
 
-After deploying the Worker, copy its URL, for example:
+The live PolicyLens app defaults to this Worker URL:
+
+```text
+https://policylens-document-ai.chungakwanc.workers.dev
+```
+
+If you deploy a different Worker for testing, copy its URL, for example:
 
 ```text
 https://policylens-document-ai.<your-subdomain>.workers.dev
@@ -68,7 +74,8 @@ Open PolicyLens:
 Settings -> AI Document Extraction -> Google Document AI Proxy
 ```
 
-Paste the Worker URL and click Save, then Test.
+Paste the alternate Worker URL and click Save, then Test. Use Reset to return
+to the built-in Worker URL.
 
 ## 4. Runtime Flow
 

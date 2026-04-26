@@ -658,11 +658,31 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2d.6';
+const APP_VERSION = 'v2.3.0-rc2d.7';
 const APP_VERSION_DATE = '2026-04-26';
-const APP_VERSION_NAME = 'Document AI first-pass parsing';
+const APP_VERSION_NAME = 'Embedded Document AI proxy';
+const DEFAULT_DOCUMENT_AI_PROXY_URL = 'https://policylens-document-ai.chungakwanc.workers.dev';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2d.7',
+    date: '2026-04-26',
+    name: 'Embedded Document AI proxy',
+    sections: [
+      {
+        heading: 'AI scan',
+        items: [
+          'PolicyLens now ships with the Document AI Worker URL preconfigured, so signed-in users can use the Google Document AI first pass without manually pasting a proxy URL.'
+        ]
+      },
+      {
+        heading: 'Settings',
+        items: [
+          'The Document AI proxy field remains available as an override and test control; resetting it returns the app to the built-in Worker URL.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2d.6',
     date: '2026-04-26',
@@ -3268,11 +3288,11 @@ async function pdfToImages(pdfDoc, maxPages=12) {
 // CLEAN even if the FC never actually reviewed anything. Bumping the version
 // forces a re-extraction next time those same files are uploaded, and the
 // one-time cleanup in App init purges the stale entries from IndexedDB.
-const EXTRACT_PIPELINE_VERSION = 'v14.7-2026-04-26-document-ai-first-pass';
+const EXTRACT_PIPELINE_VERSION = 'v14.8-2026-04-26-document-ai-default-proxy';
 
 // ── v15: PROMPT VERSIONING ──
 const EXTRACT_PROMPT_VERSION = 'v14.2-2026-04-26-sequential-images';
-const OCR_PROMPT_VERSION = 'v16-2026-04-26-document-ai';
+const OCR_PROMPT_VERSION = 'v17-2026-04-26-document-ai-default-proxy';
 
 // ── v2.0.9: MODULE-SCOPE EXTRACT_PROMPT ──
 // The EXTRACT_PROMPT template literal (~443 lines of insurance extraction
@@ -6056,9 +6076,9 @@ async function getDocumentAIEndpoint() {
     const uid = window._user?.id || '';
     const rec = (await dbGet('settings','documentAiEndpoint_'+uid).catch(()=>null))
       || (await dbGet('settings','documentAiEndpoint').catch(()=>null));
-    return String(rec?.value || '').trim().replace(/\/+$/, '');
+    return String(rec?.value || DEFAULT_DOCUMENT_AI_PROXY_URL).trim().replace(/\/+$/, '') || DEFAULT_DOCUMENT_AI_PROXY_URL;
   } catch(_) {
-    return '';
+    return DEFAULT_DOCUMENT_AI_PROXY_URL;
   }
 }
 
@@ -35927,7 +35947,7 @@ function Settings() {
   const {apiKey,saveApiKey,clientName,saveClientName,policies,savePolicy,deletePolicy,houseDefaults,saveHouseDefaults,tierDefinitions,saveTierDefinitions,setShowChangelog,isAdmin} = useContext(AppCtx);
   const [geminiKey, setGeminiKey] = useState('');
   const [anthropicKey, setAnthropicKey] = useState('');
-  const [documentAiEndpoint, setDocumentAiEndpoint] = useState('');
+  const [documentAiEndpoint, setDocumentAiEndpoint] = useState(DEFAULT_DOCUMENT_AI_PROXY_URL);
   const [syncApiKeysToCloud, setSyncApiKeysToCloud] = useState(false);
   const [name, setName] = useState(clientName);
   const loadRef = useRef(null);
@@ -35945,7 +35965,7 @@ function Settings() {
       const de = await dbGet('settings','documentAiEndpoint_'+uid).catch(()=>null) || await dbGet('settings','documentAiEndpoint').catch(()=>null);
       if(gk?.value) setGeminiKey(gk.value);
       if(ck?.value) setAnthropicKey(ck.value);
-      if(de?.value) setDocumentAiEndpoint(de.value);
+      setDocumentAiEndpoint(String(de?.value || DEFAULT_DOCUMENT_AI_PROXY_URL).trim().replace(/\/+$/, '') || DEFAULT_DOCUMENT_AI_PROXY_URL);
       const syncKeys = await dbGet('settings','syncApiKeysToCloud').catch(()=>null);
       setSyncApiKeysToCloud(syncKeys?.value === true);
       // Load advisor details
@@ -36132,25 +36152,25 @@ function Settings() {
         {/* Google Document AI Proxy */}
         <div style={{padding:10,background:'var(--bg3)',borderRadius:8,border:'1px solid var(--border)',marginTop:10}}>
           <div className="field" style={{marginBottom:6}}>
-            <label style={{color:'#34a853',fontWeight:600}}>Google Document AI Proxy <span style={{fontWeight:400,color:'var(--text3)'}}>(optional first-pass OCR/layout)</span></label>
+            <label style={{color:'#34a853',fontWeight:600}}>Google Document AI Proxy <span style={{fontWeight:400,color:'var(--text3)'}}>(built-in first-pass OCR/layout)</span></label>
             <div style={{display:'flex',gap:6,alignItems:'center'}}>
-              <input type="url" value={documentAiEndpoint} onChange={e=>setDocumentAiEndpoint(e.target.value)} placeholder="https://policylens-document-ai.yourname.workers.dev" style={{flex:1,fontFamily:'monospace',fontSize:11}} autoComplete="off" spellCheck="false" />
+              <input type="url" value={documentAiEndpoint} onChange={e=>setDocumentAiEndpoint(e.target.value)} placeholder={DEFAULT_DOCUMENT_AI_PROXY_URL} style={{flex:1,fontFamily:'monospace',fontSize:11}} autoComplete="off" spellCheck="false" />
               {documentAiEndpoint && <span style={{fontSize:10,color:'var(--text3)',flexShrink:0}}>{documentAiEndpoint.length}ch</span>}
             </div>
           </div>
           <div style={{display:'flex',gap:6,flexWrap:'wrap'}}>
             <button className="btn-primary btn-sm" onClick={async()=>{
-              const url=documentAiEndpoint.trim().replace(/\/+$/,'');
+              const url=(documentAiEndpoint||'').trim().replace(/\/+$/,'');
               if(url && !/^https:\/\/.+/i.test(url)){toast('Use the HTTPS Worker URL for Document AI','warning');return;}
+              const effectiveUrl=url||DEFAULT_DOCUMENT_AI_PROXY_URL;
               const uid3=window._user?.id||'';
               await dbPut('settings',{key:'documentAiEndpoint_'+uid3,value:url});
               await dbPut('settings',{key:'documentAiEndpoint',value:url});
-              setDocumentAiEndpoint(url);
-              toast(url?'Document AI proxy saved':'Document AI proxy cleared','success');
+              setDocumentAiEndpoint(effectiveUrl);
+              toast(url?'Document AI proxy override saved':'Document AI proxy reset to built-in default','success');
             }}>Save</button>
             <button className="btn-secondary btn-sm" onClick={async()=>{
-              const url=(documentAiEndpoint||'').trim().replace(/\/+$/,'');
-              if(!url){toast('Paste your Document AI Worker URL first','warning');return;}
+              const url=((documentAiEndpoint||'').trim().replace(/\/+$/,'')||DEFAULT_DOCUMENT_AI_PROXY_URL);
               try{
                 const r=await fetchWithTimeout(url,{method:'GET'},15000);
                 const d=await r.json().catch(()=>({}));
@@ -36158,15 +36178,15 @@ function Settings() {
                 toast(d.configured?'Document AI proxy connected':'Proxy reachable but missing Worker env/secrets','info',4500);
               }catch(e){toast('Document AI proxy test failed: '+e.message,'error',5000);}
             }}>Test</button>
-            {documentAiEndpoint && <button className="btn-secondary btn-sm" onClick={async()=>{
+            {documentAiEndpoint !== DEFAULT_DOCUMENT_AI_PROXY_URL && <button className="btn-secondary btn-sm" onClick={async()=>{
               const uid4=window._user?.id||'';
               await dbPut('settings',{key:'documentAiEndpoint_'+uid4,value:''});
               await dbPut('settings',{key:'documentAiEndpoint',value:''});
-              setDocumentAiEndpoint('');
-              toast('Document AI proxy cleared','info');
-            }}>Clear</button>}
+              setDocumentAiEndpoint(DEFAULT_DOCUMENT_AI_PROXY_URL);
+              toast('Document AI proxy reset to built-in default','info');
+            }}>Reset</button>}
           </div>
-          <p style={{fontSize:10,color:'var(--text3)',marginTop:4}}>Private service-account JSON stays in the Worker, never in this browser app. Supported path: Document AI Form Parser -> Gemini structured extraction -> Claude fallback.</p>
+          <p style={{fontSize:10,color:'var(--text3)',marginTop:4}}>Private service-account JSON stays in the Worker, never in this browser app. Leave this as the built-in URL unless you are testing another Worker. Supported path: Document AI Form Parser -> Gemini structured extraction -> Claude fallback.</p>
         </div>
 
         {/* Pipeline status */}
