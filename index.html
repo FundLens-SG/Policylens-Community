@@ -664,12 +664,34 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2d.18';
+const APP_VERSION = 'v2.3.0-rc2d.19';
 const APP_VERSION_DATE = '2026-04-27';
-const APP_VERSION_NAME = 'Family routing dedupe and evidence hotfix';
+const APP_VERSION_NAME = 'Family duplicate cleanup and evidence review hotfix';
 const DEFAULT_DOCUMENT_AI_PROXY_URL = 'https://policylens-document-ai.chungakwanc.workers.dev';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2d.19',
+    date: '2026-04-27',
+    name: 'Family duplicate cleanup and evidence review hotfix',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Existing same-owner duplicate policies are now compacted safely on client load while same-product policies for different family members remain separate.',
+          'Routing policies to a newly-created or existing family client no longer pollutes the active client policy list; Clients view still refreshes immediately from IndexedDB.',
+          'Extraction confidence and evidence metadata are preserved when scanned policies are accepted instead of being stripped before save.'
+        ]
+      },
+      {
+        heading: 'AI extraction',
+        items: [
+          'The structured extraction schema now accepts field-level evidence, extraction notes and page/source hints, then normalizes them into PolicyLens field evidence.',
+          'Known-policy matching during scan review now uses owner/life-assured-aware identity checks before marking a row as a duplicate.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2d.18',
     date: '2026-04-27',
@@ -2875,7 +2897,44 @@ function policiesLikelySamePolicy(a, b) {
   const bAmounts = new Set(policyAmountAnchors(b));
   let amountMatch = false;
   aAmounts.forEach(x => { if (bAmounts.has(x)) amountMatch = true; });
-  return !!(amountMatch || (personA && personB));
+  const sameFingerprint = !!(
+    a?._pageFingerprint?.textHash &&
+    b?._pageFingerprint?.textHash &&
+    a._pageFingerprint.textHash === b._pageFingerprint.textHash
+  );
+  return !!(amountMatch || sameFingerprint);
+}
+
+function policyAmountAnchorMatchCount(a, b) {
+  const aAmounts = new Set(policyAmountAnchors(a));
+  const bAmounts = new Set(policyAmountAnchors(b));
+  let matches = 0;
+  aAmounts.forEach(x => { if (bAmounts.has(x)) matches++; });
+  return matches;
+}
+
+function policiesSafeAutoDuplicate(a, b) {
+  if (!policiesLikelySamePolicy(a, b)) return false;
+  const an = policyNumberIdentity(a);
+  const bn = policyNumberIdentity(b);
+  if (an && bn) return true;
+  const ai = policyInsurerIdentity(a);
+  const bi = policyInsurerIdentity(b);
+  const ap = policyProductIdentity(a);
+  const bp = policyProductIdentity(b);
+  if (!ai || !bi || ai !== bi || !ap || !bp) return false;
+  const productMatch = ap === bp || ap.includes(bp) || bp.includes(ap);
+  if (!productMatch) return false;
+  const personA = policyPersonKey(a);
+  const personB = policyPersonKey(b);
+  if (personA && personB && !personNameEquivalent(personA, personB)) return false;
+  const amountMatches = policyAmountAnchorMatchCount(a, b);
+  const sameFingerprint = !!(
+    a?._pageFingerprint?.textHash &&
+    b?._pageFingerprint?.textHash &&
+    a._pageFingerprint.textHash === b._pageFingerprint.textHash
+  );
+  return sameFingerprint || amountMatches >= 2;
 }
 
 function mergePolicyRecords(base, next) {
@@ -2928,6 +2987,28 @@ function mergePolicyRecords(base, next) {
   return merged;
 }
 
+const EXTRACT_FIELD_REMAP = { premiumAmount: 'annualPremium', valueText: 'value' };
+
+function mergeConfidenceArrayIntoMaps(policy) {
+  const next = policy || {};
+  const aiConfidence = Array.isArray(next._confidence) ? next._confidence : [];
+  if (aiConfidence.length === 0) return next;
+  const confMap = { ...(next._extractConfidence || {}) };
+  const reasonMap = { ...(next._extractConfidenceReasons || {}) };
+  for (const entry of aiConfidence) {
+    if (!entry || !entry.field || !entry.level) continue;
+    const lvl = entry.level === 'low' || entry.level === 'medium' || entry.level === 'high' ? entry.level : null;
+    if (!lvl) continue;
+    const targetField = EXTRACT_FIELD_REMAP[entry.field] || entry.field;
+    if (lvl !== 'high') confMap[targetField] = lvl;
+    if (entry.reason) reasonMap[targetField] = entry.reason;
+  }
+  next._extractConfidence = confMap;
+  if (Object.keys(reasonMap).length > 0) next._extractConfidenceReasons = reasonMap;
+  delete next._confidence;
+  return next;
+}
+
 function classifyPolicyOwnership(policy, currentClientName) {
   const owner = normalizePersonNameKey(policy?.policyOwner);
   const life = normalizePersonNameKey(policy?.lifeInsured);
@@ -2951,15 +3032,32 @@ function buildPolicyPageFingerprint(policy, meta = {}) {
     owner: policy?.policyOwner || '',
     lifeInsured: policy?.lifeInsured || '',
     productName: policy?.productName || policy?.policyName || '',
-    page: meta.page || policy?._sourcePage || null,
-    documentTitle: policy?._documentTitle || '',
+    page: meta.page || policy?._sourcePage || policy?.sourcePage || policy?.pageRange || null,
+    documentTitle: policy?._documentTitle || policy?.documentTitle || '',
+    tableType: policy?.tableType || '',
     textHash: normalizeCompactKey([policy?.insurer, policy?.policyNumber, policy?.policyOwner, policy?.lifeInsured, policy?.productName, policy?.notes].filter(Boolean).join('|')).slice(0, 80)
   };
 }
 
 function ensurePolicyFieldEvidence(policy, meta = {}) {
-  const next = {...(policy || {})};
+  const next = mergeConfidenceArrayIntoMaps({...(policy || {})});
   const evidence = {...(next._fieldEvidence || {})};
+  const evidenceRows = Array.isArray(next.fieldEvidence) ? next.fieldEvidence : [];
+  for (const row of evidenceRows) {
+    if (!row || !row.field) continue;
+    const field = EXTRACT_FIELD_REMAP[row.field] || row.field;
+    if (evidence[field]) continue;
+    evidence[field] = {
+      value: row.value ?? row.valueText ?? next[field],
+      confidence: row.confidence || 'high',
+      sourceImage: row.sourceImage || meta.sourceImage || next._sourceImage || next.sourceImage || null,
+      sourceText: row.sourceText || row.valueText || '',
+      page: row.page || meta.page || next._sourcePage || next.sourcePage || null,
+      boundingBox: row.boundingBox || null,
+      reason: row.reason || 'Model supplied field-level evidence.'
+    };
+  }
+  delete next.fieldEvidence;
   const flags = Array.isArray(next._confidence) ? next._confidence : [];
   const flagByField = {};
   flags.forEach(f => { if (f?.field) flagByField[f.field] = f; });
@@ -2973,8 +3071,8 @@ function ensurePolicyFieldEvidence(policy, meta = {}) {
       value: next[field],
       confidence: confMap[field] || flag?.level || 'high',
       sourceImage: meta.sourceImage || next._sourceImage || next.sourceImage || null,
-      sourceText: reasonMap[field] || flag?.reason || next.notes || '',
-      page: meta.page || next._sourcePage || null,
+      sourceText: reasonMap[field] || flag?.reason || next.extractionNotes || next.notes || '',
+      page: meta.page || next._sourcePage || next.sourcePage || null,
       boundingBox: meta.boundingBox || null,
       reason: reason || reasonMap[field] || flag?.reason || 'Extracted from policy document.'
     };
@@ -2996,6 +3094,32 @@ function normalizePolicyForStorage(policy, meta = {}) {
     insuranceExtraction: true
   };
   return ensurePolicyFieldEvidence(next, meta);
+}
+
+function compactDuplicatePolicyList(policyList) {
+  const kept = [];
+  const removed = [];
+  for (const raw of (Array.isArray(policyList) ? policyList : [])) {
+    if (!raw || typeof raw !== 'object') continue;
+    const idx = kept.findIndex(existing => existing.id !== raw.id && policiesSafeAutoDuplicate(existing, raw));
+    if (idx < 0) {
+      kept.push(raw);
+      continue;
+    }
+    const existing = kept[idx];
+    const merged = {
+      ...mergePolicyRecords(existing, raw),
+      id: existing.id,
+      clientId: existing.clientId || raw.clientId,
+      _mergedDuplicateIds: [
+        ...(Array.isArray(existing._mergedDuplicateIds) ? existing._mergedDuplicateIds : []),
+        ...(raw.id ? [raw.id] : [])
+      ].filter(Boolean)
+    };
+    kept[idx] = merged;
+    removed.push(raw);
+  }
+  return { policies: kept, removed };
 }
 
 // Realistic SG par Whole Life cash-value trajectory as a multiple of
@@ -14458,6 +14582,7 @@ function App() {
   const policiesRef = useRef(policies);
   const clientProfileRef = useRef(clientProfile);
   const activeClientIdRef = useRef(activeClientId);
+  const duplicateCleanupRef = useRef(new Set());
   useEffect(() => { policiesRef.current = policies; clientProfileRef.current = clientProfile; }, [policies, clientProfile]);
   useEffect(() => { activeClientIdRef.current = activeClientId; }, [activeClientId]);
 
@@ -15443,6 +15568,33 @@ function App() {
     return pending;
   };
 
+  const cleanupDuplicatePoliciesForClient = async (clientId, policyList, reason = 'duplicate-cleanup') => {
+    if (!clientId || !Array.isArray(policyList) || policyList.length < 2) return policyList || [];
+    const { policies: compacted, removed } = compactDuplicatePolicyList(policyList);
+    if (!removed.length) return policyList;
+    for (const pol of compacted) {
+      if (pol?.clientId === clientId || !pol?.clientId) await dbPut('policies', { ...pol, clientId });
+    }
+    for (const pol of removed) {
+      if (!pol?.id) continue;
+      await recordDeletedPolicyId(clientId, pol.id).catch(() => {});
+      await dbDel('policies', pol.id).catch(() => {});
+    }
+    if (clientId === activeClientIdRef.current) setPolicies(compacted.map(p => ({ ...p, clientId })));
+    lastSelfPushRef.current = Date.now();
+    for (const pol of compacted) {
+      const versions = pol._fieldVersions || bumpFieldVersions(pol, {}, {});
+      sbPolicyPush({ ...pol, clientId }, versions).catch(() => {});
+    }
+    for (const pol of removed) {
+      if (pol?.id) sbPolicyDelete(pol.id).catch(() => {});
+    }
+    await scheduleDriveWriteForClient(clientId, reason, 1000);
+    try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
+    try { toast('Merged ' + removed.length + ' duplicate polic' + (removed.length === 1 ? 'y' : 'ies'), 'success', 3500); } catch(_) {}
+    return compacted;
+  };
+
   const savePolicy = async (incomingP) => {
     // Dedup pass — if an existing policy shares (policyNumber|insurer),
     // merge into it rather than creating a duplicate row.
@@ -15598,11 +15750,13 @@ function App() {
     const enriched = stampPolicySyncMeta({...p, _fieldVersions: newVersions, clientId: targetClientId}, opts.reason || 'policy-route');
     await dbPut('policies', enriched);
     await clearDeletedPolicyId(targetClientId, enriched.id).catch(() => {});
-    setPolicies(prev => {
-      const idx = prev.findIndex(x => x.id === enriched.id);
-      if (idx >= 0) { const n = [...prev]; n[idx] = enriched; return n; }
-      return [...prev, enriched];
-    });
+    if (targetClientId === activeClientIdRef.current) {
+      setPolicies(prev => {
+        const idx = prev.findIndex(x => x.id === enriched.id);
+        if (idx >= 0) { const n = [...prev]; n[idx] = enriched; return n; }
+        return [...prev, enriched];
+      });
+    }
     try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
     lastSelfPushRef.current = Date.now();
     sbPolicyPush(enriched, newVersions).catch(() => {});
@@ -15611,6 +15765,17 @@ function App() {
   };
 
   // Repo operations — Supabase primary, local fallback
+  useEffect(() => {
+    if (loading || !activeClientId || !Array.isArray(policies) || policies.length < 2) return;
+    const signature = activeClientId + '|' + policies.map(p => p.id || '').sort().join(',');
+    if (duplicateCleanupRef.current.has(signature)) return;
+    const preview = compactDuplicatePolicyList(policies);
+    if (!preview.removed.length) return;
+    duplicateCleanupRef.current.add(signature);
+    cleanupDuplicatePoliciesForClient(activeClientId, policies, 'duplicate-cleanup')
+      .catch(err => console.warn('[DuplicateCleanup] Failed:', err?.message || err));
+  }, [activeClientId, loading, policies]);
+
   const saveRepo = async (item) => {
     if(repoSource==='supabase') {
       await sbRepoSave(item);
@@ -18569,6 +18734,30 @@ const POLICY_EXTRACTION_SCHEMA = {
         items: { type: 'STRING' }
       },
       notes: { type: 'STRING', nullable: true, description: 'REQUIRED FC review summary — 3-5 sentences covering what the product is, coverage scope, premium structure, and key features. Always provide; never null/empty. Infer from product type if document is sparse.' },
+      extractionNotes: { type: 'STRING', nullable: true, description: 'Short extraction reasoning note, max 200 chars. Mention whether fields came from a clean schedule, table row, multi-page merge, weak OCR, or inferred source.' },
+      sourceImage: { type: 'STRING', nullable: true, description: 'Source image/file label or upload sequence label used for this policy, e.g. "Image 18" or file name.' },
+      sourcePage: { type: 'STRING', nullable: true, description: 'Source page or page range if visible, e.g. "page 5", "pages 5-6", or "Page 5 of 32".' },
+      documentTitle: { type: 'STRING', nullable: true, description: 'Visible document section title, e.g. "Policy Schedule", "Benefits Illustration", "Annual Statement".' },
+      tableType: { type: 'STRING', nullable: true, description: 'Table/source type used for important values, e.g. "cash benefit table", "premium schedule", "fund allocation table".' },
+      fieldEvidence: {
+        type: 'ARRAY',
+        nullable: true,
+        description: 'Evidence for important extracted fields. Include entries for owner, life assured, product, policy number, premium, sum assured, and income payout fields when visible.',
+        items: {
+          type: 'OBJECT',
+          properties: {
+            field: { type: 'STRING', description: 'Schema field name, e.g. "annuityPayout", "premiumAmount", "policyOwner".' },
+            valueText: { type: 'STRING', nullable: true, description: 'Exact text/value as seen in the document.' },
+            confidence: { type: 'STRING', enum: ['high','medium','low'], nullable: true },
+            sourceImage: { type: 'STRING', nullable: true, description: 'Image/file label if known.' },
+            sourceText: { type: 'STRING', nullable: true, description: 'Short quoted source text or table row that supports the value.' },
+            page: { type: 'STRING', nullable: true, description: 'Page number/range if known.' },
+            boundingBox: { type: 'STRING', nullable: true, description: 'Optional bounding box or row/column hint, e.g. "table row age 26".' },
+            reason: { type: 'STRING', nullable: true, description: 'Why this value was chosen, especially for table-derived totals.' }
+          },
+          required: ['field']
+        }
+      },
       userRemarks: { type: 'STRING', nullable: true, description: 'Handwritten notes or informal annotations preserved verbatim' },
 
       // ═══════════════════════════════════════════════════════════════
@@ -27904,6 +28093,11 @@ A null field is ALWAYS better than a hallucinated one. The app handles nulls gra
 
 ═══ EXTRACTION NOTES (v14.1) ═══
 
+EVIDENCE-BASED EXTRACTION (CRITICAL):
+For every important extracted value, add a compact fieldEvidence entry. Prioritize policyOwner, lifeInsured, productName, policyNumber, premiumAmount, premFrequency, sumAssured, annuityPayout, annuityGuaranteedPayout, annuityNonGuaranteedPayout, fundAllocations, cashValue and retMaturitySum.
+Each evidence entry should include field, valueText, confidence, sourceText, page/sourceImage if visible, and reason. If exact bounding box coordinates are unavailable, use a practical locator such as "table row age 26", "premium schedule", or "Page 5 of 32".
+Example for income plans: if a Singlife table shows "Cash Benefit 550" and "Cash Bonus 750", set annuityGuaranteedPayout=550, annuityNonGuaranteedPayout=750, annuityPayout=1300, and fieldEvidence for annuityPayout.sourceText="Cash Benefit 550 + Cash Bonus 750 = 1300".
+
 For each policy, include an "extractionNotes" field (string, max 200 chars) summarizing what you observed during extraction. This helps the FC understand your reasoning. Examples:
 - "Clear policy schedule PDF, all fields verbatim from labeled cells"
 - "Handwritten document, OCR quality poor — premium and SA from best available text"
@@ -30358,6 +30552,8 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
         // for the full rule list.
         try {
           validateExtractedPolicy(result);
+          mergeConfidenceArrayIntoMaps(result);
+          Object.assign(result, ensurePolicyFieldEvidence(result, { source: 'scan-postprocess' }));
         } catch (validateErr) {
           console.warn('[Validate] Failed for policy', result.id, ':', validateErr.message);
         }
@@ -30455,7 +30651,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
         // Tier 1: policy number
         const itemPolNum = normalizePolicyKey(item.policyNumber);
         if (itemPolNum && itemPolNum.length >= 4) {
-          const m = policies.find(p => normalizePolicyKey(p.policyNumber) === itemPolNum);
+          const m = policies.find(p => normalizePolicyKey(p.policyNumber) === itemPolNum && policiesLikelySamePolicy(p, item));
           if (m) return { match: m, reason: 'policy-number' };
         }
         // Tier 2/3: fingerprint (exact or substring)
@@ -31639,7 +31835,6 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
           delete clean._dupOf; delete clean._matchesExisting; delete clean._repoMatch;
           delete clean._mergeConflicts; delete clean._mergedFromPartial; delete clean._mergedFromSequentialPartial;
           delete clean._recovered; delete clean._knownPolicyMatch;
-          delete clean._extractConfidence; delete clean._extractConfidenceReasons;
           delete clean._mergeIntoExisting;
           delete clean._ownerRoute; delete clean._ownerRoutedFrom;
           clean.clientId = importClientId;
