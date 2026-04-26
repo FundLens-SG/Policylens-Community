@@ -664,12 +664,34 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2d.17';
+const APP_VERSION = 'v2.3.0-rc2d.18';
 const APP_VERSION_DATE = '2026-04-27';
-const APP_VERSION_NAME = 'Family route client creation hotfix';
+const APP_VERSION_NAME = 'Family routing dedupe and evidence hotfix';
 const DEFAULT_DOCUMENT_AI_PROXY_URL = 'https://policylens-document-ai.chungakwanc.workers.dev';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2d.18',
+    date: '2026-04-27',
+    name: 'Family routing dedupe and evidence hotfix',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Routed family policies now refresh the shared policy list immediately, so newly-created owner clients show their policies without waiting for Drive sync.',
+          'Duplicate detection now checks policy identity together with owner/life assured compatibility, preventing same-family policies from being merged or duplicated incorrectly.',
+          'New Client creation now reuses an existing matching local client instead of creating another empty shell with the same name.'
+        ]
+      },
+      {
+        heading: 'AI extraction',
+        items: [
+          'Extracted policies now keep evidence and confidence metadata through import, including source text/reason scaffolding for important fields.',
+          'Income payouts are normalized deterministically from guaranteed plus non-guaranteed components, fixing guaranteed-only payout defaults such as $550 instead of $1,300.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2d.17',
     date: '2026-04-27',
@@ -2699,6 +2721,281 @@ function syncAnnuityPayoutPair(policy, changedField) {
     if(!next.annuityPayoutMode) next.annuityPayoutMode = annual >= monthly * 12 ? 'annual' : 'monthly';
   }
   return next;
+}
+
+function firstMoneyValue(obj, keys) {
+  for (const key of keys) {
+    const n = moneyNumber(obj?.[key]);
+    if (n > 0) return n;
+  }
+  return 0;
+}
+
+function normalizePolicyFinancials(policy) {
+  const next = {...(policy || {})};
+  const guaranteed = firstMoneyValue(next, [
+    'annuityGuaranteedPayout','guaranteedAnnualPayout','guaranteedPayout',
+    'guaranteedCashBenefit','annualGuaranteedCashBenefit','cashBenefit',
+    'annualCashBenefit','yearlyCashBenefit','cashBenefitAnnual'
+  ]);
+  const nonGuaranteed = firstMoneyValue(next, [
+    'annuityNonGuaranteedPayout','nonGuaranteedAnnualPayout','nonGuaranteedPayout',
+    'nonGuaranteedCashBonus','cashBonus','cashBonusAnnual','annualCashBonus',
+    'projectedCashBonus','illustratedCashBonus','dividendPayout','annualDividend'
+  ]);
+  if (guaranteed > 0 && !moneyNumber(next.annuityGuaranteedPayout)) {
+    next.annuityGuaranteedPayout = cleanMoneyString(guaranteed);
+  }
+  if (nonGuaranteed > 0 && !moneyNumber(next.annuityNonGuaranteedPayout)) {
+    next.annuityNonGuaranteedPayout = cleanMoneyString(nonGuaranteed);
+  }
+  const combined = guaranteed + nonGuaranteed;
+  const existingAnnual = moneyNumber(next.annuityPayout);
+  const existingMonthlyAnnual = moneyNumber(next.annuityMonthly || next.monthlyBenefit) * 12;
+  if (combined > 0 && combined >= existingAnnual && combined >= existingMonthlyAnnual) {
+    next.annuityPayout = cleanMoneyString(combined);
+    next.annuityMonthly = cleanMoneyString(combined / 12);
+    next.annuityPayoutMode = next.annuityPayoutMode || 'annual';
+    next._financialNormalization = {
+      ...(next._financialNormalization || {}),
+      annuityPayout: {
+        rule: 'guaranteed_plus_non_guaranteed',
+        guaranteed,
+        nonGuaranteed,
+        total: combined,
+        reason: 'Annual payout uses guaranteed plus non-guaranteed components when both are paid together.'
+      }
+    };
+    const evidence = {...(next._fieldEvidence || {})};
+    evidence.annuityPayout = {
+      value: combined,
+      confidence: 'high',
+      sourceImage: evidence.annuityPayout?.sourceImage || next._sourceImage || next.sourceImage || null,
+      sourceText: evidence.annuityPayout?.sourceText || ('Guaranteed payout ' + guaranteed + ' + non-guaranteed payout ' + nonGuaranteed + ' = ' + combined),
+      page: evidence.annuityPayout?.page || next._sourcePage || null,
+      boundingBox: evidence.annuityPayout?.boundingBox || null,
+      reason: 'Deterministic financial rule: use total illustrated payout, not guaranteed-only payout.'
+    };
+    next._fieldEvidence = evidence;
+  }
+  return next;
+}
+
+function normalizeTextKey(s) {
+  return (s || '').toString().toLowerCase()
+    .replace(/&/g, ' and ')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim()
+    .replace(/\s+/g, ' ');
+}
+
+function normalizeCompactKey(s) {
+  return normalizeTextKey(s).replace(/\s+/g, '');
+}
+
+function normalizePersonNameKey(name) {
+  let n = normalizeTextKey(name);
+  n = n.replace(/\b(mr|mrs|ms|mdm|madam|dr|miss|master|mstr)\b/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!n) return '';
+  if (/^(policy owner|owner|life insured|life assured|insured|applicant|proposer|payor|payer|self|same as|not applicable|not stated|unknown|null|nil|na|n a)$/i.test(n)) return '';
+  return n;
+}
+
+function personNameEquivalent(a, b) {
+  const ak = normalizePersonNameKey(a);
+  const bk = normalizePersonNameKey(b);
+  if (!ak || !bk) return false;
+  if (ak === bk) return true;
+  const as = new Set(ak.split(' ').filter(Boolean));
+  const bs = new Set(bk.split(' ').filter(Boolean));
+  let overlap = 0;
+  as.forEach(t => { if (bs.has(t)) overlap++; });
+  const smaller = Math.min(as.size, bs.size);
+  return smaller > 0 && overlap >= smaller && Math.abs(as.size - bs.size) <= 1;
+}
+
+function policyPersonKey(p) {
+  return normalizePersonNameKey(p?.policyOwner) || normalizePersonNameKey(p?.lifeInsured) || '';
+}
+
+function policyHasExplicitPeopleConflict(a, b) {
+  const aOwner = normalizePersonNameKey(a?.policyOwner);
+  const bOwner = normalizePersonNameKey(b?.policyOwner);
+  if (aOwner && bOwner && !personNameEquivalent(aOwner, bOwner)) return true;
+  const aLife = normalizePersonNameKey(a?.lifeInsured);
+  const bLife = normalizePersonNameKey(b?.lifeInsured);
+  if (aLife && bLife && !personNameEquivalent(aLife, bLife)) return true;
+  return false;
+}
+
+function policyInsurerIdentity(p) {
+  return normalizeCompactKey(p?.insurer);
+}
+
+function policyProductIdentity(p) {
+  return normalizeCompactKey(p?.productName || p?.policyName || p?.subType);
+}
+
+function policyNumberIdentity(p) {
+  const pn = normalizePolicyKey(p?.policyNumber);
+  return pn && pn.length >= 4 ? pn : '';
+}
+
+function policyAmountAnchors(p) {
+  return [
+    p?.sumAssured, p?.deathBenefit, p?.premiumAmount, p?.annualPremium,
+    p?.annuityPayout, p?.cashValue, p?.retMaturitySum
+  ].map(v => moneyNumber(v)).filter(n => n > 0).map(n => String(Math.round(n)));
+}
+
+function policiesLikelySamePolicy(a, b) {
+  if (!a || !b) return false;
+  if (a.id && b.id && a.id === b.id) return true;
+  if (policyHasExplicitPeopleConflict(a, b)) return false;
+  const an = policyNumberIdentity(a);
+  const bn = policyNumberIdentity(b);
+  const ai = policyInsurerIdentity(a);
+  const bi = policyInsurerIdentity(b);
+  if (an && bn) {
+    const numberMatch = an === bn || ((an.startsWith(bn) || bn.startsWith(an)) && Math.min(an.length, bn.length) >= 6);
+    if (!numberMatch) return false;
+    if (ai && bi && ai !== bi) return false;
+    return true;
+  }
+  const ap = policyProductIdentity(a);
+  const bp = policyProductIdentity(b);
+  if (!ap || !bp || Math.min(ap.length, bp.length) < 5) return false;
+  const productMatch = ap === bp || ap.includes(bp) || bp.includes(ap);
+  if (!productMatch) return false;
+  if (ai && bi && ai !== bi) return false;
+  const personA = policyPersonKey(a);
+  const personB = policyPersonKey(b);
+  if (personA && personB && !personNameEquivalent(personA, personB)) return false;
+  const aAmounts = new Set(policyAmountAnchors(a));
+  const bAmounts = new Set(policyAmountAnchors(b));
+  let amountMatch = false;
+  aAmounts.forEach(x => { if (bAmounts.has(x)) amountMatch = true; });
+  return !!(amountMatch || (personA && personB));
+}
+
+function mergePolicyRecords(base, next) {
+  const merged = {...(base || {})};
+  const conflicts = [...(Array.isArray(base?._mergeConflicts) ? base._mergeConflicts : [])];
+  const empty = (v) => v === null || v === undefined || v === '' || (Array.isArray(v) && v.length === 0);
+  for (const [k, v] of Object.entries(next || {})) {
+    if (k === 'id' || k === '_idx' || k === '_selected' || k === '_expanded' || k === '_batch') continue;
+    if (k === '_dupOf' || k === '_matchesExisting' || k === '_repoMatch' || k === '_knownPolicyMatch') continue;
+    if (k === 'riders') {
+      const existing = Array.isArray(merged.riders) ? merged.riders : [];
+      const incoming = Array.isArray(v) ? v : [];
+      const byName = new Map(existing.map(r => [normalizeCompactKey(r?.riderName || r?.type), {...r}]));
+      for (const r of incoming) {
+        const rk = normalizeCompactKey(r?.riderName || r?.type) || ('rider_' + byName.size);
+        if (!byName.has(rk)) byName.set(rk, {...r});
+        else byName.set(rk, mergePolicyRecords(byName.get(rk), r));
+      }
+      merged.riders = [...byName.values()];
+      continue;
+    }
+    if (k === 'highlights') {
+      const vals = [...(Array.isArray(merged.highlights) ? merged.highlights : []), ...(Array.isArray(v) ? v : [])]
+        .map(x => (x || '').toString().trim()).filter(Boolean);
+      merged.highlights = [...new Set(vals)];
+      continue;
+    }
+    if (k === '_fieldEvidence') {
+      merged._fieldEvidence = {...(merged._fieldEvidence || {}), ...(v || {})};
+      continue;
+    }
+    if (empty(merged[k])) {
+      if (!empty(v)) merged[k] = v;
+      continue;
+    }
+    if (empty(v)) continue;
+    const left = String(merged[k]).trim().toLowerCase();
+    const right = String(v).trim().toLowerCase();
+    if (left === right) continue;
+    const ln = moneyNumber(merged[k]);
+    const rn = moneyNumber(v);
+    if (ln > 0 && rn > 0) {
+      if (rn > ln) merged[k] = v;
+      if (Math.abs(ln - rn) / Math.max(ln, rn) > 0.05) conflicts.push({field:k, values:[merged[k], v], kept:merged[k]});
+      continue;
+    }
+    if (String(v).length > String(merged[k]).length && String(v).toLowerCase().includes(String(merged[k]).toLowerCase())) merged[k] = v;
+  }
+  if (conflicts.length) merged._mergeConflicts = conflicts;
+  return merged;
+}
+
+function classifyPolicyOwnership(policy, currentClientName) {
+  const owner = normalizePersonNameKey(policy?.policyOwner);
+  const life = normalizePersonNameKey(policy?.lifeInsured);
+  const current = normalizePersonNameKey(currentClientName);
+  if (owner) {
+    if (current && !personNameEquivalent(owner, current)) return 'newClientSuggested';
+    if (life && !personNameEquivalent(owner, life)) return 'dependantPolicyLikely';
+    return 'ownerConfirmed';
+  }
+  if (life && current && !personNameEquivalent(life, current)) return 'ownerAmbiguous';
+  if (life) return 'ownerInferred';
+  return 'ownerAmbiguous';
+}
+
+function buildPolicyPageFingerprint(policy, meta = {}) {
+  return {
+    fileName: meta.fileName || policy?._sourceFile || policy?.sourceFile || null,
+    sequence: meta.sequence ?? policy?._sourceSequence ?? null,
+    insurer: policy?.insurer || '',
+    policyNumber: policy?.policyNumber || '',
+    owner: policy?.policyOwner || '',
+    lifeInsured: policy?.lifeInsured || '',
+    productName: policy?.productName || policy?.policyName || '',
+    page: meta.page || policy?._sourcePage || null,
+    documentTitle: policy?._documentTitle || '',
+    textHash: normalizeCompactKey([policy?.insurer, policy?.policyNumber, policy?.policyOwner, policy?.lifeInsured, policy?.productName, policy?.notes].filter(Boolean).join('|')).slice(0, 80)
+  };
+}
+
+function ensurePolicyFieldEvidence(policy, meta = {}) {
+  const next = {...(policy || {})};
+  const evidence = {...(next._fieldEvidence || {})};
+  const flags = Array.isArray(next._confidence) ? next._confidence : [];
+  const flagByField = {};
+  flags.forEach(f => { if (f?.field) flagByField[f.field] = f; });
+  const confMap = (next._extractConfidence && typeof next._extractConfidence === 'object') ? next._extractConfidence : {};
+  const reasonMap = (next._extractConfidenceReasons && typeof next._extractConfidenceReasons === 'object') ? next._extractConfidenceReasons : {};
+  const add = (field, reason) => {
+    if (next[field] === undefined || next[field] === null || next[field] === '') return;
+    if (evidence[field]) return;
+    const flag = flagByField[field];
+    evidence[field] = {
+      value: next[field],
+      confidence: confMap[field] || flag?.level || 'high',
+      sourceImage: meta.sourceImage || next._sourceImage || next.sourceImage || null,
+      sourceText: reasonMap[field] || flag?.reason || next.notes || '',
+      page: meta.page || next._sourcePage || null,
+      boundingBox: meta.boundingBox || null,
+      reason: reason || reasonMap[field] || flag?.reason || 'Extracted from policy document.'
+    };
+  };
+  ['insurer','productName','policyName','policyNumber','policyOwner','lifeInsured','premiumAmount','annualPremium','sumAssured','annuityPayout','annuityGuaranteedPayout','annuityNonGuaranteedPayout'].forEach(f => add(f));
+  next._fieldEvidence = evidence;
+  next._pageFingerprint = next._pageFingerprint || buildPolicyPageFingerprint(next, meta);
+  return next;
+}
+
+function normalizePolicyForStorage(policy, meta = {}) {
+  let next = normalizePolicyFinancials(policy);
+  next = syncAnnuityPayoutPair(next);
+  next._ownerClassification = next._ownerClassification || classifyPolicyOwnership(next, meta.currentClientName || '');
+  next._extractionStages = {
+    ...(next._extractionStages || {}),
+    ocrLayout: !!(next._ocrText || next._documentAi || next._pageFingerprint || meta.source === 'document-ai'),
+    pageGrouping: true,
+    insuranceExtraction: true
+  };
+  return ensurePolicyFieldEvidence(next, meta);
 }
 
 // Realistic SG par Whole Life cash-value trajectory as a multiple of
@@ -4835,7 +5132,8 @@ function normalizeClaudeText(resp) {
   return '';
 }
 
-// Dedup helpers — merge duplicate extracted policies by policyNumber+insurer
+// Dedup helpers - merge duplicate extracted policies without collapsing
+// different family members who bought similar/same products.
 function normalizePolicyKey(s) {
   return (s || '').toString().toLowerCase()
     .replace(/[^a-z0-9]/g, '')
@@ -4844,14 +5142,19 @@ function normalizePolicyKey(s) {
 }
 
 const _dedupKey = (p) => {
-  const pn = normalizePolicyKey(p?.policyNumber);
-  const ins = (p?.insurer || '').trim().toLowerCase();
-  if (!pn) return null;
-  return pn + '|' + ins;
+  const pn = policyNumberIdentity(p);
+  const ins = policyInsurerIdentity(p);
+  const person = policyPersonKey(p) || 'unknown';
+  if (pn) return ['pn', pn, ins, person].join('|');
+  const product = policyProductIdentity(p);
+  if (!product) return null;
+  const amount = policyAmountAnchors(p)[0] || '';
+  if (person === 'unknown' && !amount) return null;
+  return ['fp', ins, product, person, amount].join('|');
 };
 const _dedupScore = (p) => {
   if (!p) return 0;
-  const fields = ['riderList','riderPremium','sumAssured','premium','coverageBenefits','subType','category'];
+  const fields = ['riderList','riderPremium','riders','sumAssured','premium','premiumAmount','annualPremium','coverageBenefits','subType','category','policyOwner','lifeInsured','annuityPayout','annuityGuaranteedPayout','annuityNonGuaranteedPayout','_fieldEvidence'];
   let s = 0;
   for (const f of fields) {
     const v = p[f];
@@ -4878,6 +5181,7 @@ const dedupPolicyArray = (arr) => {
     if (!k) { passthrough.push(p); continue; }
     const existing = byKey.get(k);
     if (!existing) { byKey.set(k, p); continue; }
+    if (!policiesLikelySamePolicy(existing, p)) { passthrough.push(p); continue; }
     merges++;
     const winner = _dedupScore(p) > _dedupScore(existing) ? p : existing;
     const loser  = winner === p ? existing : p;
@@ -15142,34 +15446,41 @@ function App() {
   const savePolicy = async (incomingP) => {
     // Dedup pass — if an existing policy shares (policyNumber|insurer),
     // merge into it rather than creating a duplicate row.
-    let p = incomingP;
-    const inKey = _dedupKey(p);
-    if (inKey) {
-      const dup = policies.find(x => x.id !== p.id && _dedupKey(x) === inKey);
-      if (dup) {
-        const winner = _dedupScore(p) >= _dedupScore(dup) ? p : dup;
-        const loser  = winner === p ? dup : p;
-        p = {..._dedupMerge(winner, loser), id: dup.id};
-        try { await dbOp('policies','readwrite',s=>s.delete(incomingP.id)); } catch(e){}
-        try { toast('🔀 Merged 1 duplicate policy','info',3500); } catch(e){}
-      }
-    }
-    p = syncAnnuityPayoutPair(p);
-    const oldData = policies.find(x => x.id === p.id);
-    const oldVersions = oldData?._fieldVersions || {};
-    const newVersions = bumpFieldVersions(p, oldData, oldVersions);
+    let p = normalizePolicyForStorage(incomingP || {}, { currentClientName: clientProfile?.name || clientName || '', source: 'policy-save' });
     let targetClientId = p.clientId || activeClientIdRef.current || activeClientId;
     if (!targetClientId) {
       try { targetClientId = localStorage.getItem('policylens_active_client_id'); } catch(_) {}
     }
     if (!targetClientId) {
-      console.warn('[savePolicy] No active client — policy not saved:', p.id);
+      console.warn('[savePolicy] No active client - policy not saved:', p.id);
       return;
     }
+    p.clientId = targetClientId;
+    const latestPolicies = await dbGetAll('policies').catch(() => policies || []);
+    const clientPols = (latestPolicies || []).filter(x => (x.clientId || targetClientId) === targetClientId);
+    const inKey = _dedupKey(p);
+    if (inKey) {
+      const dup = clientPols.find(x => x.id !== p.id && policiesLikelySamePolicy(x, p));
+      if (dup) {
+        const winner = _dedupScore(p) >= _dedupScore(dup) ? p : dup;
+        const loser  = winner === p ? dup : p;
+        p = {...mergePolicyRecords(winner, loser), id: dup.id, clientId: targetClientId};
+        try { if (incomingP?.id && incomingP.id !== dup.id) await dbOp('policies','readwrite',s=>s.delete(incomingP.id)); } catch(e){}
+        try { toast('🔀 Merged 1 duplicate policy','info',3500); } catch(e){}
+      }
+    }
+    p = normalizePolicyForStorage(p, { currentClientName: clientProfile?.name || clientName || '', source: 'policy-save' });
+    const oldData = clientPols.find(x => x.id === p.id) || clientPols.find(x => x.id !== p.id && policiesLikelySamePolicy(x, p));
+    if (oldData && oldData.id !== p.id) {
+      p = normalizePolicyForStorage({...mergePolicyRecords(oldData, p), id: oldData.id, clientId: targetClientId}, { currentClientName: clientProfile?.name || clientName || '', source: 'policy-merge' });
+    }
+    const oldVersions = oldData?._fieldVersions || {};
+    const newVersions = bumpFieldVersions(p, oldData, oldVersions);
     const enriched = stampPolicySyncMeta({...p, _fieldVersions: newVersions, clientId: targetClientId}, 'policy-save');
     await dbPut('policies', enriched);
     clearDeletedPolicyId(enriched.clientId, enriched.id).catch(() => {});
     setPolicies(prev => {const idx=prev.findIndex(x=>x.id===enriched.id);if(idx>=0){const n=[...prev];n[idx]=enriched;return n}return[...prev,enriched]});
+    try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
     // Push to cloud (fire-and-forget — don't block save flow).
     // Cloud helper strips _fieldVersions before sending.
     // Stamp self-push so Realtime echoes get ignored.
@@ -15259,29 +15570,27 @@ function App() {
     if (!targetClientId) return savePolicy(incomingP);
     const allPols = await dbGetAll('policies').catch(() => []);
     const targetPols = allPols.filter(p => p.clientId === targetClientId);
-    let p = syncAnnuityPayoutPair({...incomingP, clientId: targetClientId});
+    const targetState = await PolicyDB.getDriveState(targetClientId).catch(() => null);
+    let p = normalizePolicyForStorage({...incomingP, clientId: targetClientId}, { currentClientName: targetState?.clientName || '', source: opts.reason || 'policy-route' });
     delete p._ownerRoute; delete p._ownerRoutedFrom;
     if (!p.id) p.id = genId();
 
     const inKey = _dedupKey(p);
     if (inKey) {
-      const dup = targetPols.find(x => x.id !== p.id && _dedupKey(x) === inKey);
+      const dup = targetPols.find(x => x.id !== p.id && policiesLikelySamePolicy(x, p));
       if (dup) {
         const winner = _dedupScore(p) >= _dedupScore(dup) ? p : dup;
         const loser = winner === p ? dup : p;
-        p = {..._dedupMerge(winner, loser), id: dup.id, clientId: targetClientId};
+        p = normalizePolicyForStorage({...mergePolicyRecords(winner, loser), id: dup.id, clientId: targetClientId}, { currentClientName: targetState?.clientName || '', source: 'policy-route-merge' });
       }
     }
 
     let targetExisting = targetPols.find(x => x.id === p.id) || null;
     if (!targetExisting) {
-      const incomingKey = normalizePolicyKey(p.policyNumber);
-      if (incomingKey && incomingKey.length >= 4) {
-        targetExisting = targetPols.find(ep => normalizePolicyKey(ep.policyNumber) === incomingKey);
-      }
+      targetExisting = targetPols.find(ep => ep.id !== p.id && policiesLikelySamePolicy(ep, p)) || null;
     }
     if (targetExisting) {
-      p = {...mergePolicies(targetExisting, p), id: targetExisting.id, clientId: targetClientId};
+      p = normalizePolicyForStorage({...mergePolicyRecords(targetExisting, p), id: targetExisting.id, clientId: targetClientId}, { currentClientName: targetState?.clientName || '', source: 'policy-route-merge' });
     }
 
     const oldVersions = targetExisting?._fieldVersions || {};
@@ -15289,13 +15598,12 @@ function App() {
     const enriched = stampPolicySyncMeta({...p, _fieldVersions: newVersions, clientId: targetClientId}, opts.reason || 'policy-route');
     await dbPut('policies', enriched);
     await clearDeletedPolicyId(targetClientId, enriched.id).catch(() => {});
-    if (targetClientId === activeClientIdRef.current) {
-      setPolicies(prev => {
-        const idx = prev.findIndex(x => x.id === enriched.id);
-        if (idx >= 0) { const n = [...prev]; n[idx] = enriched; return n; }
-        return [...prev, enriched];
-      });
-    }
+    setPolicies(prev => {
+      const idx = prev.findIndex(x => x.id === enriched.id);
+      if (idx >= 0) { const n = [...prev]; n[idx] = enriched; return n; }
+      return [...prev, enriched];
+    });
+    try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
     lastSelfPushRef.current = Date.now();
     sbPolicyPush(enriched, newVersions).catch(() => {});
     await scheduleDriveWriteForClient(targetClientId, opts.reason || 'policy-route', opts.delay || 1000);
@@ -17774,9 +18082,27 @@ function NewClientModal({ allStates, allPolicies, onClose, initialName, initialF
     if (!name.trim()) return;
     setCreating(true);
     try {
-      const clientId = crypto.randomUUID();
       const trimName = name.trim();
       const familyGroup = initialFamilyGroup || '';
+      const latestStates = await PolicyDB.getAllDriveStates().catch(() => allStates || []);
+      const sameName = (latestStates || []).find(ds => normalizePersonNameKey(ds?.clientName) && normalizePersonNameKey(ds.clientName) === normalizePersonNameKey(trimName));
+      if (sameName) {
+        if (familyGroup) {
+          await PolicyDB.saveDriveState({ ...sameName, familyGroup, clientName: sameName.clientName || trimName }).catch(() => {});
+          const rec = await dbGet('settings', 'clientProfile_' + sameName.clientId).catch(() => null);
+          await dbPut('settings', { key:'clientProfile_' + sameName.clientId, value:{ ...(rec?.value || {}), name: sameName.clientName || trimName, familyGroup } }).catch(() => {});
+        }
+        if (typeof onExistingSelected === 'function') await onExistingSelected(sameName.clientId, sameName);
+        if (!stayOnCurrent) {
+          await switchClient(sameName.clientId);
+          setTab('profile');
+        }
+        try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
+        onClose({created:true, existing:true, clientId:sameName.clientId});
+        try { toast('Used existing client: ' + (sameName.clientName || trimName), 'success', 3000); } catch(_) {}
+        return;
+      }
+      const clientId = crypto.randomUUID();
       const now = new Date().toISOString();
       const profile = stampProfileSyncMeta({name:trimName,nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[],familyGroup}, 'client-create');
       await PolicyDB.saveDriveState({
@@ -31318,21 +31644,20 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
           delete clean._ownerRoute; delete clean._ownerRoutedFrom;
           clean.clientId = importClientId;
 
-          // Tier 1: explicit _knownPolicyMatch from extraction-time detection
+          const currentClientPolicies = (policies || []).filter(ep => (ep.clientId || importClientId) === importClientId);
+
+          // Tier 1: explicit _knownPolicyMatch from extraction-time detection,
+          // still guarded by owner/life-assured compatibility for family scans.
           let targetExisting = null;
           if (p._knownPolicyMatch && p._knownPolicyMatch.id) {
-            targetExisting = policies.find(ep => ep.id === p._knownPolicyMatch.id);
+            const knownMatch = currentClientPolicies.find(ep => ep.id === p._knownPolicyMatch.id);
+            if (knownMatch && policiesLikelySamePolicy(knownMatch, clean)) targetExisting = knownMatch;
           }
-          // Tier 2: last-chance lookup by normalized policy number.
-          // Fresh normalize each call rather than assuming _knownPolicyMatch
-          // caught everything — extraction may have happened before the
-          // existing policy was in the array, or the match logic may have
-          // been too conservative.
+          // Tier 2: last-chance lookup by policy identity plus compatible
+          // owner/life assured, so family policies with the same product or
+          // repeated printed number stay as separate records.
           if (!targetExisting) {
-            const incomingKey = normalizePolicyKey(clean.policyNumber);
-            if (incomingKey && incomingKey.length >= 4) {
-              targetExisting = policies.find(ep => normalizePolicyKey(ep.policyNumber) === incomingKey);
-            }
+            targetExisting = currentClientPolicies.find(ep => ep.id !== clean.id && policiesLikelySamePolicy(ep, clean)) || null;
           }
 
           let result;
@@ -31342,7 +31667,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
             // from next (incoming) — so the existing record is the
             // authoritative source of truth and only missing fields get
             // filled. Keep the ORIGINAL id so dbPut updates in place.
-            const merged = mergePolicies(targetExisting, clean);
+            const merged = mergePolicyRecords(targetExisting, clean);
             result = {...merged, id: targetExisting.id};
             mergedCount++;
             console.log('[Save] Merged duplicate into existing:', result.productName, '(', targetExisting.id, ')');
