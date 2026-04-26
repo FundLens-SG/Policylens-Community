@@ -658,12 +658,27 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2d.7';
+const APP_VERSION = 'v2.3.0-rc2d.8';
 const APP_VERSION_DATE = '2026-04-26';
-const APP_VERSION_NAME = 'Embedded Document AI proxy';
+const APP_VERSION_NAME = 'Policy delete sync race fix';
 const DEFAULT_DOCUMENT_AI_PROXY_URL = 'https://policylens-document-ai.chungakwanc.workers.dev';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2d.8',
+    date: '2026-04-26',
+    name: 'Policy delete sync race fix',
+    sections: [
+      {
+        heading: 'Sync',
+        items: [
+          'Fixed deleted policies reappearing when switching tabs quickly before the Drive upload finished.',
+          'Drive pulls now pause as soon as a local policy/profile write is queued, and deleted-policy tombstones are respected even during forced refresh paths.',
+          'Queued Drive writes now reschedule themselves if another sync operation is in flight, reducing stuck "Queued" sync indicators.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2d.7',
     date: '2026-04-26',
@@ -10302,6 +10317,8 @@ function _driveSyncDebounced(fn, ms) {
 let _driveSyncInFlight = false;
 let _driveSyncJustSaved = false;
 let _driveLastFocusRefreshAt = 0;
+const LOCAL_DRIVE_WRITE_HOLD_MS = 15000;
+const _localDriveWriteHolds = new Map();
 // v2.3.0-rc2c.4f: Per-client throttle for refreshClientFromDrive (5s)
 const _lastRefreshTimes = new Map();
 function _notifySyncStatus() {
@@ -10355,6 +10372,37 @@ function getPolicyLensUserEmail() {
 
 function syncOutboxId(clientId) {
   return DRIVE_SYNC_OUTBOX_PREFIX + clientId;
+}
+
+function holdLocalDriveWrite(clientId, reason, ms) {
+  if (!clientId) return;
+  const ttl = ms || LOCAL_DRIVE_WRITE_HOLD_MS;
+  const until = Date.now() + ttl;
+  _localDriveWriteHolds.set(clientId, { until, reason: reason || 'local-write' });
+  setTimeout(() => {
+    const hold = _localDriveWriteHolds.get(clientId);
+    if (hold && hold.until <= Date.now()) {
+      _localDriveWriteHolds.delete(clientId);
+      _notifySyncStatus();
+    }
+  }, ttl + 250);
+  _notifySyncStatus();
+}
+
+function hasLocalDriveWriteHold(clientId) {
+  if (!clientId) return false;
+  const hold = _localDriveWriteHolds.get(clientId);
+  if (!hold) return false;
+  if (hold.until <= Date.now()) {
+    _localDriveWriteHolds.delete(clientId);
+    return false;
+  }
+  return true;
+}
+
+function clearLocalDriveWriteHold(clientId) {
+  if (!clientId) return;
+  if (_localDriveWriteHolds.delete(clientId)) _notifySyncStatus();
 }
 
 function getLocalSyncBroadcast() {
@@ -10507,6 +10555,7 @@ async function markDriveSyncPending(clientId, reason, extra) {
 async function clearDriveSyncPending(clientId, patch) {
   if (!clientId) return;
   await PolicyDB.deleteSyncOutbox(syncOutboxId(clientId)).catch(() => {});
+  clearLocalDriveWriteHold(clientId);
   const ds = await PolicyDB.getDriveState(clientId).catch(() => null);
   if (ds) {
     await PolicyDB.saveDriveState({
@@ -10668,7 +10717,13 @@ function mergeDrivePayloadsForConflict(localPayload, remoteRaw, clientId) {
 
 async function writeDrivePayloadToLocal(clientId, parsed, headRevisionId, existingDs) {
   const driveProfile = parsed.clientProfile || {};
-  const drivePolicies = parsed.policies || [];
+  const localDeletedIds = await getDeletedPolicyIds(clientId).catch(() => []);
+  const deletedPolicyIds = Array.from(new Set([
+    ...(Array.isArray(parsed.deletedPolicyIds) ? parsed.deletedPolicyIds : []),
+    ...(Array.isArray(localDeletedIds) ? localDeletedIds : [])
+  ])).slice(-500);
+  const deletedSet = new Set(deletedPolicyIds);
+  const drivePolicies = (parsed.policies || []).filter(pol => !pol?.id || !deletedSet.has(pol.id));
   if (driveProfile) await dbPut('settings', { key: 'clientProfile_' + clientId, value: driveProfile });
   if (driveProfile?.name != null) await dbPut('settings', { key: 'clientName_' + clientId, value: driveProfile.name || '' }).catch(() => {});
   const oldPols = await dbGetAll('policies');
@@ -10681,9 +10736,7 @@ async function writeDrivePayloadToLocal(clientId, parsed, headRevisionId, existi
   for (const session of (parsed.scanSessions || [])) {
     if (session?.id) await PolicyDB.saveScanSession({ ...session, clientId }).catch(() => {});
   }
-  if (Array.isArray(parsed.deletedPolicyIds)) {
-    await PolicyDB.saveSetting('deletedPolicyIds_' + clientId, parsed.deletedPolicyIds.slice(-500)).catch(() => {});
-  }
+  await PolicyDB.saveSetting('deletedPolicyIds_' + clientId, deletedPolicyIds).catch(() => {});
   const ds = existingDs || await PolicyDB.getDriveState(clientId).catch(() => null);
   const updatedDs = ds ? {
     ...ds,
@@ -10816,6 +10869,10 @@ async function driveSyncClientById(clientId, opts) {
 
 async function flushDriveSyncOutbox(opts) {
   if (isDriveLocalOnly() || getDriveStatus() !== 'connected') return 0;
+  if (_driveSyncInFlight && !opts?.force) {
+    _driveSyncDebounced(() => flushDriveSyncOutbox(opts), 1200);
+    return 0;
+  }
   const all = await PolicyDB.getAllSyncOutbox().catch(() => []);
   const targetClientId = opts?.clientId || null;
   const pending = (all || [])
@@ -11240,7 +11297,7 @@ async function refreshClientFromDrive(clientId, opts) {
   const force = !!opts?.force;
   // v2.3.0-rc2c.5m: CRITICAL — skip refresh when a local write is pending.
   // Local is newer than Drive. Without this, poll/focus/switch overwrite local edits.
-  if (!force && (_driveSyncTimer !== null || _driveSyncInFlight)) return false;
+  if (!force && (hasLocalDriveWriteHold(clientId) || _driveSyncTimer !== null || _driveSyncInFlight)) return false;
   const pendingOutbox = await PolicyDB.getSyncOutbox(syncOutboxId(clientId)).catch(() => null);
   if (!force && pendingOutbox && (pendingOutbox.status === 'pending' || pendingOutbox.status === 'failed')) return false;
   let ds;
@@ -13031,15 +13088,31 @@ function App() {
     if (policies.length > 0) { _autoPullAttemptedRef.current.delete(activeClientId); return; }
     if (_autoPullAttemptedRef.current.has(activeClientId)) return;
     if (getDriveStatus() !== 'connected' || isDriveLocalOnly()) return;
-    _autoPullAttemptedRef.current.add(activeClientId);
+    if (hasLocalDriveWriteHold(activeClientId) || _driveSyncTimer !== null || _driveSyncInFlight) return;
     (async () => {
       try {
+        const pendingOutbox = await PolicyDB.getSyncOutbox(syncOutboxId(activeClientId)).catch(() => null);
+        if (pendingOutbox && (pendingOutbox.status === 'pending' || pendingOutbox.status === 'failed')) {
+          console.log('[AutoPull] Skipped - local Drive write pending for', activeClientId);
+          return;
+        }
         const ds = await PolicyDB.getDriveState(activeClientId).catch(() => null);
         if (!ds || !ds.fileId) return;
+        if (ds.pendingWrite) {
+          console.log('[AutoPull] Skipped - drive_state has pendingWrite for', activeClientId);
+          return;
+        }
+        _autoPullAttemptedRef.current.add(activeClientId);
         console.log('[AutoPull] Active client', activeClientId, 'has 0 policies — pulling from Drive');
         const { meta, content } = await driveClient.getFile(ds.fileId);
         const fileData = JSON.parse(content);
-        const { clientProfile: driveProfile, policies: drivePolicies } = parseDriveClientFile(fileData);
+        const parsed = parseDriveClientFile(fileData);
+        const driveProfile = parsed.clientProfile;
+        const deletedIds = new Set([
+          ...(Array.isArray(parsed.deletedPolicyIds) ? parsed.deletedPolicyIds : []),
+          ...(await getDeletedPolicyIds(activeClientId).catch(() => []))
+        ]);
+        const drivePolicies = (parsed.policies || []).filter(pol => !pol?.id || !deletedIds.has(pol.id));
         if (!drivePolicies || drivePolicies.length === 0) { console.log('[AutoPull] Drive file also has 0 policies'); return; }
         if (driveProfile) await dbPut('settings', { key: 'clientProfile_' + activeClientId, value: driveProfile });
         for (const pol of drivePolicies) { pol.clientId = activeClientId; await dbPut('policies', pol); }
@@ -14445,9 +14518,11 @@ function App() {
   };
 
   const scheduleDriveWriteForClient = (clientId, reason, delay) => {
-    if (!clientId) return;
-    markDriveSyncPending(clientId, reason).catch(() => {});
+    if (!clientId) return Promise.resolve(null);
+    holdLocalDriveWrite(clientId, reason);
+    const pending = markDriveSyncPending(clientId, reason).catch(() => null);
     _driveSyncDebounced(() => flushDriveSyncOutbox({ reason: reason || 'autosave' }), delay || 1000);
+    return pending;
   };
 
   const savePolicy = async (incomingP) => {
@@ -14489,12 +14564,13 @@ function App() {
     const deletedClientId = existing?.clientId || activeClientId;
     await recordDeletedPolicyId(deletedClientId, id);
     await dbDel('policies', id);
+    // Queue the Drive tombstone before React sees 0 policies; otherwise the
+    // auto-pull safety net can mistake a just-deleted client for a failed load.
+    await scheduleDriveWriteForClient(deletedClientId, 'policy-delete', 1000);
     setPolicies(prev => prev.filter(x=>x.id!==id));
     // Cloud soft-delete (fire-and-forget)
     lastSelfPushRef.current = Date.now();
     sbPolicyDelete(id).catch(() => {});
-    // v2.3.0-rc2c.5o: Sync deletion to Drive (was missing — deleted policies persisted in Drive)
-    scheduleDriveWriteForClient(deletedClientId, 'policy-delete', 1000);
   };
 
   // Repo operations — Supabase primary, local fallback
@@ -20405,10 +20481,10 @@ function ProfileTab() {
           <button style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',fontSize:11,padding:'5px 10px',borderRadius:8,cursor:'pointer',fontWeight:500}} onClick={async()=>{const files=await openCameraModal();if(files&&files.length) scanProfile(files);}} disabled={scanning}>{scanning?'Scanning…':'📷 Camera'}</button>
           <button style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',fontSize:11,padding:'5px 10px',borderRadius:8,cursor:'pointer',fontWeight:500}} onClick={()=>{const inp=document.createElement('input');inp.type='file';inp.accept='image/*';inp.multiple=true;inp.onchange=e=>{if(e.target.files.length) scanProfile(e.target.files);};inp.click();}} disabled={scanning}>🖼 Gallery</button>
           <button style={{background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',fontSize:11,padding:'5px 10px',borderRadius:8,cursor:'pointer',fontWeight:500}} onClick={()=>uploadRef.current?.click()} disabled={scanning}>{scanning?'…':'📄 Upload'}</button>
-          <button className="btn-sm" style={{background:'rgba(239,83,80,.08)',color:'var(--red)',border:'1px solid rgba(239,83,80,.15)',fontSize:10,padding:'5px 10px',borderRadius:8,cursor:'pointer'}} onClick={()=>{
+          <button className="btn-sm" style={{background:'rgba(239,83,80,.08)',color:'var(--red)',border:'1px solid rgba(239,83,80,.15)',fontSize:10,padding:'5px 10px',borderRadius:8,cursor:'pointer'}} onClick={async()=>{
             if(!confirm('Reset all data for '+(p.name||'this client')+'?\n\nPolicies, profile fields, and assumptions will be cleared. The client record stays.')) return;
             // Delete policies for this client
-            for(const pol of policies) deletePolicy(pol.id);
+            for(const pol of [...policies]) await deletePolicy(pol.id);
             // v2.2.0-rc1: keep name so client record stays intact
             const blank = {
               name: p.name, nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[],
