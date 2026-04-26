@@ -658,12 +658,27 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2d.9';
+const APP_VERSION = 'v2.3.0-rc2d.10';
 const APP_VERSION_DATE = '2026-04-26';
-const APP_VERSION_NAME = 'Family policy owner routing';
+const APP_VERSION_NAME = 'Scan import client binding fix';
 const DEFAULT_DOCUMENT_AI_PROXY_URL = 'https://policylens-document-ai.chungakwanc.workers.dev';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2d.10',
+    date: '2026-04-26',
+    name: 'Scan import client binding fix',
+    sections: [
+      {
+        heading: 'Import safety',
+        items: [
+          'Bulk scan import now force-binds accepted policies to the active client before saving, preventing successful extractions from disappearing after Import All.',
+          'Legacy single-client data is automatically upgraded into an active local client so the Policies and Clients tabs do not open blank.',
+          'Unsyncable Drive queue entries for local-only clients are cleared instead of leaving the top bar stuck on queued sync.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2d.9',
     date: '2026-04-26',
@@ -10545,6 +10560,21 @@ function stampProfileSyncMeta(profile, reason) {
 async function markDriveSyncPending(clientId, reason, extra) {
   if (!clientId) return null;
   if (isDriveLocalOnly()) return null;
+  const ds = await PolicyDB.getDriveState(clientId).catch(() => null);
+  if (!ds || !ds.fileId) {
+    await PolicyDB.deleteSyncOutbox(syncOutboxId(clientId)).catch(() => {});
+    if (ds && (ds.pendingWrite || ds.pendingError || ds.pendingSince || ds.pendingReason)) {
+      await PolicyDB.saveDriveState({
+        ...ds,
+        pendingWrite: false,
+        pendingSince: null,
+        pendingReason: null,
+        pendingError: null
+      }).catch(() => {});
+    }
+    _notifySyncStatus();
+    return null;
+  }
   const id = syncOutboxId(clientId);
   const now = new Date().toISOString();
   const existing = await PolicyDB.getSyncOutbox(id).catch(() => null);
@@ -10564,7 +10594,6 @@ async function markDriveSyncPending(clientId, reason, extra) {
     ...(extra || {})
   };
   await PolicyDB.saveSyncOutbox(entry).catch(() => {});
-  const ds = await PolicyDB.getDriveState(clientId).catch(() => null);
   if (ds) {
     await PolicyDB.saveDriveState({
       ...ds,
@@ -10906,9 +10935,24 @@ async function flushDriveSyncOutbox(opts) {
     .sort((a,b) => String(a.updatedAt || '').localeCompare(String(b.updatedAt || '')));
   let flushed = 0;
   for (const entry of pending) {
+    const ds = await PolicyDB.getDriveState(entry.clientId).catch(() => null);
+    if (!ds || !ds.fileId) {
+      await PolicyDB.deleteSyncOutbox(entry.id || syncOutboxId(entry.clientId)).catch(() => {});
+      if (ds && (ds.pendingWrite || ds.pendingError || ds.pendingSince || ds.pendingReason)) {
+        await PolicyDB.saveDriveState({
+          ...ds,
+          pendingWrite: false,
+          pendingSince: null,
+          pendingReason: null,
+          pendingError: null
+        }).catch(() => {});
+      }
+      continue;
+    }
     const ok = await driveSyncClientById(entry.clientId, { showToast: false, reason: opts?.reason || 'outbox-flush', force: opts?.force });
     if (ok) flushed++;
   }
+  _notifySyncStatus();
   return flushed;
 }
 
@@ -13699,6 +13743,72 @@ function App() {
     await _loadClientData(clientId);
   };
 
+  const _newLocalClientId = () => {
+    try { return crypto.randomUUID(); } catch(_) { return 'client_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 7); }
+  };
+
+  const ensureLegacyActiveClient = async ({ profile, name, policyList }) => {
+    const policiesToBind = Array.isArray(policyList) ? policyList : [];
+    const rawProfile = profile || {};
+    const displayName = String(rawProfile.name || name || clientName || '').trim();
+    if (!displayName && policiesToBind.length === 0) return null;
+    let clientId = null;
+    try { clientId = localStorage.getItem('policylens_active_client_id'); } catch(_) {}
+    if (!clientId) clientId = _newLocalClientId();
+    const nextProfile = {
+      name: displayName || rawProfile.name || 'Untitled',
+      nric: '',
+      dob: '',
+      gender: '',
+      smoker: '',
+      nationality: '',
+      occupation: '',
+      phone: '',
+      email: '',
+      dependants: [],
+      ...rawProfile,
+      name: rawProfile.name || displayName || 'Untitled'
+    };
+    const existingDs = await PolicyDB.getDriveState(clientId).catch(() => null);
+    const nextDriveState = {
+      ...(existingDs || {}),
+      clientId,
+      fileId: existingDs?.fileId || null,
+      folderId: existingDs?.folderId || null,
+      tierFolderId: existingDs?.tierFolderId || null,
+      headRevisionId: existingDs?.headRevisionId || null,
+      lastSyncedAt: existingDs?.lastSyncedAt || new Date().toISOString(),
+      pendingWrite: false,
+      pendingSince: null,
+      pendingReason: null,
+      pendingError: null,
+      clientName: nextProfile.name || displayName || 'Untitled',
+      tier: existingDs?.tier || UNASSIGNED_TIER,
+      lastReviewedAt: existingDs?.lastReviewedAt || null,
+      localOnly: !existingDs?.fileId
+    };
+    await PolicyDB.saveDriveState(nextDriveState).catch(() => {});
+    await dbPut('settings', { key: 'clientProfile_' + clientId, value: nextProfile }).catch(() => {});
+    await dbPut('settings', { key: 'clientName_' + clientId, value: nextProfile.name || '' }).catch(() => {});
+    setActiveClientId(clientId);
+    activeClientIdRef.current = clientId;
+    setClientProfile(nextProfile);
+    setClientName(nextProfile.name || '');
+    setDriveState(nextDriveState);
+    try { localStorage.setItem('policylens_active_client_id', clientId); } catch(_) {}
+    const migrated = [];
+    for (const pol of policiesToBind) {
+      if (!pol) continue;
+      const nextPol = pol.clientId ? pol : { ...pol, clientId };
+      migrated.push(nextPol);
+      if (!pol.clientId) {
+        try { await dbPut('policies', nextPol); } catch(e) { console.warn('[LegacyClient] Policy client binding failed for', pol.id, e); }
+      }
+    }
+    try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
+    return { clientId, profile: nextProfile, policies: migrated, driveState: nextDriveState };
+  };
+
   // Refresh driveState for active client on sync status changes
   useEffect(() => {
     const loadDS = async () => {
@@ -13900,8 +14010,49 @@ function App() {
       } else {
         // No drive_state rows — legacy single-client or fresh install
         // Load from unnamespaced keys (pre-migration or no Drive)
-        if(stg.clientName) setClientName(stg.clientName.value||'');
-        if(stg.clientProfile?.value) setClientProfile(stg.clientProfile.value);
+        const legacy = await ensureLegacyActiveClient({
+          profile: stg.clientProfile?.value,
+          name: stg.clientName?.value,
+          policyList: fixedPolicies
+        });
+        if (legacy) {
+          setPolicies(legacy.policies);
+        } else {
+          if(stg.clientName) setClientName(stg.clientName.value||'');
+          if(stg.clientProfile?.value) setClientProfile(stg.clientProfile.value);
+        }
+      }
+
+      try {
+        const [outboxEntries, currentStates] = await Promise.all([
+          PolicyDB.getAllSyncOutbox().catch(() => []),
+          PolicyDB.getAllDriveStates().catch(() => [])
+        ]);
+        const stateByClient = new Map((currentStates || []).map(ds => [ds.clientId, ds]));
+        let clearedOutbox = 0;
+        for (const entry of (outboxEntries || [])) {
+          if (!entry || entry.type !== 'drive-client') continue;
+          const ds = stateByClient.get(entry.clientId);
+          if (!ds || !ds.fileId) {
+            await PolicyDB.deleteSyncOutbox(entry.id || syncOutboxId(entry.clientId)).catch(() => {});
+            if (ds && (ds.pendingWrite || ds.pendingError || ds.pendingSince || ds.pendingReason)) {
+              await PolicyDB.saveDriveState({
+                ...ds,
+                pendingWrite: false,
+                pendingSince: null,
+                pendingReason: null,
+                pendingError: null
+              }).catch(() => {});
+            }
+            clearedOutbox++;
+          }
+        }
+        if (clearedOutbox > 0) {
+          console.log('[SyncQueue] Cleared', clearedOutbox, 'unsyncable local-only queue entries');
+          _notifySyncStatus();
+        }
+      } catch(e) {
+        console.warn('[SyncQueue] Local-only cleanup failed:', e);
       }
 
       // Load repository from Supabase (primary) with local fallback
@@ -13945,7 +14096,7 @@ function App() {
   // Fires after initial IDB load completes AND whenever Drive status changes.
   // Shows the one-time migration prompt when:
   //   1. User has data in IDB (policies.length > 0 OR clientProfile has a name)
-  //   2. No drive_state row exists for any client (never synced before)
+  //   2. No drive_state row has a Drive file yet (never synced before)
   //   3. Drive is connected
   //   4. User hasn't dismissed the prompt this session
   useEffect(() => {
@@ -13964,7 +14115,7 @@ function App() {
       const hasData = policies.length > 0 || (clientProfile?.name && clientProfile.name.trim() !== '');
       if (!hasData) return;
       const states = await PolicyDB.getAllDriveStates().catch(() => []);
-      if (states && states.length > 0) return;
+      if (states && states.some(ds => ds?.fileId)) return;
       setShowDriveMigration(true);
     };
     checkMigration();
@@ -14569,11 +14720,15 @@ function App() {
     const oldData = policies.find(x => x.id === p.id);
     const oldVersions = oldData?._fieldVersions || {};
     const newVersions = bumpFieldVersions(p, oldData, oldVersions);
-    if (!activeClientId && !p.clientId) {
+    let targetClientId = p.clientId || activeClientIdRef.current || activeClientId;
+    if (!targetClientId) {
+      try { targetClientId = localStorage.getItem('policylens_active_client_id'); } catch(_) {}
+    }
+    if (!targetClientId) {
       console.warn('[savePolicy] No active client — policy not saved:', p.id);
       return;
     }
-    const enriched = stampPolicySyncMeta({...p, _fieldVersions: newVersions, clientId: activeClientId || p.clientId}, 'policy-save');
+    const enriched = stampPolicySyncMeta({...p, _fieldVersions: newVersions, clientId: targetClientId}, 'policy-save');
     await dbPut('policies', enriched);
     clearDeletedPolicyId(enriched.clientId, enriched.id).catch(() => {});
     setPolicies(prev => {const idx=prev.findIndex(x=>x.id===enriched.id);if(idx>=0){const n=[...prev];n[idx]=enriched;return n}return[...prev,enriched]});
@@ -14584,10 +14739,11 @@ function App() {
     sbPolicyPush(enriched, newVersions).catch(() => {});
     // v2.2.0-alpha: Dual-write to Drive (debounced, fire-and-forget)
     scheduleDriveWriteForClient(enriched.clientId, 'policy-save', 1000);
+    return enriched;
   };
   const deletePolicy = async (id) => {
     const existing = policies.find(x => x.id === id) || await dbGet('policies', id).catch(() => null);
-    const deletedClientId = existing?.clientId || activeClientId;
+    const deletedClientId = existing?.clientId || activeClientIdRef.current || activeClientId;
     await recordDeletedPolicyId(deletedClientId, id);
     await dbDel('policies', id);
     // Queue the Drive tombstone before React sees 0 policies; otherwise the
@@ -15042,7 +15198,9 @@ function App() {
           _driveSyncInFlight = true;
           _notifySyncStatus();
           try {
-            const clientId = crypto.randomUUID();
+            const existingLocalId = activeClientIdRef.current || activeClientId;
+            const existingLocalDs = existingLocalId ? await PolicyDB.getDriveState(existingLocalId).catch(() => null) : null;
+            const clientId = (existingLocalId && !existingLocalDs?.fileId) ? existingLocalId : crypto.randomUUID();
             const clientName_ = clientProfile?.name || 'Untitled';
             const payload = buildDriveClientPayload(clientId, clientProfile, policies);
             // v2.2.0-rc1: Use nested folder structure
@@ -15059,7 +15217,12 @@ function App() {
             });
             // Tag existing policies + save profile under per-client key
             const allPols = await dbGetAll('policies');
-            for (const pol of allPols) { if (!pol.clientId) { pol.clientId = clientId; await dbPut('policies', pol); } }
+            for (const pol of allPols) {
+              if (!pol.clientId || pol.clientId === existingLocalId) {
+                pol.clientId = clientId;
+                await dbPut('policies', pol);
+              }
+            }
             await dbPut('settings', { key: 'clientProfile_' + clientId, value: clientProfile });
             await dbPut('settings', { key: 'clientName_' + clientId, value: clientName_ });
             // Set as active client
@@ -16615,7 +16778,7 @@ function RepositoryTab() {
 
 // ── v2.2.0-rc1: Clients tab ──
 function ClientsTab() {
-  const { switchClient, setTab, activeClientId, policies: activePolicies, tierDefinitions, driveState, setDriveState, clientName, destroyClient } = useContext(AppCtx);
+  const { switchClient, setTab, activeClientId, policies: activePolicies, tierDefinitions, driveState, setDriveState, clientName, clientProfile, destroyClient } = useContext(AppCtx);
   const isMobile = useViewportIsMobile();
   const [filter, setFilter] = useState('all');
   const [allStates, setAllStates] = useState([]);
@@ -16640,7 +16803,16 @@ function ClientsTab() {
     };
   }, []);
   // v2.2.0-rc2.1: Filter chips now functional (backing logic was correct since rc2.0; wiring verified)
-  const filtered = filter === 'all' ? allStates : allStates.filter(ds => (ds.tier || UNASSIGNED_TIER) === filter);
+  const fallbackClientName = clientName || clientProfile?.name || 'Current client';
+  const visibleStates = allStates.length > 0 ? allStates : (activeClientId ? [{
+    clientId: activeClientId,
+    clientName: fallbackClientName,
+    tier: UNASSIGNED_TIER,
+    lastReviewedAt: null,
+    pendingWrite: false,
+    localOnly: true
+  }] : []);
+  const filtered = filter === 'all' ? visibleStates : visibleStates.filter(ds => (ds.tier || UNASSIGNED_TIER) === filter);
   const chips = [{id:'all',label:'All'}, ...tierDefinitions.map(t => ({id:t, label:t}))];
   return (
     <div className="fade-in">
@@ -16663,7 +16835,7 @@ function ClientsTab() {
           {isMobile ? '+' : '+ New Client'}
         </button>
       </div>
-      {filtered.length === 0 && allStates.length === 0 && (
+      {filtered.length === 0 && visibleStates.length === 0 && (
         <div style={{textAlign:'center',padding:'60px 20px',color:'var(--text3)'}}>
           <div style={{fontSize:40,marginBottom:12}}>👥</div>
           <p style={{fontSize:14,marginBottom:16}}>No clients yet. Create your first client to get started.</p>
@@ -16673,7 +16845,7 @@ function ClientsTab() {
           </button>
         </div>
       )}
-      {filtered.length === 0 && allStates.length > 0 && (
+      {filtered.length === 0 && visibleStates.length > 0 && (
         <div style={{textAlign:'center',padding:'40px 20px',color:'var(--text3)',fontSize:13}}>No clients match this filter.</div>
       )}
       <div style={{display:'grid',gap:8}}>
@@ -25490,7 +25662,7 @@ function Policies() {
           // v2.3.0-rc2c.3b: Name detection — check before opening BulkVerifyModal
           try {
             const allDS = await PolicyDB.getAllDriveStates().catch(()=>[]);
-            const detected = collectDetectedClients(deduped, clientProfile, allDS);
+            const detected = collectDetectedClients(deduped, {...(clientProfile || {}), name: clientProfile?.name || clientName}, allDS);
             if (detected.size > 0) {
               setPendingNameDetection({policies:deduped, detected, allDriveStates:allDS});
               setScanProgress(null);
@@ -29898,6 +30070,15 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
         let count = 0;
         let mergedCount = 0;
         const acceptedPolicyIds = [];
+        let importClientId = activeClientId;
+        if (!importClientId) {
+          try { importClientId = localStorage.getItem('policylens_active_client_id'); } catch(_) {}
+        }
+        if (!importClientId) {
+          toast('No active client found. Reload PolicyLens, open the client, then import again.', 'error', 7000);
+          return;
+        }
+        try { holdLocalDriveWrite(importClientId, 'scan-import', 120000); } catch(_) {}
         // ── DEDUPE AT SAVE TIME (2026-04-09 fix) ──
         // Previously every selected policy got a fresh genId() and
         // was saved as a new entry, even when findExistingMatch had
@@ -29924,6 +30105,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
           delete clean._extractConfidence; delete clean._extractConfidenceReasons;
           delete clean._mergeIntoExisting;
           delete clean._ownerRoute; delete clean._ownerRoutedFrom;
+          clean.clientId = importClientId;
 
           // Tier 1: explicit _knownPolicyMatch from extraction-time detection
           let targetExisting = null;
@@ -29956,20 +30138,21 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
           } else {
             result = {...clean, id: genId()};
           }
+          result = {...result, clientId: importClientId};
 
           if(result.premiumStructure==='Single Premium' || result.premFrequency==='single') result.premSingle = true;
           if(result.premStartAge && result.premTerm && !result.premEndAge) result.premEndAge = String(parseInt(result.premStartAge)+parseInt(result.premTerm));
           if(result.ageAtEntry && !result.premStartAge) result.premStartAge = result.ageAtEntry;
-          await savePolicy(result);
-          if (result.id) acceptedPolicyIds.push(result.id);
+          const savedPolicy = await savePolicy(result);
+          if (savedPolicy?.id || result.id) acceptedPolicyIds.push(savedPolicy?.id || result.id);
           count++;
         }
-        if (activeClientId && count > 0) {
+        if (importClientId && count > 0) {
           try {
             const sourceFiles = (staged || []).map(s => s?.file?.name || s?.name).filter(Boolean);
             await PolicyDB.saveScanSession({
               id: 'scan_' + Date.now() + '_' + Math.random().toString(36).slice(2, 7),
-              clientId: activeClientId,
+              clientId: importClientId,
               createdAt: new Date().toISOString(),
               deviceId: getPolicyLensDeviceId(),
               deviceName: getPolicyLensDeviceName(),
@@ -29983,12 +30166,19 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
             });
           } catch(e) { console.warn('[ScanSession] Save failed:', e?.message || e); }
         }
-        if (activeClientId) {
+        if (importClientId) {
           try {
-            window.dispatchEvent(new CustomEvent('policylens-trigger-drive-write', { detail: { clientId: activeClientId, reason: 'scan-import' } }));
+            window.dispatchEvent(new CustomEvent('policylens-trigger-drive-write', { detail: { clientId: importClientId, reason: 'scan-import' } }));
           } catch(_) {}
         }
         // Progressive session ends on accept — same reset as onClose
+        try {
+          await switchClient(importClientId);
+          setTab('policies');
+          window.dispatchEvent(new Event('policylens-clients-changed'));
+        } catch(e) {
+          console.warn('[Import] Post-save reload failed:', e);
+        }
         sessionBulkRef.current = [];
         progressiveSessionRef.current = false;
         if (progressiveTimerRef.current) { clearTimeout(progressiveTimerRef.current); progressiveTimerRef.current = null; }
