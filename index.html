@@ -30,13 +30,13 @@ window.PolicyLensDebug=function(on){try{localStorage.setItem('policylens_debug',
 <link rel="apple-touch-icon" href="apple-touch-icon.png">
 <script>
 // ═══════════════════════════════════════════════════════════════
-// v2.3.0-rc2d.12: SERVICE WORKER REGISTRATION
+// v2.3.0-rc2d.13: SERVICE WORKER REGISTRATION
 // ───────────────────────────────────────────────────────────────
 // PolicyLens uses a lightweight Service Worker extraction relay so
 // long multi-batch scans can continue when the browser backgrounds
 // the page. The worker is registered only on HTTPS/localhost.
 // ═══════════════════════════════════════════════════════════════
-const POLICYLENS_SW_VERSION = 'v2.3.0-rc2d.12';
+const POLICYLENS_SW_VERSION = 'v2.3.0-rc2d.13';
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', async () => {
     const canRegister = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
@@ -664,12 +664,26 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2d.12';
+const APP_VERSION = 'v2.3.0-rc2d.13';
 const APP_VERSION_DATE = '2026-04-26';
-const APP_VERSION_NAME = 'Background extraction and family groups';
+const APP_VERSION_NAME = 'Family scan routing completion';
 const DEFAULT_DOCUMENT_AI_PROXY_URL = 'https://policylens-document-ai.chungakwanc.workers.dev';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2d.13',
+    date: '2026-04-26',
+    name: 'Family scan routing completion',
+    sections: [
+      {
+        heading: 'AI scanning',
+        items: [
+          'Policy-owner routing now runs before verification for the main multi-batch scan path, recovered sessions, and queue-based extraction results.',
+          'Same policy number/product entries are no longer merged when the printed policy owner or life insured clearly belongs to different family members.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2d.12',
     date: '2026-04-26',
@@ -25894,6 +25908,27 @@ function Policies() {
     setNewClientModalOpen(true);
   };
 
+  const maybeOpenPolicyOwnerRouting = async (incomingPolicies) => {
+    const list = Array.isArray(incomingPolicies) ? incomingPolicies : [];
+    if (list.length === 0) return false;
+    try {
+      const allDS = await PolicyDB.getAllDriveStates().catch(()=>[]);
+      const detected = collectDetectedClients(
+        list,
+        {...(clientProfile || {}), name: clientProfile?.name || clientName},
+        allDS
+      );
+      if (detected.size > 0) {
+        setPendingNameDetection({policies:list, detected, allDriveStates:allDS});
+        setScanProgress(null);
+        return true;
+      }
+    } catch(e) {
+      console.warn('[NameDetect]', e?.message || e);
+    }
+    return false;
+  };
+
   // ═══════════════════════════════════════════════════════════════
   // v15: QUEUE SUBSCRIPTION — bridges ticker events to React state
   // ═══════════════════════════════════════════════════════════════
@@ -25945,17 +25980,11 @@ function Policies() {
             _pipelineVersion: EXTRACT_PIPELINE_VERSION,
           }));
           const deduped = typeof dedupePolicies === 'function' ? dedupePolicies(processed) : processed;
-          // v2.3.0-rc2c.3b: Name detection — check before opening BulkVerifyModal
-          try {
-            const allDS = await PolicyDB.getAllDriveStates().catch(()=>[]);
-            const detected = collectDetectedClients(deduped, {...(clientProfile || {}), name: clientProfile?.name || clientName}, allDS);
-            if (detected.size > 0) {
-              setPendingNameDetection({policies:deduped, detected, allDriveStates:allDS});
-              setScanProgress(null);
-              setStaged(prev => prev.map(s => { if(!s._jobId) return s; const j=jobs.find(j2=>j2.id===s._jobId); return j?{...s,_status:j.stage==='done'?'done':j.stage==='failed'?'failed':j.stage==='cancelled'?'cancelled':s._status}:s; }));
-              return;
-            }
-          } catch(e) { console.warn('[NameDetect]', e.message); }
+          // v2.3.0-rc2d.13: Name detection — check before opening BulkVerifyModal.
+          if (await maybeOpenPolicyOwnerRouting(deduped)) {
+            setStaged(prev => prev.map(s => { if(!s._jobId) return s; const j=jobs.find(j2=>j2.id===s._jobId); return j?{...s,_status:j.stage==='done'?'done':j.stage==='failed'?'failed':j.stage==='cancelled'?'cancelled':s._status}:s; }));
+            return;
+          }
           setBulkExtracted(deduped);
           const dupsRemoved = processed.length - deduped.length;
           try { toast('✅ Imported '+deduped.length+' policies'+(dupsRemoved>0?' ('+dupsRemoved+' duplicates merged)':''),'success',5000); } catch(_) {}
@@ -26216,7 +26245,9 @@ function Policies() {
             return true;
           });
           if (deduped.length > 0) {
-            setBulkExtracted(deduped);
+            if (!(await maybeOpenPolicyOwnerRouting(deduped))) {
+              setBulkExtracted(deduped);
+            }
             const batchNote = multiRecovered.rawTexts.length < multiRecovered.totalBatches
               ? ` (${multiRecovered.rawTexts.length} of ${multiRecovered.totalBatches} batches)`
               : '';
@@ -26242,7 +26273,9 @@ function Policies() {
           console.log('[SW Recovery] No policies in recovered result');
           return;
         }
-        setBulkExtracted(processed);
+        if (!(await maybeOpenPolicyOwnerRouting(processed))) {
+          setBulkExtracted(processed);
+        }
         toast(
           `📦 Recovered ${processed.length} polic${processed.length === 1 ? 'y' : 'ies'} from background extraction`,
           'success',
@@ -27013,19 +27046,23 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
 
   // Restore pending extracted policies from sessionStorage (survives refresh)
   useEffect(() => {
+    (async () => {
     try {
       const saved = sessionStorage.getItem('policylens_pendingExtract');
       if(saved && !bulkExtracted) {
         const parsed = JSON.parse(saved);
         if(Array.isArray(parsed) && parsed.length > 0) {
           console.log('[Extract] Restored', parsed.length, 'pending policies from session');
-          setBulkExtracted(parsed);
+          if (!(await maybeOpenPolicyOwnerRouting(parsed))) {
+            setBulkExtracted(parsed);
+          }
           // Seed sessionBulkRef so chained runs continue where
           // the previous session's last batch left off.
           sessionBulkRef.current = parsed;
         }
       }
     } catch(e){}
+    })();
   }, []);
 
   // ── PROGRESSIVE STAGED PERSISTENCE (feature c, 2026-04-09) ──
@@ -27542,6 +27579,9 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
   // pass in handleExtract after all batches complete).
   const dedupePolicies = (arr) => {
     const before = arr.length;
+    // Policy number is a very strong merge key, but family scans can contain
+    // repeated/master numbers across different lives. Keep separate buckets
+    // when the printed people clearly conflict.
     const byPolNum = new Map();
     const byFp = new Map();
     const unmatched = [];
@@ -27572,10 +27612,20 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
       if (!p || typeof p !== 'object') continue;
       const polNum = normalizePolicyKey(p.policyNumber);
       if (polNum && polNum.length >= 4) {
-        if (byPolNum.has(polNum)) {
-          byPolNum.set(polNum, smartMerge(byPolNum.get(polNum), p));
+        if (!byPolNum.has(polNum)) byPolNum.set(polNum, new Map());
+        const bucket = byPolNum.get(polNum);
+        let compatiblePersonKey = null;
+        for (const [key, existing] of bucket.entries()) {
+          if (!hasDifferentExplicitPeople(existing, p)) {
+            compatiblePersonKey = key;
+            break;
+          }
+        }
+        if (compatiblePersonKey) {
+          bucket.set(compatiblePersonKey, smartMerge(bucket.get(compatiblePersonKey), p));
         } else {
-          byPolNum.set(polNum, p);
+          const personKey = personFingerprintForDedup(p) || ('unknown-' + bucket.size);
+          bucket.set('person:' + personKey, p);
         }
         continue;
       }
@@ -27600,7 +27650,11 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
         byFp.set(fp + '|person:' + personKey, p);
       }
     }
-    const out = [...byPolNum.values(), ...byFp.values(), ...unmatched];
+    const out = [
+      ...Array.from(byPolNum.values()).flatMap(bucket => Array.from(bucket.values())),
+      ...byFp.values(),
+      ...unmatched
+    ];
 
     // ── SUBSTRING + FUZZY FALLBACK PASS (v14.1 upgrade) ──
     // Four-tier secondary matching for ALL entries (including those with policy numbers):
@@ -29401,8 +29455,11 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
       const dupsRemoved = pendingBatchRef.current.length - finalPolicies.length;
       pendingBatchRef.current = [];
       if (finalPolicies.length > 0) {
-        setBulkExtracted([...finalPolicies]);
-        sessionBulkRef.current = [...finalPolicies];
+        const finalPolicyList = [...finalPolicies];
+        if (!(await maybeOpenPolicyOwnerRouting(finalPolicyList))) {
+          setBulkExtracted(finalPolicyList);
+        }
+        sessionBulkRef.current = finalPolicyList;
         try {
           toast('✅ Imported ' + finalPolicies.length + ' policies' + (dupsRemoved > 0 ? ' (' + dupsRemoved + ' duplicates merged)' : ''), 'success', 5000);
         } catch(_) {}
@@ -29510,7 +29567,10 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
         toast(msg,'warning',7000);
         // If some batches succeeded, show partial results
         if(allExtracted.length > 0) {
-          setBulkExtracted([...allExtracted]);
+          const partialPolicyList = [...allExtracted];
+          if (!(await maybeOpenPolicyOwnerRouting(partialPolicyList))) {
+            setBulkExtracted(partialPolicyList);
+          }
           toast(allExtracted.length + ' policies extracted before error — review now','warning',5000);
         }
       }
