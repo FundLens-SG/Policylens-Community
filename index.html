@@ -664,12 +664,27 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2d.20';
+const APP_VERSION = 'v2.3.0-rc2d.21';
 const APP_VERSION_DATE = '2026-04-27';
-const APP_VERSION_NAME = 'Family profile switch sync hotfix';
+const APP_VERSION_NAME = 'Family tree UI cleanup';
 const DEFAULT_DOCUMENT_AI_PROXY_URL = 'https://policylens-document-ai.chungakwanc.workers.dev';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2d.21',
+    date: '2026-04-27',
+    name: 'Family tree UI cleanup',
+    sections: [
+      {
+        heading: 'UX cleanup',
+        items: [
+          'Clients Family view now renders household members as a compact connected list instead of nested client cards.',
+          'Family group editing moved to one group-level field, removing repeated family inputs from every member row.',
+          'Policy previews are now compact chips and owner questions are condensed, reducing visual clutter while keeping routing warnings visible.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2d.20',
     date: '2026-04-27',
@@ -17915,7 +17930,7 @@ function ClientsTab() {
     const explicit = String(profile.familyGroup || ds.familyGroup || '').trim();
     return explicit || inferFamilyGroupName(profile.name || ds.clientName);
   };
-  const saveFamilyGroupForClient = async (ds, rawValue) => {
+  const saveFamilyGroupForClient = async (ds, rawValue, opts = {}) => {
     const value = String(rawValue || '').trim();
     const currentProfile = getProfileForClient(ds);
     const nextProfile = { ...currentProfile, name: currentProfile.name || ds.clientName || '', familyGroup: value };
@@ -17937,7 +17952,21 @@ function ClientsTab() {
       }
     } catch(_) {}
     try { window.dispatchEvent(new CustomEvent('policylens-trigger-drive-write', { detail: { clientId: ds.clientId, reason: 'family-group' } })); } catch(_) {}
-    try { toast(value ? 'Family group saved: ' + value : 'Family group cleared', 'success', 1800); } catch(_) {}
+    if (!opts.silent) try { toast(value ? 'Family group saved: ' + value : 'Family group cleared', 'success', 1800); } catch(_) {}
+  };
+  const saveFamilyGroupForGroup = async (group, rawValue) => {
+    const value = String(rawValue || '').trim();
+    const key = 'group:' + group.name;
+    setFamilyDrafts(prev => ({ ...prev, [key]: value }));
+    try {
+      for (const ds of group.clients) {
+        await saveFamilyGroupForClient(ds, value, { silent: true });
+      }
+      try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
+      try { toast(value ? 'Family renamed: ' + value : 'Family group cleared', 'success', 2200); } catch(_) {}
+    } catch (err) {
+      try { toast('Family rename failed: ' + (err.message || err), 'error'); } catch(_) {}
+    }
   };
   const clientStatsFor = (ds) => {
     const clientPols = allPolicies.filter(p => p.clientId === ds.clientId);
@@ -18009,7 +18038,7 @@ function ClientsTab() {
     });
     return Array.from(map.values()).sort((a, b) => a.name.localeCompare(b.name));
   })();
-  const renderClientCard = (ds, compactFamily=false) => {
+  const renderClientCard = (ds, compactFamily=false, memberIndex=0, memberCount=1) => {
     const isActive = ds.clientId === activeClientId;
     const { clientPols, totalPrem } = clientStatsFor(ds);
     const tierLabel = ds.tier || UNASSIGNED_TIER;
@@ -18017,6 +18046,49 @@ function ClientsTab() {
     const syncColor = ds.pendingError ? 'var(--red)' : ds.pendingWrite ? 'var(--gold)' : 'var(--text3)';
     const familyValue = familyDrafts[ds.clientId] ?? String(getProfileForClient(ds).familyGroup || ds.familyGroup || '');
     const inferredFamily = inferFamilyGroupName(getProfileForClient(ds).name || ds.clientName);
+    if (compactFamily) {
+      const premiumLabel = totalPrem > 0 ? '$' + Math.round(totalPrem).toLocaleString() + '/yr' : 'No premiums';
+      const policyLabel = clientPols.length + ' ' + (clientPols.length === 1 ? 'policy' : 'policies');
+      const reviewLabel = ds.lastReviewedAt ? 'reviewed ' + fmtRelativeTime(ds.lastReviewedAt) : 'not reviewed';
+      return (
+        <div key={ds.clientId} onClick={() => openClientView(ds.clientId, 'profile')}
+          style={{display:'grid',gridTemplateColumns:'22px minmax(0,1fr) auto',gap:10,alignItems:'stretch',padding:isMobile?'10px 8px':'10px 10px',cursor:'pointer',background:isActive?'rgba(212,169,106,.055)':'transparent',borderBottom:memberIndex < memberCount - 1?'1px solid rgba(255,255,255,.055)':'none',transition:'background .15s'}}>
+          <div style={{position:'relative',width:22}}>
+            <div style={{position:'absolute',left:10,top:memberIndex===0?'50%':0,bottom:memberIndex===memberCount-1?'50%':0,width:1,background:'rgba(201,169,110,.25)'}} />
+            <div style={{position:'absolute',left:5,top:'50%',transform:'translateY(-50%)',width:11,height:11,borderRadius:'50%',background:isActive?'var(--gold)':'var(--bg)',border:isActive?'2px solid var(--gold)':'2px solid rgba(201,169,110,.45)',boxShadow:isActive?'0 0 0 3px rgba(212,169,106,.12)':'none'}} />
+          </div>
+          <div style={{minWidth:0,alignSelf:'center'}}>
+            <div style={{display:'flex',alignItems:'center',gap:7,flexWrap:'wrap'}}>
+              <span style={{fontSize:13,fontWeight:800,color:'var(--text)',minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',maxWidth:isMobile?'100%':340}}>{ds.clientName || 'Untitled'}</span>
+              {isActive && <span style={{fontSize:9,fontWeight:800,color:'var(--gold)',background:'rgba(212,169,106,.12)',border:'1px solid rgba(212,169,106,.22)',borderRadius:999,padding:'2px 6px'}}>Viewing</span>}
+              <span style={{fontSize:9,color:'var(--text3)',background:'rgba(255,255,255,.035)',border:'1px solid rgba(255,255,255,.06)',borderRadius:999,padding:'2px 6px'}}>{tierLabel}</span>
+              {syncLabel && <span style={{fontSize:9,color:syncColor,background:'rgba(255,255,255,.025)',border:'1px solid rgba(255,255,255,.05)',borderRadius:999,padding:'2px 6px'}}>{syncLabel}</span>}
+            </div>
+            <div style={{fontSize:10,color:'var(--text3)',marginTop:3}}>
+              {premiumLabel} · {policyLabel} · {reviewLabel}
+            </div>
+            <div style={{display:'flex',gap:6,flexWrap:'wrap',marginTop:7}}>
+              {clientPols.length === 0 && <span style={{fontSize:10,color:'var(--text3)',border:'1px dashed rgba(255,255,255,.12)',borderRadius:999,padding:'3px 7px'}}>No policies</span>}
+              {clientPols.slice(0, 3).map(pol => {
+                const amount = compactMoney(annualizedPremium(pol)) || compactMoney(getPolicyAnnualPayout(pol)) || compactMoney(pol.sumAssured);
+                return (
+                  <span key={pol.id || pol.policyNumber || policyMiniTitle(pol)} title={(pol.insurer || 'Insurer unclear') + ' · Owner: ' + policyOwnerDisplay(pol)}
+                    style={{display:'inline-flex',alignItems:'center',gap:5,maxWidth:isMobile?'100%':260,minWidth:0,fontSize:10,color:'var(--text2)',background:'rgba(255,255,255,.03)',border:'1px solid rgba(255,255,255,.07)',borderRadius:999,padding:'4px 8px'}}>
+                    <span style={{minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{policyMiniTitle(pol)}</span>
+                    {amount && <strong style={{color:'var(--gold)',fontWeight:800,whiteSpace:'nowrap'}}>{amount}</strong>}
+                  </span>
+                );
+              })}
+              {clientPols.length > 3 && <span style={{fontSize:10,color:'var(--text3)',border:'1px solid rgba(255,255,255,.06)',borderRadius:999,padding:'4px 8px'}}>+{clientPols.length - 3} more</span>}
+            </div>
+          </div>
+          <div style={{display:'flex',alignItems:'center',gap:8,alignSelf:'center'}}>
+            {!isMobile && <span style={{fontSize:10,color:'var(--text3)',whiteSpace:'nowrap'}}>Open profile</span>}
+            <span style={{fontSize:18,color:isActive?'var(--gold)':'var(--text3)',lineHeight:1}}>›</span>
+          </div>
+        </div>
+      );
+    }
     return (
       <div key={ds.clientId} onClick={() => openClientView(ds.clientId, 'profile')}
         style={{background:isActive?'rgba(212,169,106,.06)':'var(--bg2)',border:isActive?'1px solid rgba(212,169,106,.4)':'1px solid var(--border)',borderRadius:10,padding:compactFamily?'10px 12px':'12px 14px',cursor:'pointer',transition:'border-color .15s'}}>
@@ -18089,6 +18161,53 @@ function ClientsTab() {
       </div>
     );
   };
+  const renderFamilyGroup = (group) => {
+    const groupDraftKey = 'group:' + group.name;
+    const groupNameValue = familyDrafts[groupDraftKey] ?? group.name;
+    const questions = groupPolicyQuestions(group);
+    return (
+      <div key={group.name} style={{background:'rgba(255,255,255,.018)',border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>
+        <div style={{display:'grid',gridTemplateColumns:isMobile?'1fr':'minmax(240px,420px) minmax(0,1fr) auto',gap:10,alignItems:'center',padding:'12px 14px',background:'rgba(255,255,255,.025)',borderBottom:'1px solid rgba(255,255,255,.06)'}}>
+          <div>
+            <label style={{display:'block',fontSize:9,fontWeight:800,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.4px',marginBottom:4}}>Family name</label>
+            <input
+              value={groupNameValue}
+              placeholder="Family name"
+              onChange={e => setFamilyDrafts(prev => ({ ...prev, [groupDraftKey]: e.target.value }))}
+              onBlur={e => { if (String(e.target.value || '').trim() !== group.name) saveFamilyGroupForGroup(group, e.target.value); }}
+              onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }}
+              style={{width:'100%',boxSizing:'border-box',padding:'7px 9px',fontSize:12,fontWeight:700,borderRadius:7,background:'var(--bg)',border:'1px solid var(--border2)',color:'var(--text)'}}
+            />
+          </div>
+          <div style={{display:'flex',gap:6,flexWrap:'wrap',minWidth:0}}>
+            <span style={{fontSize:10,color:'var(--text2)',border:'1px solid rgba(255,255,255,.08)',borderRadius:999,padding:'4px 8px'}}>{group.clients.length} {group.clients.length===1?'member':'members'}</span>
+            <span style={{fontSize:10,color:'var(--text2)',border:'1px solid rgba(255,255,255,.08)',borderRadius:999,padding:'4px 8px'}}>{group.policyCount} {group.policyCount===1?'policy':'policies'}</span>
+            <span style={{fontSize:10,color:group.totalPrem > 0?'var(--gold)':'var(--text3)',border:'1px solid rgba(255,255,255,.08)',borderRadius:999,padding:'4px 8px'}}>{group.totalPrem > 0 ? '$' + Math.round(group.totalPrem).toLocaleString() + '/yr' : 'No premiums'}</span>
+            {questions.length > 0 && <span style={{fontSize:10,color:'var(--gold)',border:'1px solid rgba(212,169,106,.2)',background:'rgba(212,169,106,.08)',borderRadius:999,padding:'4px 8px'}}>{questions.length} owner check{questions.length===1?'':'s'}</span>}
+          </div>
+          <button onClick={() => { const first = group.clients[0]; if (first) openClientView(first.clientId, 'dashboard'); }}
+            style={{padding:'6px 10px',fontSize:10,fontWeight:800,borderRadius:7,background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',flexShrink:0}}>
+            Open review
+          </button>
+        </div>
+        {questions.length > 0 && (
+          <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap',padding:'8px 14px',background:'rgba(212,169,106,.045)',borderBottom:'1px solid rgba(212,169,106,.12)'}}>
+            <span style={{fontSize:10,fontWeight:800,color:'var(--gold)',marginRight:2}}>Owner checks</span>
+            {questions.slice(0, 3).map((q, qi) => (
+              <span key={qi} title={q.title + ' · ' + q.owner + (q.life ? ' · ' + q.life : '')}
+                style={{fontSize:10,color:'var(--text2)',maxWidth:isMobile?'100%':300,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',border:'1px solid rgba(212,169,106,.16)',background:'rgba(0,0,0,.12)',borderRadius:999,padding:'4px 8px'}}>
+                {q.clientName}: {q.title} · {q.owner}
+              </span>
+            ))}
+            {questions.length > 3 && <span style={{fontSize:10,color:'var(--text3)',border:'1px solid rgba(255,255,255,.06)',borderRadius:999,padding:'4px 8px'}}>+{questions.length - 3}</span>}
+          </div>
+        )}
+        <div style={{display:'grid'}}>
+          {group.clients.map((ds, idx) => renderClientCard(ds, true, idx, group.clients.length))}
+        </div>
+      </div>
+    );
+  };
   return (
     <div className="fade-in">
       <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:12}}>
@@ -18134,21 +18253,27 @@ function ClientsTab() {
         <div style={{textAlign:'center',padding:'40px 20px',color:'var(--text3)',fontSize:13}}>No clients match this filter.</div>
       )}
       {familyMode === 'family' && (
-        <div style={{display:'grid',gap:10}}>
-          <div style={{background:'linear-gradient(135deg,rgba(91,168,160,.08),rgba(212,169,106,.05))',border:'1px solid rgba(91,168,160,.18)',borderRadius:12,padding:12}}>
+        <div style={{display:'grid',gap:12}}>
+          <div style={{background:'transparent',border:'none',borderBottom:'1px solid rgba(255,255,255,.06)',borderRadius:0,padding:'2px 2px 8px'}}>
             <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:10,flexWrap:'wrap'}}>
               <div>
-                <div style={{fontSize:13,fontWeight:800,color:'var(--teal)'}}>Family Review Workspace</div>
+                <div style={{fontSize:13,fontWeight:800,color:'var(--teal)'}}>Families</div>
                 <div style={{fontSize:10,color:'var(--text3)',marginTop:2}}>
                   {familyGroups.length} {familyGroups.length===1?'family group':'family groups'} · {filtered.length} {filtered.length===1?'client':'clients'} · {filtered.reduce((s, ds) => s + clientStatsFor(ds).clientPols.length, 0)} policies
                 </div>
               </div>
-              <div style={{fontSize:10,color:'var(--text2)',maxWidth:420,lineHeight:1.45}}>
-                Group clients into a household, then use the owner questions to route policies before report review.
+              <div style={{display:'flex',gap:6,flexWrap:'wrap',justifyContent:'flex-end'}}>
+                {familyGroups.slice(0, 3).map(group => (
+                  <span key={group.name} style={{fontSize:10,color:'var(--text2)',border:'1px solid rgba(255,255,255,.08)',background:'rgba(255,255,255,.025)',borderRadius:999,padding:'4px 8px'}}>
+                    {group.name} · {group.clients.length}
+                  </span>
+                ))}
+                {familyGroups.length > 3 && <span style={{fontSize:10,color:'var(--text3)',border:'1px solid rgba(255,255,255,.06)',borderRadius:999,padding:'4px 8px'}}>+{familyGroups.length - 3}</span>}
               </div>
             </div>
           </div>
-          {familyGroups.map(group => (
+          {familyGroups.map(group => renderFamilyGroup(group))}
+          {false && familyGroups.map(group => (
             <div key={group.name} style={{background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:12,padding:12}}>
               <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8,marginBottom:10}}>
                 <div style={{minWidth:0}}>
