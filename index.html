@@ -664,12 +664,27 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2d.19';
+const APP_VERSION = 'v2.3.0-rc2d.20';
 const APP_VERSION_DATE = '2026-04-27';
-const APP_VERSION_NAME = 'Family duplicate cleanup and evidence review hotfix';
+const APP_VERSION_NAME = 'Family profile switch sync hotfix';
 const DEFAULT_DOCUMENT_AI_PROXY_URL = 'https://policylens-document-ai.chungakwanc.workers.dev';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2d.20',
+    date: '2026-04-27',
+    name: 'Family profile switch sync hotfix',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Clicking a different family member now waits for that client profile and policies to load before opening Profile, preventing the previous family member from remaining in the form.',
+          'Profile draft autosave now checks the client it was scheduled for before saving, so a pending edit cannot be written into a newly-selected client after a fast switch.',
+          'Rapid client switching is guarded with a switch token, preventing a slower older IndexedDB load from overwriting the newest active client state.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2d.19',
     date: '2026-04-27',
@@ -14033,20 +14048,21 @@ function App() {
     if (_autoPullAttemptedRef.current.has(activeClientId)) return;
     if (getDriveStatus() !== 'connected' || isDriveLocalOnly()) return;
     if (hasLocalDriveWriteHold(activeClientId) || _driveSyncTimer !== null || _driveSyncInFlight) return;
+    const pullClientId = activeClientId;
     (async () => {
       try {
-        const pendingOutbox = await PolicyDB.getSyncOutbox(syncOutboxId(activeClientId)).catch(() => null);
+        const pendingOutbox = await PolicyDB.getSyncOutbox(syncOutboxId(pullClientId)).catch(() => null);
         if (pendingOutbox && (pendingOutbox.status === 'pending' || pendingOutbox.status === 'failed')) {
-          console.log('[AutoPull] Skipped - local Drive write pending for', activeClientId);
+          console.log('[AutoPull] Skipped - local Drive write pending for', pullClientId);
           return;
         }
-        const ds = await PolicyDB.getDriveState(activeClientId).catch(() => null);
+        const ds = await PolicyDB.getDriveState(pullClientId).catch(() => null);
         if (!ds || !isValidDriveFileId(ds.fileId)) return;
         if (ds.pendingWrite) {
-          console.log('[AutoPull] Skipped - drive_state has pendingWrite for', activeClientId);
+          console.log('[AutoPull] Skipped - drive_state has pendingWrite for', pullClientId);
           return;
         }
-        _autoPullAttemptedRef.current.add(activeClientId);
+        _autoPullAttemptedRef.current.add(pullClientId);
         console.log('[AutoPull] Active client', activeClientId, 'has 0 policies — pulling from Drive');
         const { meta, content } = await driveClient.getFile(ds.fileId);
         const fileData = JSON.parse(content);
@@ -14054,23 +14070,26 @@ function App() {
         const driveProfile = parsed.clientProfile;
         const deletedIds = new Set([
           ...(Array.isArray(parsed.deletedPolicyIds) ? parsed.deletedPolicyIds : []),
-          ...(await getDeletedPolicyIds(activeClientId).catch(() => []))
+          ...(await getDeletedPolicyIds(pullClientId).catch(() => []))
         ]);
         const drivePolicies = (parsed.policies || []).filter(pol => !pol?.id || !deletedIds.has(pol.id));
         if (!drivePolicies || drivePolicies.length === 0) { console.log('[AutoPull] Drive file also has 0 policies'); return; }
-        if (driveProfile) await dbPut('settings', { key: 'clientProfile_' + activeClientId, value: driveProfile });
-        for (const pol of drivePolicies) { pol.clientId = activeClientId; await dbPut('policies', pol); }
-        setPolicies(drivePolicies.map(p => ({ ...p, clientId: activeClientId })));
-        if (driveProfile) { setClientProfile(driveProfile); setClientName(driveProfile.name || ''); }
+        if (driveProfile) await dbPut('settings', { key: 'clientProfile_' + pullClientId, value: driveProfile });
+        for (const pol of drivePolicies) { pol.clientId = pullClientId; await dbPut('policies', pol); }
+        const stillActive = pullClientId === activeClientIdRef.current;
+        if (stillActive) {
+          setPolicies(drivePolicies.map(p => ({ ...p, clientId: pullClientId })));
+          if (driveProfile) { setClientProfile(driveProfile); setClientName(driveProfile.name || ''); }
+        }
         if (meta?.headRevisionId) {
           const updated = { ...ds, headRevisionId: meta.headRevisionId, lastSyncedAt: new Date().toISOString() };
           await PolicyDB.saveDriveState(updated);
-          setDriveState(updated);
+          if (stillActive) setDriveState(updated);
         }
         // v2.3.0-rc2c.5n: Notify ProfileTab to re-sync
-        try { window.dispatchEvent(new CustomEvent('policylens-drive-data-refreshed', { detail: { clientProfile: driveProfile } })); } catch(_) {}
+        if (stillActive) try { window.dispatchEvent(new CustomEvent('policylens-drive-data-refreshed', { detail: { clientId: pullClientId, clientProfile: driveProfile } })); } catch(_) {}
         console.log('[AutoPull] Loaded', drivePolicies.length, 'policies from Drive');
-        try { toast('Loaded ' + drivePolicies.length + ' policies from Drive', 'success', 3000); } catch(_) {}
+        if (stillActive) try { toast('Loaded ' + drivePolicies.length + ' policies from Drive', 'success', 3000); } catch(_) {}
       } catch (e) {
         console.warn('[AutoPull] Failed:', e.message);
         try { toast('Could not load policies from Drive — try refreshing the page', 'warning', 5000); } catch(_) {}
@@ -14321,7 +14340,7 @@ function App() {
       const remaining = await PolicyDB.getAllDriveStates().catch(() => []);
       if (remaining.length > 0) {
         const next = remaining.reduce((a, b) => (a.lastSyncedAt || '') > (b.lastSyncedAt || '') ? a : b);
-        switchClient(next.clientId);
+        await switchClient(next.clientId);
       } else {
         setActiveClientId(null);
         try { localStorage.removeItem('policylens_active_client_id'); } catch(_) {}
@@ -14393,7 +14412,9 @@ function App() {
         }
         if (del > 0) {
           console.log('[Dedupe] Removed', del, 'duplicate polic'+(del===1?'y':'ies'));
-          setPolicies(await dbGetAll('policies'));
+          const activeCid = activeClientIdRef.current;
+          const reloaded = await dbGetAll('policies');
+          setPolicies(activeCid ? reloaded.filter(p => p.clientId === activeCid) : reloaded);
           try { toast('Cleaned up '+del+' duplicate polic'+(del===1?'y':'ies'), 'success', 5000); } catch(_) {}
         } else { console.log('[Dedupe] No duplicates found'); }
         try { localStorage.setItem(FLAG, '1'); } catch(_) {}
@@ -14582,24 +14603,31 @@ function App() {
   const policiesRef = useRef(policies);
   const clientProfileRef = useRef(clientProfile);
   const activeClientIdRef = useRef(activeClientId);
+  const clientSwitchSeqRef = useRef(0);
   const duplicateCleanupRef = useRef(new Set());
   useEffect(() => { policiesRef.current = policies; clientProfileRef.current = clientProfile; }, [policies, clientProfile]);
   useEffect(() => { activeClientIdRef.current = activeClientId; }, [activeClientId]);
 
   // Load a specific client's data from IDB into React state
-  const _loadClientData = async (clientId) => {
-    const profileRec = await dbGet('settings', 'clientProfile_' + clientId).catch(() => null);
+  const _loadClientData = async (clientId, switchToken) => {
+    const [profileRec, allPolicies, states] = await Promise.all([
+      dbGet('settings', 'clientProfile_' + clientId).catch(() => null),
+      dbGetAll('policies'),
+      PolicyDB.getAllDriveStates(),
+    ]);
+    if (switchToken != null && switchToken !== clientSwitchSeqRef.current) return false;
+    if (clientId !== activeClientIdRef.current) return false;
     const profile = profileRec?.value || {name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[]};
     setClientProfile(profile);
     setClientName(profile.name || '');
-    const allPolicies = await dbGetAll('policies');
     setPolicies(allPolicies.filter(p => p.clientId === clientId));
-    const states = await PolicyDB.getAllDriveStates();
     setDriveState(states.find(s => s.clientId === clientId) || null);
+    return true;
   };
 
   // Switch active client — cancels pending sync, swaps all client-scoped state
   const switchClient = async (clientId) => {
+    const switchToken = ++clientSwitchSeqRef.current;
     // LOAD-BEARING: cancel pending sync for previous client.
     // Removing this causes cross-client sync contamination (pending
     // timer fires against new active client's file with previous
@@ -14612,10 +14640,11 @@ function App() {
       try { await _driveSyncCurrentClient({ force: true, reason: 'switch-flush' }); }
       catch(e) { console.warn('[Drive] Pending write flush before client switch failed:', e.message || e); }
     }
+    if (switchToken !== clientSwitchSeqRef.current) return false;
     setActiveClientId(clientId);
     activeClientIdRef.current = clientId;
     try { localStorage.setItem('policylens_active_client_id', clientId); } catch(_) {}
-    await _loadClientData(clientId);
+    return await _loadClientData(clientId, switchToken);
   };
 
   const _newLocalClientId = () => {
@@ -15809,25 +15838,28 @@ function App() {
     await dbPut('settings',{key:'clientName',value:n});
   };
   const saveProfile = async (p) => {
+    const profileClientId = activeClientIdRef.current || activeClientId;
     // v2.2.0-rc2.1.4: Strip tier from clientProfile — drive_state.tier is the single source of truth
     const { tier: _tierIgnored, ...profileWithoutTier } = p;
     // ── CLOUD SYNC: bump field versions, push fire-and-forget ──
     const oldVersions = clientProfile?._fieldVersions || {};
     const newVersions = bumpFieldVersions(profileWithoutTier, clientProfile, oldVersions);
     const enriched = stampProfileSyncMeta({...profileWithoutTier, _fieldVersions: newVersions}, 'profile-save');
-    setClientProfile(enriched);
-    setClientName(enriched.name||'');
+    if (!profileClientId || profileClientId === activeClientIdRef.current) {
+      setClientProfile(enriched);
+      setClientName(enriched.name||'');
+    }
     // v2.2.0-rc1: Per-client profile keys
-    if (activeClientId) {
-      await dbPut('settings',{key:'clientProfile_'+activeClientId,value:enriched});
-      await dbPut('settings',{key:'clientName_'+activeClientId,value:enriched.name||''});
+    if (profileClientId) {
+      await dbPut('settings',{key:'clientProfile_'+profileClientId,value:enriched});
+      await dbPut('settings',{key:'clientName_'+profileClientId,value:enriched.name||''});
       // Mirror name into drive_state for switcher display + rename Drive folder
       try {
-        const ds = await PolicyDB.getDriveState(activeClientId);
+        const ds = await PolicyDB.getDriveState(profileClientId);
         if (ds && ds.clientName !== (enriched.name||'')) {
           await PolicyDB.saveDriveState({...ds, clientName: enriched.name||''});
           // v2.2.0-rc2.1.6: Rename the Drive folder to match (fire-and-forget, serialized)
-          if (ds.folderId) handleClientRename(activeClientId, enriched.name||'');
+          if (ds.folderId) handleClientRename(profileClientId, enriched.name||'');
         }
       } catch(_){}
     } else {
@@ -15838,7 +15870,7 @@ function App() {
     lastSelfPushRef.current = Date.now();
     sbProfilePush(enriched, newVersions).catch(() => {});
     // v2.2.0-alpha: Dual-write to Drive (debounced, fire-and-forget)
-    scheduleDriveWriteForClient(activeClientId, 'profile-save', 1000);
+    scheduleDriveWriteForClient(profileClientId, 'profile-save', 1000);
     // ── GLOBAL SYNC: Recalculate ageAtEntry for all policies ──
     // Triggers whenever the profile has ANY age source (real DOB
     // OR current age + asOf timestamp). Uses getProfileEffectiveDob
@@ -15871,8 +15903,10 @@ function App() {
         console.log('[Sync] Updated ageAtEntry for '+updated+' policies from '+(source==='dob'?'DOB':'current age'));
         // Reload policies
         const all = await dbGetAll('policies');
-        setPolicies(activeClientId ? all.filter(pol => pol.clientId === activeClientId) : all);
-        scheduleDriveWriteForClient(activeClientId, 'profile-age-sync', 1000);
+        if (!profileClientId || profileClientId === activeClientIdRef.current) {
+          setPolicies(profileClientId ? all.filter(pol => pol.clientId === profileClientId) : all);
+        }
+        scheduleDriveWriteForClient(profileClientId, 'profile-age-sync', 1000);
       }
     }
   };
@@ -16004,13 +16038,14 @@ function App() {
   const applyDriveRefresh = (result, cid) => {
     if (!result || !result.pulled) return;
     const clientId = cid || activeClientIdRef.current;
+    if (clientId !== activeClientIdRef.current) return;
     setPolicies(result.policies.map(p => ({ ...p, clientId })));
     if (result.clientProfile) {
       setClientProfile(result.clientProfile);
       setClientName(result.clientProfile.name || '');
     }
     setDriveState(result.driveState);
-    try { window.dispatchEvent(new CustomEvent('policylens-drive-data-refreshed', { detail: { clientProfile: result.clientProfile } })); } catch(_) {}
+    try { window.dispatchEvent(new CustomEvent('policylens-drive-data-refreshed', { detail: { clientId, clientProfile: result.clientProfile } })); } catch(_) {}
     // v2.3.0-rc2c.5p: also fire clients-changed so ClientsTab refreshes tier/review/policy counts
     try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
   };
@@ -17859,6 +17894,15 @@ function ClientsTab() {
   const filtered = filter === 'all' ? visibleStates : visibleStates.filter(ds => (ds.tier || UNASSIGNED_TIER) === filter);
   const chips = [{id:'all',label:'All'}, ...tierDefinitions.map(t => ({id:t, label:t}))];
   const getProfileForClient = (ds) => profilesByClient[ds.clientId] || (ds.clientId === activeClientId ? clientProfile : null) || {};
+  const openClientView = async (clientId, targetTab='profile') => {
+    if (!clientId) return;
+    try {
+      const loaded = clientId === activeClientId ? true : await switchClient(clientId);
+      if (loaded !== false) setTab(targetTab);
+    } catch (err) {
+      try { toast('Could not open client: ' + (err.message || err), 'error', 3500); } catch(_) {}
+    }
+  };
   const inferFamilyGroupName = (name) => {
     const cleaned = String(name || '').trim().replace(/\s+/g, ' ');
     if (!cleaned) return 'Ungrouped';
@@ -17974,7 +18018,7 @@ function ClientsTab() {
     const familyValue = familyDrafts[ds.clientId] ?? String(getProfileForClient(ds).familyGroup || ds.familyGroup || '');
     const inferredFamily = inferFamilyGroupName(getProfileForClient(ds).name || ds.clientName);
     return (
-      <div key={ds.clientId} onClick={() => { switchClient(ds.clientId); setTab('profile'); }}
+      <div key={ds.clientId} onClick={() => openClientView(ds.clientId, 'profile')}
         style={{background:isActive?'rgba(212,169,106,.06)':'var(--bg2)',border:isActive?'1px solid rgba(212,169,106,.4)':'1px solid var(--border)',borderRadius:10,padding:compactFamily?'10px 12px':'12px 14px',cursor:'pointer',transition:'border-color .15s'}}>
         <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
           <span style={{fontSize:14,fontWeight:600,color:'var(--text)',flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{ds.clientName || 'Untitled'}</span>
@@ -18115,7 +18159,7 @@ function ClientsTab() {
                 </div>
                 <button onClick={() => {
                   const first = group.clients[0];
-                  if (first) { switchClient(first.clientId); setTab('dashboard'); }
+                  if (first) openClientView(first.clientId, 'dashboard');
                 }}
                   style={{padding:'5px 10px',fontSize:10,fontWeight:700,borderRadius:6,background:'var(--gold-dim)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.25)',flexShrink:0}}>
                   Open review
@@ -18155,7 +18199,7 @@ function ClientsTab() {
           const syncLabel = ds.pendingError ? 'sync queued' : ds.pendingWrite ? 'sync pending' : ds.lastSyncDeviceName ? ('synced from ' + ds.lastSyncDeviceName) : null;
           const syncColor = ds.pendingError ? 'var(--red)' : ds.pendingWrite ? 'var(--gold)' : 'var(--text3)';
           return (
-            <div key={ds.clientId} onClick={() => { switchClient(ds.clientId); setTab('profile'); }}
+            <div key={ds.clientId} onClick={() => openClientView(ds.clientId, 'profile')}
               style={{background:isActive?'rgba(212,169,106,.06)':'var(--bg2)',border:isActive?'1px solid rgba(212,169,106,.4)':'1px solid var(--border)',borderRadius:10,padding:'12px 14px',cursor:'pointer',transition:'border-color .15s'}}>
               <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8}}>
                 <span style={{fontSize:14,fontWeight:600,color:'var(--text)',flex:1,minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{ds.clientName || 'Untitled'}</span>
@@ -18259,8 +18303,8 @@ function NewClientModal({ allStates, allPolicies, onClose, initialName, initialF
         }
         if (typeof onExistingSelected === 'function') await onExistingSelected(sameName.clientId, sameName);
         if (!stayOnCurrent) {
-          await switchClient(sameName.clientId);
-          setTab('profile');
+          const loaded = await switchClient(sameName.clientId);
+          if (loaded !== false) setTab('profile');
         }
         try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
         onClose({created:true, existing:true, clientId:sameName.clientId});
@@ -18292,8 +18336,8 @@ function NewClientModal({ allStates, allPolicies, onClose, initialName, initialF
       if (typeof onCreated === 'function') await onCreated(clientId, profile);
       await markDriveSyncPending(clientId, 'new-client-create').catch(() => {});
       if (!stayOnCurrent) {
-        await switchClient(clientId);
-        setTab('profile');
+        const loaded = await switchClient(clientId);
+        if (loaded !== false) setTab('profile');
       }
       try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
       onClose({created:true, clientId});
@@ -18335,7 +18379,8 @@ function NewClientModal({ allStates, allPolicies, onClose, initialName, initialF
                     }
                     return;
                   }
-                  switchClient(ds.clientId); setTab('profile'); onClose();
+                  const loaded = await switchClient(ds.clientId);
+                  if (loaded !== false) { setTab('profile'); onClose(); }
                 }}
                   style={{padding:'8px 10px',background:'var(--bg3)',border:'1px solid var(--border)',borderRadius:6,marginBottom:4,cursor:'pointer',fontSize:12,color:'var(--text2)'}}>
                   <strong>{ds.clientName}</strong>
@@ -22104,7 +22149,8 @@ function OtherClientCheckpointPicker({ onClose, onCloseAll, switchClient, setTab
 function ProfileTab() {
   const {clientProfile,saveProfile,apiKey,houseDefaults,tierDefinitions,policies,deletePolicy,activeClientId,driveState,setDriveState,switchClient,setTab} = useContext(AppCtx);
   const isMobile = useViewportIsMobile();
-  const [p, setP] = useState(clientProfile);
+  const blankProfileDraft = () => ({name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[]});
+  const [p, setP] = useState(() => clientProfile || blankProfileDraft());
   const [scanning, setScanning] = useState(false);
   const [newClientGuardOpen, setNewClientGuardOpen] = useState(false);
   const [newClientModalOpen, setNewClientModalOpen] = useState(false);
@@ -22112,26 +22158,38 @@ function ProfileTab() {
   const camRef = useRef(null);
   const uploadRef = useRef(null);
 
-  // v2.3.0-rc2c.3b.2: Re-sync local p to clientProfile on client switch.
-  // Prevents stale p (from previous client) being auto-saved to new client.
-  const _activeClientIdSyncRef = useRef(activeClientId);
+  const profileDraftSignature = (clientId, profile) => {
+    try { return String(clientId || '') + '|' + JSON.stringify(profile || {}); }
+    catch(_) { return String(clientId || '') + '|' + String(profile?.name || ''); }
+  };
+  const _profileActiveClientRef = useRef(activeClientId);
+  const _profileSyncSignatureRef = useRef('');
   const _skipNextSaveRef = useRef(true); // skip initial save on mount
+  useEffect(() => { _profileActiveClientRef.current = activeClientId; }, [activeClientId]);
 
   // v2.3.0-rc2c.5n: Re-sync local p when Drive refresh updates clientProfile.
   // Without this, poll/focus updates App state but ProfileTab's local p stays stale until tab switch.
   useEffect(() => {
     const h = (e) => {
+      const cid = e.detail?.clientId;
+      if (cid && cid !== _profileActiveClientRef.current) return;
       const cp = e.detail?.clientProfile;
-      if (cp) { _skipNextSaveRef.current = true; setP(cp); }
+      if (cp) {
+        _profileSyncSignatureRef.current = profileDraftSignature(_profileActiveClientRef.current, cp);
+        _skipNextSaveRef.current = true;
+        setP(cp);
+      }
     };
     window.addEventListener('policylens-drive-data-refreshed', h);
     return () => window.removeEventListener('policylens-drive-data-refreshed', h);
   }, []);
   useEffect(() => {
-    if (_activeClientIdSyncRef.current === activeClientId) return;
-    _activeClientIdSyncRef.current = activeClientId;
+    const nextProfile = clientProfile || blankProfileDraft();
+    const signature = profileDraftSignature(activeClientId, nextProfile);
+    if (_profileSyncSignatureRef.current === signature) return;
+    _profileSyncSignatureRef.current = signature;
     _skipNextSaveRef.current = true;
-    setP(clientProfile);
+    setP(nextProfile);
   }, [activeClientId, clientProfile]);
 
   // v2.0.3: One-shot migration of legacy retirementAge / inflationRate
@@ -22159,10 +22217,13 @@ function ProfileTab() {
   }, [activeClientId, clientProfile]);
 
   // Auto-save on change — debounced, guarded against re-sync saves
-  const debouncedSave = useDebounce((profile) => { saveProfile(profile); }, 500);
+  const debouncedSave = useDebounce((profile, scheduledClientId) => {
+    if (scheduledClientId !== _profileActiveClientRef.current) return;
+    saveProfile(profile);
+  }, 500);
   useEffect(() => {
     if (_skipNextSaveRef.current) { _skipNextSaveRef.current = false; return; }
-    debouncedSave(p);
+    debouncedSave(p, activeClientId);
   }, [p]);
 
   // Pick up files dropped from Dashboard
