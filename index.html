@@ -36,7 +36,7 @@ window.PolicyLensDebug=function(on){try{localStorage.setItem('policylens_debug',
 // long multi-batch scans can continue when the browser backgrounds
 // the page. The worker is registered only on HTTPS/localhost.
 // ═══════════════════════════════════════════════════════════════
-const POLICYLENS_SW_VERSION = 'v2.3.0-rc2d.16';
+const POLICYLENS_SW_VERSION = 'v2.3.0-rc2d.17';
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', async () => {
     const canRegister = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
@@ -664,12 +664,25 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2d.16';
-const APP_VERSION_DATE = '2026-04-26';
-const APP_VERSION_NAME = 'Owner routing safety and client creation fixes';
+const APP_VERSION = 'v2.3.0-rc2d.17';
+const APP_VERSION_DATE = '2026-04-27';
+const APP_VERSION_NAME = 'Family route client creation hotfix';
 const DEFAULT_DOCUMENT_AI_PROXY_URL = 'https://policylens-document-ai.chungakwanc.workers.dev';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2d.17',
+    date: '2026-04-27',
+    name: 'Family route client creation hotfix',
+    sections: [
+      {
+        heading: 'Bug fix',
+        items: [
+          'Fixed the New Client family-routing flow failing with "normalizePolicyKey is not defined" while routing scanned policies into the newly-created client.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2d.16',
     date: '2026-04-26',
@@ -4823,8 +4836,15 @@ function normalizeClaudeText(resp) {
 }
 
 // Dedup helpers — merge duplicate extracted policies by policyNumber+insurer
+function normalizePolicyKey(s) {
+  return (s || '').toString().toLowerCase()
+    .replace(/[^a-z0-9]/g, '')
+    .replace(/o/g, '0')
+    .replace(/[il]/g, '1');
+}
+
 const _dedupKey = (p) => {
-  const pn = (p?.policyNumber || '').trim().toUpperCase();
+  const pn = normalizePolicyKey(p?.policyNumber);
   const ins = (p?.insurer || '').trim().toLowerCase();
   if (!pn) return null;
   return pn + '|' + ins;
