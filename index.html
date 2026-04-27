@@ -36,7 +36,7 @@ window.PolicyLensDebug=function(on){try{localStorage.setItem('policylens_debug',
 // long multi-batch scans can continue when the browser backgrounds
 // the page. The worker is registered only on HTTPS/localhost.
 // ═══════════════════════════════════════════════════════════════
-const POLICYLENS_SW_VERSION = 'v2.3.0-rc2d.22';
+const POLICYLENS_SW_VERSION = 'v2.3.0-rc2d.24';
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', async () => {
     const canRegister = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
@@ -664,12 +664,43 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2d.22';
+const APP_VERSION = 'v2.3.0-rc2d.24';
 const APP_VERSION_DATE = '2026-04-27';
-const APP_VERSION_NAME = 'Family owner routing hotfix';
+const APP_VERSION_NAME = 'Family routing, merge, profile hints, and dependant tracing';
 const DEFAULT_DOCUMENT_AI_PROXY_URL = 'https://policylens-document-ai.chungakwanc.workers.dev';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2d.24',
+    date: '2026-04-27',
+    name: 'Family routing, merge, profile hints, and dependant tracing',
+    sections: [
+      {
+        heading: 'Family workflow',
+        items: [
+          'Policy-level routing can now send a policy to another detected family owner/client being created in the same popup, not only mark the person as life assured under that owner.',
+          'Added an intuitive Merge Client action on the Profile tab so a wrong OCR-created client can be merged into the correct client; policies migrate, source client disappears, and Drive sync/trash handling is queued.',
+          'Detected-name grouping now collapses one-token OCR typos such as "Tng Meng Kat" vs "Tng Meng Kiat" while keeping genuinely different family members separate.',
+          'Dependant-only pages now trace back to the same document owner/proposer where possible, so a child/spouse life assured page is stored under the original owner instead of becoming a stray client.',
+          'Client merges/deletes now queue source Drive folder trash if Drive is disconnected, then flush the cleanup before the next Drive discovery/sync so merged duplicates do not reappear.'
+        ]
+      },
+      {
+        heading: 'AI extraction',
+        items: [
+          'Policy extraction now asks for owner/life-assured DOB and current age fields, and imports use those hints to auto-populate client DOB or age-only profile fields when blank.',
+          'Pipeline cache bumped so old cached extractions do not hide the DOB/age prompt changes.',
+          'The extraction schema now preserves document-owner/proposer trace fields and owner-inference reasons for dependant tables.'
+        ]
+      },
+      {
+        heading: 'Reports',
+        items: [
+          'Added Family Visual Report generation with the same navy/gold client-facing style as the Visual Premium Report, covering family KPIs, member summaries, category distribution, and per-member policy cards.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2d.22',
     date: '2026-04-27',
@@ -2906,6 +2937,24 @@ function personNameEquivalent(a, b) {
   return smaller > 0 && overlap >= smaller && Math.abs(as.size - bs.size) <= 1;
 }
 
+function personNameLikelyTypoVariant(a, b) {
+  const ak = normalizePersonNameKey(a);
+  const bk = normalizePersonNameKey(b);
+  if (!ak || !bk || ak === bk) return !!(ak && bk && ak === bk);
+  const at = ak.split(' ').filter(Boolean);
+  const bt = bk.split(' ').filter(Boolean);
+  if (at.length < 2 || at.length !== bt.length) return false;
+  let exact = 0, near = 0, far = 0;
+  for (let i = 0; i < at.length; i++) {
+    if (at[i] === bt[i]) { exact++; continue; }
+    const maxLen = Math.max(at[i].length, bt[i].length);
+    const dist = _levenshtein(at[i], bt[i]);
+    if (maxLen >= 3 && dist <= (maxLen >= 6 ? 2 : 1)) near++;
+    else far++;
+  }
+  return far === 0 && near <= 1 && exact >= at.length - 1;
+}
+
 function policyPersonKey(p) {
   return normalizePersonNameKey(p?.policyOwner) || normalizePersonNameKey(p?.lifeInsured) || '';
 }
@@ -3101,6 +3150,8 @@ function buildPolicyPageFingerprint(policy, meta = {}) {
     policyNumber: policy?.policyNumber || '',
     owner: policy?.policyOwner || '',
     lifeInsured: policy?.lifeInsured || '',
+    documentOwner: policy?.documentOwner || '',
+    documentGroupId: policy?.documentGroupId || policy?.sourceDocumentId || '',
     productName: policy?.productName || policy?.policyName || '',
     page: meta.page || policy?._sourcePage || policy?.sourcePage || policy?.pageRange || null,
     documentTitle: policy?._documentTitle || policy?.documentTitle || '',
@@ -3147,7 +3198,7 @@ function ensurePolicyFieldEvidence(policy, meta = {}) {
       reason: reason || reasonMap[field] || flag?.reason || 'Extracted from policy document.'
     };
   };
-  ['insurer','productName','policyName','policyNumber','policyOwner','lifeInsured','premiumAmount','annualPremium','sumAssured','annuityPayout','annuityGuaranteedPayout','annuityNonGuaranteedPayout'].forEach(f => add(f));
+  ['insurer','productName','policyName','policyNumber','policyOwner','lifeInsured','documentOwner','documentRole','documentGroupId','dob','policyOwnerDob','policyOwnerAge','lifeInsuredDob','lifeInsuredAge','premiumAmount','annualPremium','sumAssured','annuityPayout','annuityGuaranteedPayout','annuityNonGuaranteedPayout'].forEach(f => add(f));
   next._fieldEvidence = evidence;
   next._pageFingerprint = next._pageFingerprint || buildPolicyPageFingerprint(next, meta);
   return next;
@@ -3164,6 +3215,190 @@ function normalizePolicyForStorage(policy, meta = {}) {
     insuranceExtraction: true
   };
   return ensurePolicyFieldEvidence(next, meta);
+}
+
+function isWeakPolicyOwnerValue(name) {
+  const n = normalizePersonNameKey(name) || normalizeName(name);
+  if (!n || n.length < 3) return true;
+  if (/^(policy owner|owner|policyholder|life insured|life assured|insured|applicant|proposer|payor|payer|self|same as|not applicable|not stated|n\/a|na|nil|unknown|null)$/i.test(n)) return true;
+  return false;
+}
+
+function policySourceSequence(policy) {
+  const direct = policy?._sourceSequence ?? policy?.sourceSequence ?? policy?.sequence;
+  const num = parseInt(direct, 10);
+  if (Number.isFinite(num)) return num;
+  const text = [policy?.sourceImage, policy?._sourceImage, policy?.sourcePage, policy?._sourcePage, policy?.documentTitle].filter(Boolean).join(' ');
+  const m = text.match(/\b(?:image|photo|page|img)\s*#?\s*(\d{1,3})\b/i);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+function policyTraceText(policy) {
+  return [
+    policy?.documentTitle,
+    policy?.tableType,
+    policy?.documentRole,
+    policy?.ownerInferenceReason,
+    policy?.extractionNotes,
+    policy?.notes,
+    policy?.userRemarks,
+    policy?._fieldEvidence?.policyOwner?.sourceText,
+    policy?._fieldEvidence?.lifeInsured?.sourceText
+  ].filter(Boolean).join(' ');
+}
+
+function dependantContextScore(policy) {
+  const text = policyTraceText(policy).toLowerCase();
+  let score = 0;
+  if (/\bdep(?:en)?dant\b|\bdependent\b/.test(text)) score += 3;
+  if (/\bproposer\b|\bpolicyholder\b|\bpolicy holder\b|\bpurchaser\b/.test(text)) score += 2;
+  if (/\bparticulars?\b|\bfamily\b|\bchildren?\b|\bspouse\b/.test(text)) score += 1;
+  if (/main life assured|main insured|same document|same application|same proposal/.test(text)) score += 1;
+  const role = normalizeName(policy?.documentRole);
+  if (role && /dep(?:en)?dant|dependent|child|spouse/.test(role)) score += 3;
+  return score;
+}
+
+function policyDocumentTraceAnchors(policy) {
+  const fields = [
+    policy?.documentGroupId,
+    policy?.sourceDocumentId,
+    policy?.applicationNumber,
+    policy?.proposalNumber,
+    policy?.quoteNumber,
+    policy?.caseNumber,
+    policy?.policyNumber
+  ];
+  const anchors = [];
+  fields.forEach((v, i) => {
+    const key = normalizePolicyKey(v);
+    if (key && key.length >= 4 && !anchors.includes(key)) anchors.push(key);
+  });
+  return anchors;
+}
+
+function policyTraceProductKey(policy) {
+  let name = String(policy?.productName || policy?.policyName || '').toLowerCase();
+  name = name.replace(/\s*[-–—]\s*(?:sg|sgd|usd|cash|cpf|srs|basic|lite|plus|super|premier|gold|platinum|silver|classic|enhanced|flex|flexi)\s*$/i, '');
+  return normalizeCompactKey(name);
+}
+
+function backfillDependantPolicyOwners(policies, meta = {}) {
+  if (!Array.isArray(policies) || policies.length < 1) return { updated: 0, updates: [] };
+  const currentClientName = meta.currentClientName || '';
+  const strongOwners = [];
+  policies.forEach((policy, index) => {
+    const owner = cleanPersonDisplayName(policy?.policyOwner || '');
+    if (!isWeakPolicyOwnerValue(owner)) {
+      strongOwners.push({ index, owner, policy, seq: policySourceSequence(policy), anchors: policyDocumentTraceAnchors(policy) });
+    }
+  });
+  const updates = [];
+  const setOwner = (policy, owner, detail) => {
+    const ownerName = cleanPersonDisplayName(owner);
+    if (!ownerName || isWeakPolicyOwnerValue(ownerName)) return false;
+    const lifeName = cleanPersonDisplayName(policy.lifeInsured || '');
+    if (lifeName && personNameEquivalent(ownerName, lifeName)) return false;
+    policy.policyOwner = ownerName;
+    policy.documentOwner = policy.documentOwner || ownerName;
+    policy.ownerInferenceReason = policy.ownerInferenceReason || detail.reason;
+    policy._ownerClassification = 'dependantPolicyLikely';
+    policy._ownerInferredFromDocument = {
+      owner: ownerName,
+      confidence: detail.confidence || 'medium',
+      reason: detail.reason,
+      source: detail.source || null,
+      score: detail.score || null
+    };
+    policy._extractConfidence = { ...(policy._extractConfidence || {}), policyOwner: detail.confidence === 'high' ? 'medium' : 'medium' };
+    policy._extractConfidenceReasons = {
+      ...(policy._extractConfidenceReasons || {}),
+      policyOwner: detail.reason
+    };
+    policy._fieldEvidence = {
+      ...(policy._fieldEvidence || {}),
+      policyOwner: {
+        value: ownerName,
+        confidence: detail.confidence || 'medium',
+        sourceImage: policy.sourceImage || policy._sourceImage || null,
+        sourceText: detail.sourceText || detail.reason,
+        page: policy.sourcePage || policy._sourcePage || null,
+        boundingBox: null,
+        reason: detail.reason
+      }
+    };
+    updates.push({ policy, owner: ownerName, reason: detail.reason });
+    return true;
+  };
+
+  policies.forEach((policy, index) => {
+    if (!policy || typeof policy !== 'object') return;
+    if (!isWeakPolicyOwnerValue(policy.policyOwner)) return;
+    const lifeName = cleanPersonDisplayName(policy.lifeInsured || '');
+    const directOwner = cleanPersonDisplayName(
+      policy.documentOwner || policy.sourceDocumentOwner || policy.policyProposer ||
+      policy.proposerName || policy.applicantName || policy.policyholderName || ''
+    );
+    if (directOwner && !isWeakPolicyOwnerValue(directOwner) && (!lifeName || !personNameEquivalent(directOwner, lifeName))) {
+      setOwner(policy, directOwner, {
+        confidence: 'high',
+        reason: 'Owner/proposer was captured from the same document while this policy page named a dependant life assured.',
+        source: 'documentOwner',
+        sourceText: policy.ownerInferenceReason || policyTraceText(policy).slice(0, 180)
+      });
+      return;
+    }
+
+    const dependantScore = dependantContextScore(policy);
+    const anchors = policyDocumentTraceAnchors(policy);
+    const seq = policySourceSequence(policy);
+    let best = null;
+    for (const cand of strongOwners) {
+      if (cand.index === index) continue;
+      if (lifeName && personNameEquivalent(cand.owner, lifeName)) continue;
+      let score = 0;
+      const reasons = [];
+      const sharedAnchors = anchors.filter(a => cand.anchors.includes(a));
+      if (sharedAnchors.length) { score += 7; reasons.push('shared document/policy reference'); }
+      const aPol = policy.policyNumber && normalizePolicyKey(policy.policyNumber);
+      const bPol = cand.policy.policyNumber && normalizePolicyKey(cand.policy.policyNumber);
+      if (aPol && bPol && aPol === bPol) { score += 4; reasons.push('same policy number'); }
+      const sameInsurer = normalizeCompactKey(policy.insurer) && normalizeCompactKey(policy.insurer) === normalizeCompactKey(cand.policy.insurer);
+      const sameProduct = policyTraceProductKey(policy) && policyTraceProductKey(policy) === policyTraceProductKey(cand.policy);
+      if (sameInsurer) { score += 1.5; reasons.push('same insurer'); }
+      if (sameProduct) { score += 2; reasons.push('same product'); }
+      if (policy._batch && cand.policy._batch && policy._batch === cand.policy._batch) score += 1;
+      if (seq != null && cand.seq != null && Math.abs(seq - cand.seq) <= 2) { score += 1.5; reasons.push('nearby upload page'); }
+      if (dependantScore > 0) score += Math.min(3, dependantScore);
+      const candRole = normalizeName(cand.policy.documentRole);
+      if (/proposer|owner|policyholder|policy holder|main life/.test(candRole)) score += 2;
+      if (!best || score > best.score) best = { ...cand, score, reasons };
+    }
+    if (!best) return;
+    const second = strongOwners
+      .filter(c => c.index !== best.index && c.index !== index)
+      .map(c => {
+        const sameInsurer = normalizeCompactKey(policy.insurer) && normalizeCompactKey(policy.insurer) === normalizeCompactKey(c.policy.insurer);
+        const sameProduct = policyTraceProductKey(policy) && policyTraceProductKey(policy) === policyTraceProductKey(c.policy);
+        const shared = anchors.filter(a => c.anchors.includes(a)).length;
+        return (shared ? 7 : 0) + (sameInsurer ? 1.5 : 0) + (sameProduct ? 2 : 0) + (dependantScore ? Math.min(3, dependantScore) : 0);
+      })
+      .sort((a,b) => b-a)[0] || 0;
+    const confident = best.score >= 8 || (dependantScore >= 3 && best.score >= 5 && best.score - second >= 1.5);
+    if (!confident) return;
+    setOwner(policy, best.owner, {
+      confidence: best.score >= 8 ? 'high' : 'medium',
+      score: Math.round(best.score * 10) / 10,
+      source: best.policy.productName || best.policy.policyName || best.policy.policyNumber || 'sibling policy page',
+      reason: 'Dependant-only page traced to ' + best.owner + ' from the same document context (' + (best.reasons.join(', ') || 'owner found on nearby page') + ').',
+      sourceText: policyTraceText(policy).slice(0, 180)
+    });
+  });
+
+  if (updates.length > 0) {
+    console.log('[OwnerTrace] Backfilled dependant policy owners:', updates.map(u => (u.policy.productName || u.policy.policyName || 'policy') + ' -> ' + u.owner));
+  }
+  return { updated: updates.length, updates };
 }
 
 function compactDuplicatePolicyList(policyList) {
@@ -4009,10 +4244,10 @@ async function pdfToImages(pdfDoc, maxPages=12) {
 // CLEAN even if the FC never actually reviewed anything. Bumping the version
 // forces a re-extraction next time those same files are uploaded, and the
 // one-time cleanup in App init purges the stale entries from IndexedDB.
-const EXTRACT_PIPELINE_VERSION = 'v15.0-2026-04-26-family-scan-sorting';
+const EXTRACT_PIPELINE_VERSION = 'v15.2-2026-04-27-family-dependant-owner-trace';
 
 // ── v15: PROMPT VERSIONING ──
-const EXTRACT_PROMPT_VERSION = 'v14.4-2026-04-26-family-scan-sorting';
+const EXTRACT_PROMPT_VERSION = 'v14.6-2026-04-27-family-dependant-owner-trace';
 const OCR_PROMPT_VERSION = 'v17-2026-04-26-document-ai-default-proxy';
 
 // ── v2.0.9: MODULE-SCOPE EXTRACT_PROMPT ──
@@ -5254,10 +5489,16 @@ function collectDetectedClients(policies, currentProfile, allDriveStates) {
     return false;
   };
   const addDetected = (p, idx, detectedName, sourceField, ownerStrong, lifeInsuredStrong) => {
-    const key = normalizePersonNameKey(detectedName);
+    let key = normalizePersonNameKey(detectedName);
     if (!key) return;
     if (currentName && fuzzyNameMatch(detectedName, currentName) && sourceField === 'policyOwner') return;
     const displayName = cleanPersonDisplayName(detectedName);
+    for (const [existingKey, existingInfo] of detected.entries()) {
+      if (personNameLikelyTypoVariant(displayName, existingInfo.displayName)) {
+        key = existingKey;
+        break;
+      }
+    }
     const candidates = (allDriveStates||[]).filter(ds => ds.clientName);
     const existingMatches = candidates.filter(ds => fuzzyNameMatch(displayName, ds.clientName)).slice(0, 5);
     if (!detected.has(key)) {
@@ -5291,7 +5532,9 @@ function collectDetectedClients(policies, currentProfile, allDriveStates) {
       productName: p.productName || p.policyName || p.subType || '',
       policyNumber: p.policyNumber || '',
       policyOwner: p.policyOwner || '',
-      lifeInsured: p.lifeInsured || ''
+      lifeInsured: p.lifeInsured || '',
+      documentOwner: p.documentOwner || '',
+      ownerInferenceReason: p.ownerInferenceReason || p._ownerInferredFromDocument?.reason || ''
     };
     entry.policyItems.push(item);
     if (entry.samplePolicies.length < 3) entry.samplePolicies.push(item);
@@ -5589,6 +5832,111 @@ function getProfileAgeSource(profile) {
   if (profile.dob) return 'dob';
   if (profile.currentAge != null && profile.currentAge !== '' && profile.currentAgeAsOf) return 'age';
   return null;
+}
+
+function normalizeProfileDob(raw) {
+  if (raw == null) return '';
+  const s = String(raw).trim();
+  if (!s) return '';
+  let m = s.match(/^(\d{4})[-\/.](\d{1,2})[-\/.](\d{1,2})$/);
+  if (m) {
+    const y = parseInt(m[1], 10), mo = parseInt(m[2], 10), d = parseInt(m[3], 10);
+    if (y >= 1900 && y <= 2100 && mo >= 1 && mo <= 12 && d >= 1 && d <= 31) {
+      return String(y).padStart(4, '0') + '-' + String(mo).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+    }
+  }
+  m = s.match(/^(\d{1,2})[-\/.](\d{1,2})[-\/.](\d{2,4})$/);
+  if (m) {
+    const d = parseInt(m[1], 10), mo = parseInt(m[2], 10);
+    let y = parseInt(m[3], 10);
+    if (y < 100) {
+      const yy = new Date().getFullYear() % 100;
+      y += y <= yy ? 2000 : 1900;
+    }
+    if (y >= 1900 && y <= 2100 && mo >= 1 && mo <= 12 && d >= 1 && d <= 31) {
+      return String(y).padStart(4, '0') + '-' + String(mo).padStart(2, '0') + '-' + String(d).padStart(2, '0');
+    }
+  }
+  const parsed = new Date(s);
+  if (!isNaN(parsed.getTime()) && parsed.getFullYear() >= 1900 && parsed.getFullYear() <= 2100) {
+    return parsed.toISOString().slice(0, 10);
+  }
+  return '';
+}
+
+function coerceProfileAge(raw) {
+  if (raw == null || raw === '') return null;
+  const m = String(raw).match(/\b(\d{1,3})\b/);
+  if (!m) return null;
+  const age = parseInt(m[1], 10);
+  return age > 0 && age < 120 ? age : null;
+}
+
+function extractDobNearName(text, name) {
+  const key = normalizePersonNameKey(name);
+  if (!key || !text) return '';
+  const compact = String(text).replace(/\s+/g, ' ');
+  const nameTokens = key.split(' ').filter(Boolean).map(t => t.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  if (!nameTokens.length) return '';
+  const nameRe = new RegExp(nameTokens.join('\\s+'), 'i');
+  const match = compact.match(nameRe);
+  if (!match) return '';
+  const start = Math.max(0, match.index - 80);
+  const end = Math.min(compact.length, match.index + match[0].length + 120);
+  const windowText = compact.slice(start, end);
+  const dateRe = /\b(\d{1,2}[\/.\-]\d{1,2}[\/.\-]\d{2,4}|\d{4}[\/.\-]\d{1,2}[\/.\-]\d{1,2})\b/;
+  const dateMatch = windowText.match(dateRe);
+  return dateMatch ? normalizeProfileDob(dateMatch[1]) : '';
+}
+
+function collectPolicyTextForHints(policy) {
+  const parts = [];
+  ['_ocrText','ocrText','rawText','notes','extractionNotes','userRemarks','documentTitle','sourceText'].forEach(k => {
+    if (policy?.[k]) parts.push(String(policy[k]));
+  });
+  const evidence = policy?._fieldEvidence || {};
+  Object.values(evidence || {}).forEach(ev => {
+    if (ev?.sourceText) parts.push(String(ev.sourceText));
+    if (ev?.value) parts.push(String(ev.value));
+  });
+  return parts.join(' ');
+}
+
+function ageFromEntryAge(policy) {
+  const entry = coerceProfileAge(policy?.ageAtEntry || policy?.premStartAge);
+  if (!entry || !policy?.inceptionDate) return null;
+  const inception = new Date(policy.inceptionDate);
+  if (isNaN(inception.getTime())) return null;
+  const years = Math.max(0, Math.floor((Date.now() - inception.getTime()) / 31557600000));
+  const age = entry + years;
+  return age > 0 && age < 120 ? age : null;
+}
+
+function pickPersonProfileHintFromPolicies(personName, policies) {
+  const key = normalizePersonNameKey(personName);
+  if (!key) return null;
+  const candidates = [];
+  const add = (hint) => {
+    if (!hint) return;
+    if (hint.dob || hint.currentAge) candidates.push(hint);
+  };
+  (policies || []).forEach(pol => {
+    const ownerMatch = personNameEquivalent(personName, pol?.policyOwner) || personNameLikelyTypoVariant(personName, pol?.policyOwner);
+    const lifeMatch = personNameEquivalent(personName, pol?.lifeInsured) || personNameLikelyTypoVariant(personName, pol?.lifeInsured);
+    const text = collectPolicyTextForHints(pol);
+    if (ownerMatch) {
+      const dob = normalizeProfileDob(pol.policyOwnerDob || pol.ownerDob || pol.policyholderDob || pol.proposerDob) || extractDobNearName(text, personName);
+      const currentAge = coerceProfileAge(pol.policyOwnerAge || pol.ownerAge || pol.proposerAge || pol.currentOwnerAge);
+      add({ dob, currentAge, source: pol.productName || pol.policyName || pol.insurer || 'policy owner details' });
+    }
+    if (lifeMatch) {
+      const dob = normalizeProfileDob(pol.lifeInsuredDob || pol.lifeAssuredDob || pol.insuredDob || pol.laDob || pol.dob) || extractDobNearName(text, personName);
+      const currentAge = coerceProfileAge(pol.lifeInsuredAge || pol.lifeAssuredAge || pol.insuredAge || pol.currentAge || pol.age) || ageFromEntryAge(pol);
+      add({ dob, currentAge, source: pol.productName || pol.policyName || pol.insurer || 'life assured details' });
+    }
+  });
+  if (!candidates.length) return null;
+  return candidates.find(c => c.dob) || candidates.find(c => c.currentAge) || null;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -11226,6 +11574,7 @@ async function consumeUndoSnapshot(clientId, snapshotId) {
 const POLICYLENS_DEVICE_ID_KEY = 'policylens_device_id';
 const POLICYLENS_DEVICE_NAME_KEY = 'policylens_device_name';
 const DRIVE_SYNC_OUTBOX_PREFIX = 'drive-client:';
+const PENDING_CLIENT_TRASH_KEY = 'pendingClientTrashQueue';
 let _policyLensSyncBroadcast = null;
 
 function getPolicyLensDeviceId() {
@@ -11270,6 +11619,62 @@ function getPolicyLensUserEmail() {
 
 function syncOutboxId(clientId) {
   return DRIVE_SYNC_OUTBOX_PREFIX + clientId;
+}
+
+async function getPendingClientTrashQueue() {
+  const rec = await PolicyDB.getSetting(PENDING_CLIENT_TRASH_KEY).catch(() => []);
+  return Array.isArray(rec) ? rec : [];
+}
+
+async function queueClientTrashRequest(ds, reason) {
+  if (!ds || (!ds.folderId && !isValidDriveFileId(ds.fileId))) return false;
+  const queue = await getPendingClientTrashQueue();
+  const entry = {
+    clientId: ds.clientId || null,
+    clientName: ds.clientName || '',
+    folderId: ds.folderId || null,
+    fileId: isValidDriveFileId(ds.fileId) ? ds.fileId : null,
+    reason: reason || 'client-trash',
+    queuedAt: new Date().toISOString()
+  };
+  const next = queue.filter(q =>
+    (entry.clientId && q.clientId !== entry.clientId) ||
+    (!entry.clientId && (q.folderId || q.fileId) !== (entry.folderId || entry.fileId))
+  );
+  next.push(entry);
+  await PolicyDB.saveSetting(PENDING_CLIENT_TRASH_KEY, next).catch(() => {});
+  _notifySyncStatus();
+  return true;
+}
+
+async function flushPendingClientTrashQueue() {
+  if (isDriveLocalOnly() || getDriveStatus() !== 'connected') return 0;
+  const queue = await getPendingClientTrashQueue();
+  if (!queue.length) return 0;
+  const remaining = [];
+  let trashed = 0;
+  for (const item of queue) {
+    try {
+      if (item.folderId) await driveClient.trashFolder(item.folderId);
+      else if (isValidDriveFileId(item.fileId)) {
+        await _driveFetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(item.fileId), {
+          method:'PATCH',
+          headers:{'Content-Type':'application/json'},
+          body:JSON.stringify({ trashed:true })
+        });
+      } else {
+        continue;
+      }
+      trashed++;
+      console.log('[ClientTrashQueue] Trashed queued client:', item.clientName || item.clientId || item.folderId || item.fileId);
+    } catch (err) {
+      console.warn('[ClientTrashQueue] Could not trash queued client yet:', item.clientName || item.clientId || '', err?.message || err);
+      remaining.push(item);
+    }
+  }
+  await PolicyDB.saveSetting(PENDING_CLIENT_TRASH_KEY, remaining).catch(() => {});
+  if (trashed > 0) _notifySyncStatus();
+  return trashed;
 }
 
 function holdLocalDriveWrite(clientId, reason, ms) {
@@ -11867,6 +12272,7 @@ async function flushDriveSyncOutbox(opts) {
     _driveSyncDebounced(() => flushDriveSyncOutbox(opts), 1200);
     return 0;
   }
+  await flushPendingClientTrashQueue().catch(() => 0);
   const all = await PolicyDB.getAllSyncOutbox().catch(() => []);
   const targetClientId = opts?.clientId || null;
   const pending = (all || [])
@@ -12358,6 +12764,7 @@ async function discoverDriveClients() {
     console.log('[Discovery] Skipped — Drive not connected');
     return { found: [], changedExisting: [], reconciledExisting: 0, skippedExisting: 0, errors: 0, driveClientIds: new Set(), hasFolderStructure: false };
   }
+  await flushPendingClientTrashQueue().catch(() => 0);
   const found = [];
   const changedExisting = [];
   const driveClientIds = new Set();
@@ -15871,6 +16278,134 @@ function App() {
     return enriched;
   };
 
+  const applyProfileHintsForClient = async (targetClientId, targetName, sourcePolicies, reason) => {
+    if (!targetClientId || !targetName) return false;
+    const hint = pickPersonProfileHintFromPolicies(targetName, sourcePolicies || []);
+    if (!hint || (!hint.dob && !hint.currentAge)) return false;
+    const profileRec = await dbGet('settings', 'clientProfile_' + targetClientId).catch(() => null);
+    const ds = await PolicyDB.getDriveState(targetClientId).catch(() => null);
+    const profile = { ...(profileRec?.value || {}), name: (profileRec?.value?.name || ds?.clientName || targetName) };
+    const hasDob = !!profile.dob;
+    const hasAge = profile.currentAge != null && profile.currentAge !== '' && profile.currentAgeAsOf;
+    const next = { ...profile };
+    if (hint.dob && !hasDob) {
+      next.dob = hint.dob;
+      next.currentAge = '';
+      next.currentAgeAsOf = '';
+    } else if (!hasDob && !hasAge && hint.currentAge) {
+      next.currentAge = String(hint.currentAge);
+      next.currentAgeAsOf = new Date().toISOString().slice(0, 10);
+    } else {
+      return false;
+    }
+    next._profileHintSource = reason || 'policy-extraction';
+    next._profileHintDetail = hint.source || '';
+    const versions = bumpFieldVersions(next, profile, profile._fieldVersions || {});
+    const enriched = stampProfileSyncMeta({ ...next, _fieldVersions: versions }, reason || 'policy-profile-hints');
+    await dbPut('settings', { key: 'clientProfile_' + targetClientId, value: enriched });
+    await dbPut('settings', { key: 'clientName_' + targetClientId, value: enriched.name || targetName }).catch(() => {});
+    if (ds) await PolicyDB.saveDriveState({ ...ds, clientName: enriched.name || ds.clientName || targetName, familyGroup: enriched.familyGroup || ds.familyGroup || '' }).catch(() => {});
+    if (targetClientId === activeClientIdRef.current) {
+      setClientProfile(enriched);
+      setClientName(enriched.name || targetName);
+    }
+    await scheduleDriveWriteForClient(targetClientId, reason || 'policy-profile-hints', 500);
+    try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
+    return true;
+  };
+
+  const mergeClientIntoClient = async (sourceClientId, targetClientId, opts = {}) => {
+    if (!sourceClientId || !targetClientId || sourceClientId === targetClientId) throw new Error('Choose two different clients to merge.');
+    const [states, allPols, sourceProfileRec, targetProfileRec] = await Promise.all([
+      PolicyDB.getAllDriveStates().catch(() => []),
+      dbGetAll('policies').catch(() => []),
+      dbGet('settings', 'clientProfile_' + sourceClientId).catch(() => null),
+      dbGet('settings', 'clientProfile_' + targetClientId).catch(() => null)
+    ]);
+    const sourceState = states.find(s => s.clientId === sourceClientId) || null;
+    const targetState = states.find(s => s.clientId === targetClientId) || null;
+    if (!targetState && !targetProfileRec?.value) throw new Error('Target client not found.');
+    const sourceProfile = sourceProfileRec?.value || { name: sourceState?.clientName || opts.sourceName || 'Source client' };
+    const targetProfile = targetProfileRec?.value || { name: targetState?.clientName || opts.targetName || 'Target client' };
+    const sourceName = cleanPersonDisplayName(sourceProfile.name || sourceState?.clientName || opts.sourceName || 'Source client');
+    const targetName = cleanPersonDisplayName(targetProfile.name || targetState?.clientName || opts.targetName || 'Target client');
+    if (!targetName) throw new Error('Target client needs a name before merge.');
+    const sourcePolicies = allPols.filter(p => p.clientId === sourceClientId);
+    const targetPolicies = allPols.filter(p => p.clientId === targetClientId);
+    try { await createCheckpoint(targetClientId, 'Auto-save before merging ' + sourceName + ' into ' + targetName); } catch(_) {}
+    try { if (sourcePolicies.length) await createCheckpoint(sourceClientId, 'Auto-save before merging into ' + targetName); } catch(_) {}
+
+    let moved = 0, merged = 0;
+    const currentTargetPolicies = [...targetPolicies];
+    const replaceIfSourceName = (value) => {
+      if (!value) return value;
+      return (personNameEquivalent(value, sourceName) || personNameLikelyTypoVariant(value, sourceName)) ? targetName : value;
+    };
+    for (const original of sourcePolicies) {
+      let migrated = normalizePolicyForStorage({
+        ...original,
+        clientId: targetClientId,
+        policyOwner: replaceIfSourceName(original.policyOwner) || targetName,
+        lifeInsured: replaceIfSourceName(original.lifeInsured)
+      }, { currentClientName: targetName, source: 'client-merge' });
+      let dup = currentTargetPolicies.find(p => p.id !== migrated.id && policiesLikelySamePolicy(p, migrated)) || null;
+      if (!dup) dup = currentTargetPolicies.find(p => p.id === migrated.id) || null;
+      if (dup) {
+        migrated = normalizePolicyForStorage({ ...mergePolicyRecords(dup, migrated), id: dup.id, clientId: targetClientId }, { currentClientName: targetName, source: 'client-merge' });
+        merged++;
+      } else if (currentTargetPolicies.some(p => p.id === migrated.id)) {
+        migrated.id = genId();
+      }
+      await dbPut('policies', migrated);
+      const idx = currentTargetPolicies.findIndex(p => p.id === migrated.id);
+      if (idx >= 0) currentTargetPolicies[idx] = migrated;
+      else currentTargetPolicies.push(migrated);
+      if (original.id && original.id !== migrated.id) await dbDel('policies', original.id).catch(() => {});
+      moved++;
+    }
+
+    const targetFamily = targetProfile.familyGroup || targetState?.familyGroup || sourceProfile.familyGroup || sourceState?.familyGroup || '';
+    const nextTargetProfile = stampProfileSyncMeta({
+      ...targetProfile,
+      name: targetName,
+      familyGroup: targetFamily,
+      dependants: Array.isArray(targetProfile.dependants) ? targetProfile.dependants : []
+    }, 'client-merge');
+    await dbPut('settings', { key: 'clientProfile_' + targetClientId, value: nextTargetProfile });
+    await dbPut('settings', { key: 'clientName_' + targetClientId, value: targetName }).catch(() => {});
+    if (targetState) await PolicyDB.saveDriveState({ ...targetState, clientName: targetName, familyGroup: targetFamily }).catch(() => {});
+
+    if (sourceState) {
+      let sourceTrashed = false;
+      if (!isDriveLocalOnly() && getDriveStatus() === 'connected') {
+        try {
+          if (sourceState.folderId) await driveClient.trashFolder(sourceState.folderId);
+          else if (isValidDriveFileId(sourceState.fileId)) await _driveFetch('https://www.googleapis.com/drive/v3/files/' + encodeURIComponent(sourceState.fileId), { method:'PATCH', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ trashed:true }) });
+          sourceTrashed = !!(sourceState.folderId || isValidDriveFileId(sourceState.fileId));
+        } catch(e) {
+          console.warn('[ClientMerge] Could not trash source Drive file/folder:', e?.message || e);
+        }
+      }
+      if (!sourceTrashed) await queueClientTrashRequest(sourceState, 'client-merge').catch(() => {});
+      await dbDel('drive_state', sourceClientId).catch(() => {});
+    }
+    await dbDel('settings', 'clientProfile_' + sourceClientId).catch(() => {});
+    await dbDel('settings', 'clientName_' + sourceClientId).catch(() => {});
+    await PolicyDB.deleteSyncOutbox(syncOutboxId(sourceClientId)).catch(() => {});
+    await recordActivity(targetClientId, {
+      type: 'client-merge',
+      label: 'Merged client',
+      detail: sourceName + ' into ' + targetName + ' (' + moved + ' policies, ' + merged + ' duplicates merged)',
+      level: 'success'
+    }).catch(() => {});
+    await scheduleDriveWriteForClient(targetClientId, 'client-merge', 250);
+    if (sourceClientId === activeClientIdRef.current || targetClientId === activeClientIdRef.current) {
+      await switchClient(targetClientId);
+    }
+    try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
+    return { moved, merged, sourceName, targetName };
+  };
+
   // Repo operations — Supabase primary, local fallback
   useEffect(() => {
     if (loading || !activeClientId || !Array.isArray(policies) || policies.length < 2) return;
@@ -16047,7 +16582,11 @@ function App() {
   const destroyClient = async () => {
     const ds = driveState;
     if (!ds) return;
-    if (ds.folderId) { try { await driveClient.trashFolder(ds.folderId); } catch(e) { console.warn('[Destroy] Trash failed:', e.message); } }
+    let clientTrashed = false;
+    if (!isDriveLocalOnly() && getDriveStatus() === 'connected' && ds.folderId) {
+      try { await driveClient.trashFolder(ds.folderId); clientTrashed = true; } catch(e) { console.warn('[Destroy] Trash failed:', e.message); }
+    }
+    if (!clientTrashed) await queueClientTrashRequest(ds, 'client-destroy').catch(() => {});
     await dbDel('drive_state', activeClientId);
     const allPols = await dbGetAll('policies');
     for (const pol of allPols.filter(p => p.clientId === activeClientId)) await dbDel('policies', pol.id);
@@ -16128,7 +16667,7 @@ function App() {
     try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
   };
 
-  const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,savePolicyForClient,deletePolicy,restoreLastUndo,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,tab,setTab,presentMode,setPresentMode,showChangelog,setShowChangelog,houseDefaults,saveHouseDefaults,tierDefinitions,saveTierDefinitions,runCloudSync:()=>runCloudSyncRef.current?.({force:true}),driveState,setDriveState,activeClientId,switchClient,destroyClient,isAdmin};
+  const ctx = {policies,repo,apiKey,clientName,clientProfile,savePolicy,savePolicyForClient,deletePolicy,restoreLastUndo,saveRepo,deleteRepo,refreshRepo,repoSource,saveApiKey,saveClientName,saveProfile,applyProfileHintsForClient,mergeClientIntoClient,tab,setTab,presentMode,setPresentMode,showChangelog,setShowChangelog,houseDefaults,saveHouseDefaults,tierDefinitions,saveTierDefinitions,runCloudSync:()=>runCloudSyncRef.current?.({force:true}),driveState,setDriveState,activeClientId,switchClient,destroyClient,isAdmin};
 
   if(loading) {
     if (_isOAuthReturn) return <OAuthReturnLoader />;
@@ -18445,6 +18984,95 @@ function ClientsTab() {
   );
 }
 
+function MergeClientModal({ open, sourceClientId, sourceName, onClose }) {
+  const { mergeClientIntoClient } = useContext(AppCtx);
+  const [states, setStates] = useState([]);
+  const [policiesAll, setPoliciesAll] = useState([]);
+  const [query, setQuery] = useState('');
+  const [targetId, setTargetId] = useState('');
+  const [busy, setBusy] = useState(false);
+  useEffect(() => {
+    if (!open) return;
+    setTargetId('');
+    setQuery('');
+    Promise.all([
+      PolicyDB.getAllDriveStates().catch(() => []),
+      dbGetAll('policies').catch(() => [])
+    ]).then(([st, pols]) => {
+      const sorted = (st || []).filter(ds => ds.clientId !== sourceClientId).sort((a,b) => String(a.clientName || '').localeCompare(String(b.clientName || '')));
+      setStates(sorted);
+      setPoliciesAll(pols || []);
+    }).catch(() => { setStates([]); setPoliciesAll([]); });
+  }, [open, sourceClientId]);
+  if (!open) return null;
+  const sourcePolicies = policiesAll.filter(p => p.clientId === sourceClientId);
+  const q = normalizeName(query);
+  const candidates = states.filter(ds => !q || normalizeName(ds.clientName).includes(q) || normalizePersonNameKey(ds.clientName).includes(normalizePersonNameKey(query)));
+  const target = states.find(ds => ds.clientId === targetId) || null;
+  const targetPolicies = target ? policiesAll.filter(p => p.clientId === target.clientId) : [];
+  const modalBg = {position:'fixed',inset:0,zIndex:10002,background:'rgba(0,0,0,.72)',display:'flex',alignItems:'center',justifyContent:'center',padding:16};
+  const modalBox = {background:'#1a2332',borderRadius:14,border:'1px solid rgba(201,169,110,.24)',maxWidth:560,width:'100%',padding:22,boxShadow:'0 20px 60px rgba(0,0,0,.5)',maxHeight:'84vh',overflowY:'auto'};
+  const runMerge = async () => {
+    if (!targetId || busy) return;
+    const label = (sourceName || 'this client') + ' into ' + (target?.clientName || 'selected client');
+    if (!confirm('Merge ' + label + '?\n\nAll policies under the source client will move to the target. The source client will disappear locally and its Drive folder/file will be moved to Trash when Drive is connected.')) return;
+    setBusy(true);
+    try {
+      const result = await mergeClientIntoClient(sourceClientId, targetId, { sourceName });
+      try { toast('Merged ' + result.sourceName + ' into ' + result.targetName + ' (' + result.moved + ' policies)', 'success', 4500); } catch(_) {}
+      onClose(true);
+    } catch (err) {
+      try { toast('Merge failed: ' + (err.message || err), 'error', 6000); } catch(_) {}
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div onClick={e => { if (e.target === e.currentTarget && !busy) onClose(false); }} style={modalBg}>
+      <div style={modalBox}>
+        <h2 style={{fontSize:16,fontWeight:800,color:'var(--gold)',margin:'0 0 4px'}}>Merge client</h2>
+        <p style={{fontSize:11,color:'var(--text3)',lineHeight:1.5,margin:'0 0 14px'}}>
+          Use this when OCR created a wrong duplicate name. Policies, owner names and Drive sync move from the source client into the selected correct client.
+        </p>
+        <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:10,marginBottom:12}}>
+          <div style={{padding:10,background:'var(--bg3)',border:'1px solid var(--border)',borderRadius:8}}>
+            <div style={{fontSize:9,fontWeight:800,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.4px'}}>Source disappears</div>
+            <div style={{fontSize:14,fontWeight:800,color:'var(--text)',marginTop:4}}>{sourceName || 'Current client'}</div>
+            <div style={{fontSize:10,color:'var(--text3)',marginTop:3}}>{sourcePolicies.length} polic{sourcePolicies.length===1?'y':'ies'} to migrate</div>
+          </div>
+          <div style={{padding:10,background:'rgba(91,168,160,.06)',border:'1px solid rgba(91,168,160,.18)',borderRadius:8}}>
+            <div style={{fontSize:9,fontWeight:800,color:'var(--teal)',textTransform:'uppercase',letterSpacing:'.4px'}}>Target remains</div>
+            <div style={{fontSize:14,fontWeight:800,color:'var(--text)',marginTop:4}}>{target?.clientName || 'Choose correct client'}</div>
+            <div style={{fontSize:10,color:'var(--text3)',marginTop:3}}>{target ? targetPolicies.length + ' existing polic' + (targetPolicies.length===1?'y':'ies') : 'Policies will consolidate here'}</div>
+          </div>
+        </div>
+        <input value={query} onChange={e => setQuery(e.target.value)} placeholder="Search correct client"
+          style={{width:'100%',boxSizing:'border-box',padding:'9px 11px',background:'var(--bg)',border:'1px solid var(--border2)',borderRadius:8,color:'var(--text)',fontSize:12,outline:'none',marginBottom:10}} />
+        <div style={{display:'grid',gap:6,maxHeight:240,overflowY:'auto',marginBottom:14}}>
+          {candidates.length === 0 && <div style={{fontSize:11,color:'var(--text3)',padding:10}}>No matching target client found.</div>}
+          {candidates.map(ds => {
+            const selected = ds.clientId === targetId;
+            const polCount = policiesAll.filter(p => p.clientId === ds.clientId).length;
+            return (
+              <button key={ds.clientId} onClick={() => setTargetId(ds.clientId)}
+                style={{textAlign:'left',padding:'9px 10px',borderRadius:8,border:selected?'1px solid var(--gold)':'1px solid var(--border)',background:selected?'rgba(212,169,106,.12)':'var(--bg3)',color:'var(--text)',cursor:'pointer'}}>
+                <div style={{fontSize:12,fontWeight:800}}>{selected ? 'Selected: ' : ''}{ds.clientName || 'Untitled'}</div>
+                <div style={{fontSize:10,color:'var(--text3)',marginTop:2}}>{polCount} polic{polCount===1?'y':'ies'} - {ds.familyGroup || 'No family group'}</div>
+              </button>
+            );
+          })}
+        </div>
+        <div style={{display:'flex',gap:8,justifyContent:'flex-end'}}>
+          <button onClick={() => onClose(false)} disabled={busy} style={{background:'transparent',color:'var(--text3)',border:'1px solid var(--border2)',borderRadius:8,padding:'8px 14px',fontSize:11,cursor:'pointer'}}>Cancel</button>
+          <button onClick={runMerge} disabled={!targetId || busy} style={{background:'var(--gold)',color:'#0b0f1a',border:'none',borderRadius:8,padding:'8px 15px',fontSize:11,fontWeight:800,cursor:targetId&&!busy?'pointer':'not-allowed',opacity:targetId&&!busy?1:.55}}>
+            {busy ? 'Merging...' : 'Merge into selected client'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── v2.2.0-rc1: New Client modal ──
 function NewClientModal({ allStates, allPolicies, onClose, initialName, initialFamilyGroup, onCreated, onExistingSelected, stayOnCurrent, routePolicies }) {
   const { switchClient, setTab } = useContext(AppCtx);
@@ -18872,8 +19500,16 @@ const POLICY_EXTRACTION_SCHEMA = {
       // ── Client info ──
       policyOwner: { type: 'STRING', nullable: true, description: 'Exact name of policy owner/purchaser printed on the document; do not substitute the active client name' },
       lifeInsured: { type: 'STRING', nullable: true, description: 'Name of life assured (may differ from owner)' },
+      documentOwner: { type: 'STRING', nullable: true, description: 'Owner/proposer/policyholder traced from the same physical document or application pack when the current page only shows a dependant/life assured table' },
+      documentRole: { type: 'STRING', enum: ['owner','proposer','main_life_assured','dependant','life_assured_only','unknown'], nullable: true, description: 'Role of the named person/page in the document. Use dependant/life_assured_only when a page names a child/spouse/dependant but does not itself prove ownership.' },
+      documentGroupId: { type: 'STRING', nullable: true, description: 'Stable same-document grouping hint such as policy number, proposal/application number, or upload image range. Use the same value for pages from the same physical document when visible/inferable.' },
+      ownerInferenceReason: { type: 'STRING', nullable: true, description: 'Short reason for policyOwner/documentOwner when inferred across pages, e.g. "Dependant 2 page traced to proposer TNG TENG SOO on Image 1".' },
       gender: { type: 'STRING', enum: ['Male','Female','unknown'], nullable: true },
       dob: { type: 'STRING', nullable: true, description: 'YYYY-MM-DD' },
+      policyOwnerDob: { type: 'STRING', nullable: true, description: 'YYYY-MM-DD date of birth of policy owner/policyholder/proposer when visible' },
+      policyOwnerAge: { type: 'INTEGER', nullable: true, description: 'Current age of policy owner/policyholder/proposer when visible' },
+      lifeInsuredDob: { type: 'STRING', nullable: true, description: 'YYYY-MM-DD date of birth of life assured/insured person when visible' },
+      lifeInsuredAge: { type: 'INTEGER', nullable: true, description: 'Current age of life assured/insured person when visible' },
       ageAtEntry: { type: 'INTEGER', nullable: true },
       smoker: { type: 'STRING', enum: ['Smoker','Non-smoker','unknown'], nullable: true },
       nationality: { type: 'STRING', enum: ['SC','PR','Foreigner','unknown'], nullable: true },
@@ -21772,6 +22408,10 @@ function PolicyOwnerRoutingModal({ open, detected, currentClientName, allDriveSt
     if (route === 'new') return info.displayName;
     if (route?.startsWith('existing:')) return allClients.find(ds => ds.clientId === route.slice(9))?.clientName || 'Existing client';
     if (route?.startsWith('lifeExisting:')) return allClients.find(ds => ds.clientId === route.slice(13))?.clientName || 'Existing owner';
+    if (route?.startsWith('ownerDetected:')) {
+      const targetInfo = detected.get(route.slice(14));
+      return targetInfo?.displayName || 'Detected owner';
+    }
     if (route?.startsWith('lifeDetected:')) {
       const targetKey = route.slice(13);
       const targetInfo = detected.get(targetKey);
@@ -21787,14 +22427,17 @@ function PolicyOwnerRoutingModal({ open, detected, currentClientName, allDriveSt
       ? 'New owner/client'
       : route?.startsWith('existing:')
         ? 'Existing client'
-        : route?.startsWith('lifeDetected:') || route?.startsWith('lifeExisting:')
-          ? 'Life assured under owner'
+        : route?.startsWith('ownerDetected:')
+          ? 'Detected owner/client'
+          : route?.startsWith('lifeDetected:') || route?.startsWith('lifeExisting:')
+            ? 'Life assured under owner'
           : 'Current client'
   );
   const routeDescriptionFor = (route, info) => {
     if (route === 'current') return 'Attach to ' + (currentClientName || 'the current client') + '; PolicyLens keeps ' + info.displayName + ' as life assured when owner was ambiguous.';
     if (route?.startsWith('existing:')) return 'Add these policies to ' + (allClients.find(ds => ds.clientId === route.slice(9))?.clientName || 'the selected existing client') + ' and tag the same family group.';
     if (route === 'new') return 'Create "' + info.displayName + '" as a client and tag the same family group.';
+    if (route?.startsWith('ownerDetected:')) return 'Store under ' + routeLabelFor(route, info) + ' as the policy owner/client.';
     if (route?.startsWith('lifeDetected:')) return 'Store under ' + routeLabelFor(route, info) + '; keep ' + info.displayName + ' as the life assured.';
     if (route?.startsWith('lifeExisting:')) return 'Store under ' + routeLabelFor(route, info) + '; keep ' + info.displayName + ' as the life assured.';
     return '';
@@ -21813,6 +22456,12 @@ function PolicyOwnerRoutingModal({ open, detected, currentClientName, allDriveSt
           </option>
         ))}
         <option value="new">Create new owner/client: {info.displayName}</option>
+        {otherDetected.length > 0 && <option disabled>-------- Policy owner is another detected person --------</option>}
+        {otherDetected.map(([otherKey, otherInfo]) => (
+          <option key={'ownerDetected:' + otherKey} value={'ownerDetected:' + otherKey}>
+            Policy owner/client: {otherInfo.displayName}
+          </option>
+        ))}
         {lifeContext && otherDetected.length > 0 && <option disabled>-------- Life assured under detected owner --------</option>}
         {lifeContext && otherDetected.map(([otherKey, otherInfo]) => (
           <option key={'lifeDetected:' + otherKey} value={'lifeDetected:' + otherKey}>
@@ -21917,6 +22566,7 @@ function PolicyOwnerRoutingModal({ open, detected, currentClientName, allDriveSt
                       </div>
                       <div style={{fontSize:9,color:'var(--text3)'}}>
                         Owner: {p.policyOwner || 'not stated'} | Life assured: {p.lifeInsured || 'not stated'}
+                        {p.ownerInferenceReason ? ' | Trace: ' + p.ownerInferenceReason : ''}
                       </div>
                     </div>
                   ))}
@@ -21952,6 +22602,7 @@ function PolicyOwnerRoutingModal({ open, detected, currentClientName, allDriveSt
                             </div>
                             <div style={{fontSize:9,color:item.sourceField==='lifeInsured'?'var(--gold)':'var(--text3)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>
                               {item.sourceField === 'lifeInsured' ? 'Detected as life assured' : 'Detected as owner'} | Owner: {item.policyOwner || 'not stated'} | Life: {item.lifeInsured || 'not stated'}
+                              {item.ownerInferenceReason ? ' | Trace: ' + item.ownerInferenceReason : ''}
                             </div>
                           </div>
                           <select value={itemRoute} onChange={e => setPolicyRoutes(prev => ({...prev,[item.policyIndex]:e.target.value}))}
@@ -22429,13 +23080,14 @@ function OtherClientCheckpointPicker({ onClose, onCloseAll, switchClient, setTab
 }
 
 function ProfileTab() {
-  const {clientProfile,saveProfile,apiKey,houseDefaults,tierDefinitions,policies,deletePolicy,activeClientId,driveState,setDriveState,switchClient,setTab} = useContext(AppCtx);
+  const {clientName,clientProfile,saveProfile,apiKey,houseDefaults,tierDefinitions,policies,deletePolicy,activeClientId,driveState,setDriveState,switchClient,setTab} = useContext(AppCtx);
   const isMobile = useViewportIsMobile();
   const blankProfileDraft = () => ({name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[]});
   const [p, setP] = useState(() => clientProfile || blankProfileDraft());
   const [scanning, setScanning] = useState(false);
   const [newClientGuardOpen, setNewClientGuardOpen] = useState(false);
   const [newClientModalOpen, setNewClientModalOpen] = useState(false);
+  const [mergeClientOpen, setMergeClientOpen] = useState(false);
   const [newClientData, setNewClientData] = useState({allStates:[],allPolicies:[]});
   const camRef = useRef(null);
   const uploadRef = useRef(null);
@@ -22631,6 +23283,10 @@ function ProfileTab() {
             {!isMobile && <button onClick={() => setNewClientGuardOpen(true)}
               style={{fontSize:10,fontWeight:600,padding:'4px 10px',borderRadius:6,background:'rgba(212,169,106,.15)',color:'var(--gold)',border:'1px solid rgba(212,169,106,.4)',cursor:'pointer',outline:'none',whiteSpace:'nowrap'}}>
               + New Client
+            </button>}
+            {!isMobile && activeClientId && <button onClick={() => setMergeClientOpen(true)}
+              style={{fontSize:10,fontWeight:600,padding:'4px 10px',borderRadius:6,background:'rgba(91,168,160,.08)',color:'var(--teal)',border:'1px solid rgba(91,168,160,.22)',cursor:'pointer',outline:'none',whiteSpace:'nowrap'}}>
+              Merge Client
             </button>}
           </div>
           <p style={{fontSize:12,color:'var(--text3)',marginTop:4}}>Client details used across all policies — fill once, use everywhere</p>
@@ -23105,6 +23761,8 @@ function ProfileTab() {
         ))}
       </div>
 
+      <MergeClientModal open={mergeClientOpen} sourceClientId={activeClientId} sourceName={p.name || clientName}
+        onClose={() => setMergeClientOpen(false)} />
       <NewClientGuardModal open={newClientGuardOpen} onClose={() => setNewClientGuardOpen(false)}
         onProceed={async () => {
           setNewClientGuardOpen(false);
@@ -27451,7 +28109,7 @@ class ErrorBoundary extends React.Component {
 }
 
 function Policies() {
-  const {policies,savePolicy,savePolicyForClient,deletePolicy,repo,apiKey,saveRepo,clientProfile,saveProfile,activeClientId,clientName,switchClient,setTab} = useContext(AppCtx);
+  const {policies,savePolicy,savePolicyForClient,deletePolicy,repo,apiKey,saveRepo,clientProfile,saveProfile,applyProfileHintsForClient,activeClientId,clientName,switchClient,setTab} = useContext(AppCtx);
   const isMobile = useViewportIsMobile();
   const [showForm, setShowForm] = useState(false);
   const [editing, setEditing] = useState(null);
@@ -27624,7 +28282,7 @@ function Policies() {
       out.lifeInsured = out.lifeInsured || lifeAssuredName || '';
       out.policyOwner = ownerName;
       out._ownerRouteQuestion = routeName === 'current' ? 'life-assured-under-current-client' : 'life-assured-under-routed-owner';
-    } else if (routeName === 'new' || routeName === 'existing') {
+    } else if (routeName === 'new' || routeName === 'existing' || routeName === 'owner-of-detected') {
       out.policyOwner = ownerName;
       out.lifeInsured = out.lifeInsured || info.displayName || '';
     } else if (weakOwner || routeName === 'current') {
@@ -28155,8 +28813,9 @@ SHORT-TERM ENDOWMENTS (≤3 years, single premium):
 - endYield = expected yield % p.a.
 - endGuaranteedCV = expected maturity sum if given
 
-CLIENT: policyOwner (string — exact name of policy owner/purchaser shown on the document), lifeInsured (string — exact name of life assured/insured person, may differ from policyOwner), gender (Male/Female — of life insured), dob (YYYY-MM-DD — of life insured), ageAtEntry (number — of life insured at cover start), smoker (Non-smoker/Smoker), nationality (SC/PR/Foreigner), occupation
-POLICY OWNER ROUTING: preserve the owner printed on the document. Do NOT replace policyOwner with the active client name. In family scans, different policies may belong to spouse/child/parent clients; keep each policy's actual owner so PolicyLens can route it after extraction. If owner and life insured differ, capture both exactly.
+CLIENT: policyOwner (string — exact name of policy owner/purchaser/proposer shown on the document), lifeInsured (string — exact name of life assured/insured person, may differ from policyOwner), documentOwner (owner/proposer/policyholder traced from the same physical document when the current page is a dependant/life-assured page), documentRole (owner/proposer/main_life_assured/dependant/life_assured_only/unknown), documentGroupId (same-document grouping hint such as policy/proposal/application number or image range), ownerInferenceReason (short reason if owner came from another page of the same document), gender (Male/Female — of life insured), dob (YYYY-MM-DD — of life insured, backward-compatible), policyOwnerDob (YYYY-MM-DD), policyOwnerAge (current age if visible), lifeInsuredDob (YYYY-MM-DD), lifeInsuredAge (current age if visible), ageAtEntry (number — of life insured at cover start), smoker (Non-smoker/Smoker), nationality (SC/PR/Foreigner), occupation
+FAMILY PARTICULARS / DEPENDANT TABLES: If a page has "Particulars of main life assured", "Proposer", "Dependant", "Name", "Date of Birth", "DOB", "Birth Date", or age rows, extract DOB/current age for each named person. Map the DOB/age to policyOwnerDob/policyOwnerAge when the name is the policy owner/proposer, and to lifeInsuredDob/lifeInsuredAge plus dob when the name is the life assured/dependant. If one page only shows a dependant or child/spouse life assured, look at the same physical document/upload sequence for the checked Proposer/Owner/Main Life Assured and fill documentOwner plus policyOwner with that original owner. Do not ignore family DOB rows just because they appear on an application/profile page rather than the policy schedule.
+POLICY OWNER ROUTING: preserve the owner printed on the document. Do NOT replace policyOwner with the active client name. In family scans, different policies may belong to spouse/child/parent clients; keep each policy's actual owner so PolicyLens can route it after extraction. If owner and life insured differ, capture both exactly. Dependant pages are not standalone owner evidence: if the person appears only under a Dependant column, route the policy back to the proposer/owner from the same document and keep that dependant as lifeInsured.
 
 PREMIUM TERM: premStartAge (number), premTerm (number — PREMIUM PAYMENT years, NOT policy term. Calculate as premEndAge minus premStartAge), premEndAge (number — age when premium payments stop, NOT maturity age)
 
@@ -29659,7 +30318,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
         console.log('[PriorInjection] No repo matches in source text (length='+sourceText.length+', repo size='+repo.length+')');
       }
 
-      content.push({type:'text',text:'Extract ALL insurance policies AND financial instruments from these documents. CRITICAL RULES:\n1. Multiple photos may show DIFFERENT PAGES of the SAME policy — correlate them by policy number, insurer+product name, filename/upload order, or context clues. Merge information from multiple pages into ONE policy entry.\n2. Adjacent upload images with sequential filenames (e.g. IMG_1011 then IMG_1012) are likely consecutive pages. If the later page lacks a clear new policy identity, merge it into the nearest previous compatible policy instead of creating a standalone policy.\n3. Multiple photos may also show DIFFERENT policies — extract each as a separate entry when a distinct policy number/product/instrument is visible.\n4. NEVER skip or merge genuinely different policies. Two policies from the same insurer with different product names = 2 entries. Same insurer/product but different policy owner or life insured = separate entries unless the same printed policy number clearly proves they are one policy.\n5. If the same fund (e.g. "Allianz Global High Payout") appears under DIFFERENT accounts (CPFIS-OA vs Cash), these are SEPARATE entries — differentiate by appending the account type in policyName.\n6. Look across ALL images for related data — page 1 might have the policy name while page 3 has the premium details.\n7. If REPOSITORY PRIOR KNOWLEDGE is provided above, treat those products\' canonical category/subType as authoritative — do not reclassify them based on document appearance.\nReturn ONLY valid JSON array or object.'});
+      content.push({type:'text',text:'Extract ALL insurance policies AND financial instruments from these documents. CRITICAL RULES:\n1. Multiple photos may show DIFFERENT PAGES of the SAME policy — correlate them by policy number, insurer+product name, filename/upload order, or context clues. Merge information from multiple pages into ONE policy entry.\n2. Adjacent upload images with sequential filenames (e.g. IMG_1011 then IMG_1012) are likely consecutive pages. If the later page lacks a clear new policy identity, merge it into the nearest previous compatible policy instead of creating a standalone policy.\n3. Multiple photos may also show DIFFERENT policies — extract each as a separate entry when a distinct policy number/product/instrument is visible.\n4. NEVER skip or merge genuinely different policies. Two policies from the same insurer with different product names = 2 entries. Same insurer/product but different policy owner or life insured = separate entries unless the same printed policy number clearly proves they are one policy.\n5. If the same fund (e.g. "Allianz Global High Payout") appears under DIFFERENT accounts (CPFIS-OA vs Cash), these are SEPARATE entries — differentiate by appending the account type in policyName.\n6. Look across ALL images for related data — page 1 might have the policy name while page 3 has the premium details.\n7. If REPOSITORY PRIOR KNOWLEDGE is provided above, treat those products\' canonical category/subType as authoritative — do not reclassify them based on document appearance.\n8. If a page is a dependant/life-assured page, trace back to the same physical document for the checked proposer/owner/main life assured and fill policyOwner/documentOwner; keep the dependant as lifeInsured.\nReturn ONLY valid JSON array or object.'});
 
       // ── RUN EXTRACTION WITH SELF-HEALING TRUNCATION RECOVERY ──
       arr = await runExtractionWithRecovery(content, 0, 'batch');
@@ -30319,7 +30978,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
                   if (priorBlock) content.push({type:'text', text: priorBlock});
                 }
                 // Instruction tail (same as extractBatch)
-                content.push({type:'text',text:'Extract ALL insurance policies AND financial instruments from these documents. CRITICAL RULES:\n1. Multiple photos may show DIFFERENT PAGES of the SAME policy — correlate them by policy number, insurer+product name, filename/upload order, or context clues. Merge information from multiple pages into ONE policy entry.\n2. Adjacent upload images with sequential filenames (e.g. IMG_1011 then IMG_1012) are likely consecutive pages. If the later page lacks a clear new policy identity, merge it into the nearest previous compatible policy instead of creating a standalone policy.\n3. Multiple photos may also show DIFFERENT policies — extract each as a separate entry when a distinct policy number/product/instrument is visible.\n4. NEVER skip or merge genuinely different policies. Two policies from the same insurer with different product names = 2 entries. Same insurer/product but different policy owner or life insured = separate entries unless the same printed policy number clearly proves they are one policy.\n5. If the same fund (e.g. "Allianz Global High Payout") appears under DIFFERENT accounts (CPFIS-OA vs Cash), these are SEPARATE entries — differentiate by appending the account type in policyName.\n6. Look across ALL images for related data — page 1 might have the policy name while page 3 has the premium details.\n7. If REPOSITORY PRIOR KNOWLEDGE is provided above, treat those products\' canonical category/subType as authoritative — do not reclassify them based on document appearance.\nReturn ONLY valid JSON array or object.'});
+                content.push({type:'text',text:'Extract ALL insurance policies AND financial instruments from these documents. CRITICAL RULES:\n1. Multiple photos may show DIFFERENT PAGES of the SAME policy — correlate them by policy number, insurer+product name, filename/upload order, or context clues. Merge information from multiple pages into ONE policy entry.\n2. Adjacent upload images with sequential filenames (e.g. IMG_1011 then IMG_1012) are likely consecutive pages. If the later page lacks a clear new policy identity, merge it into the nearest previous compatible policy instead of creating a standalone policy.\n3. Multiple photos may also show DIFFERENT policies — extract each as a separate entry when a distinct policy number/product/instrument is visible.\n4. NEVER skip or merge genuinely different policies. Two policies from the same insurer with different product names = 2 entries. Same insurer/product but different policy owner or life insured = separate entries unless the same printed policy number clearly proves they are one policy.\n5. If the same fund (e.g. "Allianz Global High Payout") appears under DIFFERENT accounts (CPFIS-OA vs Cash), these are SEPARATE entries — differentiate by appending the account type in policyName.\n6. Look across ALL images for related data — page 1 might have the policy name while page 3 has the premium details.\n7. If REPOSITORY PRIOR KNOWLEDGE is provided above, treat those products\' canonical category/subType as authoritative — do not reclassify them based on document appearance.\n8. If a page is a dependant/life-assured page, trace back to the same physical document for the checked proposer/owner/main life assured and fill policyOwner/documentOwner; keep the dependant as lifeInsured.\nReturn ONLY valid JSON array or object.'});
                 // Build Gemini POST body
                 const parts = [];
                 for (const block of content) {
@@ -31017,6 +31676,13 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
 
         return result;
       });
+
+      const ownerTrace = backfillDependantPolicyOwners(processed, { currentClientName: clientProfile?.name || clientName || '' });
+      if (ownerTrace.updated > 0) {
+        try {
+          toast('Traced '+ownerTrace.updated+' dependant polic'+(ownerTrace.updated===1?'y':'ies')+' back to the document owner', 'success', 4500);
+        } catch(_) {}
+      }
 
       // Merge client info from first policy
       if(b === 0 && arr[0]) mergeToProfile(arr[0], clientProfile, saveProfile);
@@ -32128,6 +32794,20 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
               addNew(key, info.displayName, p, assignment, 'new', {lifeAssuredName});
               return;
             }
+            if (route.startsWith('ownerDetected:')) {
+              const targetKey = route.slice(14);
+              const targetInfo = detected.get(targetKey);
+              if (!targetInfo) return;
+              const targetRoute = routes[targetKey] || defaultRouteForAssignment(targetInfo);
+              if (targetRoute?.startsWith('existing:')) {
+                const clientId = targetRoute.slice(9);
+                const ds = (pendingNameDetection.allDriveStates||[]).find(x => x.clientId === clientId);
+                addExisting(clientId, ds?.clientName||targetInfo.displayName||'existing client', p, assignment, 'owner-of-detected', {lifeAssuredName});
+                return;
+              }
+              addNew(targetKey, targetInfo.displayName, p, assignment, 'owner-of-detected', {lifeAssuredName});
+              return;
+            }
             if (route.startsWith('lifeExisting:')) {
               const clientId = route.slice(13);
               const ds = (pendingNameDetection.allDriveStates||[]).find(x => x.clientId === clientId);
@@ -32162,6 +32842,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
               await savePolicyForClient(bucket.clientId, {...p, id:genId(), clientId:bucket.clientId}, {reason:'owner-route-existing'});
               existingSaved++;
             }
+            await applyProfileHintsForClient?.(bucket.clientId, bucket.clientName, bucket.policies, 'owner-route-profile-hints').catch(() => {});
           }
           if (existingSaved>0) try{toast('Added '+existingSaved+' polic'+(existingSaved===1?'y':'ies')+' to existing client'+(forExisting.size===1?'':'s'),'success',5000);}catch(_){}
           let newSaved = 0;
@@ -32177,6 +32858,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
                 await savePolicyForClient(target.clientId, {...p, id:genId(), clientId:target.clientId}, {reason:'owner-route-new-client'});
                 newSaved++;
               }
+              await applyProfileHintsForClient?.(target.clientId, target.clientName || bucket.displayName, bucket.policies, 'owner-route-profile-hints').catch(() => {});
             }
             if (newSaved>0) try{toast('Added '+newSaved+' polic'+(newSaved===1?'y':'ies')+' to '+(newCreated+newReused)+' routed family client'+((newCreated+newReused)===1?'':'s'),'success',5000);}catch(_){}
           }
@@ -32200,6 +32882,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
           const pols = newClientData.routePolicies || [];
           if (pols && pols.length) {
             for (const p of pols) await savePolicyForClient(clientId, {...p, id:genId(), clientId}, {reason:'owner-route-new-client'});
+            await applyProfileHintsForClient?.(clientId, newClientData.initialName || '', pols, 'owner-route-profile-hints').catch(() => {});
             try{toast('\u2713 '+pols.length+' polic'+(pols.length>1?'ies':'y')+' added to new client','success',4000);}catch(_){}
           }
           if (pendingNewClientRoutesRef.current.length > 0) {
@@ -32220,6 +32903,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
           if (newClientData.initialFamilyGroup) await applyFamilyGroupToClient(clientId, newClientData.initialFamilyGroup);
           if (pols && pols.length) {
             for (const p of pols) await savePolicyForClient(clientId, {...p, id:genId(), clientId}, {reason:'owner-route-existing'});
+            await applyProfileHintsForClient?.(clientId, ds?.clientName || newClientData.initialName || '', pols, 'owner-route-profile-hints').catch(() => {});
             try{toast('\u2713 '+pols.length+' polic'+(pols.length>1?'ies':'y')+' added to '+(ds?.clientName||'existing client'),'success',4000);}catch(_){}
           }
           if (pendingNewClientRoutesRef.current.length > 0) {
@@ -32347,6 +33031,10 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
           const savedPolicy = await savePolicy(result);
           if (savedPolicy?.id || result.id) acceptedPolicyIds.push(savedPolicy?.id || result.id);
           count++;
+        }
+        if (count > 0) {
+          const targetState = (await PolicyDB.getDriveState(importClientId).catch(() => null));
+          await applyProfileHintsForClient?.(importClientId, targetState?.clientName || clientProfile?.name || clientName || '', selected, 'scan-profile-hints').catch(() => {});
         }
         if (importClientId && count > 0) {
           try {
@@ -36016,9 +36704,10 @@ function FundLookup() {
 // ═══════════════════════════════════════════════════════════════
 
 function ReportTab() {
-  const {policies,clientName,clientProfile} = useContext(AppCtx);
+  const {policies,clientName,clientProfile,activeClientId,driveState} = useContext(AppCtx);
   const [generating, setGenerating] = useState(false);
   const [generatingVisual, setGeneratingVisual] = useState(false);
+  const [generatingFamilyVisual, setGeneratingFamilyVisual] = useState(false);
   const p = clientProfile || {};
   const age = getProfileAge(p) ?? 35;
   const retAge = getRetirementAge(p, 65); // v2.0.3
@@ -37002,6 +37691,182 @@ function ReportTab() {
     setGeneratingVisual(false);
   };
 
+  const generateFamilyVisualReport = async () => {
+    setGeneratingFamilyVisual(true);
+    try {
+      const advisorName = ((await dbGet('settings','advisorName').catch(()=>null))?.value||'').trim();
+      const advisorCompany = ((await dbGet('settings','advisorCompany').catch(()=>null))?.value||'').trim();
+      const {jsPDF} = window.jspdf;
+      const doc = new jsPDF('p','mm','a4');
+      const W=210, H=297, M=14, CW=W-2*M;
+      const NAVY=[11,15,26], NAVY2=[23,31,46], GOLD=[212,169,106], CREAM=[232,220,200], MID=[160,154,144], WHITE=[255,255,255], TEAL=[91,168,160], RED=[220,90,80], LIGHT=[247,243,236], DARK=[45,45,45];
+      const today = new Date().toLocaleDateString('en-SG',{day:'numeric',month:'long',year:'numeric'});
+      const states = await PolicyDB.getAllDriveStates().catch(() => []);
+      const allPols = await dbGetAll('policies').catch(() => []);
+      const profiles = {};
+      await Promise.all(states.map(async ds => {
+        const rec = await dbGet('settings', 'clientProfile_' + ds.clientId).catch(() => null);
+        profiles[ds.clientId] = rec?.value || { name: ds.clientName || '' };
+      }));
+      if (activeClientId && !profiles[activeClientId]) profiles[activeClientId] = clientProfile || { name: clientName || '' };
+      const activeFamily = String(clientProfile?.familyGroup || driveState?.familyGroup || '').trim();
+      const activeFamilyKey = normalizeName(activeFamily);
+      let members = states.filter(ds => activeFamilyKey && normalizeName(profiles[ds.clientId]?.familyGroup || ds.familyGroup || '') === activeFamilyKey);
+      if (!members.length && activeClientId) {
+        const activeState = states.find(ds => ds.clientId === activeClientId) || { clientId: activeClientId, clientName: clientName || clientProfile?.name || 'Current client', familyGroup: activeFamily };
+        members = [activeState];
+      }
+      if (!members.length) throw new Error('No family clients found. Assign a family group in Clients > Family first.');
+      const familyName = activeFamily || (members[0]?.familyGroup || (clientName ? clientName + ' Family' : 'Family Portfolio'));
+      const memberRows = members.map(ds => {
+        const profile = profiles[ds.clientId] || { name: ds.clientName || '' };
+        const memberPolicies = allPols.filter(pol => pol.clientId === ds.clientId);
+        return {
+          ds,
+          profile,
+          name: profile.name || ds.clientName || 'Untitled',
+          age: getProfileAge(profile),
+          policies: memberPolicies,
+          annualPremium: memberPolicies.reduce((s, pol) => s + annualizedPremium(pol), 0),
+          sumAssured: memberPolicies.reduce((s, pol) => s + (parseFloat(pol.sumAssured)||0), 0)
+        };
+      }).sort((a,b) => a.name.localeCompare(b.name));
+      const familyPolicies = memberRows.flatMap(m => m.policies.map(pol => ({ ...pol, _memberName:m.name })));
+      const totalAnnualPrem = memberRows.reduce((s,m) => s + m.annualPremium, 0);
+      const totalSA = familyPolicies.reduce((s,pol) => s + (parseFloat(pol.sumAssured)||0), 0);
+      const fmtShort = (n) => {
+        n = Number(n) || 0;
+        if (n >= 1000000) return '$' + (n/1000000).toFixed(1) + 'M';
+        if (n >= 1000) return '$' + Math.round(n/1000) + 'k';
+        return '$' + Math.round(n).toLocaleString();
+      };
+      const header = (title, subtitle) => {
+        doc.setFillColor(...NAVY); doc.rect(0,0,W,18,'F');
+        doc.setFillColor(...GOLD); doc.rect(0,17.5,W,.6,'F');
+        doc.setFont('helvetica','bold'); doc.setFontSize(12); doc.setTextColor(...GOLD); doc.text(title, M, 11);
+        doc.setFont('helvetica','normal'); doc.setFontSize(7.5); doc.setTextColor(...MID); doc.text(subtitle || familyName, M, 15);
+        doc.setFontSize(7); doc.text(today, W-M, 11, {align:'right'});
+      };
+      const addFooters = () => {
+        const pages = doc.getNumberOfPages();
+        for (let i=2; i<=pages; i++) {
+          doc.setPage(i);
+          doc.setFillColor(...GOLD); doc.rect(M,H-12,CW,.4,'F');
+          doc.setFont('helvetica','normal'); doc.setFontSize(7); doc.setTextColor(...MID);
+          doc.text('PolicyLens Family Visual Report - Confidential', M, H-7);
+          if (advisorName) doc.text(advisorName + (advisorCompany ? ' - ' + advisorCompany : ''), W/2, H-7, {align:'center'});
+          doc.setTextColor(...GOLD); doc.text(String(i)+' / '+pages, W-M, H-7, {align:'right'});
+        }
+      };
+
+      doc.setFillColor(...NAVY); doc.rect(0,0,W,H,'F');
+      doc.setFillColor(...GOLD); doc.rect(0,0,5,H,'F');
+      doc.setFillColor(25,33,52); doc.circle(W+10, -10, 92, 'F');
+      doc.setFont('helvetica','bold'); doc.setFontSize(8); doc.setTextColor(...GOLD);
+      doc.text('POLICYLENS', M+14, 38);
+      doc.setFont('helvetica','normal'); doc.setFontSize(7); doc.setTextColor(...MID);
+      doc.text('FAMILY INSURANCE PORTFOLIO REVIEW', M+14, 44);
+      doc.setFont('helvetica','bold'); doc.setFontSize(30); doc.setTextColor(...WHITE);
+      doc.text(String(familyName || 'Family Portfolio').toUpperCase().slice(0, 24), M+14, 88);
+      doc.setFont('helvetica','normal'); doc.setFontSize(10); doc.setTextColor(...CREAM);
+      doc.text(memberRows.length + ' family members - ' + familyPolicies.length + ' policies - ' + today, M+14, 100);
+      const kpis = [
+        ['MEMBERS', String(memberRows.length)],
+        ['POLICIES', String(familyPolicies.length)],
+        ['ANNUAL PREMIUM', fmtShort(totalAnnualPrem) + '/yr'],
+        ['SUM ASSURED', fmtShort(totalSA)]
+      ];
+      kpis.forEach((k, i) => {
+        const x = M+14 + i*42;
+        doc.setFillColor(...NAVY2); doc.roundedRect(x, 128, 36, 24, 2, 2, 'F');
+        doc.setFont('helvetica','bold'); doc.setFontSize(5.8); doc.setTextColor(...MID); doc.text(k[0], x+4, 136);
+        doc.setFont('helvetica','bold'); doc.setFontSize(11); doc.setTextColor(i===2 ? GOLD : WHITE); doc.text(k[1], x+4, 146);
+      });
+      if (advisorName) {
+        doc.setFont('helvetica','normal'); doc.setFontSize(8); doc.setTextColor(...MID);
+        doc.text('Prepared by ' + advisorName + (advisorCompany ? ' - ' + advisorCompany : ''), M+14, 178);
+      }
+
+      doc.addPage();
+      header('FAMILY DASHBOARD', familyName);
+      let y = 30;
+      const cardW = (CW - 6) / 3;
+      [['Annual Premium',fmtShort(totalAnnualPrem) + '/yr',GOLD],['Family Coverage',fmtShort(totalSA),WHITE],['Review Scope',memberRows.length + ' members',TEAL]].forEach((c,i)=>{
+        const x = M + i*(cardW+3);
+        doc.setFillColor(...NAVY2); doc.roundedRect(x,y,cardW,24,2,2,'F');
+        doc.setFont('helvetica','bold'); doc.setFontSize(6); doc.setTextColor(...MID); doc.text(c[0].toUpperCase(), x+4, y+7);
+        doc.setFont('helvetica','bold'); doc.setFontSize(13); doc.setTextColor(...c[2]); doc.text(c[1], x+4, y+18);
+      });
+      y += 36;
+      doc.setFont('helvetica','bold'); doc.setFontSize(10); doc.setTextColor(...GOLD); doc.text('Members', M, y);
+      y += 6;
+      memberRows.forEach(m => {
+        if (y > 255) { doc.addPage(); header('FAMILY DASHBOARD', familyName); y = 30; }
+        doc.setFillColor(...LIGHT); doc.roundedRect(M,y,CW,18,2,2,'F');
+        doc.setFont('helvetica','bold'); doc.setFontSize(9); doc.setTextColor(...NAVY);
+        doc.text(m.name.slice(0, 34), M+4, y+7);
+        doc.setFont('helvetica','normal'); doc.setFontSize(7); doc.setTextColor(...DARK);
+        const meta = [(m.age != null ? 'Age ' + m.age : 'Age not set'), m.policies.length + ' policies', fmtShort(m.annualPremium) + '/yr premium', fmtShort(m.sumAssured) + ' SA'];
+        doc.text(meta.join('   -   '), M+4, y+14);
+        y += 22;
+      });
+
+      doc.addPage();
+      header('POLICY DISTRIBUTION', familyName);
+      y = 30;
+      const byCat = {};
+      familyPolicies.forEach(pol => {
+        const key = pol.category || 'other';
+        if (!byCat[key]) byCat[key] = { count:0, prem:0, sa:0 };
+        byCat[key].count++;
+        byCat[key].prem += annualizedPremium(pol);
+        byCat[key].sa += parseFloat(pol.sumAssured)||0;
+      });
+      Object.entries(byCat).sort((a,b)=>b[1].prem-a[1].prem).forEach(([cat,row]) => {
+        if (y > 260) { doc.addPage(); header('POLICY DISTRIBUTION', familyName); y = 30; }
+        doc.setFillColor(...NAVY2); doc.roundedRect(M,y,CW,9,1.5,1.5,'F');
+        doc.setFillColor(...GOLD); doc.rect(M,y+8.4,CW,.4,'F');
+        doc.setFont('helvetica','bold'); doc.setFontSize(8.5); doc.setTextColor(...GOLD); doc.text(cat.toUpperCase(), M+5, y+6);
+        doc.setFont('helvetica','normal'); doc.setFontSize(7); doc.setTextColor(...CREAM);
+        doc.text(row.count + ' policies - ' + fmtShort(row.prem) + '/yr - ' + fmtShort(row.sa) + ' SA', W-M-4, y+6, {align:'right'});
+        y += 13;
+      });
+
+      memberRows.forEach(m => {
+        doc.addPage();
+        header(m.name.toUpperCase().slice(0, 38), familyName);
+        y = 30;
+        if (!m.policies.length) {
+          doc.setFont('helvetica','normal'); doc.setFontSize(10); doc.setTextColor(...MID);
+          doc.text('No policies currently stored under this family member.', M, y);
+          return;
+        }
+        m.policies.sort((a,b)=>(a.category||'').localeCompare(b.category||'')||(a.insurer||'').localeCompare(b.insurer||''));
+        m.policies.forEach(pol => {
+          if (y > 258) { doc.addPage(); header(m.name.toUpperCase().slice(0, 38), familyName); y = 30; }
+          doc.setFillColor(252,250,246); doc.roundedRect(M,y,CW,24,2,2,'F');
+          doc.setDrawColor(...GOLD); doc.setLineWidth(.15); doc.roundedRect(M,y,CW,24,2,2,'S');
+          doc.setFont('helvetica','bold'); doc.setFontSize(6.5); doc.setTextColor(...GOLD); doc.text((pol.insurer || 'UNKNOWN').toUpperCase().slice(0, 28), M+5, y+5.5);
+          doc.setFont('helvetica','bold'); doc.setFontSize(10); doc.setTextColor(...NAVY); doc.text(String(pol.productName || pol.policyName || 'Unnamed policy').slice(0, 58), M+5, y+12);
+          doc.setFont('helvetica','normal'); doc.setFontSize(7); doc.setTextColor(...DARK);
+          const ownerLine = 'Owner: ' + (pol.policyOwner || m.name) + (pol.lifeInsured ? ' - Life: ' + pol.lifeInsured : '');
+          doc.text(ownerLine.slice(0, 90), M+5, y+18);
+          doc.setFont('helvetica','bold'); doc.setFontSize(8); doc.setTextColor(...GOLD);
+          doc.text(fmtShort(annualizedPremium(pol)) + '/yr', W-M-5, y+8, {align:'right'});
+          doc.setFont('helvetica','normal'); doc.setFontSize(7); doc.setTextColor(...DARK);
+          doc.text(pol.sumAssured ? fmtShort(pol.sumAssured) + ' SA' : (pol.subType || ''), W-M-5, y+17, {align:'right'});
+          y += 28;
+        });
+      });
+      addFooters();
+      doc.save('PolicyLens_Family_Visual_Report_'+String(familyName||'Family').replace(/\s+/g,'_')+'_'+new Date().toISOString().slice(0,10)+'.pdf');
+    } catch(e) {
+      console.error('[Family Visual PDF] Error:', e);
+      toast('Family visual report error: '+e.message, 'error', 6000);
+    }
+    setGeneratingFamilyVisual(false);
+  };
+
   const generate = async () => {
     setGenerating(true);
     try {
@@ -37545,6 +38410,20 @@ function ReportTab() {
           {generatingVisual ? '⏳ Rendering charts & building report…' : '✨ Generate Visual Report'}
         </button>
         {policies.length===0 && <div style={{fontSize:11,color:'var(--text3)',marginTop:8}}>Add at least one policy to generate a report.</div>}
+      </div>
+
+      <div className="card" style={{marginBottom:14,background:'linear-gradient(135deg,var(--bg2),var(--bg3))',border:'1px solid rgba(91,168,160,.28)'}}>
+        <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}>
+          <span style={{fontSize:18}}>👥</span>
+          <h3 style={{fontSize:15,fontWeight:700,color:'var(--teal)'}}>Family Visual Report</h3>
+        </div>
+        <p style={{fontSize:12,color:'var(--text2)',marginBottom:14,lineHeight:1.5}}>
+          Client-facing family portfolio report using the same navy/gold visual standard, with household KPIs, member summaries, policy distribution, and per-member policy cards.
+        </p>
+        <button className="btn-primary" onClick={generateFamilyVisualReport} disabled={generatingFamilyVisual || generatingVisual || generating || !activeClientId}>
+          {generatingFamilyVisual ? 'Rendering family report...' : 'Generate Family Visual Report'}
+        </button>
+        {!activeClientId && <div style={{fontSize:11,color:'var(--text3)',marginTop:8}}>Open a client first to anchor the family report.</div>}
       </div>
 
       {/* ═══ CLASSIC REPORT — original text-dense layout ═══ */}
