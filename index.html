@@ -36,7 +36,7 @@ window.PolicyLensDebug=function(on){try{localStorage.setItem('policylens_debug',
 // long multi-batch scans can continue when the browser backgrounds
 // the page. The worker is registered only on HTTPS/localhost.
 // ═══════════════════════════════════════════════════════════════
-const POLICYLENS_SW_VERSION = 'v2.3.0-rc2d.17';
+const POLICYLENS_SW_VERSION = 'v2.3.0-rc2d.22';
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', async () => {
     const canRegister = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
@@ -664,12 +664,29 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2d.21';
+const APP_VERSION = 'v2.3.0-rc2d.22';
 const APP_VERSION_DATE = '2026-04-27';
-const APP_VERSION_NAME = 'Family tree UI cleanup';
+const APP_VERSION_NAME = 'Family owner routing hotfix';
 const DEFAULT_DOCUMENT_AI_PROXY_URL = 'https://policylens-document-ai.chungakwanc.workers.dev';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2d.22',
+    date: '2026-04-27',
+    name: 'Family owner routing hotfix',
+    sections: [
+      {
+        heading: 'Bug fixes',
+        items: [
+          'Family policy routing now merges obvious honorific variants like "Mr Tng Teng Soo" and "Tng Teng Soo" into one detected person.',
+          'Mixed person groups can now be routed policy-by-policy, so one policy can remain under another owner while a different policy for the same person creates that person as their own client.',
+          'Ambiguous life-assured policies can now be assigned under another detected family owner/client, including owners being created in the same routing pass.',
+          'Routed new owner clients are created/reused automatically during confirmation, preventing cancelled sequential new-client prompts from dropping the remaining family members.',
+          'Bulk import now resolves the intended active client from local client state when React activeClientId is temporarily missing, avoiding the "No active client found" dead end.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2d.21',
     date: '2026-04-27',
@@ -2851,6 +2868,29 @@ function normalizePersonNameKey(name) {
   if (!n) return '';
   if (/^(policy owner|owner|life insured|life assured|insured|applicant|proposer|payor|payer|self|same as|not applicable|not stated|unknown|null|nil|na|n a)$/i.test(n)) return '';
   return n;
+}
+
+function cleanPersonDisplayName(name) {
+  const raw = String(name || '').replace(/\s+/g, ' ').trim();
+  if (!raw) return '';
+  return raw.replace(/^(mr|mrs|ms|mdm|madam|dr|miss|master|mstr)\.?\s+/i, '').trim() || raw;
+}
+
+function preferPersonDisplayName(existing, incoming) {
+  const a = cleanPersonDisplayName(existing);
+  const b = cleanPersonDisplayName(incoming);
+  if (!a) return b;
+  if (!b) return a;
+  const ak = normalizePersonNameKey(a);
+  const bk = normalizePersonNameKey(b);
+  if (ak && bk && ak === bk) {
+    const aHadTitle = /^(mr|mrs|ms|mdm|madam|dr|miss|master|mstr)\.?\s+/i.test(String(existing || '').trim());
+    const bHadTitle = /^(mr|mrs|ms|mdm|madam|dr|miss|master|mstr)\.?\s+/i.test(String(incoming || '').trim());
+    if (aHadTitle && !bHadTitle) return b;
+    if (!aHadTitle && bHadTitle) return a;
+    return a.length <= b.length ? a : b;
+  }
+  return a;
 }
 
 function personNameEquivalent(a, b) {
@@ -5190,7 +5230,8 @@ function nricMatches(a, b) {
   return false;
 }
 function fuzzyNameMatch(extracted, candidate) {
-  const a = normalizeName(extracted), b = normalizeName(candidate);
+  const a = normalizePersonNameKey(extracted) || normalizeName(extracted);
+  const b = normalizePersonNameKey(candidate) || normalizeName(candidate);
   if (!a||!b) return false;
   if (a===b) return true;
   if (a.includes(b)||b.includes(a)) return true;
@@ -5207,47 +5248,69 @@ function collectDetectedClients(policies, currentProfile, allDriveStates) {
   const currentName = currentProfile?.name||'';
   const detected = new Map();
   const isWeakOwnerName = (name) => {
-    const n = normalizeName(name);
+    const n = normalizePersonNameKey(name) || normalizeName(name);
     if (!n || n.length < 3) return true;
     if (/^(policy owner|owner|policyholder|life insured|life assured|insured|applicant|proposer|payor|payer|self|same as|not applicable|n\/a|na|nil|unknown|null)$/.test(n)) return true;
     return false;
   };
-  policies.forEach((p,idx) => {
-    const ownerName = (p.policyOwner||'').trim();
-    const lifeInsuredName = (p.lifeInsured||'').trim();
-    const ownerStrong = ownerName && !isWeakOwnerName(ownerName);
-    const lifeInsuredStrong = lifeInsuredName && !isWeakOwnerName(lifeInsuredName);
-    const detectedName = ownerStrong ? ownerName : (lifeInsuredStrong ? lifeInsuredName : '');
-    if (!detectedName) return;
-    if (currentName && fuzzyNameMatch(detectedName, currentName)) return;
-    const sourceField = ownerStrong ? 'policyOwner' : 'lifeInsured';
-    const key = normalizeName(detectedName);
+  const addDetected = (p, idx, detectedName, sourceField, ownerStrong, lifeInsuredStrong) => {
+    const key = normalizePersonNameKey(detectedName);
+    if (!key) return;
+    if (currentName && fuzzyNameMatch(detectedName, currentName) && sourceField === 'policyOwner') return;
+    const displayName = cleanPersonDisplayName(detectedName);
+    const candidates = (allDriveStates||[]).filter(ds => ds.clientName);
+    const existingMatches = candidates.filter(ds => fuzzyNameMatch(displayName, ds.clientName)).slice(0, 5);
     if (!detected.has(key)) {
-      const candidates = (allDriveStates||[]).filter(ds => ds.clientName);
-      const existingMatches = candidates.filter(ds => fuzzyNameMatch(detectedName, ds.clientName)).slice(0, 5);
       detected.set(key, {
-        displayName:detectedName,
+        displayName,
         sourceField,
+        sourceFields: new Set([sourceField]),
         ownerStrong:!!ownerStrong,
         lifeInsuredStrong:!!lifeInsuredStrong,
         needsOwnerQuestion: sourceField === 'lifeInsured',
         policyIndices:[],
+        policyItems:[],
         suggestedMatch:existingMatches[0]||null,
         existingMatches,
         samplePolicies:[]
       });
     }
     const entry = detected.get(key);
-    entry.policyIndices.push(idx);
-    if (entry.samplePolicies.length < 3) {
-      entry.samplePolicies.push({
-        insurer: p.insurer || '',
-        productName: p.productName || p.policyName || p.subType || '',
-        policyNumber: p.policyNumber || '',
-        policyOwner: p.policyOwner || '',
-        lifeInsured: p.lifeInsured || ''
-      });
+    entry.displayName = preferPersonDisplayName(entry.displayName, displayName);
+    entry.sourceFields.add(sourceField);
+    entry.sourceField = entry.sourceFields.size > 1 ? 'mixed' : sourceField;
+    entry.ownerStrong = entry.ownerStrong || !!ownerStrong;
+    entry.lifeInsuredStrong = entry.lifeInsuredStrong || !!lifeInsuredStrong;
+    entry.needsOwnerQuestion = entry.needsOwnerQuestion || sourceField === 'lifeInsured';
+    if (!entry.policyIndices.includes(idx)) entry.policyIndices.push(idx);
+    const item = {
+      policyIndex: idx,
+      sourceField,
+      displayName,
+      insurer: p.insurer || '',
+      productName: p.productName || p.policyName || p.subType || '',
+      policyNumber: p.policyNumber || '',
+      policyOwner: p.policyOwner || '',
+      lifeInsured: p.lifeInsured || ''
+    };
+    entry.policyItems.push(item);
+    if (entry.samplePolicies.length < 3) entry.samplePolicies.push(item);
+  };
+  policies.forEach((p,idx) => {
+    const ownerName = (p.policyOwner||'').trim();
+    const lifeInsuredName = (p.lifeInsured||'').trim();
+    const ownerStrong = ownerName && !isWeakOwnerName(ownerName);
+    const lifeInsuredStrong = lifeInsuredName && !isWeakOwnerName(lifeInsuredName);
+    if (ownerStrong) {
+      addDetected(p, idx, ownerName, 'policyOwner', ownerStrong, lifeInsuredStrong);
+      return;
     }
+    if (lifeInsuredStrong) {
+      addDetected(p, idx, lifeInsuredName, 'lifeInsured', ownerStrong, lifeInsuredStrong);
+    }
+  });
+  detected.forEach(entry => {
+    if (entry.sourceFields instanceof Set) entry.sourceFields = Array.from(entry.sourceFields);
   });
   return detected;
 }
@@ -17993,8 +18056,12 @@ function ClientsTab() {
     const expected = new Set();
     group.clients.forEach(ds => {
       const profile = getProfileForClient(ds);
-      normalizeName(profile.name || ds.clientName || '').split('|').filter(Boolean).forEach(v => expected.add(v));
-      (profile.dependants || []).forEach(d => normalizeName(d.name || '').split('|').filter(Boolean).forEach(v => expected.add(v)));
+      const profileKey = normalizePersonNameKey(profile.name || ds.clientName || '');
+      if (profileKey) expected.add(profileKey);
+      (profile.dependants || []).forEach(d => {
+        const depKey = normalizePersonNameKey(d.name || '');
+        if (depKey) expected.add(depKey);
+      });
     });
     const questions = [];
     group.clients.forEach(ds => {
@@ -18002,8 +18069,8 @@ function ClientsTab() {
       clientPols.forEach(p => {
         const owner = String(p?.policyOwner || '').trim();
         const life = String(p?.lifeInsured || '').trim();
-        const ownerKey = normalizeName(owner);
-        const lifeKey = normalizeName(life);
+        const ownerKey = normalizePersonNameKey(owner);
+        const lifeKey = normalizePersonNameKey(life);
         const ownerWeak = !owner || weakPolicyName.test(owner);
         const ownerOutsideGroup = ownerKey && expected.size > 0 && !expected.has(ownerKey);
         if (ownerWeak || ownerOutsideGroup) {
@@ -21668,48 +21735,110 @@ function NameDetectionReviewModal({ open, detected, currentClientName, onClose, 
 
 function PolicyOwnerRoutingModal({ open, detected, currentClientName, allDriveStates, onClose, onConfirm }) {
   const [routes, setRoutes] = useState({});
+  const [policyRoutes, setPolicyRoutes] = useState({});
   const [familyGroupName, setFamilyGroupName] = useState('');
   const [busy, setBusy] = useState(false);
+  const defaultRouteFor = (info, item) => {
+    const source = item?.sourceField || info?.sourceField;
+    if (source === 'lifeInsured') return 'current';
+    return info?.suggestedMatch ? 'existing:' + info.suggestedMatch.clientId : 'new';
+  };
   useEffect(() => {
     if (!open || !detected) return;
     const init = {};
+    const initPolicyRoutes = {};
     for (const [key, info] of detected.entries()) {
-      init[key] = info.sourceField === 'lifeInsured'
-        ? 'current'
-        : (info.suggestedMatch ? 'existing:' + info.suggestedMatch.clientId : 'new');
+      init[key] = defaultRouteFor(info);
+      (info.policyItems || []).forEach(item => { initPolicyRoutes[item.policyIndex] = defaultRouteFor(info, item); });
     }
     const base = (currentClientName || '').trim();
     setFamilyGroupName(base ? base + ' Family' : 'Family Review');
     setRoutes(init);
+    setPolicyRoutes(initPolicyRoutes);
   }, [open, detected, currentClientName]);
   if (!open || !detected || detected.size === 0) return null;
   const modalBg = {position:'fixed',inset:0,zIndex:10001,background:'rgba(0,0,0,.7)',display:'flex',alignItems:'center',justifyContent:'center',padding:16};
   const modalBox = {background:'#1a2332',borderRadius:16,border:'1px solid rgba(201,169,110,.2)',maxWidth:760,width:'100%',padding:24,boxShadow:'0 20px 60px rgba(0,0,0,.5)',maxHeight:'88vh',overflowY:'auto'};
   const allClients = (allDriveStates || []).filter(ds => ds?.clientId && ds.clientName);
   const entries = Array.from(detected.entries());
-  const routeLabelFor = (route, info) => (
-    route === 'current'
-      ? (currentClientName || 'Current client')
-      : route === 'new'
-        ? info.displayName
-        : (allClients.find(ds => ds.clientId === route.slice(9))?.clientName || 'Existing client')
+  const itemsForInfo = (info) => (
+    (info.policyItems && info.policyItems.length)
+      ? info.policyItems
+      : (info.policyIndices || []).map((idx, i) => ({ policyIndex: idx, sourceField: info.sourceField, ...(info.samplePolicies?.[i] || info.samplePolicies?.[0] || {}) }))
   );
+  const routeForItem = (key, info, item) => policyRoutes[item.policyIndex] || routes[key] || defaultRouteFor(info, item);
+  const routeLabelFor = (route, info) => {
+    if (route === 'current') return currentClientName || 'Current client';
+    if (route === 'new') return info.displayName;
+    if (route?.startsWith('existing:')) return allClients.find(ds => ds.clientId === route.slice(9))?.clientName || 'Existing client';
+    if (route?.startsWith('lifeExisting:')) return allClients.find(ds => ds.clientId === route.slice(13))?.clientName || 'Existing owner';
+    if (route?.startsWith('lifeDetected:')) {
+      const targetKey = route.slice(13);
+      const targetInfo = detected.get(targetKey);
+      const targetRoute = routes[targetKey] || defaultRouteFor(targetInfo);
+      if (targetRoute?.startsWith('existing:')) return allClients.find(ds => ds.clientId === targetRoute.slice(9))?.clientName || targetInfo?.displayName || 'Detected owner';
+      if (targetRoute === 'current') return currentClientName || 'Current client';
+      return targetInfo?.displayName || 'Detected owner';
+    }
+    return info.displayName || 'Owner';
+  };
   const routeKindFor = (route) => (
     route === 'new'
       ? 'New owner/client'
       : route?.startsWith('existing:')
         ? 'Existing client'
-        : 'Current client'
+        : route?.startsWith('lifeDetected:') || route?.startsWith('lifeExisting:')
+          ? 'Life assured under owner'
+          : 'Current client'
   );
+  const routeDescriptionFor = (route, info) => {
+    if (route === 'current') return 'Attach to ' + (currentClientName || 'the current client') + '; PolicyLens keeps ' + info.displayName + ' as life assured when owner was ambiguous.';
+    if (route?.startsWith('existing:')) return 'Add these policies to ' + (allClients.find(ds => ds.clientId === route.slice(9))?.clientName || 'the selected existing client') + ' and tag the same family group.';
+    if (route === 'new') return 'Create "' + info.displayName + '" as a client and tag the same family group.';
+    if (route?.startsWith('lifeDetected:')) return 'Store under ' + routeLabelFor(route, info) + '; keep ' + info.displayName + ' as the life assured.';
+    if (route?.startsWith('lifeExisting:')) return 'Store under ' + routeLabelFor(route, info) + '; keep ' + info.displayName + ' as the life assured.';
+    return '';
+  };
+  const renderRouteOptions = (key, info, item, orderedClients, suggestedIds) => {
+    const source = item?.sourceField || info.sourceField;
+    const lifeContext = item ? source === 'lifeInsured' : (source === 'lifeInsured' || info.needsOwnerQuestion);
+    const otherDetected = entries.filter(([otherKey]) => otherKey !== key);
+    return (
+      <>
+        <option value="current">Current client owns it; {info.displayName} is life assured/dependant</option>
+        {orderedClients.length > 0 && <option disabled>-------- Existing owner clients --------</option>}
+        {orderedClients.map(ds => (
+          <option key={ds.clientId} value={'existing:' + ds.clientId}>
+            {suggestedIds.has(ds.clientId) ? 'Suggested: ' : ''}{ds.clientName}
+          </option>
+        ))}
+        <option value="new">Create new owner/client: {info.displayName}</option>
+        {lifeContext && otherDetected.length > 0 && <option disabled>-------- Life assured under detected owner --------</option>}
+        {lifeContext && otherDetected.map(([otherKey, otherInfo]) => (
+          <option key={'lifeDetected:' + otherKey} value={'lifeDetected:' + otherKey}>
+            Life assured under: {otherInfo.displayName}
+          </option>
+        ))}
+        {lifeContext && orderedClients.length > 0 && <option disabled>-------- Life assured under existing owner --------</option>}
+        {lifeContext && orderedClients.map(ds => (
+          <option key={'lifeExisting:' + ds.clientId} value={'lifeExisting:' + ds.clientId}>
+            Life assured under existing: {ds.clientName}
+          </option>
+        ))}
+      </>
+    );
+  };
   const routedNodeMap = new Map();
   entries.forEach(([key, info]) => {
-    const route = routes[key] || (info.sourceField === 'lifeInsured' ? 'current' : (info.suggestedMatch ? 'existing:' + info.suggestedMatch.clientId : 'new'));
-    const label = routeLabelFor(route, info);
-    const mapKey = route + ':' + label;
-    if (!routedNodeMap.has(mapKey)) routedNodeMap.set(mapKey, { label, kind: routeKindFor(route), count: 0, policies: [], route });
-    const node = routedNodeMap.get(mapKey);
-    node.count += info.policyIndices.length;
-    node.policies.push(...(info.samplePolicies || []));
+    itemsForInfo(info).forEach(item => {
+      const route = routeForItem(key, info, item);
+      const label = routeLabelFor(route, info);
+      const mapKey = route + ':' + label;
+      if (!routedNodeMap.has(mapKey)) routedNodeMap.set(mapKey, { label, kind: routeKindFor(route), count: 0, policies: [], route });
+      const node = routedNodeMap.get(mapKey);
+      node.count += 1;
+      node.policies.push(item);
+    });
   });
   const routedNodes = Array.from(routedNodeMap.values());
   return (
@@ -21759,15 +21888,17 @@ function PolicyOwnerRoutingModal({ open, detected, currentClientName, allDriveSt
             ...(info.existingMatches || []),
             ...allClients.filter(ds => !suggestedIds.has(ds.clientId)).sort((a,b) => String(a.clientName || '').localeCompare(String(b.clientName || '')))
           ];
-          const route = routes[key] || (info.sourceField === 'lifeInsured' ? 'current' : (info.suggestedMatch ? 'existing:' + info.suggestedMatch.clientId : 'new'));
-          const selectedExisting = route.startsWith('existing:') ? orderedClients.find(ds => ds.clientId === route.slice(9)) : null;
+          const items = itemsForInfo(info);
+          const route = routes[key] || defaultRouteFor(info);
+          const sourceFields = new Set(items.map(item => item.sourceField || info.sourceField).filter(Boolean));
+          const showPolicyLevelRoutes = items.length > 1 || sourceFields.size > 1;
           return (
             <div key={key} style={{padding:'12px 14px',background:'var(--bg3)',border:'1px solid '+(info.needsOwnerQuestion?'rgba(212,169,106,.35)':'var(--border)'),borderRadius:8,marginBottom:10}}>
               <div style={{display:'flex',justifyContent:'space-between',alignItems:'center',gap:10,marginBottom:8}}>
                 <div style={{minWidth:0}}>
                   <div style={{fontWeight:700,fontSize:13,color:'var(--text)',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{info.displayName}</div>
-                  <div style={{fontSize:9,color:info.sourceField==='lifeInsured'?'var(--gold)':'var(--text3)',marginTop:2}}>
-                    Detected from {info.sourceField === 'lifeInsured' ? 'Life Assured only - owner needs confirmation' : 'Policy Owner'}
+                  <div style={{fontSize:9,color:info.needsOwnerQuestion?'var(--gold)':'var(--text3)',marginTop:2}}>
+                    Detected from {sourceFields.size > 1 ? 'mixed owner/life assured fields' : (sourceFields.has('lifeInsured') ? 'Life Assured only - owner needs confirmation' : 'Policy Owner')}
                   </div>
                 </div>
                 <div style={{fontSize:10,color:'var(--text3)',flexShrink:0}}>{info.policyIndices.length} polic{info.policyIndices.length>1?'ies':'y'}</div>
@@ -21791,22 +21922,48 @@ function PolicyOwnerRoutingModal({ open, detected, currentClientName, allDriveSt
                   ))}
                 </div>
               )}
-              <select value={route} onChange={e => setRoutes(r => ({...r,[key]:e.target.value}))}
+              <select value={route} onChange={e => {
+                  const nextRoute = e.target.value;
+                  setRoutes(r => ({...r,[key]:nextRoute}));
+                  setPolicyRoutes(prev => {
+                    const next = {...prev};
+                    items.forEach(item => { next[item.policyIndex] = nextRoute; });
+                    return next;
+                  });
+                }}
                 style={{width:'100%',padding:'8px 10px',background:'var(--bg2)',border:'1px solid var(--border2)',borderRadius:6,color:'var(--text)',fontSize:11,outline:'none'}}>
-                <option value="current">Current client owns it; {info.displayName} is life assured/dependant</option>
-                {orderedClients.length > 0 && <option disabled>-------- Existing clients --------</option>}
-                {orderedClients.map(ds => (
-                  <option key={ds.clientId} value={'existing:' + ds.clientId}>
-                    {suggestedIds.has(ds.clientId) ? 'Suggested: ' : ''}{ds.clientName}
-                  </option>
-                ))}
-                <option value="new">Create new owner/client: {info.displayName}</option>
+                {renderRouteOptions(key, info, null, orderedClients, suggestedIds)}
               </select>
               <div style={{fontSize:10,color:'var(--text3)',marginTop:6,fontStyle:'italic'}}>
-                {route === 'current' && 'Attach to ' + (currentClientName || 'the current client') + '; PolicyLens will keep ' + info.displayName + ' as life assured when owner was ambiguous.'}
-                {route.startsWith('existing:') && 'Add these policies to ' + (selectedExisting?.clientName || 'the selected existing client') + ' and tag the same family group.'}
-                {route === 'new' && 'Create "' + info.displayName + '" as a client and tag the same family group.'}
+                {routeDescriptionFor(route, info)}
               </div>
+              {showPolicyLevelRoutes && (
+                <div style={{marginTop:10,padding:'8px',border:'1px solid rgba(255,255,255,.06)',borderRadius:7,background:'rgba(0,0,0,.10)'}}>
+                  <div style={{fontSize:9,fontWeight:800,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.35px',marginBottom:6}}>Policy-level routing</div>
+                  <div style={{display:'grid',gap:7}}>
+                    {items.map((item, pi) => {
+                      const itemRoute = routeForItem(key, info, item);
+                      const itemInfo = {...info, displayName: item.displayName || info.displayName};
+                      return (
+                        <div key={(item.policyIndex ?? pi) + ':' + (item.policyNumber || item.productName || '')} style={{display:'grid',gridTemplateColumns:'minmax(0,1fr) minmax(180px,.9fr)',gap:8,alignItems:'center'}}>
+                          <div style={{minWidth:0}}>
+                            <div style={{fontSize:10,color:'var(--text2)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>
+                              {(item.productName || 'Policy')}{item.insurer ? ' - ' + item.insurer : ''}{item.policyNumber ? ' - ' + item.policyNumber : ''}
+                            </div>
+                            <div style={{fontSize:9,color:item.sourceField==='lifeInsured'?'var(--gold)':'var(--text3)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>
+                              {item.sourceField === 'lifeInsured' ? 'Detected as life assured' : 'Detected as owner'} | Owner: {item.policyOwner || 'not stated'} | Life: {item.lifeInsured || 'not stated'}
+                            </div>
+                          </div>
+                          <select value={itemRoute} onChange={e => setPolicyRoutes(prev => ({...prev,[item.policyIndex]:e.target.value}))}
+                            style={{width:'100%',padding:'7px 8px',background:'var(--bg2)',border:'1px solid var(--border2)',borderRadius:6,color:'var(--text)',fontSize:10,outline:'none'}}>
+                            {renderRouteOptions(key, itemInfo, item, orderedClients, suggestedIds)}
+                          </select>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
           );
         })}
@@ -21815,7 +21972,7 @@ function PolicyOwnerRoutingModal({ open, detected, currentClientName, allDriveSt
             style={{background:'transparent',color:'var(--text3)',border:'1px solid var(--border2)',borderRadius:6,padding:'8px 14px',fontSize:11,cursor:busy?'not-allowed':'pointer'}}>
             Review all on current client
           </button>
-          <button onClick={async () => { if (busy) return; setBusy(true); try { await onConfirm({routes, familyGroupName}); } finally { setBusy(false); } }} disabled={busy}
+          <button onClick={async () => { if (busy) return; setBusy(true); try { await onConfirm({routes, policyRoutes, familyGroupName}); } finally { setBusy(false); } }} disabled={busy}
             style={{background:'var(--gold)',color:'#0b0f1a',border:'none',borderRadius:6,padding:'8px 16px',fontSize:11,fontWeight:700,cursor:busy?'wait':'pointer'}}>
             {busy ? 'Routing...' : 'Apply family routing ->'}
           </button>
@@ -24260,8 +24417,8 @@ function Dashboard() {
     const active = policies.filter(pol => !['matured','surrendered','lapsed'].includes(pol.status));
     const missingCore = policies.filter(pol => !(pol.productName || pol.policyName || pol.insurer) || !pol.category || (!pol.policyNumber && !pol.policyOwner && !pol.lifeInsured));
     const ownerQuestions = policies.filter(pol => {
-      const owner = normalizeName(pol.policyOwner || '');
-      const life = normalizeName(pol.lifeInsured || '');
+      const owner = normalizePersonNameKey(pol.policyOwner || '');
+      const life = normalizePersonNameKey(pol.lifeInsured || '');
       return life && (!owner || owner !== life);
     });
     const incomePolicies = policies.filter(pol => getPolicyAnnualPayout(pol) > 0 || pol.category === 'retirement');
@@ -26542,7 +26699,7 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
   const verifiedCount = items.filter(it => it._extractVerifiedAt || (getVerifiableFields(it).length === 0 && it._extractConfidence !== undefined)).length;
   const visibleVerifyItems = viewMode === 'quick' && !showTrusted ? filtered.filter(needsDecisionForItem) : filtered;
   const trustedHiddenCount = filtered.length - visibleVerifyItems.length;
-  const ownerKeysInView = [...new Set(visibleVerifyItems.map(it => normalizeName(ownerKeyForItem(it))).filter(Boolean))];
+  const ownerKeysInView = [...new Set(visibleVerifyItems.map(it => normalizePersonNameKey(ownerKeyForItem(it))).filter(Boolean))];
   const showOwnerLabels = ownerKeysInView.length > 1;
 
   return (
@@ -27395,16 +27552,81 @@ function Policies() {
     }
   };
 
-  const buildOwnerRoutedPolicy = (policy, assignment, targetClientName, routeName) => {
+  const ensureOwnerRouteClient = async (rawName, rawFamilyGroup) => {
+    const trimName = cleanPersonDisplayName(rawName || '').trim();
+    if (!trimName) return null;
+    const familyGroup = String(rawFamilyGroup || '').trim();
+    const latestStates = await PolicyDB.getAllDriveStates().catch(() => []);
+    const nameKey = normalizePersonNameKey(trimName);
+    const sameName = (latestStates || []).find(ds => normalizePersonNameKey(ds?.clientName) && normalizePersonNameKey(ds.clientName) === nameKey);
+    if (sameName) {
+      if (familyGroup) await applyFamilyGroupToClient(sameName.clientId, familyGroup);
+      return { ...sameName, clientName: sameName.clientName || trimName, reused: true, created: false };
+    }
+    const clientId = (crypto && crypto.randomUUID) ? crypto.randomUUID() : ('client_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 7));
+    const now = new Date().toISOString();
+    const profile = stampProfileSyncMeta({name:trimName,nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[],familyGroup}, 'owner-route-client-create');
+    await PolicyDB.saveDriveState({
+      clientId,
+      fileId: null,
+      folderId: null,
+      tierFolderId: null,
+      headRevisionId: null,
+      lastSyncedAt: null,
+      pendingWrite: true,
+      pendingSince: now,
+      pendingReason: 'owner-route-client-create',
+      pendingError: null,
+      clientName: trimName,
+      tier: UNASSIGNED_TIER,
+      familyGroup,
+      lastReviewedAt: null,
+      localOnly: true,
+    });
+    await dbPut('settings', { key: 'clientProfile_' + clientId, value: profile });
+    await dbPut('settings', { key: 'clientName_' + clientId, value: trimName });
+    await markDriveSyncPending(clientId, 'owner-route-client-create').catch(() => {});
+    ensureDriveFileForClient(clientId, { clientName: trimName, profile, tier: UNASSIGNED_TIER, reason: 'owner-route-client-create' })
+      .catch(async (err) => {
+        await failDriveSyncPending(clientId, err, 'owner-route-client-create').catch(() => {});
+      });
+    try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
+    return { clientId, clientName: trimName, created: true, reused: false };
+  };
+
+  const resolveActiveImportClientId = async () => {
+    let cid = activeClientId;
+    if (!cid) {
+      try { cid = localStorage.getItem('policylens_active_client_id'); } catch(_) {}
+    }
+    const states = await PolicyDB.getAllDriveStates().catch(() => []);
+    if (cid && (!states.length || states.some(ds => ds.clientId === cid))) return cid;
+    const wantedName = clientProfile?.name || clientName || '';
+    const wantedKey = normalizePersonNameKey(wantedName);
+    if (wantedKey) {
+      const byName = states.find(ds => normalizePersonNameKey(ds?.clientName) === wantedKey);
+      if (byName?.clientId) return byName.clientId;
+    }
+    if (states.length === 1) return states[0].clientId;
+    return cid || null;
+  };
+
+  const buildOwnerRoutedPolicy = (policy, assignment, targetClientName, routeName, opts = {}) => {
     const info = assignment?.info || {};
+    const item = assignment?.item || {};
     const currentOwner = clientProfile?.name || clientName || targetClientName || '';
     const ownerName = targetClientName || currentOwner || info.displayName || policy.policyOwner || '';
     const out = { ...policy, _ownerRoute:routeName, _ownerRoutedFrom:currentOwner };
     const weakOwner = !out.policyOwner || /^(unknown|null|n\/a|na|nil|same as|self|policy owner|owner|life insured|life assured)$/i.test(String(out.policyOwner).trim());
-    if (info.sourceField === 'lifeInsured') {
-      out.lifeInsured = out.lifeInsured || info.displayName || '';
+    const lifeRoute = routeName === 'current' || routeName?.startsWith('life-') || item.sourceField === 'lifeInsured' || info.sourceField === 'lifeInsured';
+    const lifeAssuredName = opts.lifeAssuredName || item.displayName || info.displayName || out.lifeInsured || '';
+    if (lifeRoute && (item.sourceField === 'lifeInsured' || info.sourceField === 'lifeInsured' || routeName?.startsWith('life-'))) {
+      out.lifeInsured = out.lifeInsured || lifeAssuredName || '';
       out.policyOwner = ownerName;
-      out._ownerRouteQuestion = routeName === 'current' ? 'life-assured-under-current-client' : 'life-assured-promoted-to-owner';
+      out._ownerRouteQuestion = routeName === 'current' ? 'life-assured-under-current-client' : 'life-assured-under-routed-owner';
+    } else if (routeName === 'new' || routeName === 'existing') {
+      out.policyOwner = ownerName;
+      out.lifeInsured = out.lifeInsured || info.displayName || '';
     } else if (weakOwner || routeName === 'current') {
       out.policyOwner = ownerName;
     }
@@ -28941,7 +29163,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
   // household members. Product fingerprints are therefore only safe to
   // merge when explicit person fields do not conflict.
   const isWeakPersonName = (name) => {
-    const n = normalizeName(name);
+    const n = normalizePersonNameKey(name) || normalizeName(name);
     if (!n || n.length < 3) return true;
     if (/^(policy owner|owner|policyholder|life insured|life assured|insured|applicant|proposer|payor|payer|self|same as|not applicable|n\/a|na|nil|unknown|null)$/i.test(n)) return true;
     if (/^\d+$/.test(n)) return true;
@@ -28949,7 +29171,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
   };
   const meaningfulPersonName = (name) => {
     if (isWeakPersonName(name)) return '';
-    return normalizeName(name);
+    return normalizePersonNameKey(name) || normalizeName(name);
   };
   const personNamesDiffer = (left, right) => {
     const a = meaningfulPersonName(left);
@@ -31850,37 +32072,90 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
         onClose={() => { setBulkExtracted(pendingNameDetection.policies); setPendingNameDetection(null); }}
         onConfirm={async (payload) => {
           const routes = payload?.routes || payload || {};
+          const policyRoutes = payload?.policyRoutes || {};
           const familyGroupName = String(payload?.familyGroupName || '').trim();
           const {policies:allPols, detected} = pendingNameDetection;
+          const defaultRouteForAssignment = (info, item) => {
+            const source = item?.sourceField || info?.sourceField;
+            if (source === 'lifeInsured') return 'current';
+            return info?.suggestedMatch ? 'existing:' + info.suggestedMatch.clientId : 'new';
+          };
+          const itemsForAssignment = (info) => (
+            (info.policyItems && info.policyItems.length)
+              ? info.policyItems
+              : (info.policyIndices || []).map((idx, i) => ({ policyIndex: idx, sourceField: info.sourceField, ...(info.samplePolicies?.[i] || info.samplePolicies?.[0] || {}) }))
+          );
           const policyAssignments = new Map();
           for (const [key, info] of detected.entries()) {
-            for (const idx of info.policyIndices) policyAssignments.set(idx, {key, info, route: routes[key] || (info.sourceField === 'lifeInsured' ? 'current' : (info.suggestedMatch ? 'existing:' + info.suggestedMatch.clientId : 'new'))});
+            for (const item of itemsForAssignment(info)) {
+              const idx = item.policyIndex;
+              const route = policyRoutes[idx] || routes[key] || defaultRouteForAssignment(info, item);
+              const existing = policyAssignments.get(idx);
+              const candidate = {key, info, item, route};
+              if (!existing || (existing.item?.sourceField !== 'policyOwner' && item.sourceField === 'policyOwner')) {
+                policyAssignments.set(idx, candidate);
+              }
+            }
           }
           const forCurrent = [];
           const forExisting = new Map();
           const forNew = new Map();
+          const addExisting = (clientId, clientName, policy, assignment, routeName, opts) => {
+            if (!clientId) return;
+            if (!forExisting.has(clientId)) forExisting.set(clientId,{clientId,clientName:clientName||'existing client',policies:[]});
+            forExisting.get(clientId).policies.push(buildOwnerRoutedPolicy(policy, assignment, clientName||'existing client', routeName, opts));
+          };
+          const addNew = (key, displayName, policy, assignment, routeName, opts) => {
+            if (!key || !displayName) return;
+            if (!forNew.has(key)) forNew.set(key,{displayName,policies:[],familyGroupName});
+            forNew.get(key).policies.push(buildOwnerRoutedPolicy(policy, assignment, displayName, routeName, opts));
+          };
           allPols.forEach((p,idx) => {
             const assignment = policyAssignments.get(idx);
             const route = assignment?.route;
-            if (!route||route==='current') { forCurrent.push(buildOwnerRoutedPolicy(p, assignment, clientProfile?.name||clientName||'', 'current')); return; }
+            const lifeAssuredName = assignment?.item?.displayName || assignment?.info?.displayName || p.lifeInsured || '';
+            if (!route||route==='current') { forCurrent.push(buildOwnerRoutedPolicy(p, assignment, clientProfile?.name||clientName||'', 'current', {lifeAssuredName})); return; }
             if (route.startsWith('existing:')) {
               const clientId = route.slice(9);
               const ds = (pendingNameDetection.allDriveStates||[]).find(x => x.clientId === clientId);
-              if (!forExisting.has(clientId)) forExisting.set(clientId,{clientId,clientName:ds?.clientName||'existing client',policies:[]});
-              forExisting.get(clientId).policies.push(buildOwnerRoutedPolicy(p, assignment, ds?.clientName||'existing client', 'existing'));
+              addExisting(clientId, ds?.clientName||'existing client', p, assignment, 'existing', {lifeAssuredName});
               return;
             }
             if (route==='new') {
               const key = assignment?.key;
               const info = assignment?.info;
               if (!key || !info) return;
-              if (!forNew.has(key)) forNew.set(key,{displayName:info.displayName,policies:[],familyGroupName});
-              forNew.get(key).policies.push(buildOwnerRoutedPolicy(p, assignment, info.displayName, 'new'));
+              addNew(key, info.displayName, p, assignment, 'new', {lifeAssuredName});
+              return;
+            }
+            if (route.startsWith('lifeExisting:')) {
+              const clientId = route.slice(13);
+              const ds = (pendingNameDetection.allDriveStates||[]).find(x => x.clientId === clientId);
+              addExisting(clientId, ds?.clientName||'existing client', p, assignment, 'life-of-existing', {lifeAssuredName});
+              return;
+            }
+            if (route.startsWith('lifeDetected:')) {
+              const targetKey = route.slice(13);
+              const targetInfo = detected.get(targetKey);
+              if (!targetInfo) return;
+              const targetRoute = routes[targetKey] || defaultRouteForAssignment(targetInfo);
+              if (targetRoute?.startsWith('existing:')) {
+                const clientId = targetRoute.slice(9);
+                const ds = (pendingNameDetection.allDriveStates||[]).find(x => x.clientId === clientId);
+                addExisting(clientId, ds?.clientName||targetInfo.displayName||'existing client', p, assignment, 'life-of-existing', {lifeAssuredName});
+                return;
+              }
+              if (targetRoute === 'current') {
+                forCurrent.push(buildOwnerRoutedPolicy(p, assignment, clientProfile?.name||clientName||'', 'current', {lifeAssuredName}));
+                return;
+              }
+              addNew(targetKey, targetInfo.displayName, p, assignment, 'life-of-detected', {lifeAssuredName});
             }
           });
           setPendingNameDetection(null);
           let existingSaved = 0;
-          if (forCurrent.length > 0 && familyGroupName) await applyFamilyGroupToClient(activeClientId, familyGroupName);
+          const currentRouteClientId = forCurrent.length > 0 ? await resolveActiveImportClientId() : activeClientId;
+          if (forCurrent.length > 0 && familyGroupName) await applyFamilyGroupToClient(currentRouteClientId, familyGroupName);
           for (const bucket of forExisting.values()) {
             if (familyGroupName) await applyFamilyGroupToClient(bucket.clientId, familyGroupName);
             for (const p of bucket.policies) {
@@ -31889,12 +32164,24 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
             }
           }
           if (existingSaved>0) try{toast('Added '+existingSaved+' polic'+(existingSaved===1?'y':'ies')+' to existing client'+(forExisting.size===1?'':'s'),'success',5000);}catch(_){}
-          if (forCurrent.length>0) setBulkExtracted(forCurrent);
+          let newSaved = 0;
+          let newCreated = 0;
+          let newReused = 0;
           if (forNew.size>0) {
             try { if(activeClientId) { await createCheckpoint(activeClientId,'Auto-save before new client \u2014 '+new Date().toLocaleString('en-SG',{dateStyle:'short',timeStyle:'short'})); toast('\u2713 Auto-backed up '+clientName,'success',3000); } } catch(_){}
-            pendingNewClientCleanupRef.current = forCurrent.length===0;
-            await openNextOwnerRouteNewClient(Array.from(forNew.values()));
-          } else if (forCurrent.length===0 && existingSaved>0) {
+            for (const bucket of forNew.values()) {
+              const target = await ensureOwnerRouteClient(bucket.displayName, bucket.familyGroupName || familyGroupName);
+              if (!target?.clientId) continue;
+              if (target.created) newCreated++; else newReused++;
+              for (const p of bucket.policies) {
+                await savePolicyForClient(target.clientId, {...p, id:genId(), clientId:target.clientId}, {reason:'owner-route-new-client'});
+                newSaved++;
+              }
+            }
+            if (newSaved>0) try{toast('Added '+newSaved+' polic'+(newSaved===1?'y':'ies')+' to '+(newCreated+newReused)+' routed family client'+((newCreated+newReused)===1?'':'s'),'success',5000);}catch(_){}
+          }
+          if (forCurrent.length>0) setBulkExtracted(forCurrent);
+          if (forCurrent.length===0 && (existingSaved>0 || newSaved>0)) {
             sessionBulkRef.current = [];
             progressiveSessionRef.current = false;
             if (progressiveTimerRef.current) { clearTimeout(progressiveTimerRef.current); progressiveTimerRef.current = null; }
@@ -31970,12 +32257,9 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
         let count = 0;
         let mergedCount = 0;
         const acceptedPolicyIds = [];
-        let importClientId = activeClientId;
+        let importClientId = await resolveActiveImportClientId();
         if (!importClientId) {
-          try { importClientId = localStorage.getItem('policylens_active_client_id'); } catch(_) {}
-        }
-        if (!importClientId) {
-          toast('No active client found. Reload PolicyLens, open the client, then import again.', 'error', 7000);
+          toast('No active client found. Open or create the intended owner/client, then import again.', 'error', 7000);
           return;
         }
         if (selected && selected.length > 0) {
