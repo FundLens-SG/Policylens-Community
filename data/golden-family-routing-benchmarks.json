@@ -1,0 +1,65 @@
+{
+  "version": "2026-04-27-family-sync-cockpit",
+  "description": "Golden benchmark seed cases for PolicyLens family-policy routing and duplicate-owner handling. Scans are anonymized/synthetic descriptors; assertions describe expected app behavior.",
+  "cases": [
+    {
+      "id": "family-dependent-page-owner-trace",
+      "insurer": "Prudential",
+      "scenario": "A dependant/life-assured page names a child but the proposer is shown on a neighbouring page.",
+      "expected": {
+        "policyCount": 1,
+        "owner": "TNG TENG SOO",
+        "lifeInsured": "TNG MENG KIAT",
+        "route": "life-assured-under-detected-owner",
+        "profileHints": ["lifeInsuredDob", "people[]"]
+      }
+    },
+    {
+      "id": "same-product-different-owner",
+      "insurer": "Singlife",
+      "scenario": "Two Singlife Flexi Life Income II policies share the same product and sum assured but belong to different owners/life assured.",
+      "expected": {
+        "policyCount": 2,
+        "dedupe": "must-not-merge",
+        "ownerCompatibilityRequired": true
+      }
+    },
+    {
+      "id": "honorific-duplicate-owner",
+      "insurer": "Aviva/Singlife",
+      "scenario": "OCR emits both 'Mr Tng Teng Soo' and 'Tng Teng Soo' for the same owner.",
+      "expected": {
+        "detectedClientGroups": 1,
+        "mergeNameVariants": true
+      }
+    },
+    {
+      "id": "mixed-owned-and-dependent-under-one-name",
+      "insurer": "Manulife",
+      "scenario": "One policy is truly owned by the detected person; another policy only names that person as life assured under a different owner.",
+      "expected": {
+        "policyLevelRouting": true,
+        "allowedActions": ["create-owner-client", "life-assured-under-existing-owner", "life-assured-under-detected-owner"]
+      }
+    },
+    {
+      "id": "application-family-dob-table",
+      "insurer": "Generic",
+      "scenario": "Application particulars page lists main life assured and dependants with DOB rows.",
+      "expected": {
+        "peopleLedgerRequired": true,
+        "autofillDobOrAge": true,
+        "fallbackAgeOnlyWhenDobMissing": true
+      }
+    }
+  ],
+  "metrics": [
+    "owner accuracy",
+    "grouping accuracy",
+    "policy count accuracy",
+    "annual premium accuracy",
+    "payout accuracy",
+    "import success rate",
+    "review time per policy"
+  ]
+}

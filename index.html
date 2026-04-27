@@ -36,7 +36,7 @@ window.PolicyLensDebug=function(on){try{localStorage.setItem('policylens_debug',
 // long multi-batch scans can continue when the browser backgrounds
 // the page. The worker is registered only on HTTPS/localhost.
 // ═══════════════════════════════════════════════════════════════
-const POLICYLENS_SW_VERSION = 'v2.3.0-rc2d.24';
+const POLICYLENS_SW_VERSION = 'v2.3.0-rc2d.25';
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', async () => {
     const canRegister = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
@@ -664,12 +664,44 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2d.24';
+const APP_VERSION = 'v2.3.0-rc2d.25';
 const APP_VERSION_DATE = '2026-04-27';
-const APP_VERSION_NAME = 'Family routing, merge, profile hints, and dependant tracing';
+const APP_VERSION_NAME = 'Family sync cockpit and extraction ledger';
 const DEFAULT_DOCUMENT_AI_PROXY_URL = 'https://policylens-document-ai.chungakwanc.workers.dev';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2d.25',
+    date: '2026-04-27',
+    name: 'Family sync cockpit and extraction ledger',
+    sections: [
+      {
+        heading: 'Critical fixes',
+        items: [
+          'Service-worker batch extraction errors now resolve immediately and fall back to the foreground path instead of leaving the extraction UI waiting.',
+          'Import no longer trusts a stale localStorage client ID when Drive has a different active client set, preventing the misleading "No active client found" dead end.',
+          'Routed/new-client saves and client merges now recalculate age-at-entry and premium start/end ages for the target client after profile DOB or age hints are applied.',
+          'Client merge now preserves useful source profile fields and dependants when the target profile is missing them, then queues the merged Drive state.'
+        ]
+      },
+      {
+        heading: 'Family extraction',
+        items: [
+          'Extraction schema now includes a people ledger for owner, proposer, life assured, and dependant rows with DOB/age/evidence hints.',
+          'Policy owner/life assured DOB and age are backfilled from the people ledger before storage, so family/dependant pages can populate profile age data.',
+          'Dependant auto-add now uses all owner/life/people DOB and age hints instead of only the top-level sample DOB.'
+        ]
+      },
+      {
+        heading: 'Advisor workflow',
+        items: [
+          'Added a routing review cockpit with owner, life assured, action, confidence, and evidence before family import.',
+          'Added an extraction timeline and visible ledger showing Document AI, Gemini/Claude fallback, review, and sync stage events.',
+          'Clients family view now shows a compact relationship graph with policy chips and clearer sync-state labels.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2d.24',
     date: '2026-04-27',
@@ -3205,7 +3237,8 @@ function ensurePolicyFieldEvidence(policy, meta = {}) {
 }
 
 function normalizePolicyForStorage(policy, meta = {}) {
-  let next = normalizePolicyFinancials(policy);
+  let next = applyStructuredPeopleToPolicy(policy);
+  next = normalizePolicyFinancials(next);
   next = syncAnnuityPayoutPair(next);
   next._ownerClassification = next._ownerClassification || classifyPolicyOwnership(next, meta.currentClientName || '');
   next._extractionStages = {
@@ -4244,10 +4277,10 @@ async function pdfToImages(pdfDoc, maxPages=12) {
 // CLEAN even if the FC never actually reviewed anything. Bumping the version
 // forces a re-extraction next time those same files are uploaded, and the
 // one-time cleanup in App init purges the stale entries from IndexedDB.
-const EXTRACT_PIPELINE_VERSION = 'v15.2-2026-04-27-family-dependant-owner-trace';
+const EXTRACT_PIPELINE_VERSION = 'v15.3-2026-04-27-family-sync-cockpit-ledger';
 
 // ── v15: PROMPT VERSIONING ──
-const EXTRACT_PROMPT_VERSION = 'v14.6-2026-04-27-family-dependant-owner-trace';
+const EXTRACT_PROMPT_VERSION = 'v14.7-2026-04-27-family-sync-cockpit-ledger';
 const OCR_PROMPT_VERSION = 'v17-2026-04-26-document-ai-default-proxy';
 
 // ── v2.0.9: MODULE-SCOPE EXTRACT_PROMPT ──
@@ -5912,6 +5945,58 @@ function ageFromEntryAge(policy) {
   return age > 0 && age < 120 ? age : null;
 }
 
+function collectStructuredPeopleFromPolicy(policy) {
+  const people = [];
+  const pushPerson = (person, fallbackRole) => {
+    if (!person) return;
+    const name = cleanPersonDisplayName(person.name || person.fullName || person.personName || person.policyOwner || person.lifeInsured || '');
+    if (!name) return;
+    people.push({
+      ...person,
+      name,
+      role: person.role || fallbackRole || person.documentRole || '',
+      dob: normalizeProfileDob(person.dob || person.dateOfBirth || person.birthDate),
+      currentAge: coerceProfileAge(person.currentAge || person.age || person.policyOwnerAge || person.lifeInsuredAge),
+      gender: person.gender || '',
+      smoker: person.smoker || '',
+      nationality: person.nationality || '',
+      occupation: person.occupation || '',
+      source: person.sourceText || person.reason || person.sourceImage || person.role || fallbackRole || ''
+    });
+  };
+  (Array.isArray(policy?.people) ? policy.people : []).forEach(p => pushPerson(p));
+  (Array.isArray(policy?.familyMembers) ? policy.familyMembers : []).forEach(p => pushPerson(p));
+  if (policy?.policyOwner) pushPerson({ name: policy.policyOwner, dob: policy.policyOwnerDob, age: policy.policyOwnerAge, gender: policy.policyOwnerGender, smoker: policy.policyOwnerSmoker }, 'owner');
+  if (policy?.documentOwner && !personNameEquivalent(policy.documentOwner, policy.policyOwner)) pushPerson({ name: policy.documentOwner, dob: policy.policyOwnerDob, age: policy.policyOwnerAge }, 'proposer');
+  if (policy?.lifeInsured) pushPerson({ name: policy.lifeInsured, dob: policy.lifeInsuredDob || policy.lifeAssuredDob || policy.dob, age: policy.lifeInsuredAge || policy.lifeAssuredAge || policy.age, gender: policy.lifeInsuredGender || policy.gender, smoker: policy.lifeInsuredSmoker || policy.smoker }, 'life_assured');
+  return people;
+}
+
+function findStructuredPerson(policy, personName) {
+  const key = normalizePersonNameKey(personName);
+  if (!key) return null;
+  return collectStructuredPeopleFromPolicy(policy).find(person =>
+    personNameEquivalent(person.name, personName) || personNameLikelyTypoVariant(person.name, personName)
+  ) || null;
+}
+
+function applyStructuredPeopleToPolicy(policy) {
+  const next = { ...(policy || {}) };
+  const people = collectStructuredPeopleFromPolicy(next);
+  if (!people.length) return next;
+  const owner = next.policyOwner ? findStructuredPerson(next, next.policyOwner) : people.find(p => /owner|policyholder|proposer|applicant/i.test(String(p.role || '')));
+  const life = next.lifeInsured ? findStructuredPerson(next, next.lifeInsured) : people.find(p => /life|insured|assured|dependant|dependent/i.test(String(p.role || '')));
+  if (!next.policyOwner && owner?.name) next.policyOwner = owner.name;
+  if (!next.lifeInsured && life?.name) next.lifeInsured = life.name;
+  if (!next.policyOwnerDob && owner?.dob) next.policyOwnerDob = owner.dob;
+  if (!next.policyOwnerAge && owner?.currentAge) next.policyOwnerAge = owner.currentAge;
+  if (!next.lifeInsuredDob && life?.dob) next.lifeInsuredDob = life.dob;
+  if (!next.lifeInsuredAge && life?.currentAge) next.lifeInsuredAge = life.currentAge;
+  if (!next.dob && life?.dob) next.dob = life.dob;
+  if (!next.people) next.people = people;
+  return next;
+}
+
 function pickPersonProfileHintFromPolicies(personName, policies) {
   const key = normalizePersonNameKey(personName);
   if (!key) return null;
@@ -5921,6 +6006,14 @@ function pickPersonProfileHintFromPolicies(personName, policies) {
     if (hint.dob || hint.currentAge) candidates.push(hint);
   };
   (policies || []).forEach(pol => {
+    const structured = findStructuredPerson(pol, personName);
+    if (structured) {
+      add({
+        dob: structured.dob,
+        currentAge: structured.currentAge,
+        source: structured.source || structured.role || pol.productName || pol.policyName || pol.insurer || 'person details'
+      });
+    }
     const ownerMatch = personNameEquivalent(personName, pol?.policyOwner) || personNameLikelyTypoVariant(personName, pol?.policyOwner);
     const lifeMatch = personNameEquivalent(personName, pol?.lifeInsured) || personNameLikelyTypoVariant(personName, pol?.lifeInsured);
     const text = collectPolicyTextForHints(pol);
@@ -7316,6 +7409,16 @@ async function swFetchJSONRelay(url, options = {}, timeoutMs = 120000) {
   return resultPromise;
 }
 
+function emitExtractionLedger(detail) {
+  try {
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('policylens-extraction-ledger', {
+        detail: { at: Date.now(), ...(detail || {}) }
+      }));
+    }
+  } catch(_) {}
+}
+
 async function tryDocumentAIFirstPass(file, blocks, opts = {}) {
   const endpoint = opts.endpoint != null ? opts.endpoint : await getDocumentAIEndpoint();
   if (!endpoint) return null;
@@ -7323,6 +7426,7 @@ async function tryDocumentAIFirstPass(file, blocks, opts = {}) {
   if (!media) return null;
   try {
     console.log('[DocumentAI] First-pass parse for', cleanUploadFileName(file), media.mimeType);
+    emitExtractionLedger({ stage:'ocr-layout', label:'Document AI', level:'info', fileName:cleanUploadFileName(file), detail:'OCR/layout parse started' });
     const requestOptions = {
       method: 'POST',
       headers: await getDocumentAIHeaders(),
@@ -7355,9 +7459,11 @@ async function tryDocumentAIFirstPass(file, blocks, opts = {}) {
     const textLen = String(data.text || '').trim().length;
     if (textLen < 40) throw new Error('Document AI returned too little text (' + textLen + ' chars)');
     console.log('[DocumentAI] Parsed', cleanUploadFileName(file), '->', textLen, 'chars,', data.pageCount || 0, 'pages');
+    emitExtractionLedger({ stage:'ocr-layout', label:'Document AI', level:'success', fileName:cleanUploadFileName(file), detail:textLen + ' chars, ' + (data.pageCount || 0) + ' pages' });
     return [buildDocumentAITextBlock(file, data)];
   } catch (err) {
     console.warn('[DocumentAI] First-pass failed for', cleanUploadFileName(file) + ':', err.message);
+    emitExtractionLedger({ stage:'ocr-layout', label:'Document AI fallback', level:'warning', fileName:cleanUploadFileName(file), detail:err?.message || String(err) });
     return null;
   }
 }
@@ -16109,6 +16215,42 @@ function App() {
     return compacted;
   };
 
+  const recalculatePolicyAgesForClient = async (targetClientId, profile, reason = 'profile-age-sync') => {
+    if (!targetClientId || !profile) return 0;
+    const effectiveDob = getProfileEffectiveDob(profile);
+    if (!effectiveDob) return 0;
+    const allPols = await dbGetAll('policies').catch(() => []);
+    let updated = 0;
+    for (const pol of allPols || []) {
+      const polClientId = pol.clientId || activeClientIdRef.current || activeClientId;
+      if (polClientId !== targetClientId || !pol.inceptionDate) continue;
+      const inception = new Date(pol.inceptionDate);
+      if (isNaN(inception.getTime())) continue;
+      const entryAge = Math.floor((inception.getTime() - effectiveDob.getTime()) / 31557600000);
+      if (entryAge <= 0 || entryAge >= 100) continue;
+      const existingAge = parseInt(pol.ageAtEntry || pol.premStartAge || 0, 10);
+      const needsUpdate = !existingAge || Math.abs(existingAge - entryAge) > 1 || !pol.premStartAge;
+      if (!needsUpdate) continue;
+      const next = { ...pol, clientId: targetClientId, ageAtEntry: String(entryAge), premStartAge: String(entryAge) };
+      const premTerm = parseInt(pol.premTerm, 10);
+      if (premTerm > 0) next.premEndAge = String(entryAge + premTerm);
+      const versions = bumpFieldVersions(next, pol, pol._fieldVersions || {});
+      const enriched = stampPolicySyncMeta({ ...next, _fieldVersions: versions }, reason);
+      await dbPut('policies', enriched);
+      updated++;
+    }
+    if (updated > 0) {
+      const fresh = await dbGetAll('policies').catch(() => []);
+      if (targetClientId === activeClientIdRef.current) {
+        setPolicies((fresh || []).filter(pol => (pol.clientId || targetClientId) === targetClientId));
+      }
+      await scheduleDriveWriteForClient(targetClientId, reason, 1000);
+      try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
+      console.log('[Sync] Updated ageAtEntry for ' + updated + ' policies for client ' + targetClientId);
+    }
+    return updated;
+  };
+
   const savePolicy = async (incomingP) => {
     // Dedup pass — if an existing policy shares (policyNumber|insurer),
     // merge into it rather than creating a duplicate row.
@@ -16309,6 +16451,7 @@ function App() {
       setClientProfile(enriched);
       setClientName(enriched.name || targetName);
     }
+    await recalculatePolicyAgesForClient(targetClientId, enriched, reason || 'policy-profile-hints');
     await scheduleDriveWriteForClient(targetClientId, reason || 'policy-profile-hints', 500);
     try { window.dispatchEvent(new Event('policylens-clients-changed')); } catch(_) {}
     return true;
@@ -16365,15 +16508,37 @@ function App() {
     }
 
     const targetFamily = targetProfile.familyGroup || targetState?.familyGroup || sourceProfile.familyGroup || sourceState?.familyGroup || '';
-    const nextTargetProfile = stampProfileSyncMeta({
-      ...targetProfile,
-      name: targetName,
-      familyGroup: targetFamily,
-      dependants: Array.isArray(targetProfile.dependants) ? targetProfile.dependants : []
-    }, 'client-merge');
+    const emptyProfileValue = (v) => v == null || v === '' || (Array.isArray(v) && v.length === 0);
+    const nextTargetDraft = { ...targetProfile, name: targetName, familyGroup: targetFamily };
+    ['nric','dob','currentAge','currentAgeAsOf','gender','smoker','nationality','occupation','phone','email'].forEach(field => {
+      if (emptyProfileValue(nextTargetDraft[field]) && !emptyProfileValue(sourceProfile[field])) nextTargetDraft[field] = sourceProfile[field];
+    });
+    const depMap = new Map();
+    const addDepRecord = (dep) => {
+      if (!dep || !String(dep.name || '').trim()) return;
+      const depKey = normalizePersonNameKey(dep.name);
+      if (!depKey) return;
+      const existing = depMap.get(depKey);
+      if (!existing) {
+        depMap.set(depKey, { ...dep, id: dep.id || ('dep_' + Date.now() + '_' + Math.random().toString(36).slice(2,5)) });
+        return;
+      }
+      for (const [field, value] of Object.entries(dep)) {
+        if (field === 'id') continue;
+        if (emptyProfileValue(existing[field]) && !emptyProfileValue(value)) existing[field] = value;
+      }
+    };
+    (Array.isArray(targetProfile.dependants) ? targetProfile.dependants : []).forEach(addDepRecord);
+    (Array.isArray(sourceProfile.dependants) ? sourceProfile.dependants : []).forEach(addDepRecord);
+    nextTargetDraft.dependants = Array.from(depMap.values());
+    const aliases = new Set([...(Array.isArray(targetProfile._mergedAliases) ? targetProfile._mergedAliases : [])]);
+    if (sourceName && !personNameEquivalent(sourceName, targetName)) aliases.add(sourceName);
+    if (aliases.size) nextTargetDraft._mergedAliases = Array.from(aliases);
+    const nextTargetProfile = stampProfileSyncMeta(nextTargetDraft, 'client-merge');
     await dbPut('settings', { key: 'clientProfile_' + targetClientId, value: nextTargetProfile });
     await dbPut('settings', { key: 'clientName_' + targetClientId, value: targetName }).catch(() => {});
     if (targetState) await PolicyDB.saveDriveState({ ...targetState, clientName: targetName, familyGroup: targetFamily }).catch(() => {});
+    await recalculatePolicyAgesForClient(targetClientId, nextTargetProfile, 'client-merge-profile-age-sync');
 
     if (sourceState) {
       let sourceTrashed = false;
@@ -16449,6 +16614,23 @@ function App() {
   const saveClientName = async (n) => {
     setClientName(n);
     await dbPut('settings',{key:'clientName',value:n});
+    const cid = activeClientIdRef.current || activeClientId;
+    if (cid) {
+      await dbPut('settings',{key:'clientName_'+cid,value:n}).catch(() => {});
+      try {
+        const rec = await dbGet('settings', 'clientProfile_' + cid);
+        const nextProfile = { ...(rec?.value || clientProfile || {}), name: n };
+        await dbPut('settings', { key:'clientProfile_' + cid, value: nextProfile });
+      } catch(_) {}
+      try {
+        const ds = await PolicyDB.getDriveState(cid);
+        if (ds && ds.clientName !== n) {
+          await PolicyDB.saveDriveState({ ...ds, clientName: n });
+          if (ds.folderId) handleClientRename(cid, n);
+        }
+      } catch(_) {}
+      await scheduleDriveWriteForClient(cid, 'client-name-save', 1000);
+    }
   };
   const saveProfile = async (p) => {
     const profileClientId = activeClientIdRef.current || activeClientId;
@@ -16469,10 +16651,12 @@ function App() {
       // Mirror name into drive_state for switcher display + rename Drive folder
       try {
         const ds = await PolicyDB.getDriveState(profileClientId);
-        if (ds && ds.clientName !== (enriched.name||'')) {
-          await PolicyDB.saveDriveState({...ds, clientName: enriched.name||''});
+        const nextFamilyGroup = enriched.familyGroup || '';
+        const nameChanged = ds && ds.clientName !== (enriched.name||'');
+        if (ds && (nameChanged || (ds.familyGroup || '') !== nextFamilyGroup)) {
+          await PolicyDB.saveDriveState({...ds, clientName: enriched.name||'', familyGroup: nextFamilyGroup});
           // v2.2.0-rc2.1.6: Rename the Drive folder to match (fire-and-forget, serialized)
-          if (ds.folderId) handleClientRename(profileClientId, enriched.name||'');
+          if (nameChanged && ds.folderId) handleClientRename(profileClientId, enriched.name||'');
         }
       } catch(_){}
     } else {
@@ -16522,6 +16706,7 @@ function App() {
         scheduleDriveWriteForClient(profileClientId, 'profile-age-sync', 1000);
       }
     }
+    await recalculatePolicyAgesForClient(profileClientId, enriched, 'profile-age-sync');
   };
 
   // saveHouseDefaults: persists firm-level planning defaults to IndexedDB and
@@ -18591,6 +18776,13 @@ function ClientsTab() {
     if (n >= 1000) return '$' + Math.round(n / 1000) + 'k';
     return '$' + Math.round(n);
   };
+  const syncStateFor = (ds) => {
+    if (ds?.pendingError) return { label:'conflict/queued', color:'var(--red)', bg:'rgba(239,83,80,.08)' };
+    if (ds?.pendingWrite) return { label:'queued to Drive', color:'var(--gold)', bg:'rgba(212,169,106,.08)' };
+    if (ds?.localOnly || (!ds?.fileId && !ds?.folderId)) return { label:'local only', color:'var(--text3)', bg:'rgba(255,255,255,.035)' };
+    if (ds?.lastSyncedAt || ds?.headRevisionId) return { label:'synced to Drive', color:'var(--teal)', bg:'rgba(91,168,160,.07)' };
+    return { label:'sync unknown', color:'var(--text3)', bg:'rgba(255,255,255,.025)' };
+  };
   const groupPolicyQuestions = (group) => {
     const expected = new Set();
     group.clients.forEach(ds => {
@@ -18648,8 +18840,9 @@ function ClientsTab() {
     const isActive = ds.clientId === activeClientId;
     const { clientPols, totalPrem } = clientStatsFor(ds);
     const tierLabel = ds.tier || UNASSIGNED_TIER;
-    const syncLabel = ds.pendingError ? 'sync queued' : ds.pendingWrite ? 'sync pending' : ds.lastSyncDeviceName ? ('synced from ' + ds.lastSyncDeviceName) : null;
-    const syncColor = ds.pendingError ? 'var(--red)' : ds.pendingWrite ? 'var(--gold)' : 'var(--text3)';
+    const syncState = syncStateFor(ds);
+    const syncLabel = syncState.label;
+    const syncColor = syncState.color;
     const familyValue = familyDrafts[ds.clientId] ?? String(getProfileForClient(ds).familyGroup || ds.familyGroup || '');
     const inferredFamily = inferFamilyGroupName(getProfileForClient(ds).name || ds.clientName);
     if (compactFamily) {
@@ -18668,7 +18861,7 @@ function ClientsTab() {
               <span style={{fontSize:13,fontWeight:800,color:'var(--text)',minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',maxWidth:isMobile?'100%':340}}>{ds.clientName || 'Untitled'}</span>
               {isActive && <span style={{fontSize:9,fontWeight:800,color:'var(--gold)',background:'rgba(212,169,106,.12)',border:'1px solid rgba(212,169,106,.22)',borderRadius:999,padding:'2px 6px'}}>Viewing</span>}
               <span style={{fontSize:9,color:'var(--text3)',background:'rgba(255,255,255,.035)',border:'1px solid rgba(255,255,255,.06)',borderRadius:999,padding:'2px 6px'}}>{tierLabel}</span>
-              {syncLabel && <span style={{fontSize:9,color:syncColor,background:'rgba(255,255,255,.025)',border:'1px solid rgba(255,255,255,.05)',borderRadius:999,padding:'2px 6px'}}>{syncLabel}</span>}
+              {syncLabel && <span style={{fontSize:9,color:syncColor,background:syncState.bg,border:'1px solid rgba(255,255,255,.05)',borderRadius:999,padding:'2px 6px'}}>{syncLabel}</span>}
             </div>
             <div style={{fontSize:10,color:'var(--text3)',marginTop:3}}>
               {premiumLabel} · {policyLabel} · {reviewLabel}
@@ -18808,6 +19001,32 @@ function ClientsTab() {
             {questions.length > 3 && <span style={{fontSize:10,color:'var(--text3)',border:'1px solid rgba(255,255,255,.06)',borderRadius:999,padding:'4px 8px'}}>+{questions.length - 3}</span>}
           </div>
         )}
+        <div style={{padding:'10px 14px',borderBottom:'1px solid rgba(255,255,255,.055)',background:'rgba(0,0,0,.08)'}}>
+          <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+            <span style={{fontSize:10,fontWeight:800,color:'var(--teal)',textTransform:'uppercase',letterSpacing:'.35px',marginRight:2}}>Relationship graph</span>
+            {group.clients.map((ds, idx) => {
+              const stats = clientStatsFor(ds);
+              const isActive = ds.clientId === activeClientId;
+              return (
+                <React.Fragment key={'graph:' + ds.clientId}>
+                  {idx > 0 && <span style={{height:1,width:18,background:'rgba(201,169,110,.28)',display:'inline-block'}} />}
+                  <button onClick={() => openClientView(ds.clientId, 'profile')} style={{maxWidth:isMobile?'100%':220,minWidth:0,display:'inline-flex',alignItems:'center',gap:6,padding:'6px 8px',borderRadius:999,border:'1px solid '+(isActive?'rgba(212,169,106,.45)':'rgba(255,255,255,.08)'),background:isActive?'rgba(212,169,106,.12)':'rgba(255,255,255,.025)',color:'var(--text2)',cursor:'pointer'}}>
+                    <span style={{fontSize:10,fontWeight:800,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{ds.clientName || 'Untitled'}</span>
+                    <span style={{fontSize:9,color:'var(--gold)',whiteSpace:'nowrap'}}>{stats.clientPols.length}p</span>
+                  </button>
+                </React.Fragment>
+              );
+            })}
+          </div>
+          <div style={{display:'flex',gap:6,flexWrap:'wrap',marginTop:7}}>
+            {group.clients.flatMap(ds => clientStatsFor(ds).clientPols.slice(0, 2).map(pol => ({ ds, pol }))).slice(0, 8).map(({ds, pol}, i) => (
+              <span key={(pol.id || pol.policyNumber || i) + ':familychip'} title={(ds.clientName || 'Client') + ' - ' + (pol.insurer || '')}
+                style={{fontSize:10,color:'var(--text2)',border:'1px solid rgba(255,255,255,.07)',background:'rgba(255,255,255,.025)',borderRadius:999,padding:'4px 8px',maxWidth:isMobile?'100%':250,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
+                {policyMiniTitle(pol)}
+              </span>
+            ))}
+          </div>
+        </div>
         <div style={{display:'grid'}}>
           {group.clients.map((ds, idx) => renderClientCard(ds, true, idx, group.clients.length))}
         </div>
@@ -18927,8 +19146,9 @@ function ClientsTab() {
           const totalPrem = clientPols.reduce((sum, p) => sum + annualizedPremium(p), 0);
           const tierLabel = ds.tier || UNASSIGNED_TIER;
           const ts = tierStyle(tierLabel, tierDefinitions);
-          const syncLabel = ds.pendingError ? 'sync queued' : ds.pendingWrite ? 'sync pending' : ds.lastSyncDeviceName ? ('synced from ' + ds.lastSyncDeviceName) : null;
-          const syncColor = ds.pendingError ? 'var(--red)' : ds.pendingWrite ? 'var(--gold)' : 'var(--text3)';
+          const syncState = syncStateFor(ds);
+          const syncLabel = syncState.label;
+          const syncColor = syncState.color;
           return (
             <div key={ds.clientId} onClick={() => openClientView(ds.clientId, 'profile')}
               style={{background:isActive?'rgba(212,169,106,.06)':'var(--bg2)',border:isActive?'1px solid rgba(212,169,106,.4)':'1px solid var(--border)',borderRadius:10,padding:'12px 14px',cursor:'pointer',transition:'border-color .15s'}}>
@@ -19510,6 +19730,30 @@ const POLICY_EXTRACTION_SCHEMA = {
       policyOwnerAge: { type: 'INTEGER', nullable: true, description: 'Current age of policy owner/policyholder/proposer when visible' },
       lifeInsuredDob: { type: 'STRING', nullable: true, description: 'YYYY-MM-DD date of birth of life assured/insured person when visible' },
       lifeInsuredAge: { type: 'INTEGER', nullable: true, description: 'Current age of life assured/insured person when visible' },
+      people: {
+        type: 'ARRAY',
+        nullable: true,
+        description: 'Person ledger for every visible owner, proposer, applicant, life assured, and dependant on family/application pages. Use this even when only some people are policy owners.',
+        items: {
+          type: 'OBJECT',
+          properties: {
+            name: { type: 'STRING', description: 'Exact person name as written, preserving initials/honorifics when useful.' },
+            role: { type: 'STRING', enum: ['owner','policyholder','proposer','applicant','life_assured','dependant','payer','unknown'], nullable: true },
+            relationship: { type: 'STRING', nullable: true },
+            dob: { type: 'STRING', nullable: true, description: 'YYYY-MM-DD date of birth if visible.' },
+            age: { type: 'INTEGER', nullable: true, description: 'Current age if visible and DOB is not available.' },
+            gender: { type: 'STRING', enum: ['Male','Female','unknown'], nullable: true },
+            smoker: { type: 'STRING', enum: ['Smoker','Non-smoker','unknown'], nullable: true },
+            nationality: { type: 'STRING', enum: ['SC','PR','Foreigner','unknown'], nullable: true },
+            occupation: { type: 'STRING', nullable: true },
+            sourceImage: { type: 'STRING', nullable: true },
+            sourceText: { type: 'STRING', nullable: true },
+            confidence: { type: 'STRING', enum: ['high','medium','low'], nullable: true },
+            reason: { type: 'STRING', nullable: true }
+          },
+          required: ['name']
+        }
+      },
       ageAtEntry: { type: 'INTEGER', nullable: true },
       smoker: { type: 'STRING', enum: ['Smoker','Non-smoker','unknown'], nullable: true },
       nationality: { type: 'STRING', enum: ['SC','PR','Foreigner','unknown'], nullable: true },
@@ -20516,6 +20760,18 @@ async function swExtractRelayMulti(url, bodies, onBatchProgress, timeoutMs) {
           }
         } else if (d.phase === 'batch_error') {
           console.warn('[SW Multi] Batch', d.latestBatchIndex, 'failed:', d.latestError);
+          try {
+            if (typeof onBatchProgress === 'function') {
+              onBatchProgress({
+                batchIndex: d.latestBatchIndex,
+                error: d.latestError || 'Batch extraction failed',
+                completedBatches: d.completedBatches,
+                totalBatches: d.totalBatches,
+              });
+            }
+          } catch(cbErr) {
+            console.warn('[SW Multi] onBatchProgress callback error:', cbErr);
+          }
         }
       } else if (d.type === 'EXTRACT_MULTI_DONE') {
         clearTimeout(timeoutId);
@@ -21928,6 +22184,7 @@ async function callAI(systemPrompt, contentBlocks, maxTokens, responseSchema) {
       return result;
     } catch(structuredErr) {
       console.warn('[AI] Structured extract failed:', structuredErr.message);
+      emitExtractionLedger({ stage:'ai-extraction', label:'Gemini structured failed', level:'error', detail:String(structuredErr?.message || structuredErr).slice(0, 420) });
       // ── CLAUDE VISION FALLBACK ──
       // Gemini's full chain (2.5 → 3 → 3.1-lite) is exhausted. Before
       // dropping to the legacy dual-AI / Gemini-only paths, try Claude
@@ -21946,16 +22203,24 @@ async function callAI(systemPrompt, contentBlocks, maxTokens, responseSchema) {
           errMsg.includes('429') || errMsg.includes('unavailable') || errMsg.includes('exhausted') ||
           errMsg.includes('timed out') || errMsg.includes('network') || errMsg.includes('empty') ||
           errMsg.includes('all models');
-        if(isCapacityOrQuality) {
+        const isSchemaOrPayload400 = errMsg.includes('(400)') || errMsg.includes('invalid_argument') ||
+          errMsg.includes('bad request') || errMsg.includes('response_schema') || errMsg.includes('schema') ||
+          errMsg.includes('generatecontent');
+        const isAuthOrKey = errMsg.includes('api key') || errMsg.includes('apikey') ||
+          errMsg.includes('permission') || errMsg.includes('unauthorized') || errMsg.includes('forbidden');
+        if(isCapacityOrQuality || (isSchemaOrPayload400 && !isAuthOrKey)) {
           console.log('[AI] ⤴ Falling back to Claude vision (cross-provider)');
           try { toast('🤖 Switching to Claude vision (Gemini exhausted)','info',3000); } catch(e){}
+          emitExtractionLedger({ stage:'ai-extraction', label:'Fallback to Claude vision', level:'info', detail:isSchemaOrPayload400 ? 'Gemini 400/schema/payload issue' : 'Gemini capacity/quality issue' });
           await hopBackoff('Gemini', 'Claude');
           try {
             const claudeResult = await claudeStructuredExtract(ck, systemPrompt, contentBlocks, maxTokens);
+            emitExtractionLedger({ stage:'ai-extraction', label:'Claude vision succeeded', level:'success', detail:'Cross-provider fallback completed' });
             try { toast('✓ Claude vision extraction succeeded','success',2500); } catch(e){}
             return claudeResult;
           } catch(claudeErr) {
             console.warn('[AI] Claude vision also failed:', claudeErr.message, '→ falling through to legacy paths');
+            emitExtractionLedger({ stage:'ai-extraction', label:'Claude vision failed', level:'error', detail:String(claudeErr?.message || claudeErr).slice(0, 420) });
             // Fall through to legacy paths below
           }
         }
@@ -22490,6 +22755,19 @@ function PolicyOwnerRoutingModal({ open, detected, currentClientName, allDriveSt
     });
   });
   const routedNodes = Array.from(routedNodeMap.values());
+  const routingRows = entries.flatMap(([key, info]) => itemsForInfo(info).map((item, idx) => {
+    const route = routeForItem(key, info, item);
+    const source = item.sourceField || info.sourceField || '';
+    const confidence = item.ownerInferenceReason || item.documentOwner || source === 'policyOwner' ? 'High' : (info.needsOwnerQuestion || source === 'lifeInsured' ? 'Medium' : 'Low');
+    return {
+      key:key + ':' + (item.policyIndex ?? idx),
+      owner:item.policyOwner || item.documentOwner || 'Not stated',
+      life:item.lifeInsured || info.displayName || 'Not stated',
+      action:routeKindFor(route) + ': ' + routeLabelFor(route, info),
+      confidence,
+      evidence:item.ownerInferenceReason || item.extractionNotes || item.documentTitle || item.sourceImage || item.productName || 'No evidence text'
+    };
+  }));
   return (
     <div onClick={e => { if (e.target === e.currentTarget && !busy) onClose(); }} style={modalBg}>
       <div style={modalBox}>
@@ -22531,6 +22809,26 @@ function PolicyOwnerRoutingModal({ open, detected, currentClientName, allDriveSt
             </div>
           </div>
         </div>
+        {routingRows.length > 0 && (
+          <div style={{marginBottom:14,padding:10,borderRadius:9,background:'rgba(0,0,0,.13)',border:'1px solid rgba(255,255,255,.06)'}}>
+            <div style={{fontSize:10,fontWeight:800,color:'var(--gold)',textTransform:'uppercase',letterSpacing:'.35px',marginBottom:8}}>Routing review cockpit</div>
+            <div style={{display:'grid',gridTemplateColumns:'1fr 1fr 1.2fr 72px 1.3fr',gap:6,alignItems:'center',fontSize:9,color:'var(--text3)',fontWeight:800,textTransform:'uppercase',letterSpacing:'.25px',padding:'0 4px 5px'}}>
+              <span>Owner</span><span>Life assured</span><span>Action</span><span>Confidence</span><span>Evidence</span>
+            </div>
+            <div style={{display:'grid',gap:5}}>
+              {routingRows.slice(0, 8).map(row => (
+                <div key={row.key} style={{display:'grid',gridTemplateColumns:'1fr 1fr 1.2fr 72px 1.3fr',gap:6,alignItems:'center',fontSize:10,color:'var(--text2)',padding:'6px 4px',borderRadius:6,background:'rgba(255,255,255,.025)'}}>
+                  <span style={{minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{row.owner}</span>
+                  <span style={{minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{row.life}</span>
+                  <span style={{minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',color:'var(--gold)'}}>{row.action}</span>
+                  <span style={{fontWeight:800,color:row.confidence==='High'?'var(--teal)':row.confidence==='Medium'?'var(--gold)':'var(--red)'}}>{row.confidence}</span>
+                  <span style={{minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{row.evidence}</span>
+                </div>
+              ))}
+              {routingRows.length > 8 && <div style={{fontSize:10,color:'var(--text3)',paddingLeft:4}}>+{routingRows.length - 8} more routing rows</div>}
+            </div>
+          </div>
+        )}
         {entries.map(([key, info]) => {
           const suggestedIds = new Set((info.existingMatches || []).map(ds => ds.clientId));
           const orderedClients = [
@@ -23170,7 +23468,7 @@ function ProfileTab() {
   }, []);
 
   const set = (k,v) => setP(prev=>({...prev,[k]:v}));
-  const addDep = () => setP(prev=>({...prev,dependants:[...(prev.dependants||[]),{id:'dep_'+Date.now(),name:'',relationship:'',dob:'',gender:'',smoker:'',nationality:'',occupation:''}]}));
+  const addDep = () => setP(prev=>({...prev,dependants:[...(prev.dependants||[]),{id:'dep_'+Date.now(),name:'',relationship:'',dob:'',currentAge:'',currentAgeAsOf:'',gender:'',smoker:'',nationality:'',occupation:''}]}));
   const updateDep = (i,k,v) => setP(prev=>{const d=[...(prev.dependants||[])];d[i]={...d[i],[k]:v};return{...prev,dependants:d}});
   const removeDep = (i) => setP(prev=>({...prev,dependants:(prev.dependants||[]).filter((_,idx)=>idx!==i)}));
 
@@ -23185,7 +23483,7 @@ function ProfileTab() {
         content.push(...blocks);
       }
       content.push({type:'text',text:'Extract client profile information from these documents/images.'});
-      const profilePrompt = 'Extract client profile from insurance documents. Return a JSON object with: name, nric, dob (YYYY-MM-DD), gender (Male/Female), smoker (Non-smoker/Smoker), nationality (SC/PR/Foreigner), occupation, phone, email. If dependants found, include dependants (array of {name, relationship, dob, gender, smoker, nationality, occupation}). Return ONLY valid JSON starting with { and ending with }.';
+      const profilePrompt = 'Extract client profile from insurance documents. Return a JSON object with: name, nric, dob (YYYY-MM-DD), currentAge, currentAgeAsOf (YYYY-MM-DD when age is visible but DOB is absent), gender (Male/Female), smoker (Non-smoker/Smoker), nationality (SC/PR/Foreigner), occupation, phone, email. If dependants found, include dependants (array of {name, relationship, dob, currentAge, currentAgeAsOf, gender, smoker, nationality, occupation}). Return ONLY valid JSON starting with { and ending with }.';
       const rawText = await callAI(profilePrompt, content, 2000);
       const parsed = repairJSON(rawText);
       // Merge scanned data
@@ -23193,7 +23491,11 @@ function ProfileTab() {
       Object.entries(parsed).forEach(([k,v])=>{
         if(v===null||v===undefined||v==='') return;
         if(k==='dependants' && Array.isArray(v)){
-          updated.dependants = [...(updated.dependants||[]),...v.map(d=>({...d,id:'dep_'+Date.now()+Math.random().toString(36).slice(2,4)}))];
+          updated.dependants = [...(updated.dependants||[]),...v.map(d=>{
+            const dob = normalizeProfileDob(d.dob || d.dateOfBirth || d.birthDate);
+            const currentAge = dob ? '' : coerceProfileAge(d.currentAge || d.age);
+            return {...d,dob,currentAge:currentAge?String(currentAge):'',currentAgeAsOf:currentAge?(d.currentAgeAsOf || new Date().toISOString().slice(0,10)):'',id:'dep_'+Date.now()+Math.random().toString(36).slice(2,4)};
+          })];
         } else {
           updated[k] = v;
         }
@@ -23750,7 +24052,24 @@ function ProfileTab() {
               <div className="field"><label>Relationship</label><select value={d.relationship||''} onChange={e=>updateDep(i,'relationship',e.target.value)}>
                 <option value="">—</option><option>Spouse</option><option>Child</option><option>Parent</option><option>Sibling</option><option>Other</option>
               </select></div>
-              <div className="field"><label>Date of Birth</label><input type="date" value={d.dob||''} onChange={e=>updateDep(i,'dob',e.target.value)} /></div>
+              <div className="field">
+                <label>{d.dob ? 'Date of Birth' : 'DOB / Current Age'}</label>
+                <input type="date" value={d.dob||''} onChange={e=>{
+                  updateDep(i,'dob',e.target.value);
+                  if(e.target.value) { updateDep(i,'currentAge',''); updateDep(i,'currentAgeAsOf',''); }
+                }} />
+                {!d.dob && (
+                  <input type="number" min="0" max="120" placeholder="Age if DOB unknown" value={d.currentAge||''}
+                    onChange={e=>{
+                      updateDep(i,'currentAge',e.target.value);
+                      updateDep(i,'currentAgeAsOf',e.target.value ? new Date().toISOString().slice(0,10) : '');
+                    }}
+                    style={{marginTop:6}} />
+                )}
+                {(d.dob || d.currentAge) && (
+                  <div style={{fontSize:9,color:'var(--text3)',marginTop:4}}>Age {getProfileAge(d) || '—'}</div>
+                )}
+              </div>
             </div>
             <div className="grid-3">
               <div className="field"><label>Gender</label><select value={d.gender||''} onChange={e=>updateDep(i,'gender',e.target.value)}><option value="">—</option><option>Male</option><option>Female</option></select></div>
@@ -26954,7 +27273,7 @@ const QV_COMPLEX_FIELDS = new Set([
   'riders','fundAllocations','creditingRates','loyaltyBonus','fa_ia_allocation','highlights','indexSubAccountsText'
 ]);
 
-function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePolicy, onAccept, onClose, scanProgress}) {
+function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePolicy, onAccept, onClose, scanProgress, extractionLedger}) {
   const [items, setItems] = useState(() => {
     const mapped = extracted.map((p,i) => ({
       ...p, _idx:i, _selected:true, _corrections:[], _repoMatch:null,
@@ -27329,6 +27648,7 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
     }
 
     try { sessionStorage.removeItem('policylens_pendingExtract'); } catch(e){}
+    emitExtractionLedger({ stage:'sync', label:'Import queued', level:'info', detail:standalone.length + ' polic' + (standalone.length === 1 ? 'y' : 'ies') + ' queued for save/sync' });
     onAccept(standalone);
   };
 
@@ -27356,6 +27676,7 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
   const needsReviewCount = items.filter(needsDecisionForItem).length;
   const verifiedCount = items.filter(it => it._extractVerifiedAt || (getVerifiableFields(it).length === 0 && it._extractConfidence !== undefined)).length;
   const visibleVerifyItems = viewMode === 'quick' && !showTrusted ? filtered.filter(needsDecisionForItem) : filtered;
+  const advisorReviewQueue = items.filter(needsDecisionForItem).slice(0, 6);
   const trustedHiddenCount = filtered.length - visibleVerifyItems.length;
   const ownerKeysInView = [...new Set(visibleVerifyItems.map(it => normalizePersonNameKey(ownerKeyForItem(it))).filter(Boolean))];
   const showOwnerLabels = ownerKeysInView.length > 1;
@@ -27462,6 +27783,44 @@ function BulkVerifyModal({extracted, repo, policies:existingPolicies, onSavePoli
               <input type="checkbox" checked={showTrusted} onChange={e=>setShowTrusted(e.target.checked)} style={{accentColor:'var(--gold)'}} />
               <span style={{fontSize:10,color:'var(--text2)',fontWeight:700}}>Show trusted{trustedHiddenCount > 0 ? ' (' + trustedHiddenCount + ')' : ''}</span>
             </label>
+          </div>
+        )}
+
+        {(advisorReviewQueue.length > 0 || (extractionLedger || []).length > 0) && (
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(220px,1fr))',gap:8,margin:'0 0 10px'}}>
+            <div style={{background:'rgba(212,169,106,.045)',border:'1px solid rgba(212,169,106,.14)',borderRadius:9,padding:9,minWidth:0}}>
+              <div style={{fontSize:9,fontWeight:800,color:'var(--gold)',textTransform:'uppercase',letterSpacing:'.35px',marginBottom:6}}>Advisor review queue</div>
+              {advisorReviewQueue.length === 0 ? (
+                <div style={{fontSize:10,color:'var(--teal)'}}>No conflicts or low-confidence fields left.</div>
+              ) : (
+                <div style={{display:'grid',gap:5}}>
+                  {advisorReviewQueue.map((it,i) => {
+                    const gate = passesConfidenceGate(it);
+                    const reason = getVerifiableFields(it)[0]?.reason || (gate.reasons || [])[0] || (it._reviewReasons || [])[0] || (it._ownerRouteQuestion ? 'Owner/life assured routing needs confirmation' : 'Needs review');
+                    return (
+                      <div key={(it.id || it.policyNumber || it.productName || i) + ':queue'} style={{display:'grid',gridTemplateColumns:'minmax(0,1fr) auto',gap:8,alignItems:'center',fontSize:10,color:'var(--text2)',padding:'5px 6px',borderRadius:6,background:'rgba(0,0,0,.12)'}}>
+                        <span style={{minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{it.productName || it.policyName || it.insurer || 'Policy'} - {reason}</span>
+                        <span style={{color:'var(--gold)',fontWeight:800,whiteSpace:'nowrap'}}>{it._extractConfidence ? 'check' : 'route'}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+            <div style={{background:'var(--bg2)',border:'1px solid var(--border)',borderRadius:9,padding:9,minWidth:0}}>
+              <div style={{fontSize:9,fontWeight:800,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.35px',marginBottom:6}}>Extraction ledger</div>
+              {(extractionLedger || []).length === 0 ? (
+                <div style={{fontSize:10,color:'var(--text3)'}}>No stage events yet.</div>
+              ) : (
+                <div style={{display:'grid',gap:4}}>
+                  {(extractionLedger || []).slice(0,5).map((row,i) => (
+                    <div key={(row.at||0)+':bulk:'+i} style={{fontSize:10,color:row.level==='error'?'var(--red)':row.level==='success'?'var(--teal)':'var(--text3)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>
+                      <strong>{row.label || row.stage || 'Event'}</strong>{row.detail ? ': ' + row.detail : ''}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
           </div>
         )}
 
@@ -28150,6 +28509,15 @@ function Policies() {
   const stagedRef = useRef([]);
   useEffect(() => { stagedRef.current = staged; }, [staged]);
   const [scanProgress, setScanProgress] = useState(null); // {batch, totalBatches, totalFiles, status, pctComplete}
+  const [extractionLedger, setExtractionLedger] = useState([]);
+  useEffect(() => {
+    const h = (e) => {
+      const item = e.detail || {};
+      setExtractionLedger(prev => [{ at: item.at || Date.now(), ...item }, ...prev].slice(0, 80));
+    };
+    window.addEventListener('policylens-extraction-ledger', h);
+    return () => window.removeEventListener('policylens-extraction-ledger', h);
+  }, []);
   // ── SYNCHRONOUS RE-ENTRY GUARD (2026-04-09 fix) ──
   // `scanning` state is async — a dropzone event, SW recovery, or
   // double-tap can fire handleExtract twice before React commits the
@@ -28266,7 +28634,8 @@ function Policies() {
       if (byName?.clientId) return byName.clientId;
     }
     if (states.length === 1) return states[0].clientId;
-    return cid || null;
+    if (cid) console.warn('[Import] Ignoring stale active client id during import:', cid);
+    return null;
   };
 
   const buildOwnerRoutedPolicy = (policy, assignment, targetClientName, routeName, opts = {}) => {
@@ -28813,8 +29182,8 @@ SHORT-TERM ENDOWMENTS (≤3 years, single premium):
 - endYield = expected yield % p.a.
 - endGuaranteedCV = expected maturity sum if given
 
-CLIENT: policyOwner (string — exact name of policy owner/purchaser/proposer shown on the document), lifeInsured (string — exact name of life assured/insured person, may differ from policyOwner), documentOwner (owner/proposer/policyholder traced from the same physical document when the current page is a dependant/life-assured page), documentRole (owner/proposer/main_life_assured/dependant/life_assured_only/unknown), documentGroupId (same-document grouping hint such as policy/proposal/application number or image range), ownerInferenceReason (short reason if owner came from another page of the same document), gender (Male/Female — of life insured), dob (YYYY-MM-DD — of life insured, backward-compatible), policyOwnerDob (YYYY-MM-DD), policyOwnerAge (current age if visible), lifeInsuredDob (YYYY-MM-DD), lifeInsuredAge (current age if visible), ageAtEntry (number — of life insured at cover start), smoker (Non-smoker/Smoker), nationality (SC/PR/Foreigner), occupation
-FAMILY PARTICULARS / DEPENDANT TABLES: If a page has "Particulars of main life assured", "Proposer", "Dependant", "Name", "Date of Birth", "DOB", "Birth Date", or age rows, extract DOB/current age for each named person. Map the DOB/age to policyOwnerDob/policyOwnerAge when the name is the policy owner/proposer, and to lifeInsuredDob/lifeInsuredAge plus dob when the name is the life assured/dependant. If one page only shows a dependant or child/spouse life assured, look at the same physical document/upload sequence for the checked Proposer/Owner/Main Life Assured and fill documentOwner plus policyOwner with that original owner. Do not ignore family DOB rows just because they appear on an application/profile page rather than the policy schedule.
+CLIENT: policyOwner (string — exact name of policy owner/purchaser/proposer shown on the document), lifeInsured (string — exact name of life assured/insured person, may differ from policyOwner), documentOwner (owner/proposer/policyholder traced from the same physical document when the current page is a dependant/life-assured page), documentRole (owner/proposer/main_life_assured/dependant/life_assured_only/unknown), documentGroupId (same-document grouping hint such as policy/proposal/application number or image range), ownerInferenceReason (short reason if owner came from another page of the same document), people (array — every visible owner/proposer/applicant/life assured/dependant with role, DOB/current age, gender, sourceText/sourceImage, confidence, and reason), gender (Male/Female — of life insured), dob (YYYY-MM-DD — of life insured, backward-compatible), policyOwnerDob (YYYY-MM-DD), policyOwnerAge (current age if visible), lifeInsuredDob (YYYY-MM-DD), lifeInsuredAge (current age if visible), ageAtEntry (number — of life insured at cover start), smoker (Non-smoker/Smoker), nationality (SC/PR/Foreigner), occupation
+FAMILY PARTICULARS / DEPENDANT TABLES: If a page has "Particulars of main life assured", "Proposer", "Dependant", "Name", "Date of Birth", "DOB", "Birth Date", or age rows, extract DOB/current age for each named person and always add a people[] entry for that person. Map the DOB/age to policyOwnerDob/policyOwnerAge when the name is the policy owner/proposer, and to lifeInsuredDob/lifeInsuredAge plus dob when the name is the life assured/dependant. If one page only shows a dependant or child/spouse life assured, look at the same physical document/upload sequence for the checked Proposer/Owner/Main Life Assured and fill documentOwner plus policyOwner with that original owner. Do not ignore family DOB rows just because they appear on an application/profile page rather than the policy schedule.
 POLICY OWNER ROUTING: preserve the owner printed on the document. Do NOT replace policyOwner with the active client name. In family scans, different policies may belong to spouse/child/parent clients; keep each policy's actual owner so PolicyLens can route it after extraction. If owner and life insured differ, capture both exactly. Dependant pages are not standalone owner evidence: if the person appears only under a Dependant column, route the policy back to the proposer/owner from the same document and keep that dependant as lifeInsured.
 
 PREMIUM TERM: premStartAge (number), premTerm (number — PREMIUM PAYMENT years, NOT policy term. Calculate as premEndAge minus premStartAge), premEndAge (number — age when premium payments stop, NOT maturity age)
@@ -30514,6 +30883,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
     // Clear any lingering failure banner from a previous attempt
     setScanFailure(null);
     scanFailureRef.current = null;
+    setExtractionLedger([{ at: Date.now(), stage:'upload', label:'Upload staged', level:'info', detail:Array.from(files).length + ' file(s) queued' }]);
 
     // Snapshot the files array for potential retry. We convert to a real
     // Array so a retry invocation still works even if the caller's source
@@ -30822,6 +31192,8 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
       groupingUsed ? '· time-grouped' : '');
 
     // ── PRE-READ FILE BYTES INTO MEMORY (ANDROID FILE HANDLE FIX) ──
+    emitExtractionLedger({ stage:'page-grouping', label:'Page grouping', level:'info', detail:totalBatches + ' batch(es), ' + allFiles.length + ' file(s)' });
+
     // Android Chrome can revoke access to OS-backed File references
     // under memory/IO pressure, especially when many files are staged
     // and processing is slow. Symptom: NotReadableError ("permission
@@ -31019,7 +31391,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
               swExtractRelayMulti(swUrl, allBodies, (prog) => {
                 const resolver = resolvers[prog.batchIndex];
                 if (resolver && resolver._resolve) {
-                  resolver._resolve(prog.rawText);
+                  resolver._resolve(prog.error ? { error: prog.error, rawText: null } : { rawText: prog.rawText || null });
                   delete resolver._resolve;
                 }
               }).catch((e) => {
@@ -31028,7 +31400,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
                 // loop falls through to the normal per-batch path for them.
                 resolvers.forEach(r => {
                   if (r._resolve) {
-                    r._resolve(null);
+                    r._resolve({ error: e?.message || 'SW multi prefetch failed', rawText: null });
                     delete r._resolve;
                   }
                 });
@@ -31109,10 +31481,19 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
         if (precomputedPromises && precomputedPromises[b]) {
           try {
             const batchTimeoutMs = 300000; // 5 minutes per batch
-            precomputedRawText = await Promise.race([
+            const precomputed = await Promise.race([
               precomputedPromises[b],
               new Promise((resolve) => setTimeout(() => resolve(null), batchTimeoutMs)),
             ]);
+            if (precomputed && typeof precomputed === 'object' && precomputed.error) {
+              console.warn('[Extract] SW precomputed batch', b, 'failed; falling back to foreground path:', precomputed.error);
+              emitExtractionLedger({ stage:'ai-extraction', label:'SW batch fallback', level:'warning', detail:String(precomputed.error).slice(0, 300) });
+              precomputedRawText = null;
+            } else if (precomputed && typeof precomputed === 'object' && 'rawText' in precomputed) {
+              precomputedRawText = precomputed.rawText || null;
+            } else {
+              precomputedRawText = precomputed;
+            }
           } catch (prErr) {
             console.warn('[Extract] Precomputed await failed for batch', b, ':', prErr);
             precomputedRawText = null;
@@ -32183,6 +32564,39 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
             <div style={{height:'100%',width:scanProgress.pctComplete+'%',background:'linear-gradient(90deg,var(--gold),var(--green2))',borderRadius:3,transition:'width .5s ease'}} />
           </div>
           <div style={{fontSize:10,color:'var(--text2)'}}>{scanProgress.status}</div>
+          {(() => {
+            const pct = Number(scanProgress.pctComplete || 0);
+            const steps = [
+              {id:'upload',label:'Upload',done:true},
+              {id:'ocr-layout',label:'OCR/Layout',done:extractionLedger.some(x => x.stage === 'ocr-layout' && x.level === 'success') || pct > 10,active:pct <= 25},
+              {id:'page-grouping',label:'Grouping',done:pct > 25,active:pct > 10 && pct <= 45},
+              {id:'ai-extraction',label:'AI Extract',done:pct > 70,active:pct > 25 && pct < 100},
+              {id:'review',label:'Review',done:!!bulkExtracted,active:pct >= 100 && !bulkExtracted},
+              {id:'sync',label:'Sync',done:false,active:false},
+            ];
+            return (
+              <div style={{display:'grid',gridTemplateColumns:'repeat(6,minmax(0,1fr))',gap:6,marginTop:10}}>
+                {steps.map(step => (
+                  <div key={step.id} title={step.label} style={{minWidth:0,padding:'6px 6px',borderRadius:6,border:'1px solid '+(step.active?'rgba(212,169,106,.35)':step.done?'rgba(91,168,160,.24)':'rgba(255,255,255,.06)'),background:step.active?'rgba(212,169,106,.08)':step.done?'rgba(91,168,160,.06)':'rgba(255,255,255,.025)'}}>
+                    <div style={{fontSize:9,fontWeight:800,color:step.active?'var(--gold)':step.done?'var(--teal)':'var(--text3)',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{step.label}</div>
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+          {extractionLedger.length > 0 && (
+            <div style={{marginTop:8,padding:'8px 10px',borderRadius:7,border:'1px solid rgba(255,255,255,.06)',background:'rgba(0,0,0,.12)'}}>
+              <div style={{fontSize:9,fontWeight:800,color:'var(--text3)',textTransform:'uppercase',letterSpacing:'.35px',marginBottom:5}}>Extraction ledger</div>
+              <div style={{display:'grid',gap:4}}>
+                {extractionLedger.slice(0,4).map((row,i) => (
+                  <div key={(row.at||0)+':' + i} style={{display:'grid',gridTemplateColumns:'90px minmax(0,1fr)',gap:8,fontSize:10,color:row.level==='error'?'var(--red)':row.level==='success'?'var(--teal)':'var(--text3)'}}>
+                    <span style={{fontWeight:700,whiteSpace:'nowrap'}}>{row.label || row.stage || 'Event'}</span>
+                    <span style={{minWidth:0,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{row.fileName ? row.fileName + ' - ' : ''}{row.detail || ''}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           {scanProgress.pctComplete > 0 && scanProgress.pctComplete < 100 && (
             <div style={{fontSize:9,color:'var(--text3)',marginTop:4}}>You can review extracted policies below while remaining batches process</div>
           )}
@@ -32924,7 +33338,7 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
           setNewClientModalOpen(false);
           if (!event?.created) { pendingNewClientRoutesRef.current = []; pendingNewClientCleanupRef.current = false; }
         }} />}
-      {bulkExtracted && <BulkVerifyModal extracted={bulkExtracted} repo={repo} policies={policies} onSavePolicy={savePolicy} scanProgress={scanProgress} onClose={()=>{
+      {bulkExtracted && <BulkVerifyModal extracted={bulkExtracted} repo={repo} policies={policies} onSavePolicy={savePolicy} scanProgress={scanProgress} extractionLedger={extractionLedger} onClose={()=>{
         try{sessionStorage.removeItem('policylens_pendingExtract')}catch(e){}
         // Progressive session ends — reset accumulator and clear
         // any 'done' staged files so the FC starts clean for the
@@ -33117,7 +33531,11 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
             if(existingDeps.includes(liNorm)) continue;
             // Track
             if(candidates.has(liNorm)) {
-              candidates.get(liNorm).count++;
+              const existing = candidates.get(liNorm);
+              existing.count++;
+              const existingHint = pickPersonProfileHintFromPolicies(existing.display, [existing.sample]);
+              const nextHint = pickPersonProfileHintFromPolicies(liRaw, [p]);
+              if ((!existingHint || (!existingHint.dob && !existingHint.currentAge)) && nextHint && (nextHint.dob || nextHint.currentAge)) existing.sample = p;
             } else {
               candidates.set(liNorm, {
                 display: liRaw,
@@ -33134,16 +33552,23 @@ If you cannot extract ANY policies from the image (blank page, irrelevant photo,
             // setTimeout so the toast from the import lands first
             setTimeout(() => {
               if(confirm(msg)) {
-                const newDeps = list.map(c => ({
+                const newDeps = list.map(c => {
+                  const hint = pickPersonProfileHintFromPolicies(c.display, [c.sample]) || {};
+                  const dob = hint.dob || normalizeProfileDob(c.sample.lifeInsuredDob || c.sample.lifeAssuredDob || c.sample.dob) || '';
+                  const currentAge = dob ? '' : (hint.currentAge || coerceProfileAge(c.sample.lifeInsuredAge || c.sample.lifeAssuredAge || c.sample.age || c.sample.currentAge) || '');
+                  return {
                   id: 'dep_' + Date.now() + '_' + Math.random().toString(36).slice(2,5),
                   name: c.display,
                   relationship: 'Life Assured', // placeholder — FC edits later
-                  dob: c.sample.dob || '',
-                  gender: c.sample.gender || '',
-                  smoker: c.sample.smoker || '',
+                  dob,
+                  currentAge: currentAge ? String(currentAge) : '',
+                  currentAgeAsOf: currentAge ? new Date().toISOString().slice(0, 10) : '',
+                  gender: c.sample.lifeInsuredGender || c.sample.gender || '',
+                  smoker: c.sample.lifeInsuredSmoker || c.sample.smoker || '',
                   nationality: c.sample.nationality || '',
                   occupation: c.sample.occupation || '',
-                }));
+                  };
+                });
                 const updated = {...clientProfile, dependants: [...(clientProfile?.dependants || []), ...newDeps]};
                 saveProfile(updated);
                 toast('Added ' + newDeps.length + ' dependant' + (newDeps.length===1?'':'s') + ' — edit relationship in My Profile', 'success', 5000);
@@ -38591,7 +39016,7 @@ function ExtractDiagnostics() {
       if(!s.items?.properties) throw new Error('Schema missing items.properties');
       const props = Object.keys(s.items.properties);
       const required = s.items.required || [];
-      const mustHave = ['insurer','productName','category','premiumAmount','premFrequency','sumAssured','riders'];
+      const mustHave = ['insurer','productName','category','premiumAmount','premFrequency','sumAssured','riders','people','fieldEvidence'];
       const missing = mustHave.filter(f => !props.includes(f));
       if(missing.length) throw new Error('Missing required schema fields: '+missing.join(','));
       const specialty = ['creditingRateCurrent','indexSubAccounts','financed','endYield','loyaltyBonusRate'];
@@ -38772,6 +39197,27 @@ function ExtractDiagnostics() {
         else addResult('End-to-end extraction', 'pass', elapsed+'ms, all '+checks.length+' critical fields correct — pipeline healthy', elapsed);
       }
     } catch(e) { addResult('End-to-end extraction', 'fail', e.message, 0); }
+
+    // Test 11: Golden family routing primitives
+    setRunningTest('Testing family routing golden cases');
+    try {
+      const sameProductA = { id:'a', insurer:'Singlife', productName:'Singlife Flexi Life Income II', policyNumber:'', policyOwner:'Tng Meng Kiat', lifeInsured:'Tng Meng Kiat', sumAssured:25000 };
+      const sameProductB = { id:'b', insurer:'Singlife', productName:'Singlife Flexi Life Income II', policyNumber:'', policyOwner:'Tng Wen Xin', lifeInsured:'Tng Wen Xin', sumAssured:25000 };
+      if (policiesLikelySamePolicy(sameProductA, sameProductB)) throw new Error('Same-product different-owner policies would merge');
+      const peoplePolicy = normalizePolicyForStorage({
+        insurer:'Prudential',
+        productName:'PRU Life Income',
+        lifeInsured:'Tng Meng Kiat',
+        people:[
+          {name:'Tng Teng Soo', role:'proposer', dob:'1978-01-01', sourceText:'Proposer Tng Teng Soo'},
+          {name:'Tng Meng Kiat', role:'dependant', dob:'2013-05-12', sourceText:'Dependant 1 DOB 12/05/2013'}
+        ]
+      }, {currentClientName:'TAN CHENG CHENG', source:'golden-test'});
+      const hint = pickPersonProfileHintFromPolicies('Tng Meng Kiat', [peoplePolicy]);
+      if (peoplePolicy.lifeInsuredDob !== '2013-05-12') throw new Error('people[] DOB did not backfill lifeInsuredDob');
+      if (!hint?.dob) throw new Error('people[] DOB did not feed profile hint');
+      addResult('Golden family routing', 'pass', 'Same-product different-owner dedupe guard and people[] DOB hint both passed', 0);
+    } catch(e) { addResult('Golden family routing', 'fail', e.message, 0); }
 
     setRunningTest('');
     setRunning(false);
