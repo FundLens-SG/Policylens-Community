@@ -36,7 +36,7 @@ window.PolicyLensDebug=function(on){try{localStorage.setItem('policylens_debug',
 // long multi-batch scans can continue when the browser backgrounds
 // the page. The worker is registered only on HTTPS/localhost.
 // ═══════════════════════════════════════════════════════════════
-const POLICYLENS_SW_VERSION = 'v2.3.0-rc2d.25';
+const POLICYLENS_SW_VERSION = 'v2.3.0-rc2e.1';
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', async () => {
     const canRegister = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
@@ -664,12 +664,46 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2d.25';
-const APP_VERSION_DATE = '2026-04-27';
-const APP_VERSION_NAME = 'Family sync cockpit and extraction ledger';
+const APP_VERSION = 'v2.3.0-rc2e.1';
+const APP_VERSION_DATE = '2026-04-30';
+const APP_VERSION_NAME = 'Frictionless AI review pilot';
 const DEFAULT_DOCUMENT_AI_PROXY_URL = 'https://policylens-document-ai.chungakwanc.workers.dev';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2e.1',
+    date: '2026-04-30',
+    name: 'Frictionless AI review pilot',
+    sections: [
+      {
+        heading: 'AI flow',
+        items: [
+          'Dashboard drag-and-drop now infers whether files belong in Profile or Policies and routes them automatically, removing the extra confirmation step.',
+          'Policy uploads dropped from Dashboard now wake the policy scan queue directly so the AI flow lands in the right workspace.'
+        ]
+      },
+      {
+        heading: 'Review experience',
+        items: [
+          'Present Mode now opens with a guided meeting brief: what the client has, what is exposed, what changes soon, and what to discuss today.',
+          'Dashboard now includes an upcoming policy calendar for premium-end, maturity, payout, CPF, retirement, and rider-review milestones.'
+        ]
+      },
+      {
+        heading: 'Family workflow',
+        items: [
+          'Clients Family view now includes a household map that surfaces owner, life assured, payer, dependant, and beneficiary relationships from existing policy/profile data.'
+        ]
+      },
+      {
+        heading: 'Internal safety',
+        items: [
+          'Added a command-line golden family routing harness seeded from data/golden-family-routing-benchmarks.json.',
+          'Added a source-split scaffold so the single-file deploy can stay intact while module boundaries are previewed and extracted internally.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2d.25',
     date: '2026-04-27',
@@ -5457,6 +5491,104 @@ function stagedFileLabel(files) {
   }
   const parts = nonZero.map(([t,n])=>n+' '+(n>1?nouns[t][1]:nouns[t][0])).join(', ');
   return '\uD83D\uDCCE '+files.length+' files staged ('+parts+')';
+}
+
+function inferUploadIntent(files) {
+  const list = Array.from(files || []);
+  if (list.length === 0) return { intent:'policy', confidence:'low', reason:'No files selected' };
+  let profileScore = 0, policyScore = 0;
+  const names = list.map(f => String(f?.name || '').toLowerCase());
+  const joined = names.join(' ');
+  for (const name of names) {
+    if (/\b(nric|fin|passport|kyc|fact\s*find|fna|needs?\s*analysis|profile|particulars|client\s*info|application\s*form|proposal\s*form)\b/i.test(name)) profileScore += 3;
+    if (/\b(policy|contract|schedule|benefit|illustration|bi\b|premium|statement|shield|life|endowment|retire|annuity|rider|betterview|portfolio)\b/i.test(name)) policyScore += 3;
+    if (/\.(xlsx|xls|csv)$/i.test(name)) policyScore += 2;
+    if (/\.(pdf|jpg|jpeg|png|heic|webp)$/i.test(name)) policyScore += 1;
+  }
+  if (/\b(dependant|spouse|child|family)\b/i.test(joined) && policyScore > 0) policyScore += 1;
+  if (profileScore >= policyScore + 2) return { intent:'profile', confidence:profileScore >= 5 ? 'high' : 'medium', reason:'Looks like profile/KYC/FNA material' };
+  if (policyScore >= profileScore + 2) return { intent:'policy', confidence:policyScore >= 5 ? 'high' : 'medium', reason:'Looks like policy or illustration material' };
+  return { intent:'policy', confidence:'low', reason:'Defaulting to policy extraction' };
+}
+
+function buildPolicyLifecycleEvents(policies, clientProfile = {}, opts = {}) {
+  const active = (policies || []).filter(pol => !['matured','surrendered','lapsed'].includes(pol?.status));
+  const currentAge = opts.age ?? getProfileAge(clientProfile) ?? 35;
+  const retAge = opts.retAge ?? getRetirementAge(clientProfile, 65);
+  const nowYear = opts.asOfYear || new Date().getFullYear();
+  const horizonYears = opts.horizonYears || 25;
+  const events = [];
+  const addAgeEvent = (pol, kind, targetAge, label, detail, tone='gold') => {
+    const ageNum = parseInt(targetAge);
+    if (!ageNum || ageNum < currentAge || ageNum - currentAge > horizonYears) return;
+    events.push({
+      year: nowYear + Math.max(0, ageNum - currentAge),
+      age: ageNum,
+      kind,
+      label,
+      subLabel: detail || pol?.insurer || '',
+      policyName: pol?.productName || pol?.policyName || pol?.subType || 'Policy',
+      insurer: pol?.insurer || '',
+      tone
+    });
+  };
+  const addDateEvent = (pol, kind, rawDate, label, detail, tone='gold') => {
+    if (!rawDate) return;
+    const d = new Date(rawDate);
+    if (isNaN(d.getTime())) return;
+    const year = d.getFullYear();
+    if (year < nowYear || year - nowYear > horizonYears) return;
+    events.push({
+      year,
+      age: currentAge + (year - nowYear),
+      kind,
+      label,
+      subLabel: detail || pol?.insurer || '',
+      policyName: pol?.productName || pol?.policyName || pol?.subType || 'Policy',
+      insurer: pol?.insurer || '',
+      tone
+    });
+  };
+  active.forEach(pol => {
+    const name = pol.productName || pol.policyName || pol.subType || 'Policy';
+    if (!(pol.premSingle || pol.premFrequency === 'single')) addAgeEvent(pol, 'premium_end', pol.premEndAge, name + ' premium paid-up', pol.insurer, 'teal');
+    addDateEvent(pol, 'maturity', pol.maturityDate || pol.fdMaturityDate, name + ' matures', pol.insurer, 'gold');
+    const payoutStart = parseInt(pol.annuityStartAge || pol.payoutStartAge);
+    const payoutEnd = parseInt(pol.annuityEndAge || pol.payoutEndAge);
+    const monthly = getPolicyMonthlyPayout(pol);
+    addAgeEvent(pol, 'payout_start', payoutStart, name + ' income starts', monthly > 0 ? '$' + Math.round(monthly).toLocaleString() + '/mo' : pol.insurer, 'blue');
+    addAgeEvent(pol, 'payout_end', payoutEnd, name + ' income ends', pol.insurer, 'red');
+    const sub = String(pol.subType || '').toLowerCase();
+    if ((sub.includes('integrated shield') || sub === 'isp') && pol.hasRider) {
+      const gen = pol.ispRiderGeneration || getISPRiderGeneration(pol.ispRiderInceptionDate || pol.inceptionDate);
+      if (gen === 'legacy' || gen === 'transitional') {
+        const reformYear = 2028;
+        if (reformYear >= nowYear && reformYear - nowYear <= horizonYears) {
+          events.push({
+            year: reformYear,
+            age: currentAge + (reformYear - nowYear),
+            kind:'isp_reform',
+            label:name + ' rider reform review',
+            subLabel:'Check renewal path before next post-Apr 2028 renewal',
+            policyName:name,
+            insurer:pol.insurer || '',
+            tone:'red'
+          });
+        }
+      }
+    }
+  });
+  if (retAge && retAge >= currentAge && retAge - currentAge <= horizonYears) {
+    events.push({ year: nowYear + (retAge - currentAge), age: retAge, kind:'retirement', label:'Planned retirement age', subLabel:'Review income readiness', policyName:'Retirement', insurer:'', tone:'gold' });
+  }
+  const cpfStart = parseInt(clientProfile?.cpfStartAge || 65);
+  if (cpfStart && cpfStart >= currentAge && cpfStart - currentAge <= horizonYears) {
+    events.push({ year: nowYear + (cpfStart - currentAge), age: cpfStart, kind:'cpf_life', label:'CPF LIFE payout age', subLabel:'Confirm scheme and payout estimate', policyName:'CPF LIFE', insurer:'CPF', tone:'teal' });
+  }
+  const seen = new Set();
+  return events
+    .sort((a,b) => a.year - b.year || a.age - b.age || a.label.localeCompare(b.label))
+    .filter(e => { const key = [e.year,e.age,e.kind,e.label].join('|'); if (seen.has(key)) return false; seen.add(key); return true; });
 }
 
 function emitTelemetry(event, data) {
@@ -17490,7 +17622,15 @@ function PresentMode() {
     }
   });
   policyEvents.sort((a, b) => a.year - b.year || a.age - b.age);
-  const topEvents = policyEvents.slice(0, 8);
+  const topEvents = buildPolicyLifecycleEvents(active, clientProfile, { age: clientAge, retAge, horizonYears: 20 }).slice(0, 8);
+  const eventTone = (evt) => evt.tone === 'red' ? '#dc5a50' : evt.tone === 'blue' ? '#5b8fd9' : evt.tone === 'teal' ? '#5ba8a0' : GOLD;
+  const eventIcon = (evt) => evt.kind === 'premium_end' ? 'P' : evt.kind === 'maturity' ? '$' : evt.kind === 'payout_start' ? '>' : evt.kind === 'payout_end' ? '!' : evt.kind === 'isp_reform' ? '!' : evt.kind === 'cpf_life' ? 'C' : 'R';
+  const meetingBrief = [
+    { label:'What you have', value:active.length + ' active polic' + (active.length === 1 ? 'y' : 'ies'), note:'Annual commitment ' + bigFmt(annualPrem) },
+    { label:'What is exposed', value:gapDetails.length ? gapDetails[0].label : 'Core cover looks healthy', note:gapDetails.length ? 'Start with the largest gap' : 'Review affordability and retirement next' },
+    { label:'What changes soon', value:topEvents[0] ? topEvents[0].year + ' - age ' + topEvents[0].age : 'No near-term milestones', note:topEvents[0] ? topEvents[0].label : 'Nothing urgent in the next 20 years' },
+    { label:'What to discuss today', value:retData?.gap > 0 ? 'Retirement shortfall' : (premiumPctOfIncome > 15 ? 'Premium load' : 'Next review action'), note:retData?.gap > 0 ? bigFmt(retData.gap) + '/mo gap' : (premiumPctOfIncome > 15 ? premiumPctOfIncome.toFixed(1) + '% of income' : 'Confirm priorities and timeline') },
+  ];
 
   // ── Exit confirmation: long-press or double-tap would be ideal, but for v1
   //    a simple confirm() is safer against accidental exits during meetings ──
@@ -17628,6 +17768,27 @@ function PresentMode() {
         </div>
 
         {/* ── COVERAGE BREAKDOWN ── */}
+        <div style={{
+          background:NAVY_LIGHT,
+          border:`1px solid rgba(91,168,160,0.24)`,
+          borderRadius:16,
+          padding:'22px 24px',
+          marginBottom:28,
+        }}>
+          <div style={{fontSize:11, fontWeight:700, color:'#5ba8a0', letterSpacing:'1.5px', textTransform:'uppercase', marginBottom:16}}>
+            Meeting Brief
+          </div>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(190px,1fr))',gap:12}}>
+            {meetingBrief.map(item => (
+              <div key={item.label} style={{background:'rgba(255,255,255,0.035)',border:'1px solid rgba(255,255,255,0.06)',borderRadius:10,padding:'13px 14px'}}>
+                <div style={{fontSize:10,color:MUTED,textTransform:'uppercase',letterSpacing:'0.8px',marginBottom:6}}>{item.label}</div>
+                <div style={{fontSize:15,fontWeight:700,color:CREAM,lineHeight:1.2,marginBottom:5}}>{item.value}</div>
+                <div style={{fontSize:11,color:MUTED,lineHeight:1.35}}>{item.note}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+
         <div style={{
           background:NAVY_LIGHT,
           border:`1px solid rgba(212,169,106,0.2)`,
@@ -18159,17 +18320,17 @@ function PresentMode() {
                     width:28, height:28,
                     borderRadius:'50%',
                     background: NAVY,
-                    border: `2px solid ${evt.color}`,
+                    border: `2px solid ${eventTone(evt)}`,
                     display:'flex',
                     alignItems:'center',
                     justifyContent:'center',
                     fontSize:13,
                     fontWeight:700,
-                    color: evt.color,
+                    color: eventTone(evt),
                     flexShrink:0,
                     zIndex:1,
                   }}>
-                    {evt.icon}
+                    {eventIcon(evt)}
                   </div>
                   {/* Event content */}
                   <div style={{flex:1, minWidth:0, paddingTop:2}}>
@@ -18177,7 +18338,7 @@ function PresentMode() {
                       <div style={{fontSize:13, fontWeight:600, color:CREAM, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap', minWidth:0, flex:1}}>
                         {evt.label}
                       </div>
-                      <div style={{fontSize:11, fontWeight:700, color:evt.color, flexShrink:0, fontVariantNumeric:'tabular-nums'}}>
+                      <div style={{fontSize:11, fontWeight:700, color:eventTone(evt), flexShrink:0, fontVariantNumeric:'tabular-nums'}}>
                         {evt.year}
                       </div>
                     </div>
@@ -18960,10 +19121,44 @@ function ClientsTab() {
       </div>
     );
   };
+  const householdRelationsForGroup = (group) => {
+    const rows = [];
+    const push = (from, relation, to, detail, tone='var(--gold)') => {
+      from = cleanPersonDisplayName(from || '');
+      to = String(to || '').trim();
+      if (!from || !to) return;
+      const key = normalizePersonNameKey(from) + '|' + relation + '|' + normalizeTextKey(to);
+      if (rows.some(r => r.key === key)) return;
+      rows.push({ key, from, relation, to, detail: detail || '', tone });
+    };
+    group.clients.forEach(ds => {
+      const profile = getProfileForClient(ds);
+      const holder = profile.name || ds.clientName || 'Client';
+      (profile.dependants || []).forEach(dep => {
+        if (dep?.name) push(holder, dep.relationship || 'dependant', dep.name, dep.currentAge ? 'Age ' + dep.currentAge : '', 'var(--teal)');
+      });
+      clientStatsFor(ds).clientPols.forEach(pol => {
+        const title = policyMiniTitle(pol);
+        const owner = cleanPersonDisplayName(pol.policyOwner || holder);
+        const life = cleanPersonDisplayName(pol.lifeInsured || '');
+        const payer = cleanPersonDisplayName(pol.payer || pol.payor || pol.premiumPayer || pol.paymentOwner || '');
+        const rawBeneficiary = pol.beneficiary || pol.beneficiaries || pol.nominee || pol.nominees || '';
+        push(owner, 'owns', title, pol.insurer, 'var(--gold)');
+        if (life && !personNameEquivalent(owner, life)) push(owner, 'life assured', life, title, 'var(--blue2)');
+        if (payer && !personNameEquivalent(payer, owner)) push(payer, 'pays', title, pol.insurer, 'var(--teal)');
+        const beneficiaries = Array.isArray(rawBeneficiary)
+          ? rawBeneficiary.map(b => typeof b === 'string' ? b : (b?.name || b?.beneficiaryName || b?.nomineeName || b?.fullName || ''))
+          : String(rawBeneficiary || '').split(/[,;/]+/);
+        beneficiaries.map(b => cleanPersonDisplayName(b)).filter(Boolean).slice(0,3).forEach(b => push(owner, 'beneficiary', b, title, 'var(--purple)'));
+      });
+    });
+    return rows.slice(0, 12);
+  };
   const renderFamilyGroup = (group) => {
     const groupDraftKey = 'group:' + group.name;
     const groupNameValue = familyDrafts[groupDraftKey] ?? group.name;
     const questions = groupPolicyQuestions(group);
+    const relationRows = householdRelationsForGroup(group);
     return (
       <div key={group.name} style={{background:'rgba(255,255,255,.018)',border:'1px solid var(--border)',borderRadius:10,overflow:'hidden'}}>
         <div style={{display:'grid',gridTemplateColumns:isMobile?'1fr':'minmax(240px,420px) minmax(0,1fr) auto',gap:10,alignItems:'center',padding:'12px 14px',background:'rgba(255,255,255,.025)',borderBottom:'1px solid rgba(255,255,255,.06)'}}>
@@ -19002,30 +19197,24 @@ function ClientsTab() {
           </div>
         )}
         <div style={{padding:'10px 14px',borderBottom:'1px solid rgba(255,255,255,.055)',background:'rgba(0,0,0,.08)'}}>
-          <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
-            <span style={{fontSize:10,fontWeight:800,color:'var(--teal)',textTransform:'uppercase',letterSpacing:'.35px',marginRight:2}}>Relationship graph</span>
-            {group.clients.map((ds, idx) => {
-              const stats = clientStatsFor(ds);
-              const isActive = ds.clientId === activeClientId;
-              return (
-                <React.Fragment key={'graph:' + ds.clientId}>
-                  {idx > 0 && <span style={{height:1,width:18,background:'rgba(201,169,110,.28)',display:'inline-block'}} />}
-                  <button onClick={() => openClientView(ds.clientId, 'profile')} style={{maxWidth:isMobile?'100%':220,minWidth:0,display:'inline-flex',alignItems:'center',gap:6,padding:'6px 8px',borderRadius:999,border:'1px solid '+(isActive?'rgba(212,169,106,.45)':'rgba(255,255,255,.08)'),background:isActive?'rgba(212,169,106,.12)':'rgba(255,255,255,.025)',color:'var(--text2)',cursor:'pointer'}}>
-                    <span style={{fontSize:10,fontWeight:800,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{ds.clientName || 'Untitled'}</span>
-                    <span style={{fontSize:9,color:'var(--gold)',whiteSpace:'nowrap'}}>{stats.clientPols.length}p</span>
-                  </button>
-                </React.Fragment>
-              );
-            })}
+          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',gap:8,flexWrap:'wrap',marginBottom:7}}>
+            <span style={{fontSize:10,fontWeight:800,color:'var(--teal)',textTransform:'uppercase',letterSpacing:'.35px'}}>Household map</span>
+            <span style={{fontSize:9,color:'var(--text3)'}}>{relationRows.length} relationship signal{relationRows.length===1?'':'s'}</span>
           </div>
-          <div style={{display:'flex',gap:6,flexWrap:'wrap',marginTop:7}}>
-            {group.clients.flatMap(ds => clientStatsFor(ds).clientPols.slice(0, 2).map(pol => ({ ds, pol }))).slice(0, 8).map(({ds, pol}, i) => (
-              <span key={(pol.id || pol.policyNumber || i) + ':familychip'} title={(ds.clientName || 'Client') + ' - ' + (pol.insurer || '')}
-                style={{fontSize:10,color:'var(--text2)',border:'1px solid rgba(255,255,255,.07)',background:'rgba(255,255,255,.025)',borderRadius:999,padding:'4px 8px',maxWidth:isMobile?'100%':250,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
-                {policyMiniTitle(pol)}
-              </span>
-            ))}
-          </div>
+          {relationRows.length > 0 ? (
+            <div style={{display:'grid',gridTemplateColumns:isMobile?'1fr':'repeat(auto-fit,minmax(240px,1fr))',gap:6}}>
+              {relationRows.map(row => (
+                <div key={row.key} title={row.detail}
+                  style={{display:'grid',gridTemplateColumns:'minmax(0,1fr) auto minmax(0,1fr)',alignItems:'center',gap:6,fontSize:10,color:'var(--text2)',border:'1px solid rgba(255,255,255,.07)',background:'rgba(255,255,255,.025)',borderRadius:8,padding:'6px 8px',minWidth:0}}>
+                  <span style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap',fontWeight:700}}>{row.from}</span>
+                  <span style={{fontSize:9,color:row.tone,border:'1px solid rgba(255,255,255,.08)',borderRadius:999,padding:'2px 6px',whiteSpace:'nowrap'}}>{row.relation}</span>
+                  <span style={{overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{row.to}</span>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{fontSize:10,color:'var(--text3)',border:'1px dashed rgba(255,255,255,.09)',borderRadius:8,padding:'8px'}}>No owner/life assured/dependant links detected yet.</div>
+          )}
         </div>
         <div style={{display:'grid'}}>
           {group.clients.map((ds, idx) => renderClientCard(ds, true, idx, group.clients.length))}
@@ -24915,10 +25104,18 @@ function Dashboard() {
     const gk = ((await dbGet('settings','geminiKey').catch(()=>null))?.value || '').trim();
     const ck = ((await dbGet('settings','anthropicKey').catch(()=>null))?.value || '').trim();
     if(!gk && !ck){toast('Set your API key in Settings first','warning');return;}
-    const choice = confirm('What are these documents?\n\nOK = Client profile (NRIC, FNA, KYC)\nCancel = Policy documents');
-    if(choice) setTab('profile');
-    else setTab('policies');
-    window._pendingDropFiles = files;
+    const picked = Array.from(files || []);
+    const intent = inferUploadIntent(picked);
+    if(intent.intent === 'profile') {
+      window._pendingDropFiles = picked;
+      setTab('profile');
+      try { toast('AI routed upload to Profile - ' + intent.reason, intent.confidence === 'low' ? 'warning' : 'info', 3200); } catch(_) {}
+      return;
+    }
+    window._pendingScanFiles = picked;
+    setTab('policies');
+    try { window.dispatchEvent(new Event('policylens-pending-scan')); } catch(_) {}
+    try { toast('AI routed upload to Policies - ' + intent.reason, intent.confidence === 'low' ? 'warning' : 'info', 3200); } catch(_) {}
   };
 
   const byCategory = useMemo(() => {
@@ -25390,6 +25587,7 @@ function Dashboard() {
   const premRatio = annualIncome > 0 ? Math.round(totalPremium.annual/annualIncome*100) : 0;
   const retRow = cvTimeline.find(r => r.age === retAge);
   const [showReview, setShowReview] = useState(false);
+  const lifecycleEvents = useMemo(() => buildPolicyLifecycleEvents(policies, p, { age, retAge, horizonYears: 25 }), [policies, p, age, retAge]);
   const advisorReview = useMemo(() => {
     const active = policies.filter(pol => !['matured','surrendered','lapsed'].includes(pol.status));
     const missingCore = policies.filter(pol => !(pol.productName || pol.policyName || pol.insurer) || !pol.category || (!pol.policyNumber && !pol.policyOwner && !pol.lifeInsured));
@@ -25526,6 +25724,30 @@ function Dashboard() {
           </div>
         ))}
       </div>
+
+      {lifecycleEvents.length > 0 && (
+        <div className="card" style={{marginBottom:14,padding:14,borderLeft:'3px solid var(--teal)'}}>
+          <div style={{display:'flex',justifyContent:'space-between',alignItems:'baseline',gap:10,marginBottom:10,flexWrap:'wrap'}}>
+            <h3 style={{fontSize:13,fontWeight:700,margin:0,color:'var(--teal)'}}>Upcoming Policy Calendar</h3>
+            <span style={{fontSize:10,color:'var(--text3)'}}>Next {Math.min(lifecycleEvents.length, 6)} of {lifecycleEvents.length} milestone{lifecycleEvents.length===1?'':'s'}</span>
+          </div>
+          <div style={{display:'grid',gridTemplateColumns:'repeat(auto-fit,minmax(180px,1fr))',gap:8}}>
+            {lifecycleEvents.slice(0,6).map((evt, i) => {
+              const toneColor = evt.tone === 'red' ? 'var(--red)' : evt.tone === 'blue' ? 'var(--blue2)' : evt.tone === 'teal' ? 'var(--teal)' : 'var(--gold)';
+              return (
+                <div key={evt.kind + evt.year + evt.label + i} style={{background:'var(--bg3)',border:'1px solid rgba(255,255,255,.06)',borderRadius:8,padding:'9px 10px',minHeight:72}}>
+                  <div style={{display:'flex',justifyContent:'space-between',gap:8,alignItems:'center',marginBottom:5}}>
+                    <span style={{fontSize:10,fontWeight:800,color:toneColor,textTransform:'uppercase',letterSpacing:'.35px'}}>{evt.year}</span>
+                    <span style={{fontSize:9,color:'var(--text3)',whiteSpace:'nowrap'}}>Age {evt.age}</span>
+                  </div>
+                  <div style={{fontSize:11,fontWeight:700,color:'var(--text2)',lineHeight:1.25,overflow:'hidden',display:'-webkit-box',WebkitLineClamp:2,WebkitBoxOrient:'vertical'}}>{evt.label}</div>
+                  {evt.subLabel && <div style={{fontSize:9,color:'var(--text3)',marginTop:4,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{evt.subLabel}</div>}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:8,marginBottom:14}}>
         <div className="card card-sm"><div style={{color:'var(--text3)',fontSize:9,fontWeight:600,textTransform:'uppercase',letterSpacing:'.5px'}}>Active Policies</div><div style={{fontSize:22,fontWeight:700,marginTop:4}}>{policies.filter(p=>p.status!=='matured'&&p.status!=='surrendered'&&p.status!=='lapsed').length}</div><div style={{fontSize:10,color:'var(--text3)'}}>Total coverage: {totalCoverage>=1e6?'$'+(totalCoverage/1e6).toFixed(1)+'M':fmt(totalCoverage)}</div></div>
