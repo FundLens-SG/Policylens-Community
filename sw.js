@@ -1,4 +1,4 @@
-const SW_VERSION = 'v2.3.0-rc2d.25';
+const SW_VERSION = 'v2.3.0-rc2e.2';
 const DB_NAME = 'PolicyLensSW';
 const DB_VERSION = 1;
 const SESSION_STORE = 'sessions';
