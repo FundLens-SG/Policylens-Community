@@ -36,7 +36,7 @@ window.PolicyLensDebug=function(on){try{localStorage.setItem('policylens_debug',
 // long multi-batch scans can continue when the browser backgrounds
 // the page. The worker is registered only on HTTPS/localhost.
 // ═══════════════════════════════════════════════════════════════
-const POLICYLENS_SW_VERSION = 'v2.3.0-rc2e.1';
+const POLICYLENS_SW_VERSION = 'v2.3.0-rc2e.2';
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', async () => {
     const canRegister = location.protocol === 'https:' || location.hostname === 'localhost' || location.hostname === '127.0.0.1';
@@ -664,12 +664,26 @@ document.addEventListener('DOMContentLoaded',function(){
 const {useState,useEffect,useRef,useCallback,useMemo,createContext,useContext,memo} = React;
 
 // ── APP VERSION (display only — NOT the extraction pipeline version) ──
-const APP_VERSION = 'v2.3.0-rc2e.1';
+const APP_VERSION = 'v2.3.0-rc2e.2';
 const APP_VERSION_DATE = '2026-04-30';
-const APP_VERSION_NAME = 'Frictionless AI review pilot';
+const APP_VERSION_NAME = 'Single-confirm client delete';
 const DEFAULT_DOCUMENT_AI_PROXY_URL = 'https://policylens-document-ai.chungakwanc.workers.dev';
 
 const CHANGELOG = [
+  {
+    version: 'v2.3.0-rc2e.2',
+    date: '2026-04-30',
+    name: 'Single-confirm client delete',
+    sections: [
+      {
+        heading: 'UX fixes',
+        items: [
+          'Client delete now asks once, combining the Drive Trash recovery note and PolicyLens undo warning into a single confirmation.',
+          'Client delete actions now target the selected client directly and rely on one completion toast from the destroy flow.'
+        ]
+      }
+    ]
+  },
   {
     version: 'v2.3.0-rc2e.1',
     date: '2026-04-30',
@@ -16895,25 +16909,32 @@ function App() {
     sbAppSettingsPush(bundle, newVersions).catch(()=>{});
   };
 
-  // ── v2.2.0-rc1: Destroy client (called from Header) ──
-  const destroyClient = async () => {
-    const ds = driveState;
+  // ── v2.2.0-rc1: Destroy client ──
+  const destroyClient = async (targetClient = null) => {
+    const targetId = typeof targetClient === 'string'
+      ? targetClient
+      : (targetClient?.clientId || activeClientIdRef.current || activeClientId);
+    if (!targetId) return;
+    const statesBeforeDelete = await PolicyDB.getAllDriveStates().catch(() => []);
+    const ds = (targetClient && typeof targetClient === 'object' ? targetClient : null)
+      || statesBeforeDelete.find(s => s.clientId === targetId)
+      || (targetId === activeClientIdRef.current ? driveState : null);
     if (!ds) return;
     let clientTrashed = false;
     if (!isDriveLocalOnly() && getDriveStatus() === 'connected' && ds.folderId) {
       try { await driveClient.trashFolder(ds.folderId); clientTrashed = true; } catch(e) { console.warn('[Destroy] Trash failed:', e.message); }
     }
     if (!clientTrashed) await queueClientTrashRequest(ds, 'client-destroy').catch(() => {});
-    await dbDel('drive_state', activeClientId);
+    await dbDel('drive_state', targetId);
     const allPols = await dbGetAll('policies');
-    for (const pol of allPols.filter(p => p.clientId === activeClientId)) await dbDel('policies', pol.id);
-    try { await dbDel('settings', 'clientProfile_' + activeClientId); } catch(_) {}
-    try { await dbDel('settings', 'clientName_' + activeClientId); } catch(_) {}
+    for (const pol of allPols.filter(p => p.clientId === targetId)) await dbDel('policies', pol.id);
+    try { await dbDel('settings', 'clientProfile_' + targetId); } catch(_) {}
+    try { await dbDel('settings', 'clientName_' + targetId); } catch(_) {}
     const remaining = await PolicyDB.getAllDriveStates();
-    if (remaining.length > 0) {
+    if (targetId === activeClientIdRef.current && remaining.length > 0) {
       const next = remaining.reduce((a, b) => (a.lastSyncedAt || '') > (b.lastSyncedAt || '') ? a : b);
       await switchClient(next.clientId);
-    } else {
+    } else if (targetId === activeClientIdRef.current) {
       setActiveClientId(null);
       try { localStorage.removeItem('policylens_active_client_id'); } catch(_) {}
       setPolicies([]); setClientProfile({name:'',nric:'',dob:'',gender:'',smoker:'',nationality:'',occupation:'',phone:'',email:'',dependants:[]}); setClientName(''); setDriveState(null);
@@ -19074,10 +19095,8 @@ function ClientsTab() {
             <button onClick={async (e) => {
               e.stopPropagation();
               const cname = ds.clientName || 'this client';
-              if (!confirm('Destroy ' + cname + '?\n\nDrive folder will be moved to Trash (30-day recovery window).')) return;
-              if (!confirm('Are you sure? This cannot be undone from PolicyLens.')) return;
-              if (ds.clientId !== activeClientId) await switchClient(ds.clientId);
-              try { await destroyClient(); toast('Client destroyed', 'success'); } catch(err) { toast('Error: ' + err.message, 'error'); }
+              if (!confirm('Destroy ' + cname + '?\n\nDrive folder will be moved to Trash (30-day recovery window).\n\nThis cannot be undone from PolicyLens.')) return;
+              try { await destroyClient(ds); } catch(err) { toast('Error: ' + err.message, 'error'); }
             }}
               title={'Delete ' + (ds.clientName || 'client')}
               style={{background:'transparent',color:'var(--text3)',border:'none',width:24,height:24,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:14,opacity:0.5,flexShrink:0}}
@@ -19364,10 +19383,8 @@ function ClientsTab() {
                   <button onClick={async (e) => {
                     e.stopPropagation();
                     const cname = ds.clientName || 'this client';
-                    if (!confirm('Destroy ' + cname + '?\n\nDrive folder will be moved to Trash (30-day recovery window).')) return;
-                    if (!confirm('Are you sure? This cannot be undone from PolicyLens.')) return;
-                    if (ds.clientId !== activeClientId) await switchClient(ds.clientId);
-                    try { await destroyClient(); toast('Client destroyed', 'success'); } catch(err) { toast('Error: ' + err.message, 'error'); }
+                    if (!confirm('Destroy ' + cname + '?\n\nDrive folder will be moved to Trash (30-day recovery window).\n\nThis cannot be undone from PolicyLens.')) return;
+                    try { await destroyClient(ds); } catch(err) { toast('Error: ' + err.message, 'error'); }
                   }}
                     title={'Delete ' + (ds.clientName || 'client')}
                     style={{background:'transparent',color:'var(--text3)',border:'none',width:24,height:24,borderRadius:'50%',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer',fontSize:14,opacity:0.5,flexShrink:0}}
